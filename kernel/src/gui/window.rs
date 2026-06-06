@@ -10,11 +10,14 @@ pub struct Window {
     pub content: Option<alloc::boxed::Box<[u32]>>,
     pub phys_addr: Option<u64>, // Physical address for shared memory buffer
     pub widgets: alloc::vec::Vec<crate::gui::widgets::Widget>,
+    pub minimized: bool,
+    pub saved_rect: Option<(usize, usize, usize, usize)>,
+    pub terminal: Option<crate::gui::terminal::TerminalWidget>,
 }
 
 impl Window {
     pub fn new(x: usize, y: usize, width: usize, height: usize, title: &'static str) -> Self {
-        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new() }
+        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None }
     }
 
     pub fn render(&self, buffer: &mut [u32]) {
@@ -27,20 +30,38 @@ impl Window {
         
         // Draw Title Text (White)
         drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + 5, self.y + 4, self.title, 0xFFFFFFFF);
-        
+
+        // Draw Minimize Button (Yellow square with underscore)
+        let mbx = self.x + self.width - 2 * (Self::BTN_SIZE + 2);
+        let mby = self.y + 3;
+        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, mbx, mby, Self::BTN_SIZE, Self::BTN_SIZE, 0xFFE0B040);
+        drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, mbx + 3, mby + Self::BTN_SIZE - 4, Self::BTN_SIZE - 6, 0xFFFFFFFF);
+
+        // Draw Close Button (Red square with white X)
+        let bx = self.x + self.width - Self::BTN_SIZE - 2;
+        let by = self.y + 3;
+        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx, by, Self::BTN_SIZE, Self::BTN_SIZE, 0xFFE04040);
+        for i in 0..4 {
+            drawing::draw_pixel(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx + 4 + i, by + 4 + i, 0xFFFFFFFF);
+            drawing::draw_pixel(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx + 4 + i, by + 9 - i, 0xFFFFFFFF);
+        }
+
         // Draw Window Border (Black)
         drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.width, 0xFF000000);
         drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y + self.height - 1, self.width, 0xFF000000);
         drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.height, 0xFF000000);
         drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + self.width - 1, self.y, self.height, 0xFF000000);
 
-        // Draw content if present
+        // Draw content area
         let content_x = self.x + 1;
-        let content_y = self.y + 21; // title bar is 20 + 1 line border
+        let content_y = self.y + 21;
         let content_w = self.width.saturating_sub(2);
         let content_h = self.height.saturating_sub(22);
 
-        if let Some(ref content) = self.content {
+        if let Some(ref term) = self.terminal {
+            // Terminal widget handles its own rendering
+            term.render(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, content_x, content_y, content_w, content_h);
+        } else if let Some(ref content) = self.content {
             for row in 0..content_h {
                 for col in 0..content_w {
                     let target_y = content_y + row;
@@ -51,10 +72,8 @@ impl Window {
                 }
             }
         } else if let Some(phys) = self.phys_addr {
-            // Render from physical memory directly (using kernel offset)
             let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("phys offset not init");
             let k_ptr = (offset + phys) as *const u32;
-            
             for row in 0..content_h {
                 for col in 0..content_w {
                     let target_y = content_y + row;
@@ -74,8 +93,20 @@ impl Window {
         }
     }
 
+    pub const BTN_SIZE: usize = 14;
+
     pub fn is_within_title_bar(&self, mx: usize, my: usize) -> bool {
-        mx >= self.x && mx < self.x + self.width && my >= self.y && my < self.y + 20
+        mx >= self.x && mx < self.x + self.width - 2 * (Self::BTN_SIZE + 2) && my >= self.y && my < self.y + 20
+    }
+
+    pub fn is_close_button(&self, mx: usize, my: usize) -> bool {
+        let bx = self.x + self.width - Self::BTN_SIZE - 2;
+        mx >= bx && mx < bx + Self::BTN_SIZE && my >= self.y + 3 && my < self.y + 3 + Self::BTN_SIZE
+    }
+
+    pub fn is_minimize_button(&self, mx: usize, my: usize) -> bool {
+        let bx = self.x + self.width - 2 * (Self::BTN_SIZE + 2);
+        mx >= bx && mx < bx + Self::BTN_SIZE && my >= self.y + 3 && my < self.y + 3 + Self::BTN_SIZE
     }
     
     pub fn is_within_content(&self, mx: usize, my: usize) -> bool {
@@ -91,7 +122,40 @@ impl Window {
         }
     }
 
-    pub fn handle_keyboard(&mut self, _key: pc_keyboard::DecodedKey) {
-        // To be implemented by specific window types or widgets
+    pub fn toggle_maximize(&mut self) {
+        if let Some(saved) = self.saved_rect {
+            self.x = saved.0;
+            self.y = saved.1;
+            self.width = saved.2;
+            self.height = saved.3;
+            self.saved_rect = None;
+        } else {
+            self.saved_rect = Some((self.x, self.y, self.width, self.height));
+            self.x = 0;
+            self.y = 0;
+            self.width = crate::gui::SCREEN_WIDTH;
+            self.height = crate::gui::SCREEN_HEIGHT;
+        }
+    }
+
+    pub fn handle_scroll(&mut self, delta: i8) {
+        if let Some(ref mut term) = self.terminal {
+            term.handle_scroll(delta);
+        }
+    }
+
+    pub fn handle_keyboard(&mut self, key: pc_keyboard::DecodedKey) {
+        if let Some(ref mut term) = self.terminal {
+            match key {
+                pc_keyboard::DecodedKey::Unicode(c) => term.handle_char(c),
+                pc_keyboard::DecodedKey::RawKey(k) => {
+                    match k {
+                        pc_keyboard::KeyCode::Backspace | pc_keyboard::KeyCode::Delete => term.handle_char('\u{0008}'),
+                        pc_keyboard::KeyCode::Enter => term.handle_char('\n'),
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 }

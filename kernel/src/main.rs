@@ -143,6 +143,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     { serial_write("[BOOT] vahiai init...\n"); vahiai::init(); }
     serial_write("[BOOT] -> Vahi: Graphical Console Mode Active!\n");
 
+    serial_write("[BOOT] RTC init...\n");
+    drivers::rtc::init();
+    serial_write("[BOOT] RTC initialized\n");
+
     serial_write("[BOOT] scheduler init...\n");
     task::scheduler::init();
     serial_write("[BOOT] GUI init...\n");
@@ -289,21 +293,38 @@ extern "C" fn run_async_tasks() -> ! {
 }
 
 pub async fn gui_refresh_task() {
+    use pc_keyboard::{Keyboard, layouts, ScancodeSet1, HandleControl};
+    use crate::task::keyboard::try_pop_scancode;
+
     const FPS: u64 = 30;
     const TICKS_PER_FRAME: u64 = 100 / FPS; // Assumes 100Hz timer
     let mut last_frame_tick: u64 = 0;
+    let mut kbd = Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore);
 
     loop {
+        // Drain any pending scancodes
+        while let Some(scancode) = try_pop_scancode() {
+            if let Ok(Some(key_event)) = kbd.add_byte(scancode) {
+                if let Some(key) = kbd.process_keyevent(key_event) {
+                    let mut comp = crate::gui::COMPOSITOR.lock();
+                    comp.handle_keyboard(key);
+                }
+            }
+        }
+
         let now = crate::interrupts::get_ticks();
         if now.wrapping_sub(last_frame_tick) >= TICKS_PER_FRAME {
             last_frame_tick = now;
-            let (x, y, buttons) = {
+            let (x, y, buttons, scroll, mouse_x, mouse_y) = {
                 let m = crate::drivers::mouse::MOUSE.lock();
-                (m.x, m.y, m.buttons)
+                (m.x, m.y, m.buttons, m.scroll, m.x, m.y)
             };
             let mut comp = crate::gui::COMPOSITOR.lock();
             comp.handle_mouse(x, y, buttons);
-            comp.render();
+            if scroll != 0 {
+                comp.handle_scroll(scroll);
+            }
+            comp.render(mouse_x, mouse_y);
         }
         // Yield to scheduler
         crate::task::YieldNow::new().await;
@@ -370,6 +391,64 @@ fn test_memory_allocations() {
 }
 
 
+
+/// Launch a userspace ELF binary at the given VFS path.
+/// Spawns a new kernel thread that will load the binary and jump to usermode.
+pub fn spawn_userspace_app(path: &'static str) {
+    extern "C" fn app_starter() -> ! {
+        let path = crate::APP_PATH_TO_LAUNCH.lock().clone();
+        crate::serial_write(&alloc::format!("[LAUNCH] loading {}\n", path));
+        let data = crate::vfs::VFS.lock().resolve_path(&path).and_then(|n| n.read(usize::MAX).ok());
+        if let Some(elf_data) = data {
+            use alloc::sync::Arc;
+            let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
+            if let Some(address_space) = crate::memory::paging::AddressSpace::new(&mut frame_allocator) {
+                if let Ok(mut process) = crate::task::process::Process::load_elf(&elf_data, address_space) {
+                    process.uid = spin::Mutex::new(1000);
+                    process.gid = spin::Mutex::new(1000);
+                    process.euid = spin::Mutex::new(1000);
+                    process.egid = spin::Mutex::new(1000);
+                    let entry = process.entry_point;
+                    let process_arc = Arc::new(process);
+                    crate::task::process::Process::register(process_arc.clone());
+                    {
+                        let mut cur = crate::task::process::CURRENT_PROCESS.lock();
+                        *cur = Some(process_arc.clone());
+                    }
+                    {
+                        let tty_node = crate::vfs::VFS.lock().resolve_path("/dev/tty0");
+                        if let Some(tty) = tty_node {
+                            use crate::task::process::FileDescriptor;
+                            let mut fd_table = process_arc.fd_table.lock();
+                            fd_table.resize(3, None);
+                            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: 0 });
+                            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: 0 });
+                            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: 0 });
+                            drop(fd_table);
+                        }
+                    }
+                    if let Some(mut thread) = crate::task::scheduler::current_thread() {
+                        thread.process = Some(process_arc.clone());
+                        crate::task::scheduler::set_current_thread(thread);
+                    }
+                    unsafe { process_arc.address_space.activate(); }
+                    let user_rsp = process_arc.setup_user_stack(&alloc::vec![path.clone()]);
+                    unsafe { crate::task::thread::jump_to_usermode(entry, user_rsp); }
+                }
+            }
+        }
+        loop { core::hint::spin_loop(); }
+    }
+    let mut app_path = crate::APP_PATH_TO_LAUNCH.lock();
+    *app_path = alloc::string::String::from(path);
+    drop(app_path);
+    let thread = crate::task::thread::Thread::new(app_starter);
+    crate::task::scheduler::spawn_thread(thread);
+}
+
+lazy_static::lazy_static! {
+    static ref APP_PATH_TO_LAUNCH: spin::Mutex<alloc::string::String> = spin::Mutex::new(alloc::string::String::new());
+}
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

@@ -8,3 +8,4 @@ pub mod usb;
 pub mod watchdog;
 pub mod audio;
 pub mod input;
+pub mod rtc;

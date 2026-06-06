@@ -131,6 +131,23 @@ pub fn init() {
     let ack = device_write_to_mouse(0xF6); // Set defaults
     crate::serial_write(&alloc::format!("[PS2] mouse set_defaults ack=0x{:x}\n", ack));
 
+    // Enable scroll wheel (IntelliMouse magic sequence)
+    let _ = device_write_to_mouse(0xF3); // Set sample rate command
+    let _ = device_write_to_mouse(200);  // Sample rate value 200
+    let _ = device_write_to_mouse(0xF3); // Set sample rate command
+    let _ = device_write_to_mouse(100);  // Sample rate value 100
+    let _ = device_write_to_mouse(0xF3); // Set sample rate command
+    let _ = device_write_to_mouse(80);   // Sample rate value 80
+
+    // Read device ID — 3 or 4 means wheel present
+    let _ = device_write_to_mouse(0xF2); // Read device ID
+    let dev_id = read_data();
+    crate::serial_write(&alloc::format!("[PS2] mouse wheel_dev_id=0x{:x}\n", dev_id));
+    if dev_id == 3 || dev_id == 4 {
+        crate::serial_write("[PS2] mouse scroll wheel detected!\n");
+        crate::drivers::mouse::enable_wheel();
+    }
+
     let ack = device_write_to_mouse(0xF4); // Enable streaming
     crate::serial_write(&alloc::format!("[PS2] mouse enable_stream ack=0x{:x}\n", ack));
 
