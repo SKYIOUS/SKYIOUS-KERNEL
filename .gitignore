@@ -1,0 +1,30 @@
+target/
+.obsidian/
+
+# Build artifacts
+*.img
+*.vdi
+*.bin
+*.fd
+*.iso
+OVMF.fd
+
+# QEMU logs
+qemu_*.log
+qemu_*.txt
+qemu_*.png
+qemu_*.ppm
+
+# Build logs
+builder_err*.txt
+builder_errors*.txt
+builder_err_utf8.txt
+builder_errors_utf8.txt
+builder_out.txt
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

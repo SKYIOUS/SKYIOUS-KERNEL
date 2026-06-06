@@ -1,0 +1,10 @@
+[package]
+name = "init"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+skyos-libc = { path = "../libc" }
+
+[package.metadata]
+skyos-entry = "_start"

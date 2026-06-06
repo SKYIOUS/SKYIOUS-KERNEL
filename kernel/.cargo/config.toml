@@ -1,0 +1,10 @@
+[build]
+target = "x86_64-unknown-none"
+rustflags = [
+    "-C", "target-feature=-mmx,-sse,+soft-float",
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "relocation-model=static",
+]
+
+[target.'cfg(target_os = "none")']
+runner = "bootimage run"

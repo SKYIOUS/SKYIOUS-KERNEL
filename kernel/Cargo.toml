@@ -1,0 +1,44 @@
+[package]
+name = "vahi_kernel"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+bootloader_api = "0.11"
+lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
+spin = "0.9.8"
+volatile = "0.2.6"
+x86_64 = "0.14.2"
+pic8259 = "0.10.1"
+pc-keyboard = "0.5.1"
+linked_list_allocator = "0.10.5"
+crossbeam-queue = { version = "0.3.12", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3.31", default-features = false, features = ["alloc"] }
+acpi = "4.1.1"
+smoltcp = { version = "0.10", default-features = false, features = ["alloc", "log", "medium-ethernet", "proto-ipv4", "socket-icmp", "socket-udp", "socket-tcp"] }
+xmas-elf = "0.9.1"
+font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", default-features = false, features = ["alloc"] }
+embedded-io = "0.6.1"
+mbr-nostd = "0.1.0"
+
+[package.metadata.bootimage]
+test-args = [
+    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
+    "-display", "none", "-smp", "2"
+]
+test-success-exit-code = 33         # (0x10 << 1) | 1
+run-args = ["-serial", "stdio", "-smp", "1", "-cpu", "max"]
+
+[features]
+default = ["smp", "net", "ai_rule"]
+ai_rule = []
+ai_llm = []
+smp = []
+net = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
