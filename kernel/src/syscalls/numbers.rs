@@ -62,4 +62,5 @@ pub const SYS_FCHOWN: u64 = 93;
 pub const SYS_VAHIAI: u64 = 300;
 pub const SYS_SYMLINK: u64 = 88;
 pub const SYS_READLINK: u64 = 89;
+pub const SYS_RENAME: u64 = 82;
 pub const SYS_ARCH_PRCTL: u64 = 158;

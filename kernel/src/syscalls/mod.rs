@@ -302,6 +302,7 @@ pub extern "sysv64" fn syscall_handler(
         numbers::SYS_FCHOWN => sys_fchown(arg1, arg2 as u32, arg3 as u32),
         numbers::SYS_SYMLINK => sys_symlink(arg1 as *const u8, arg2 as *const u8),
         numbers::SYS_READLINK => sys_readlink(arg1 as *const u8, arg2 as *mut u8, arg3),
+        numbers::SYS_RENAME => sys_rename(arg1 as *const u8, arg2 as *const u8),
         numbers::SYS_ARCH_PRCTL => sys_arch_prctl(arg1, arg2),
         numbers::SYS_BEEP => sys_beep(arg1 as u32, arg2 as u32),
         _ => {
@@ -508,9 +509,42 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
-        Some(FileDescriptor::Socket(_handle)) => {
-            // TODO: Implement socket read (recv)
-            errno::Errno::ENOSYS as u64
+        Some(FileDescriptor::Socket(handle)) => {
+            #[cfg(not(feature = "net"))]
+            return errno::Errno::ENOSYS as u64;
+            #[cfg(feature = "net")]
+            {
+                let mut sockets = crate::net::SOCKETS.lock();
+                let mut data = vec![0u8; count];
+
+                // Try TCP
+                if let Ok(mut socket) = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle) {
+                    if socket.may_recv() {
+                        let mut n = 0usize;
+                        let result = socket.recv(|slice| {
+                            n = core::cmp::min(slice.len(), count);
+                            if user_access::copy_to_user(buf, &slice[..n]).is_ok() {
+                                Ok(n)
+                            } else {
+                                Err(())
+                            }
+                        });
+                        if result.is_ok() { return n as u64; }
+                    }
+                    return 0; // EAGAIN
+                }
+                // Try UDP
+                if let Ok(mut socket) = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle) {
+                    if let Ok((n, _ep)) = socket.recv_slice(&mut data) {
+                        if user_access::copy_to_user(buf, &data[..n]).is_ok() {
+                            return n as u64;
+                        }
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    return 0; // EAGAIN
+                }
+                0
+            }
         },
         None => errno::Errno::EBADF as u64,
     }
@@ -545,8 +579,33 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
-        Some(FileDescriptor::Socket(_handle)) => {
-            errno::Errno::ENOSYS as u64
+        Some(FileDescriptor::Socket(handle)) => {
+            #[cfg(not(feature = "net"))]
+            return errno::Errno::ENOSYS as u64;
+            #[cfg(feature = "net")]
+            {
+                let mut write_data = vec![0u8; count];
+                if unsafe { user_access::copy_from_user(&mut write_data, buf) }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+
+                let mut sockets = crate::net::SOCKETS.lock();
+
+                // Try TCP
+                if let Ok(mut socket) = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle) {
+                    if socket.may_send() {
+                        let result = socket.send(|slice| {
+                            let n = core::cmp::min(slice.len(), write_data.len());
+                            slice[..n].copy_from_slice(&write_data[..n]);
+                            Ok(n)
+                        });
+                        if result.is_ok() { return count as u64; }
+                    }
+                    return errno::Errno::EAGAIN as u64;
+                }
+
+                errno::Errno::ENOSYS as u64
+            }
         },
         None => errno::Errno::EBADF as u64,
     }
@@ -1670,12 +1729,42 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
             return errno::Errno::EFAULT as u64;
         }
 
+        let family = unsafe { *(addr_buf.as_ptr() as *const u16) };
+        if family != 2 { return errno::Errno::EAFNOSUPPORT as u64; }
+        let port = u16::from_be(unsafe { *(addr_buf.as_ptr().add(2) as *const u16) });
+        let ip_bytes = unsafe { *(addr_buf.as_ptr().add(4) as *const [u8; 4]) };
+        let endpoint = smoltcp::wire::IpEndpoint::new(
+            smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_bytes(&ip_bytes)),
+            port,
+        );
+
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
             let fd_table = process.fd_table.lock();
             if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
-            if let Some(FileDescriptor::Socket(_handle)) = fd_table[sockfd as usize] {
-                return 0; // Placeholder
+            if let Some(FileDescriptor::Socket(handle)) = fd_table[sockfd as usize] {
+                let mut sockets = crate::net::SOCKETS.lock();
+
+                // Try TCP connect
+                if let Ok(mut socket) = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle) {
+                    if !socket.is_active() {
+                        // Connect is non-blocking — poll loop will complete the handshake
+                        if socket.connect(endpoint).is_err() {
+                            return errno::Errno::ECONNREFUSED as u64;
+                        }
+                        return 0;
+                    }
+                    if socket.may_send() {
+                        return 0;
+                    }
+                    return errno::Errno::EALREADY as u64;
+                }
+                // UDP — set default remote endpoint (not natively supported by smoltcp,
+                // but we allow connect to succeed so send() can use it later)
+                if sockets.get_mut::<smoltcp::socket::udp::Socket>(handle).is_ok() {
+                    return 0;
+                }
+                return errno::Errno::EOPNOTSUPP as u64;
             }
         }
         errno::Errno::EBADF as u64
@@ -2089,6 +2178,75 @@ fn sys_unlink(path_ptr: *const u8) -> u64 {
         }
     }
     errno::Errno::EIO as u64
+}
+
+fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
+    let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+
+    let vfs = VFS.lock();
+
+    // Read source
+    let source_node = match vfs.resolve_path(&old_path) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+
+    let data = match source_node.read(usize::MAX) {
+        Ok(d) => d,
+        Err(_) => return errno::Errno::EIO as u64,
+    };
+
+    // Resolve destination parent
+    let last_slash = new_path.rfind('/').unwrap_or(0);
+    let (parent_path, name) = if last_slash == 0 && !new_path.starts_with('/') {
+        (".", new_path.as_str())
+    } else if last_slash == 0 {
+        ("/", &new_path[1..])
+    } else {
+        (&new_path[..last_slash], &new_path[last_slash+1..])
+    };
+
+    let parent_node = match vfs.resolve_path(parent_path) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+
+    // Create new file
+    if parent_node.create(name).is_err() {
+        return errno::Errno::EIO as u64;
+    }
+
+    // Write data to new file
+    let new_node = match parent_node.find_child(name) {
+        Some(n) => n,
+        None => return errno::Errno::EIO as u64,
+    };
+    if new_node.write(&data).is_err() {
+        return errno::Errno::EIO as u64;
+    }
+
+    // Remove old source
+    let old_last_slash = old_path.rfind('/').unwrap_or(0);
+    let (old_parent_path, old_name) = if old_last_slash == 0 && !old_path.starts_with('/') {
+        (".", old_path.as_str())
+    } else if old_last_slash == 0 {
+        ("/", &old_path[1..])
+    } else {
+        (&old_path[..old_last_slash], &old_path[old_last_slash+1..])
+    };
+
+    if let Some(old_parent) = vfs.resolve_path(old_parent_path) {
+        let _ = old_parent.unlink(old_name);
+    }
+
+    0
 }
 
 
