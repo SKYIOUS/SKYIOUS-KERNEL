@@ -162,13 +162,18 @@ impl TerminalWidget {
         self.print_str(&format!("Processes: {}\n", proc_count));
 
         let free_pages = crate::memory::buddy::BUDDY_ALLOCATOR.lock().count_free_pages();
-        self.print_str(&format!("Free pages: ~{}\n", free_pages));
+        let free_kb = (free_pages * 4) as u64;
+        let total_kb = 131072u64; // ~512 MB total
+        let used_kb = total_kb.saturating_sub(free_kb);
+        let pct = if total_kb > 0 { used_kb * 100 / total_kb } else { 0 };
+        self.print_str(&format!("Memory: {}% used ({} KB / {} KB)\n", pct, used_kb, total_kb));
 
-        self.print_str("\n-- Processes --\n");
+        self.print_str("\nPID  UID  CWD\n");
         let table = crate::task::process::PROCESS_TABLE.lock();
         for (pid, proc) in table.iter() {
             let cwd = proc.cwd.lock();
-            self.print_str(&format!("  PID {}: cwd={}\n", pid, cwd));
+            let uid = *proc.uid.lock();
+            self.print_str(&format!("{:3}  {:3}  {}\n", pid, uid, cwd));
         }
     }
 
@@ -190,6 +195,14 @@ impl TerminalWidget {
                 self.print_str("  pwd       - Print working directory\n");
                 self.print_str("  ls [path] - List files\n");
                 self.print_str("  cat <file>- Show file content\n");
+                self.print_str("  mkdir <p> - Create directory\n");
+                self.print_str("  rm <path> - Remove file/dir\n");
+                self.print_str("  touch <p> - Create empty file\n");
+                self.print_str("  cp <s> <d>- Copy file\n");
+                self.print_str("  stat <p>  - File info\n");
+                self.print_str("  date      - Show date/time\n");
+                self.print_str("  whoami    - Show user name\n");
+                self.print_str("  sleep <n> - Sleep N seconds\n");
                 self.print_str("  neofetch  - Display system info\n");
                 self.print_str("  ps        - List processes\n");
                 self.print_str("  mem       - Memory info\n");
@@ -234,20 +247,16 @@ impl TerminalWidget {
                 if let Some(node) = crate::vfs::VFS.lock().resolve_path(p) {
                     if node.is_dir() {
                         if let Ok(children) = node.children() {
-                            let mut line = String::new();
                             for child in children {
                                 if child.is_dir() {
-                                    line.push_str(&child.name());
-                                    line.push('/');
+                                    self.print_str(&format!("d {}/\n", child.name()));
                                 } else {
-                                    line.push_str(&child.name());
+                                    self.print_str(&format!("- {}\n", child.name()));
                                 }
-                                line.push(' ');
                             }
-                            self.print_str(&format!("{}\n", line.trim()));
                         }
                     } else {
-                        self.print_str(&format!("{}\n", node.name()));
+                        self.print_str(&format!("- {}\n", node.name()));
                     }
                 } else {
                     self.print_str(&format!("ls: {}: No such file or directory\n", p));
@@ -281,6 +290,148 @@ impl TerminalWidget {
                     }
                 }
             }
+            "mkdir" => {
+                let path = args.get(0).copied().unwrap_or("");
+                if path.is_empty() {
+                    self.print_str("Usage: mkdir <path>\n");
+                    return;
+                }
+                let p = alloc::format!("{}\0", path);
+                if crate::syscalls::syscall_handler(83, p.as_ptr() as u64, 0o755, 0, 0, 0, core::ptr::null_mut()) != 0 {
+                    self.print_str(&format!("mkdir: failed to create {}\n", path));
+                }
+            }
+            "rm" => {
+                let path = args.get(0).copied().unwrap_or("");
+                if path.is_empty() {
+                    self.print_str("Usage: rm <path>\n");
+                    return;
+                }
+                let p = alloc::format!("{}\0", path);
+                if crate::syscalls::syscall_handler(87, p.as_ptr() as u64, 0, 0, 0, 0, core::ptr::null_mut()) != 0 {
+                    self.print_str(&format!("rm: failed to remove {}\n", path));
+                }
+            }
+            "touch" => {
+                let path = args.get(0).copied().unwrap_or("");
+                if path.is_empty() {
+                    self.print_str("Usage: touch <path>\n");
+                    return;
+                }
+                let p = alloc::format!("{}\0", path);
+                let fd = crate::syscalls::syscall_handler(2, p.as_ptr() as u64, 0x40, 0, 0, 0, core::ptr::null_mut());
+                if fd < 1000 {
+                    crate::syscalls::syscall_handler(3, fd, 0, 0, 0, 0, core::ptr::null_mut());
+                } else {
+                    self.print_str(&format!("touch: failed to create {}\n", path));
+                }
+            }
+            "stat" => {
+                let path = args.get(0).copied().unwrap_or("");
+                if path.is_empty() {
+                    self.print_str("Usage: stat <path>\n");
+                    return;
+                }
+                let p = alloc::format!("{}\0", path);
+                let mut sb = crate::vfs::Stat {
+                    st_dev: 0, st_ino: 0, st_mode: 0, st_nlink: 0,
+                    st_uid: 0, st_gid: 0, st_rdev: 0, st_size: 0,
+                    st_atime: 0, st_mtime: 0, st_ctime: 0,
+                };
+                let res = crate::syscalls::syscall_handler(4, p.as_ptr() as u64, &mut sb as *mut _ as u64, 0, 0, 0, core::ptr::null_mut());
+                if res == 0 {
+                    let kind = if sb.st_mode & crate::vfs::S_IFDIR != 0 { "directory" } else { "file" };
+                    self.print_str(&format!("  File: {}\n", path));
+                    self.print_str(&format!("  Type: {}\n", kind));
+                    self.print_str(&format!("  Size: {} bytes\n", sb.st_size));
+                    self.print_str(&format!("  Mode: {:o}\n", sb.st_mode));
+                    self.print_str(&format!("  Inode: {}\n", sb.st_ino));
+                } else {
+                    self.print_str(&format!("stat: {}: No such file\n", path));
+                }
+            }
+            "date" => {
+                let (secs, _) = crate::drivers::rtc::read_realtime();
+                if secs <= 0 {
+                    self.print_str("RTC not available\n");
+                    return;
+                }
+                let total = secs as u64;
+                let days = total / 86400;
+                let s = total % 86400;
+                let h = s / 3600;
+                let m = (s % 3600) / 60;
+                let sec = s % 60;
+                let mut y = 1970u64;
+                let mut d = days;
+                loop {
+                    let leap = (y % 400 == 0) || (y % 4 == 0 && y % 100 != 0);
+                    let diy = if leap { 366 } else { 365 };
+                    if d < diy { break; }
+                    d -= diy;
+                    y += 1;
+                }
+                let leap = (y % 400 == 0) || (y % 4 == 0 && y % 100 != 0);
+                let mdays: [u64; 12] = if leap {
+                    [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                } else {
+                    [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                };
+                let mut mo = 1u64;
+                for &md in mdays.iter() {
+                    if d < md { break; }
+                    d -= md;
+                    mo += 1;
+                }
+                let day = d + 1;
+                self.print_str(&format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}\n", y, mo, day, h, m, sec));
+            }
+            "whoami" => {
+                self.print_str("root\n");
+            }
+            "sleep" => {
+                let secs_str = args.get(0).copied().unwrap_or("");
+                if secs_str.is_empty() {
+                    self.print_str("Usage: sleep <seconds>\n");
+                    return;
+                }
+                if let Ok(secs) = secs_str.parse::<u64>() {
+                    crate::syscalls::syscall_handler(35, secs, 0, 0, 0, 0, core::ptr::null_mut());
+                    self.print_str("Wake up!\n");
+                } else {
+                    self.print_str("Invalid duration\n");
+                }
+            }
+            "cp" => {
+                let src = args.get(0).copied().unwrap_or("");
+                let dst = args.get(1).copied().unwrap_or("");
+                if src.is_empty() || dst.is_empty() {
+                    self.print_str("Usage: cp <source> <dest>\n");
+                    return;
+                }
+                let src_c = alloc::format!("{}\0", src);
+                let dst_c = alloc::format!("{}\0", dst);
+                let fd_src = crate::syscalls::syscall_handler(2, src_c.as_ptr() as u64, 0, 0, 0, 0, core::ptr::null_mut());
+                if fd_src >= 0xFFFF_FFFF_FFFF_FF00 {
+                    self.print_str(&format!("cp: failed to open source {}\n", src));
+                } else {
+                    let fd_dst = crate::syscalls::syscall_handler(2, dst_c.as_ptr() as u64, 0x41, 0, 0, 0, core::ptr::null_mut());
+                    if fd_dst >= 0xFFFF_FFFF_FFFF_FF00 {
+                        self.print_str(&format!("cp: failed to create destination {}\n", dst));
+                        crate::syscalls::syscall_handler(3, fd_src, 0, 0, 0, 0, core::ptr::null_mut());
+                    } else {
+                        let mut buf = [0u8; 4096];
+                        loop {
+                            let n = crate::syscalls::syscall_handler(0, fd_src, buf.as_mut_ptr() as u64, 4096u64, 0, 0, core::ptr::null_mut());
+                            if n == 0 || n >= 0xFFFF_FFFF_FFFF_FF00 { break; }
+                            crate::syscalls::syscall_handler(1, fd_dst, buf.as_ptr() as u64, n as u64, 0, 0, core::ptr::null_mut());
+                        }
+                        crate::syscalls::syscall_handler(3, fd_src, 0, 0, 0, 0, core::ptr::null_mut());
+                        crate::syscalls::syscall_handler(3, fd_dst, 0, 0, 0, 0, core::ptr::null_mut());
+                        self.print_str(&format!("cp: copied {} to {}\n", src, dst));
+                    }
+                }
+            }
             "neofetch" => {
                 let ticks = crate::interrupts::get_ticks();
                 self.print_str("   .---.    User: root@skyos\n");
@@ -290,16 +441,17 @@ impl TerminalWidget {
                 self.print_str("   '---'    Shell: SkyOS Terminal\n");
             }
             "ps" => {
-                self.print_str("PID   CWD\n");
+                self.print_str("PID  UID  CWD\n");
                 let table = crate::task::process::PROCESS_TABLE.lock();
                 for (pid, proc) in table.iter() {
                     let cwd = proc.cwd.lock();
-                    self.print_str(&format!("{:3}   {}\n", pid, cwd));
+                    let uid = *proc.uid.lock();
+                    self.print_str(&format!("{:3}  {:3}  {}\n", pid, uid, cwd));
                 }
             }
             "mem" => {
                 let free_pages = crate::memory::buddy::BUDDY_ALLOCATOR.lock().count_free_pages();
-                let free_kb = free_pages * 4;
+                let free_kb = (free_pages * 4) as u64;
                 self.print_str(&format!("Free memory: ~{} KB ({} pages)\n", free_kb, free_pages));
             }
             "reboot" => {
@@ -320,3 +472,5 @@ impl TerminalWidget {
         }
     }
 }
+
+

@@ -8,6 +8,7 @@ pub mod window;
 pub mod shell;
 pub mod terminal;
 pub mod widgets;
+pub mod filemanager;
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
@@ -33,6 +34,7 @@ pub struct Compositor {
     close_pending: Option<usize>,
     prev_click_ticks: u64,
     prev_click_win: Option<usize>,
+    resize_edge: window::ResizeEdge,
 }
 
 impl Compositor {
@@ -56,6 +58,7 @@ impl Compositor {
             close_pending: None,
             prev_click_ticks: 0,
             prev_click_win: None,
+            resize_edge: window::ResizeEdge::None,
         }
     }
 
@@ -96,6 +99,14 @@ impl Compositor {
         self.windows.push(mon_win);
     }
 
+    fn create_file_manager_window(&mut self) {
+        let w = 400;
+        let h = 300;
+        let mut fm_win = window::Window::new(130, 70, w, h, "File Manager");
+        fm_win.file_manager = Some(crate::gui::filemanager::FileManagerWidget::new(w - 4, h - 24));
+        self.windows.push(fm_win);
+    }
+
     fn shutdown_qemu(&mut self) {
         unsafe { x86_64::instructions::port::Port::<u16>::new(0x604).write(0x2000); }
         x86_64::instructions::interrupts::disable();
@@ -120,7 +131,7 @@ impl Compositor {
                   if clicked_idx < shell::MENU_ITEM_COUNT {
                       self.start_menu_open = false;
                       match clicked_idx {
-                          0 => self.create_info_window("File Manager", "File Manager\n\nNot yet implemented.\nCheck back in a future release."),
+                          0 => self.create_file_manager_window(),
                           1 => self.create_terminal_window(),
                           2 => self.create_monitor_window(),
                           3 => self.create_info_window("About SkyOS",
@@ -147,7 +158,7 @@ impl Compositor {
               }
               if y >= 110 && y < 158 && x >= 20 && x < 68 {
                   // FILES desktop icon
-                  self.create_info_window("Files", "File Browser\n\nNot yet implemented.\nCheck back in a future release.");
+                  self.create_file_manager_window();
                   unsafe { PREV_LEFT_PRESSED = left_pressed; }
                   return;
               }
@@ -190,13 +201,36 @@ impl Compositor {
 
         if left_pressed {
             if let Some(idx) = self.drag_index {
-                // Currently dragging
-                self.windows[idx].x = x.saturating_sub(self.drag_offset_x);
-                self.windows[idx].y = y.saturating_sub(self.drag_offset_y);
+                if self.resize_edge != window::ResizeEdge::None {
+                    let win = &mut self.windows[idx];
+                    match self.resize_edge {
+                        window::ResizeEdge::Right => {
+                            win.width = x.saturating_sub(win.x).max(150);
+                        }
+                        window::ResizeEdge::Bottom => {
+                            win.height = y.saturating_sub(win.y).max(100);
+                        }
+                        window::ResizeEdge::Corner => {
+                            win.width = x.saturating_sub(win.x).max(150);
+                            win.height = y.saturating_sub(win.y).max(100);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    self.windows[idx].x = x.saturating_sub(self.drag_offset_x);
+                    self.windows[idx].y = y.saturating_sub(self.drag_offset_y);
+                }
             } else {
                 // Check if we started dragging or interacting with content
                 for (i, win) in self.windows.iter_mut().enumerate().rev() {
-                    if win.is_within_title_bar(x, y) {
+                    let edge = win.get_resize_edge(x, y);
+                    if edge != window::ResizeEdge::None {
+                        self.drag_index = Some(i);
+                        self.resize_edge = edge;
+                        self.drag_offset_x = x - win.x;
+                        self.drag_offset_y = y - win.y;
+                        break;
+                    } else if win.is_within_title_bar(x, y) {
                         // Double-click check
                         let now = crate::interrupts::get_ticks();
                         if self.prev_click_win == Some(i) && now.saturating_sub(self.prev_click_ticks) < 50 {
@@ -226,6 +260,7 @@ impl Compositor {
                 self.windows.push(w);
             }
             self.drag_index = None;
+            self.resize_edge = window::ResizeEdge::None;
 
             // Process pending close request
             if let Some(idx) = self.close_pending {
@@ -333,3 +368,9 @@ pub fn init() {
     
     comp.render(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
 }
+
+
+
+
+
+

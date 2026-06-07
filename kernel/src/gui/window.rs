@@ -1,6 +1,14 @@
 use crate::gui::drawing;
 use crate::gui::{SCREEN_WIDTH, SCREEN_HEIGHT};
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum ResizeEdge {
+    None,
+    Right,
+    Bottom,
+    Corner,
+}
+
 pub struct Window {
     pub x: usize,
     pub y: usize,
@@ -13,11 +21,12 @@ pub struct Window {
     pub minimized: bool,
     pub saved_rect: Option<(usize, usize, usize, usize)>,
     pub terminal: Option<crate::gui::terminal::TerminalWidget>,
+    pub file_manager: Option<crate::gui::filemanager::FileManagerWidget>,
 }
 
 impl Window {
     pub fn new(x: usize, y: usize, width: usize, height: usize, title: &'static str) -> Self {
-        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None }
+        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None, file_manager: None }
     }
 
     pub fn render(&self, buffer: &mut [u32]) {
@@ -59,8 +68,9 @@ impl Window {
         let content_h = self.height.saturating_sub(22);
 
         if let Some(ref term) = self.terminal {
-            // Terminal widget handles its own rendering
             term.render(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, content_x, content_y, content_w, content_h);
+        } else if let Some(ref fm) = self.file_manager {
+            fm.render(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, content_x, content_y, content_w, content_h);
         } else if let Some(ref content) = self.content {
             for row in 0..content_h {
                 for col in 0..content_w {
@@ -94,6 +104,16 @@ impl Window {
     }
 
     pub const BTN_SIZE: usize = 14;
+    pub const EDGE: usize = 4;
+
+    pub fn get_resize_edge(&self, mx: usize, my: usize) -> ResizeEdge {
+        let on_right = mx + Self::EDGE >= self.x + self.width && mx < self.x + self.width;
+        let on_bottom = my + Self::EDGE >= self.y + self.height && my < self.y + self.height;
+        if on_right && on_bottom { ResizeEdge::Corner }
+        else if on_right && my >= self.y + 20 { ResizeEdge::Right }
+        else if on_bottom { ResizeEdge::Bottom }
+        else { ResizeEdge::None }
+    }
 
     pub fn is_within_title_bar(&self, mx: usize, my: usize) -> bool {
         mx >= self.x && mx < self.x + self.width - 2 * (Self::BTN_SIZE + 2) && my >= self.y && my < self.y + 20
@@ -117,6 +137,14 @@ impl Window {
         let content_mx = mx.saturating_sub(self.x + 1);
         let content_my = my.saturating_sub(self.y + 21);
         
+        if pressed {
+            if let Some(ref mut fm) = self.file_manager {
+                if fm.handle_click(content_mx, content_my) {
+                    return;
+                }
+            }
+        }
+
         for widget in &mut self.widgets {
             widget.handle_mouse(content_mx, content_my, pressed);
         }
@@ -141,6 +169,8 @@ impl Window {
     pub fn handle_scroll(&mut self, delta: i8) {
         if let Some(ref mut term) = self.terminal {
             term.handle_scroll(delta);
+        } else if let Some(ref mut fm) = self.file_manager {
+            fm.handle_scroll(delta);
         }
     }
 
