@@ -29,6 +29,8 @@ pub const SYS_CONNECT: u64 = 42;
 pub const SYS_SENDTO: u64 = 44;
 pub const SYS_RECVFROM: u64 = 45;
 pub const SYS_BIND: u64 = 49;
+pub const SYS_LISTEN: u64 = 50;
+pub const SYS_ACCEPT: u64 = 43;
 
 // GUI Syscalls
 pub const SYS_GUI_CREATE_WINDOW: u64 = 100;
@@ -64,3 +66,11 @@ pub const SYS_SYMLINK: u64 = 88;
 pub const SYS_READLINK: u64 = 89;
 pub const SYS_RENAME: u64 = 82;
 pub const SYS_ARCH_PRCTL: u64 = 158;
+pub const SYS_SELECT: u64 = 23;
+pub const SYS_POLL: u64 = 7;
+pub const SYS_GETUID: u64 = 301;
+pub const SYS_GETGID: u64 = 302;
+pub const SYS_SETUID: u64 = 303;
+pub const SYS_SETGID: u64 = 304;
+pub const SYS_GETEUID: u64 = 305;
+pub const SYS_GETEGID: u64 = 306;

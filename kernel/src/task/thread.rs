@@ -326,6 +326,7 @@ pub unsafe fn jump_to_usermode(entry: u64, user_rsp: u64) -> ! {
         "mov es, ax",
         "mov fs, ax",
         "swapgs",
+        "mov rdi, rsi",  // Pass user_rsp to _start so it can read argc/argv from stack
         "push rax",      // SS
         "push rsi",      // RSP
         "push r8",       // RFLAGS

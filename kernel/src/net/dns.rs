@@ -39,6 +39,13 @@ pub fn encode_name(name: &str) -> Vec<u8> {
 }
 
 pub fn resolve_hostname(name: &str) -> Option<IpAddress> {
+    let dns_servers = if !crate::net::dhcp::DHCP_DNS_SERVERS.lock().is_empty() {
+        let servers: Vec<IpAddress> = crate::net::dhcp::DHCP_DNS_SERVERS.lock().iter().map(|&ip| IpAddress::Ipv4(ip)).collect();
+        servers
+    } else {
+        vec![IpAddress::Ipv4(Ipv4Address::new(8, 8, 8, 8))]
+    };
+
     let mut sockets = SOCKETS.lock();
     
     // Create buffers for UDP
@@ -48,7 +55,6 @@ pub fn resolve_hostname(name: &str) -> Option<IpAddress> {
     
     // Local port for DNS query
     let local_port = 54321;
-    let dns_server = IpAddress::Ipv4(Ipv4Address::new(8, 8, 8, 8));
     let dns_port = 53;
 
     if socket.bind(local_port).is_err() {
@@ -65,8 +71,13 @@ pub fn resolve_hostname(name: &str) -> Option<IpAddress> {
     query.extend_from_slice(&1u16.to_be_bytes()); // Class IN
 
     // Send query
-    let endpoint = IpEndpoint::new(dns_server, dns_port);
-    if socket.send_slice(&query, endpoint).is_err() {
+    for dns_server in &dns_servers {
+        let endpoint = IpEndpoint::new(*dns_server, dns_port);
+        if socket.send_slice(&query, endpoint).is_ok() {
+            break;
+        }
+    }
+    if !socket.can_send() {
         return None;
     }
 

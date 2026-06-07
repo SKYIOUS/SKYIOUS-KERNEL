@@ -38,6 +38,9 @@ pub enum Errno {
     EISDIR = -21,    /* Is a directory */
     EAFNOSUPPORT = -97, /* Address family not supported by protocol */
     EADDRINUSE = -98,   /* Address already in use */
+    EOPNOTSUPP = -95,   /* Operation not supported on transport endpoint */
+    ECONNREFUSED = -111,/* Connection refused */
+    EALREADY = -114,    /* Operation already in progress */
 }
 
 impl From<Errno> for u64 {

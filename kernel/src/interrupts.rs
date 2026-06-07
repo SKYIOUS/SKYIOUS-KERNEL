@@ -237,18 +237,21 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
 {
     use x86_64::instructions::port::Port;
 
-    let mut status_port = Port::<u8>::new(0x64);
-    let status = unsafe { status_port.read() };
-    let mut data_port = Port::<u8>::new(0x60);
-    let byte = unsafe { data_port.read() };
+    loop {
+        let mut status_port = Port::<u8>::new(0x64);
+        let status = unsafe { status_port.read() };
+        if status & 1 == 0 {
+            break;
+        }
+        let mut data_port = Port::<u8>::new(0x60);
+        let byte = unsafe { data_port.read() };
 
-    if status & 0x20 != 0 {
-        // Byte is from the mouse — route to mouse state machine
-        crate::drivers::mouse::feed_byte(byte);
-    } else {
-        // Byte is from the keyboard
-        crate::keyboard::handle_scancode(byte);
-        crate::tty::feed_scancode(byte);
+        if status & 0x20 != 0 {
+            crate::drivers::mouse::feed_byte(byte);
+        } else {
+            crate::keyboard::handle_scancode(byte);
+            crate::tty::feed_scancode(byte);
+        }
     }
 
     crate::apic::eoi();
@@ -259,18 +262,23 @@ extern "x86-interrupt" fn mouse_interrupt_handler(
 {
     use x86_64::instructions::port::Port;
 
-    let mut status_port = Port::<u8>::new(0x64);
-    let status = unsafe { status_port.read() };
-    let mut data_port = Port::<u8>::new(0x60);
-    let byte = unsafe { data_port.read() };
+    // Drain all available bytes from the PS/2 controller
+    loop {
+        let mut status_port = Port::<u8>::new(0x64);
+        let status = unsafe { status_port.read() };
+        if status & 1 == 0 {
+            // Output buffer empty
+            break;
+        }
+        let mut data_port = Port::<u8>::new(0x60);
+        let byte = unsafe { data_port.read() };
 
-    if status & 0x20 != 0 {
-        // Byte is from the mouse
-        crate::drivers::mouse::feed_byte(byte);
-    } else {
-        // Byte is from the keyboard — route to keyboard handler
-        crate::keyboard::handle_scancode(byte);
-        crate::tty::feed_scancode(byte);
+        if status & 0x20 != 0 {
+            crate::drivers::mouse::feed_byte(byte);
+        } else {
+            crate::keyboard::handle_scancode(byte);
+            crate::tty::feed_scancode(byte);
+        }
     }
 
     crate::apic::eoi();

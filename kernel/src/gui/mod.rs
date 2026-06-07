@@ -24,6 +24,7 @@ lazy_static::lazy_static! {
 
 pub struct Compositor {
     backbuffer: Box<[u32]>,
+    background_cache: Box<[u32]>,
     pub windows: Vec<window::Window>,
     drag_index: Option<usize>,
     drag_offset_x: usize,
@@ -40,8 +41,13 @@ impl Compositor {
         let mut buffer = Vec::with_capacity(size);
         for _ in 0..size { buffer.push(0x001A237E); } // Deep Blue Background
         
+        let backbuffer = buffer.into_boxed_slice();
+        let mut bg_cache = alloc::vec::Vec::with_capacity(size);
+        for _ in 0..size { bg_cache.push(0x001A237E); }
+        let bg_cache = bg_cache.into_boxed_slice();
         Self {
-            backbuffer: buffer.into_boxed_slice(),
+            backbuffer,
+            background_cache: bg_cache,
             windows: Vec::new(),
             drag_index: None,
             drag_offset_x: 0,
@@ -79,6 +85,17 @@ impl Compositor {
         self.windows.push(info_win);
     }
 
+    fn create_monitor_window(&mut self) {
+        let w = 360;
+        let h = 280;
+        let mut mon_win = window::Window::new(150, 90, w, h, "System Monitor");
+        let mut term = crate::gui::terminal::TerminalWidget::new(w - 4, h - 24);
+        term.is_monitor = true;
+        term.refresh_monitor();
+        mon_win.terminal = Some(term);
+        self.windows.push(mon_win);
+    }
+
     fn shutdown_qemu(&mut self) {
         unsafe { x86_64::instructions::port::Port::<u16>::new(0x604).write(0x2000); }
         x86_64::instructions::interrupts::disable();
@@ -105,10 +122,11 @@ impl Compositor {
                       match clicked_idx {
                           0 => self.create_info_window("File Manager", "File Manager\n\nNot yet implemented.\nCheck back in a future release."),
                           1 => self.create_terminal_window(),
-                          2 => self.create_info_window("Settings", "Settings\n\nNot yet implemented.\nCheck back in a future release."),
+                          2 => self.create_monitor_window(),
                           3 => self.create_info_window("About SkyOS",
                                "SkyOS v0.3.0\n\nKernel: Vahi\nArch: x86_64\n\nA modern kernel\nwritten in Rust."),
-                          4 => self.shutdown_qemu(),
+                          4 => self.create_info_window("Settings", "Settings\n\nNot yet implemented.\nCheck back in a future release."),
+                          5 => self.shutdown_qemu(),
                           _ => {}
                       }
                   }
@@ -245,7 +263,14 @@ impl Compositor {
     }
 
     pub fn render(&mut self, mouse_x: usize, mouse_y: usize) {
-        shell::draw_background(&mut self.backbuffer);
+        // Copy cached gradient background via raw pointers to avoid borrow conflict
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.background_cache.as_ptr(),
+                self.backbuffer.as_mut_ptr(),
+                SCREEN_WIDTH * SCREEN_HEIGHT,
+            );
+        }
         shell::draw_taskbar(&mut self.backbuffer);
 
         // Window entries on taskbar
@@ -260,6 +285,15 @@ impl Compositor {
         }
 
         shell::draw_icons(&mut self.backbuffer);
+
+        // Refresh monitor windows before rendering
+        for win in &mut self.windows {
+            if let Some(ref mut term) = win.terminal {
+                if term.is_monitor {
+                    term.refresh_monitor();
+                }
+            }
+        }
 
         for window in &self.windows {
             if !window.minimized { window.render(&mut self.backbuffer); }
@@ -284,19 +318,18 @@ impl Compositor {
 pub fn init() {
     let mut comp = COMPOSITOR.lock();
     
-    let mut welcome = window::Window::new(160, 130, 480, 300, "Welcome to SkyOS");
-    welcome.widgets.push(widgets::Widget::new_label(20, 30, "SkyOS v0.3 — Vahi Kernel"));
-    welcome.widgets.push(widgets::Widget::new_label(20, 55, "A modern x86-64 operating system"));
-    welcome.widgets.push(widgets::Widget::new_label(20, 80, "built with Rust."));
-    welcome.widgets.push(widgets::Widget::new_button(180, 230, 120, 30, "Get Started"));
-    comp.add_window(welcome);
+    // Render background gradient to cache (static gradient only)
+    shell::draw_background(&mut comp.background_cache);
     
-    let mut monitor = window::Window::new(50, 50, 300, 200, "System Monitor");
-    monitor.widgets.push(widgets::Widget::new_label(10, 10, "CPU Usage: 5%"));
-    monitor.widgets.push(widgets::Widget::new_label(10, 30, "Memory: 128MB / 4GB"));
-    monitor.widgets.push(widgets::Widget::new_label(10, 50, "Processes: 12"));
-    monitor.widgets.push(widgets::Widget::new_button(10, 130, 80, 25, "Refresh"));
-    comp.add_window(monitor);
+    // Draw initial frame
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            comp.background_cache.as_ptr(),
+            comp.backbuffer.as_mut_ptr(),
+            SCREEN_WIDTH * SCREEN_HEIGHT,
+        );
+    }
+    shell::draw_taskbar(&mut comp.backbuffer);
     
     comp.render(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
 }

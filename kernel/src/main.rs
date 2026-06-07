@@ -281,12 +281,7 @@ extern "C" fn run_async_tasks() -> ! {
     use task::{Task, executor::Executor};
     let mut executor = Executor::new();
 
-    // Only spawn kernel shell if no userspace init binary exists
-    let has_init = crate::vfs::VFS.lock().resolve_path("/bin/init").is_some();
-    if !has_init {
-        executor.spawn(Task::new(shell::kernel_shell()));
-    }
-
+    executor.spawn(Task::new(shell::kernel_shell()));
     executor.spawn(Task::new(network_poll_task()));
     executor.spawn(Task::new(gui_refresh_task()));
     executor.run();

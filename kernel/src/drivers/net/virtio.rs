@@ -255,7 +255,7 @@ impl Device for VirtIONetDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.max_transmission_unit = 1500;
-        caps.checksum = ChecksumCapabilities::ignored();
+        caps.checksum = ChecksumCapabilities::default();
         caps
     }
 }

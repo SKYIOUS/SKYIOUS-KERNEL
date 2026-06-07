@@ -147,14 +147,16 @@ impl Window {
     pub fn handle_keyboard(&mut self, key: pc_keyboard::DecodedKey) {
         if let Some(ref mut term) = self.terminal {
             match key {
-                pc_keyboard::DecodedKey::Unicode(c) => term.handle_char(c),
-                pc_keyboard::DecodedKey::RawKey(k) => {
-                    match k {
-                        pc_keyboard::KeyCode::Backspace | pc_keyboard::KeyCode::Delete => term.handle_char('\u{0008}'),
-                        pc_keyboard::KeyCode::Enter => term.handle_char('\n'),
-                        _ => {}
+                pc_keyboard::DecodedKey::Unicode(c) => {
+                    if c == '\r' || c == '\n' {
+                        term.handle_char('\n');
+                    } else if c == '\u{0008}' || c == '\u{007f}' {
+                        term.handle_char('\u{0008}');
+                    } else {
+                        term.handle_char(c);
                     }
                 }
+                pc_keyboard::DecodedKey::RawKey(_k) => {}
             }
         }
     }

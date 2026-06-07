@@ -39,6 +39,8 @@ pub struct E1000 {
     base_addr: usize,
     rx_descs: &'static mut [RxDesc],
     tx_descs: &'static mut [TxDesc],
+    rx_bufs: Vec<&'static mut [u8]>,
+    tx_bufs: Vec<&'static mut [u8]>,
     rx_cur: usize,
     tx_cur: usize,
     mac_addr: [u8; 6],
@@ -55,6 +57,8 @@ impl E1000 {
             base_addr,
             rx_descs: &mut [],
             tx_descs: &mut [],
+            rx_bufs: Vec::new(),
+            tx_bufs: Vec::new(),
             rx_cur: 0,
             tx_cur: 0,
             mac_addr: [0; 6],
@@ -87,19 +91,16 @@ impl E1000 {
     pub fn init(&mut self) {
         crate::println!("E1000: Initializing...");
         
-        // Reset
-        // self.write_reg(REG_CTRL, 0x04000000); // RST bit 26
-        
-        // Read MAC Address from EEPROM
         self.read_mac();
         
-        // Setup RX/TX Rings
         self.rx_descs = self.init_rx();
         self.tx_descs = self.init_tx();
         
         // Link Up
         let ctrl = self.read_reg(REG_CTRL);
         self.write_reg(REG_CTRL, ctrl | 0x40); // SLU bit 6
+        
+        self.dump_rx_status();
         
         // Enable Interrupts
         // ICR (Interrupt Cause Read) - clear all
@@ -135,27 +136,24 @@ impl E1000 {
         use x86_64::VirtAddr;
         
         let desc_count = 32;
-        let size = (core::mem::size_of::<RxDesc>() * desc_count) as u32; // 16 * 32 = 512 bytes
+        let size = (core::mem::size_of::<RxDesc>() * desc_count) as u32;
         
-        // Allocate Descriptors
-        // In a real allocator we need 16-byte alignment. Box is usually pointer aligned (8 bytes). 
-        // We'll rely on luck or use a larger buffer and align manually in future.
         let descs = Box::leak(Box::new([RxDesc::default(); 32])); 
         let desc_ptr = descs.as_ptr();
         let desc_virt = VirtAddr::from_ptr(desc_ptr);
         let desc_phys = crate::memory::virt_to_phys(desc_virt).expect("RX Ring Phys failed");
         
-        // Allocate Buffers for each descriptor
+        self.rx_bufs = Vec::with_capacity(desc_count);
         for desc in descs.iter_mut() {
-            let buf: &mut [u8] = Box::leak(vec![0u8; 2048].into_boxed_slice());
+            let buf: &'static mut [u8] = Box::leak(vec![0u8; 2048].into_boxed_slice());
             let buf_virt = VirtAddr::from_ptr(buf.as_ptr());
             let buf_phys = crate::memory::virt_to_phys(buf_virt).expect("RX Buf Phys failed");
             
             desc.addr = buf_phys.as_u64();
             desc.status = 0;
+            self.rx_bufs.push(buf);
         }
         
-        // Write to RDBAL/RDBAH
         self.write_reg(0x2800, desc_phys.as_u64() as u32);
         self.write_reg(0x2804, (desc_phys.as_u64() >> 32) as u32);
         
@@ -164,7 +162,6 @@ impl E1000 {
         self.write_reg(0x2818, desc_count as u32 - 1); // RDT
         
         // Enable RX
-        // EN | SBC | BAM | RDM_0 | SECRC
         self.write_reg(REG_RCTL, (1 << 1) | (1 << 2) | (1 << 15) | (1 << 26)); 
         
         descs
@@ -182,6 +179,16 @@ impl E1000 {
         let desc_virt = VirtAddr::from_ptr(desc_ptr);
         let desc_phys = crate::memory::virt_to_phys(desc_virt).expect("TX Ring Phys failed");
         
+        self.tx_bufs = Vec::with_capacity(desc_count);
+        for desc in descs.iter_mut() {
+            let buf: &'static mut [u8] = Box::leak(vec![0u8; 2048].into_boxed_slice());
+            let buf_virt = VirtAddr::from_ptr(buf.as_ptr());
+            let buf_phys = crate::memory::virt_to_phys(buf_virt).expect("TX Buf Phys failed");
+            desc.addr = buf_phys.as_u64();
+            desc.status = 0;
+            self.tx_bufs.push(buf);
+        }
+        
         self.write_reg(0x3800, desc_phys.as_u64() as u32);
         self.write_reg(0x3804, (desc_phys.as_u64() >> 32) as u32);
         
@@ -190,7 +197,6 @@ impl E1000 {
         self.write_reg(0x3818, 0);    // TDT
         
         // Enable TX
-        // EN | PSP | CT=15 | COLD=64
         self.write_reg(REG_TCTL, (1 << 1) | (1 << 3) | (0x0F << 4) | (0x40 << 12)); 
         
         descs
@@ -199,46 +205,79 @@ impl E1000 {
     pub fn send_packet(&mut self, data: &[u8]) {
         let cur = self.tx_cur;
         let len = self.tx_descs.len();
-        let base = self.base_addr;
-        let desc = &mut self.tx_descs[cur];
         
-        // Copy data to buffer
-        let buf_ptr = desc.addr as *mut u8;
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, data.len());
+        if data.len() > 2048 {
+            return;
         }
         
-        desc.length = data.len() as u16;
-        desc.cmd = (1 << 0) | (1 << 1) | (1 << 3); // EOP | IFCS | RS
-        desc.status = 0;
+        let buf = &mut self.tx_bufs[cur];
+        buf[..data.len()].copy_from_slice(data);
+        
+        unsafe {
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!(self.tx_descs[cur].length), data.len() as u16);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!(self.tx_descs[cur].cmd), (1 << 0) | (1 << 1) | (1 << 3));
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!(self.tx_descs[cur].status), 0u8);
+        }
         
         self.tx_cur = (cur + 1) % len;
-        Self::write_reg_raw(base, 0x3818, self.tx_cur as u32); // TDT
+        Self::write_reg_raw(self.base_addr, 0x3818, self.tx_cur as u32);
         
-        // Wait for send
-        while (desc.status & 1) == 0 {}
+        loop {
+            let s;
+            unsafe { s = core::ptr::read_unaligned(core::ptr::addr_of!(self.tx_descs[cur].status)); }
+            if s & 1 != 0 { break; }
+        }
     }
 
+    pub fn dump_rx_status(&self) {
+        let rdh = self.read_reg(0x2810);
+        let rdt = self.read_reg(0x2818);
+        let icr = self.read_reg(REG_ICR);
+        let sts = self.read_reg(REG_STATUS);
+        let cur = self.rx_cur;
+        let dd = if cur < self.rx_descs.len() {
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.rx_descs[cur].status)) & 1 }
+        } else { 0 };
+        crate::serial_write("[E1000] sts=");
+        crate::serial_write(&alloc::format!("{:08x}", sts));
+        crate::serial_write(" icr=");
+        crate::serial_write(&alloc::format!("{:08x}", icr));
+        crate::serial_write(" rdh=");
+        crate::serial_write(&alloc::format!("{}", rdh));
+        crate::serial_write(" rdt=");
+        crate::serial_write(&alloc::format!("{}", rdt));
+        crate::serial_write(" cur=");
+        crate::serial_write(&alloc::format!("{}", cur));
+        crate::serial_write(" dd=");
+        crate::serial_write(&alloc::format!("{}", dd));
+        crate::serial_write("\n");
+    }
+    
     pub fn receive_packet(&mut self) -> Option<Vec<u8>> {
         let cur = self.rx_cur;
-        let desc = &mut self.rx_descs[cur];
         
-        if (desc.status & 1) != 0 {
-            let len = desc.length as usize;
-            let mut buf = vec![0u8; len];
-            let buf_ptr = desc.addr as *const u8;
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf_ptr, buf.as_mut_ptr(), len);
-            }
-            
-            desc.status = 0;
-            self.rx_cur = (cur + 1) % self.rx_descs.len();
-            self.write_reg(0x2818, cur as u32); // RDT
-            
-            return Some(buf);
+        let status;
+        let pkt_len;
+        unsafe {
+            status = core::ptr::read_unaligned(core::ptr::addr_of!(self.rx_descs[cur].status));
+            pkt_len = core::ptr::read_unaligned(core::ptr::addr_of!(self.rx_descs[cur].length));
         }
         
-        None
+        if status & 1 != 0 {
+            let mut buf = vec![0u8; pkt_len as usize];
+            let src = &self.rx_bufs[cur][..pkt_len as usize];
+            buf.copy_from_slice(src);
+            
+            unsafe {
+                core::ptr::write_unaligned(core::ptr::addr_of_mut!(self.rx_descs[cur].status), 0u8);
+            }
+            self.rx_cur = (cur + 1) % self.rx_descs.len();
+            self.write_reg(0x2818, cur as u32);
+            
+            Some(buf)
+        } else {
+            None
+        }
     }
 }
 
@@ -265,7 +304,7 @@ impl Device for E1000Device {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.max_transmission_unit = 1500;
-        caps.checksum = ChecksumCapabilities::ignored();
+        caps.checksum = ChecksumCapabilities::default();
         caps
     }
 }

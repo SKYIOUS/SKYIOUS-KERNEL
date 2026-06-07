@@ -9,11 +9,12 @@ target/
 *.iso
 OVMF.fd
 
-# QEMU logs
+# QEMU logs and captures
 qemu_*.log
 qemu_*.txt
 qemu_*.png
 qemu_*.ppm
+*.pcap
 
 # Build logs
 builder_err*.txt
@@ -22,9 +23,16 @@ builder_err_utf8.txt
 builder_errors_utf8.txt
 builder_out.txt
 
-# Editor files
+# IDE / Editor
 *.swp
 *.swo
 *~
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
+*.code-workspace
+
+# OS junk
+desktop.ini
+ehthumbs.db

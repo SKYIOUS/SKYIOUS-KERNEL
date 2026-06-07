@@ -269,6 +269,8 @@ pub extern "sysv64" fn syscall_handler(
         numbers::SYS_SOCKET => sys_socket(arg1, arg2, arg3),
         numbers::SYS_BIND => sys_bind(arg1, arg2 as *const u8, arg3),
         numbers::SYS_CONNECT => sys_connect(arg1, arg2 as *const u8, arg3),
+        numbers::SYS_LISTEN => sys_listen(arg1, arg2),
+        numbers::SYS_ACCEPT => sys_accept(arg1, arg2 as *mut u8, arg3 as *mut u32),
         numbers::SYS_SENDTO => sys_sendto(arg1, arg2 as *const u8, arg3, arg4 as *const u8, arg5),
         numbers::SYS_RECVFROM => sys_recvfrom(arg1, arg2 as *mut u8, arg3, arg4 as *mut u8, arg5 as *mut u32),
         
@@ -305,6 +307,20 @@ pub extern "sysv64" fn syscall_handler(
         numbers::SYS_RENAME => sys_rename(arg1 as *const u8, arg2 as *const u8),
         numbers::SYS_ARCH_PRCTL => sys_arch_prctl(arg1, arg2),
         numbers::SYS_BEEP => sys_beep(arg1 as u32, arg2 as u32),
+        numbers::SYS_SELECT => sys_select(arg1, arg2 as *mut u64, arg3 as *mut u64, arg4 as *mut u64, arg5 as *const u64),
+        numbers::SYS_POLL => {
+            // Treat poll like select with nfds=1, check fd 0
+            let readfds: *mut u64 = core::ptr::null_mut();
+            let writefds: *mut u64 = core::ptr::null_mut();
+            let exceptfds: *mut u64 = core::ptr::null_mut();
+            sys_select(64, readfds, writefds, exceptfds, arg2 as *const u64)
+        }
+        numbers::SYS_GETUID => sys_getuid(),
+        numbers::SYS_GETGID => sys_getgid(),
+        numbers::SYS_SETUID => sys_setuid(arg1),
+        numbers::SYS_SETGID => sys_setgid(arg1),
+        numbers::SYS_GETEUID => sys_geteuid(),
+        numbers::SYS_GETEGID => sys_getegid(),
         _ => {
             crate::println!("[SYSCALL] Unknown syscall: {} (0x{:x})", n, n);
             errno::Errno::ENOSYS as u64
@@ -509,40 +525,36 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
-        Some(FileDescriptor::Socket(handle)) => {
+        Some(FileDescriptor::Socket(handle, _stype)) => {
             #[cfg(not(feature = "net"))]
             return errno::Errno::ENOSYS as u64;
             #[cfg(feature = "net")]
             {
                 let mut sockets = crate::net::SOCKETS.lock();
-                let mut data = vec![0u8; count];
-
                 // Try TCP
-                if let Ok(mut socket) = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle) {
+                if let Some(n) = with_tcp_mut(&mut *sockets, handle, |socket| {
                     if socket.may_recv() {
                         let mut n = 0usize;
                         let result = socket.recv(|slice| {
                             n = core::cmp::min(slice.len(), count);
-                            if user_access::copy_to_user(buf, &slice[..n]).is_ok() {
-                                Ok(n)
-                            } else {
-                                Err(())
-                            }
+                            let ok = unsafe { user_access::copy_to_user(buf, &slice[..n]) }.is_ok();
+                            (n, ok)
                         });
-                        if result.is_ok() { return n as u64; }
+                        if result.unwrap_or(false) { return n as u64; }
                     }
-                    return 0; // EAGAIN
-                }
+                    0u64
+                }) { return n; }
                 // Try UDP
-                if let Ok(mut socket) = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle) {
+                if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
+                    let mut data = vec![0u8; count];
                     if let Ok((n, _ep)) = socket.recv_slice(&mut data) {
-                        if user_access::copy_to_user(buf, &data[..n]).is_ok() {
+                        if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
                             return n as u64;
                         }
                         return errno::Errno::EFAULT as u64;
                     }
-                    return 0; // EAGAIN
-                }
+                    0u64
+                }) { return n; }
                 0
             }
         },
@@ -579,7 +591,7 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
-        Some(FileDescriptor::Socket(handle)) => {
+        Some(FileDescriptor::Socket(handle, _stype)) => {
             #[cfg(not(feature = "net"))]
             return errno::Errno::ENOSYS as u64;
             #[cfg(feature = "net")]
@@ -590,20 +602,17 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                 }
 
                 let mut sockets = crate::net::SOCKETS.lock();
-
-                // Try TCP
-                if let Ok(mut socket) = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle) {
+                if let Some(v) = with_tcp_mut(&mut *sockets, handle, |socket| {
                     if socket.may_send() {
                         let result = socket.send(|slice| {
                             let n = core::cmp::min(slice.len(), write_data.len());
                             slice[..n].copy_from_slice(&write_data[..n]);
-                            Ok(n)
+                            (n, true)
                         });
-                        if result.is_ok() { return count as u64; }
+                        if result.unwrap_or(false) { return count as u64; }
                     }
-                    return errno::Errno::EAGAIN as u64;
-                }
-
+                    errno::Errno::EAGAIN as u64
+                }) { return v; }
                 errno::Errno::ENOSYS as u64
             }
         },
@@ -712,7 +721,7 @@ fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
             }
             errno::Errno::EIO as u64
         },
-        Some(FileDescriptor::Socket(_)) => {
+        Some(FileDescriptor::Socket(_, _)) => {
             errno::Errno::ENOSYS as u64 // Sockets don't support full stat
         },
         None => errno::Errno::EBADF as u64,
@@ -757,7 +766,7 @@ fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
             *fd_offset = new_offset as usize;
             *fd_offset as u64
         },
-        Some(FileDescriptor::Socket(_)) => {
+        Some(FileDescriptor::Socket(_, _)) => {
             errno::Errno::ESPIPE as u64
         },
         None => errno::Errno::EBADF as u64,
@@ -1290,13 +1299,8 @@ fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     const CLOCK_MONOTONIC: u64 = 1;
     let ts = match clock_id {
         CLOCK_REALTIME => {
-            // Use ticks as monotonic base; no RTC battery-backed time yet
-            let ticks = crate::interrupts::get_ticks();
-            let total_ms = ticks * 10;
-            Timespec {
-                tv_sec: (total_ms / 1000) as i64,
-                tv_nsec: ((total_ms % 1000) * 1_000_000) as i64,
-            }
+            let (sec, nsec) = crate::drivers::rtc::read_realtime();
+            Timespec { tv_sec: sec, tv_nsec: nsec }
         }
         CLOCK_MONOTONIC => {
             let ticks = crate::interrupts::get_ticks();
@@ -1383,7 +1387,7 @@ fn sys_fchmod(fd: u64, mode: u32) -> u64 {
         Some(FileDescriptor::File { ref node, .. }) => {
             if node.chmod(mode).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
         },
-        Some(FileDescriptor::Socket(_)) => errno::Errno::ENOSYS as u64,
+        Some(FileDescriptor::Socket(_, _)) => errno::Errno::ENOSYS as u64,
         None => errno::Errno::EBADF as u64,
     }
 }
@@ -1402,7 +1406,7 @@ fn sys_fchown(fd: u64, uid: u32, gid: u32) -> u64 {
         Some(FileDescriptor::File { ref node, .. }) => {
             if node.chown(uid, gid).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
         },
-        Some(FileDescriptor::Socket(_)) => errno::Errno::ENOSYS as u64,
+        Some(FileDescriptor::Socket(_, _)) => errno::Errno::ENOSYS as u64,
         None => errno::Errno::EBADF as u64,
     }
 }
@@ -1636,6 +1640,34 @@ fn sys_getpid() -> u64 {
     }
 }
 
+use smoltcp::socket::{Socket, tcp, udp};
+
+/// Safely access a TCP socket by handle without panicking on type mismatch.
+fn with_tcp_mut<R>(sockets: &mut smoltcp::iface::SocketSet, handle: smoltcp::iface::SocketHandle, f: impl FnOnce(&mut tcp::Socket) -> R) -> Option<R> {
+    for (h, socket) in sockets.iter_mut() {
+        if h == handle {
+            if let Socket::Tcp(ref mut s) = socket {
+                return Some(f(s));
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Safely access a UDP socket by handle without panicking on type mismatch.
+fn with_udp_mut<R>(sockets: &mut smoltcp::iface::SocketSet, handle: smoltcp::iface::SocketHandle, f: impl FnOnce(&mut udp::Socket) -> R) -> Option<R> {
+    for (h, socket) in sockets.iter_mut() {
+        if h == handle {
+            if let Socket::Udp(ref mut s) = socket {
+                return Some(f(s));
+            }
+            return None;
+        }
+    }
+    None
+}
+
 fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
     if domain != 2 {
         return errno::Errno::EAFNOSUPPORT as u64;
@@ -1663,10 +1695,11 @@ fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
             return errno::Errno::EINVAL as u64;
         };
 
+        let socket_type = if ty == 1 { crate::task::process::SocketType::Tcp } else { crate::task::process::SocketType::Udp };
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
             let mut fd_table = process.fd_table.lock();
-            let fd_obj = FileDescriptor::Socket(handle);
+            let fd_obj = FileDescriptor::Socket(handle, socket_type);
             for (i, slot) in fd_table.iter_mut().enumerate() {
                 if slot.is_none() {
                     *slot = Some(fd_obj);
@@ -1678,6 +1711,15 @@ fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
         }
         errno::Errno::ESRCH as u64
     }
+}
+
+use alloc::collections::BTreeMap;
+use smoltcp::wire::IpEndpoint;
+use smoltcp::iface::SocketHandle;
+
+lazy_static::lazy_static! {
+    static ref TCP_BIND_ENDPOINTS: spin::Mutex<BTreeMap<(u64, SocketHandle), IpEndpoint>> =
+        spin::Mutex::new(BTreeMap::new());
 }
 
 fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
@@ -1698,16 +1740,25 @@ fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
         let port = u16::from_be(unsafe { *(addr_buf.as_ptr().add(2) as *const u16) });
         let ip_bytes = unsafe { *(addr_buf.as_ptr().add(4) as *const [u8; 4]) };
         let ip = smoltcp::wire::Ipv4Address::from_bytes(&ip_bytes);
+        let endpoint = smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(ip), port);
 
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
             let fd_table = process.fd_table.lock();
             if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
-            if let Some(FileDescriptor::Socket(handle)) = fd_table[sockfd as usize] {
-                let mut sockets = crate::net::SOCKETS.lock();
-                let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
-                if socket.bind(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(ip), port)).is_err() {
-                    return errno::Errno::EADDRINUSE as u64;
+            if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+                let pid = process.id;
+                match stype {
+                    crate::task::process::SocketType::Udp => {
+                        let mut sockets = crate::net::SOCKETS.lock();
+                        let success = with_udp_mut(&mut *sockets, handle, |socket| {
+                            socket.bind(endpoint).is_ok()
+                        }).unwrap_or(false);
+                        if !success { return errno::Errno::EADDRINUSE as u64; }
+                    }
+                    crate::task::process::SocketType::Tcp => {
+                        TCP_BIND_ENDPOINTS.lock().insert((pid, handle), endpoint);
+                    }
                 }
                 return 0;
             }
@@ -1742,32 +1793,169 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
         if let Some(ref process) = *process_lock {
             let fd_table = process.fd_table.lock();
             if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
-            if let Some(FileDescriptor::Socket(handle)) = fd_table[sockfd as usize] {
+            if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
                 let mut sockets = crate::net::SOCKETS.lock();
-
-                // Try TCP connect
-                if let Ok(mut socket) = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle) {
-                    if !socket.is_active() {
-                        // Connect is non-blocking — poll loop will complete the handshake
-                        if socket.connect(endpoint).is_err() {
-                            return errno::Errno::ECONNREFUSED as u64;
+                match stype {
+                    crate::task::process::SocketType::Tcp => {
+                        let mut iface_lock = crate::net::NETWORK_INTERFACE.lock();
+                        let result = iface_lock.as_mut().map(|iface| {
+                            let cx = iface.context();
+                            with_tcp_mut(&mut *sockets, handle, |socket| {
+                                if !socket.is_active() {
+                                    let local_endpoint = smoltcp::wire::IpListenEndpoint {
+                                        addr: None,
+                                        port: 0,
+                                    };
+                                    if socket.connect(cx, endpoint, local_endpoint).is_err() {
+                                        Err(errno::Errno::ECONNREFUSED)
+                                    } else {
+                                        Ok(0u64)
+                                    }
+                                } else if socket.may_send() {
+                                    Ok(0u64)
+                                } else {
+                                    Err(errno::Errno::EALREADY)
+                                }
+                            })
+                        });
+                        match result {
+                            Some(Some(Ok(v))) => return v,
+                            Some(Some(Err(e))) => return e as u64,
+                            _ => return errno::Errno::EIO as u64,
                         }
+                    }
+                    crate::task::process::SocketType::Udp => {
                         return 0;
                     }
-                    if socket.may_send() {
-                        return 0;
-                    }
-                    return errno::Errno::EALREADY as u64;
                 }
-                // UDP — set default remote endpoint (not natively supported by smoltcp,
-                // but we allow connect to succeed so send() can use it later)
-                if sockets.get_mut::<smoltcp::socket::udp::Socket>(handle).is_ok() {
-                    return 0;
-                }
-                return errno::Errno::EOPNOTSUPP as u64;
             }
         }
         errno::Errno::EBADF as u64
+    }
+}
+
+fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
+    #[cfg(not(feature = "net"))]
+    return errno::Errno::ENOSYS as u64;
+
+    #[cfg(feature = "net")]
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let fd_table = process.fd_table.lock();
+        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+        if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+            if stype != crate::task::process::SocketType::Tcp {
+                return errno::Errno::EOPNOTSUPP as u64;
+            }
+            let pid = process.id;
+            let bind_ep = TCP_BIND_ENDPOINTS.lock().get(&(pid, handle)).copied();
+            let port = bind_ep.map(|ep| ep.port).unwrap_or(0);
+            if port == 0 { return errno::Errno::EINVAL as u64; }
+            let mut sockets = crate::net::SOCKETS.lock();
+            let success = with_tcp_mut(&mut *sockets, handle, |socket| {
+                let listen_ep = smoltcp::wire::IpListenEndpoint {
+                    addr: None,
+                    port,
+                };
+                socket.listen(listen_ep).is_ok()
+            }).unwrap_or(false);
+            if !success { return errno::Errno::EADDRINUSE as u64; }
+            return 0;
+        }
+        errno::Errno::EBADF as u64
+    }
+}
+
+fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
+    #[cfg(not(feature = "net"))]
+    return errno::Errno::ENOSYS as u64;
+
+    #[cfg(feature = "net")]
+    {
+        crate::net::poll();
+
+        let process = {
+            let process_lock = CURRENT_PROCESS.lock();
+            match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64 }
+        };
+        let mut fd_table = process.fd_table.lock();
+        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+
+        let (handle, local_port) = match fd_table[sockfd as usize] {
+            Some(FileDescriptor::Socket(h, stype)) => {
+                if stype != crate::task::process::SocketType::Tcp {
+                    return errno::Errno::EOPNOTSUPP as u64;
+                }
+                let mut sockets = crate::net::SOCKETS.lock();
+                let result = with_tcp_mut(&mut *sockets, h, |socket| {
+                    if socket.is_listening() || !socket.is_open() {
+                        return Err(errno::Errno::EAGAIN);
+                    }
+                    let remote = socket.remote_endpoint();
+                    let local_port = socket.local_endpoint().map(|ep| ep.port).unwrap_or(0);
+                    Ok((remote, local_port))
+                });
+                match result {
+                    Some(Ok((remote, lp))) => {
+                        match remote {
+                            Some(ep) => {
+                                if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
+                                    let family: u16 = 2;
+                                    let port_be = ep.port.to_be();
+                                    let mut ip_bytes = [0u8; 4];
+                                    let smoltcp::wire::IpAddress::Ipv4(ipv4) = ep.addr;
+                                    ip_bytes.copy_from_slice(ipv4.as_bytes());
+                                    let mut sockaddr = [0u8; 16];
+                                    sockaddr[..2].copy_from_slice(&family.to_ne_bytes());
+                                    sockaddr[2..4].copy_from_slice(&port_be.to_ne_bytes());
+                                    sockaddr[4..8].copy_from_slice(&ip_bytes);
+                                    let _ = unsafe { user_access::copy_to_user(addr_ptr, &sockaddr) };
+                                    let addr_len: u32 = 16;
+                                    let _ = unsafe { user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
+                                }
+                                (h, lp)
+                            }
+                            None => return errno::Errno::EINVAL as u64,
+                        }
+                    }
+                    Some(Err(e)) => return e as u64,
+                    None => return errno::Errno::EINVAL as u64,
+                }
+            }
+            _ => return errno::Errno::EBADF as u64,
+        };
+
+        if local_port == 0 { return errno::Errno::EINVAL as u64; }
+
+        let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0u8; 4096]);
+        let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0u8; 4096]);
+        let mut new_socket = smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer);
+        let listen_addr = smoltcp::wire::IpListenEndpoint {
+            addr: None,
+            port: local_port,
+        };
+        if new_socket.listen(listen_addr).is_err() {
+            return errno::Errno::EADDRINUSE as u64;
+        }
+
+        let mut sockets = crate::net::SOCKETS.lock();
+        let new_handle = sockets.add(new_socket);
+        fd_table[sockfd as usize] = Some(FileDescriptor::Socket(new_handle, crate::task::process::SocketType::Tcp));
+
+        let pid = process.id;
+        if let Some(ep) = TCP_BIND_ENDPOINTS.lock().get(&(pid, handle)).copied() {
+            TCP_BIND_ENDPOINTS.lock().insert((pid, new_handle), ep);
+        }
+
+        for (i, slot) in fd_table.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(FileDescriptor::Socket(handle, crate::task::process::SocketType::Tcp));
+                return i as u64;
+            }
+        }
+        fd_table.push(Some(FileDescriptor::Socket(handle, crate::task::process::SocketType::Tcp)));
+        (fd_table.len() - 1) as u64
     }
 }
 
@@ -1782,7 +1970,7 @@ fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, addrle
         let fd_table = process.fd_table.lock();
         if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
         
-        if let Some(FileDescriptor::Socket(handle)) = fd_table[sockfd as usize] {
+        if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
             let mut data = vec![0u8; len as usize];
             if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
 
@@ -1792,32 +1980,25 @@ fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, addrle
                  if unsafe { user_access::copy_from_user(&mut addr_buf[..clen], addr_ptr) }.is_err() {
                      return errno::Errno::EFAULT as u64;
                  }
-                 #[cfg(feature = "net")]
                  {
                      let port = u16::from_be(unsafe { *(addr_buf.as_ptr().add(2) as *const u16) });
                      let ip_bytes = unsafe { *(addr_buf.as_ptr().add(4) as *const [u8; 4]) };
                      Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_bytes(&ip_bytes)), port))
                  }
-                 #[cfg(not(feature = "net"))]
-                 None
             } else {
                  None
             };
 
             let mut sockets = crate::net::SOCKETS.lock();
-            // Try as UDP
-            {
-                let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
-                if let Some(endpoint) = dest_endpoint {
-                    if socket.send_slice(&data, endpoint).is_ok() { return len; }
+            match stype {
+                crate::task::process::SocketType::Udp => {
+                    if let Some(endpoint) = dest_endpoint {
+                        if with_udp_mut(&mut *sockets, handle, |socket| {
+                            socket.send_slice(&data, endpoint).is_ok()
+                        }).unwrap_or(false) { return len; }
+                    }
                 }
-            }
-            // Try as ICMP
-            {
-                let icmp_socket = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
-                if let Some(endpoint) = dest_endpoint {
-                    if icmp_socket.send_slice(&data, endpoint.addr).is_ok() { return len; }
-                }
+                _ => return errno::Errno::ENOSYS as u64,
             }
             return errno::Errno::EIO as u64;
         }
@@ -1837,22 +2018,23 @@ fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, _addr_ptr: *mut u8, _addrle
     let fd_table = process.fd_table.lock();
     if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     
-    if let Some(FileDescriptor::Socket(handle)) = fd_table[sockfd as usize] {
+    if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
         let mut sockets = crate::net::SOCKETS.lock();
-        // Try as UDP
-        let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
         let mut data = vec![0u8; len as usize];
-        if let Ok((n, _endpoint)) = socket.recv_slice(&mut data) {
-            if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_err() { return errno::Errno::EFAULT as u64; }
-            return n as u64;
+        match stype {
+            crate::task::process::SocketType::Udp => {
+                if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
+                    if let Ok((n, _ep)) = socket.recv_slice(&mut data) {
+                        if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
+                            return n as u64;
+                        }
+                    }
+                    0u64
+                }) { return n; }
+            }
+            _ => return errno::Errno::ENOSYS as u64,
         }
-        // Try as ICMP
-        let socket = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
-        if let Ok((n, _addr)) = socket.recv_slice(&mut data) {
-            if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_err() { return errno::Errno::EFAULT as u64; }
-            return n as u64;
-        }
-        return 0; // EAGAIN
+        return 0;
     }
     errno::Errno::EBADF as u64
 }
@@ -2000,12 +2182,13 @@ fn sys_gui_get_buffer(handle: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     let comp = COMPOSITOR.lock();
     if handle as usize >= comp.windows.len() { return 0; }
-    
+
     let win = &comp.windows[handle as usize];
     let content_w = win.width.saturating_sub(2);
     let content_h = win.height.saturating_sub(22);
-    
-    (content_w * content_h * 4) as u64 // Return expected size in bytes
+
+    // Pack width and height into return value (low 32 = width, high 32 = height)
+    ((content_w as u64) & 0xFFFF_FFFF) | ((content_h as u64) << 32)
 }
 
 fn sys_gui_map_buffer(handle: u64) -> u64 {
@@ -2077,7 +2260,7 @@ fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
             }
         }
     }
-    comp.render();
+    comp.render(0, 0);
     0
 }
 
@@ -2392,6 +2575,124 @@ fn sys_resolve(name_ptr: *const u8, ip_ptr: *mut u8) -> u64 {
     }
 
     errno::Errno::ENOENT as u64
+}
+
+fn sys_select(nfds: u64, readfds: *mut u64, writefds: *mut u64, exceptfds: *mut u64, timeout: *const u64) -> u64 {
+    let process = match *CURRENT_PROCESS.lock() {
+        Some(ref p) => p.clone(),
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let fd_table = process.fd_table.lock();
+    let mut ready_count;
+    let deadline = if !timeout.is_null() {
+        let mut tv_sec = 0u64;
+        let mut tv_nsec = 0u64;
+        unsafe {
+            let _ = user_access::copy_from_user(
+                core::slice::from_raw_parts_mut(&mut tv_sec as *mut _ as *mut u8, 8), timeout as *const u8);
+            let _ = user_access::copy_from_user(
+                core::slice::from_raw_parts_mut(&mut tv_nsec as *mut _ as *mut u8, 8), timeout.add(8) as *const u8);
+        }
+        let timeout_ms = tv_sec * 1000 + tv_nsec / 1_000_000;
+        let now = crate::interrupts::get_ticks() * 10;
+        if timeout_ms > 0 { now + timeout_ms / 10 } else { 0 }
+    } else { 0 };
+
+    let mut poll_count = 0;
+    loop {
+        poll_count += 1;
+        if poll_count > 1000 { break; }
+
+        let mut read_set: u64 = 0;
+        let mut write_set: u64 = 0;
+        #[allow(unused_mut)]
+        let mut except_set: u64 = 0;
+
+        for fd in 0..core::cmp::min(nfds, 64) {
+            if fd as usize >= fd_table.len() { continue; }
+            let readable = match fd_table[fd as usize] {
+                Some(ref desc) => match desc {
+                    FileDescriptor::File { node, .. } => node.stat().map(|s| s.st_size > 0).unwrap_or(false),
+                    FileDescriptor::Socket(_, _) => true,
+                },
+                None => false,
+            };
+            let writable = fd_table[fd as usize].is_some();
+
+            if readable { read_set |= 1 << fd; }
+            if writable { write_set |= 1 << fd; }
+        }
+
+        let mut read_set_masked = read_set;
+        let mut write_set_masked = write_set;
+        let mut except_set_masked = except_set;
+
+        if !readfds.is_null() {
+            let mut user_set = 0u64;
+            unsafe { let _ = user_access::copy_from_user(core::slice::from_raw_parts_mut(&mut user_set as *mut _ as *mut u8, 8), readfds as *const u8); }
+            read_set_masked &= user_set;
+        }
+        if !writefds.is_null() {
+            let mut user_set = 0u64;
+            unsafe { let _ = user_access::copy_from_user(core::slice::from_raw_parts_mut(&mut user_set as *mut _ as *mut u8, 8), writefds as *const u8); }
+            write_set_masked &= user_set;
+        }
+        if !exceptfds.is_null() {
+            let mut user_set = 0u64;
+            unsafe { let _ = user_access::copy_from_user(core::slice::from_raw_parts_mut(&mut user_set as *mut _ as *mut u8, 8), exceptfds as *const u8); }
+            except_set_masked &= user_set;
+        }
+
+        ready_count = read_set_masked.count_ones() as u64 + write_set_masked.count_ones() as u64 + except_set_masked.count_ones() as u64;
+
+        if ready_count > 0 {
+            if !readfds.is_null() { unsafe { let _ = user_access::copy_to_user(readfds as *mut u8, core::slice::from_raw_parts(&read_set_masked as *const _ as *const u8, 8)); } }
+            if !writefds.is_null() { unsafe { let _ = user_access::copy_to_user(writefds as *mut u8, core::slice::from_raw_parts(&write_set_masked as *const _ as *const u8, 8)); } }
+            if !exceptfds.is_null() { unsafe { let _ = user_access::copy_to_user(exceptfds as *mut u8, core::slice::from_raw_parts(&except_set_masked as *const _ as *const u8, 8)); } }
+            return ready_count;
+        }
+
+        if !timeout.is_null() {
+            let ticks = crate::interrupts::get_ticks() * 10;
+            if deadline > 0 && ticks >= deadline { break; }
+        }
+        crate::task::scheduler::try_schedule();
+    }
+
+    if !readfds.is_null() { unsafe { let _ = user_access::copy_to_user(readfds as *mut u8, &0u64.to_ne_bytes()); } }
+    if !writefds.is_null() { unsafe { let _ = user_access::copy_to_user(writefds as *mut u8, &0u64.to_ne_bytes()); } }
+    if !exceptfds.is_null() { unsafe { let _ = user_access::copy_to_user(exceptfds as *mut u8, &0u64.to_ne_bytes()); } }
+    0
+}
+
+fn sys_getuid() -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock { *p.uid.lock() as u64 } else { 0 }
+}
+
+fn sys_getgid() -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock { *p.gid.lock() as u64 } else { 0 }
+}
+
+fn sys_setuid(uid: u64) -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock { *p.uid.lock() = uid as u32; *p.euid.lock() = uid as u32; 0 } else { errno::Errno::ESRCH as u64 }
+}
+
+fn sys_setgid(gid: u64) -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock { *p.gid.lock() = gid as u32; *p.egid.lock() = gid as u32; 0 } else { errno::Errno::ESRCH as u64 }
+}
+
+fn sys_geteuid() -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock { *p.euid.lock() as u64 } else { 0 }
+}
+
+fn sys_getegid() -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock { *p.egid.lock() as u64 } else { 0 }
 }
 
 fn sys_korlang(id: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u64) -> u64 {

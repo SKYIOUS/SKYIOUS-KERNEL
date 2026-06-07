@@ -117,6 +117,18 @@ impl BuddyAllocator {
         self.free_lists[order] = Some(addr);
     }
 
+    pub fn count_free_pages(&self) -> usize {
+        let mut total = 0usize;
+        for order in 0..=MAX_ORDER {
+            let mut addr = self.free_lists[order];
+            while let Some(a) = addr {
+                total += 1 << order;
+                addr = self.read_next_ptr(a);
+            }
+        }
+        total
+    }
+
     fn read_next_ptr(&self, addr: PhysAddr) -> Option<PhysAddr> {
         let offset = *PHYSICAL_MEMORY_OFFSET.get().expect("Memory offset not init");
         // We use a magic value to represent None because 0 might be a valid physical address

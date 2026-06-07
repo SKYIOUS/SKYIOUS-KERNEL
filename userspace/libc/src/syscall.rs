@@ -238,3 +238,37 @@ pub fn beep(freq_hz: u32, duration_ms: u32) -> u64 {
 pub fn sched_yield() {
     syscall0(crate::SYS_SCHED_YIELD);
 }
+
+pub fn select(nfds: u64, readfds: *mut u64, writefds: *mut u64, exceptfds: *mut u64, timeout: *const u64) -> u64 {
+    let ret = syscall5(crate::SYS_SELECT, nfds, readfds as u64, writefds as u64, exceptfds as u64, timeout as u64);
+    crate::errno::check(ret)
+}
+
+pub fn poll(fds: *mut u8, nfds: u64, timeout: u64) -> u64 {
+    let ret = syscall3(crate::SYS_POLL, fds as u64, nfds, timeout);
+    crate::errno::check(ret)
+}
+
+pub fn getuid() -> u64 {
+    syscall0(crate::SYS_GETUID)
+}
+
+pub fn getgid() -> u64 {
+    syscall0(crate::SYS_GETGID)
+}
+
+pub fn setuid(uid: u32) -> u64 {
+    syscall1(crate::SYS_SETUID, uid as u64)
+}
+
+pub fn setgid(gid: u32) -> u64 {
+    syscall1(crate::SYS_SETGID, gid as u64)
+}
+
+pub fn geteuid() -> u64 {
+    syscall0(crate::SYS_GETEUID)
+}
+
+pub fn getegid() -> u64 {
+    syscall0(crate::SYS_GETEGID)
+}

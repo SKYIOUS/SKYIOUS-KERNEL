@@ -63,9 +63,9 @@ pub fn draw_icons(buffer: &mut [u32]) {
     drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, 15, 165, "FILES", 0xFFFFFFFF);
 }
 
-pub const MENU_ITEM_COUNT: usize = 5;
-pub const MENU_ITEMS: [&str; MENU_ITEM_COUNT] = ["File Manager", "Terminal", "Settings", "About", "Shutdown"];
-pub const MENU_ICONS: [u32; MENU_ITEM_COUNT] = [0xFFFFD700, 0xFF00C853, 0xFF2979FF, 0xFF7B1FA2, 0xFFD50000];
+pub const MENU_ITEM_COUNT: usize = 6;
+pub const MENU_ITEMS: [&str; MENU_ITEM_COUNT] = ["File Manager", "Terminal", "System Monitor", "About", "Settings", "Shutdown"];
+pub const MENU_ICONS: [u32; MENU_ITEM_COUNT] = [0xFFFFD700, 0xFF00C853, 0xFFFF6F00, 0xFF7B1FA2, 0xFF2979FF, 0xFFD50000];
 
 fn start_menu_rects() -> (usize, usize, usize) {
     (5, SCREEN_HEIGHT - 250, 180)

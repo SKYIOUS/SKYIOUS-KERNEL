@@ -32,10 +32,13 @@ pub struct Vma {
 
 use smoltcp::iface::SocketHandle;
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum SocketType { Tcp, Udp }
+
 #[derive(Clone)]
 pub enum FileDescriptor {
     File { node: Arc<dyn VfsNode>, offset: usize },
-    Socket(SocketHandle),
+    Socket(SocketHandle, SocketType),
 }
 
 pub struct Process {
@@ -51,6 +54,10 @@ pub struct Process {
     pub cwd: Mutex<String>,
     pub signals: Mutex<crate::syscalls::signal::SignalState>,
     pub signal_handlers: Mutex<[u64; 32]>,
+    pub uid: Mutex<u32>,
+    pub gid: Mutex<u32>,
+    pub euid: Mutex<u32>,
+    pub egid: Mutex<u32>,
 }
 
 use crate::vfs::VfsNode;
@@ -70,6 +77,10 @@ impl Process {
             cwd: Mutex::new(String::from("/")),
             signals: Mutex::new(crate::syscalls::signal::SignalState::new()),
             signal_handlers: Mutex::new([0; 32]),
+            uid: Mutex::new(0),
+            gid: Mutex::new(0),
+            euid: Mutex::new(0),
+            egid: Mutex::new(0),
         }
     }
 
