@@ -1,36 +1,26 @@
 SKYIOUS Software License (SSL)
 
-Copyright (c) 2026 SARGA OS Contributors
+Copyright (c) [Year] [Copyright Holder(s)]
 
 Preamble
 ========
 The SKYIOUS Software License is a file-level copyleft license that
 balances freedom for users with protection for the original project.
 It ensures that modifications to individual files remain under the
-same license while allowing the project maintainers to incorporate
-improvements from forks back into the main project. Attribution is
-required in both documentation and user interfaces.
+same license. Attribution is required in both documentation and
+user interfaces.
 
 Definitions
 ===========
 "You" (or "Your") means an individual or legal entity exercising
 permissions granted by this License.
 
-"Licensed Work" means the software, firmware, or documentation covered
-by this License, including any modifications or additions.
+"Licensed Work" means the software, firmware, or documentation
+covered by this License, including any modifications or additions.
 
 "Source" form means the preferred form for making modifications,
 including but not limited to source code, configuration files, and
 build scripts.
-
-"You" includes any entity that receives a copy of the Licensed Work.
-
-"Maintainer" means the original project team, including the original
-copyright holder and their designated contributors, who maintain the
-official upstream repository of the Licensed Work.
-
-"Fork" means a copy of the Licensed Work that is modified and
-distributed separately from the Maintainer's official repository.
 
 Grant of Copyright License
 ==========================
@@ -41,9 +31,9 @@ a worldwide, royalty-free, non-exclusive, perpetual license to:
   2. Reproduce and copy the Licensed Work.
   3. Modify the Licensed Work and create derivative works.
   4. Distribute the Licensed Work, in Source or compiled form.
-  5. Sublicense the Licensed Work, but only under this License — any
-     sublicense must use the SKYIOUS Software License (SSL) and may
-     not add further restrictions.
+  5. Sublicense the Licensed Work, but only under this License --
+     any sublicense must use the SKYIOUS Software License (SSL) and
+     may not add further restrictions.
   6. Use the Licensed Work privately without any obligations.
 
 Grant of Patent License
@@ -59,52 +49,55 @@ Conditions
 Distribution of the Licensed Work, in Source or compiled form, is
 subject to the following conditions:
 
-  1. Attribution — Any distributed copy must include a visible credit
-     to the original project ("SARGA OS" / "Vahi kernel") in both the
-     documentation and in any user interface or "About" dialog.
+  1. Attribution -- Any distributed copy must include a visible
+     credit to the original project in both the documentation and
+     in any user interface or "About" dialog. The credit must
+     identify the copyright holder(s) named in the copyright
+     notice of the Licensed Work.
 
-  2. Copyright Notice — All existing copyright notices must be
+  2. Copyright Notice -- All existing copyright notices must be
      retained in every copy, in both Source and compiled form. You
      may add Your own copyright notice to modifications You make.
 
-  3. File-Level Copyleft — If You modify a file of the Licensed Work,
-     that modified file must be distributed under this License. Other
-     files in the same distribution may remain under different terms.
-     A "modified file" is one in which You add, delete, or change any
-     lines of the file's content.
+  3. File-Level Copyleft -- If You modify a file of the Licensed
+     Work, that modified file must be distributed under this License.
+     Other files in the same distribution may remain under different
+     terms. A "modified file" is one in which You add, delete, or
+     change any lines of the file's content.
 
-  4. License Copy — When distributing Source form, You must include a
-     copy of this License with the distribution.
+  4. License Copy -- When distributing Source form, You must include
+     a copy of this License with the distribution.
 
-  5. UI Notice in Modified Versions — If You distribute a modified
+  5. UI Notice in Modified Versions -- If You distribute a modified
      version of the Licensed Work as a standalone application or
      system, You must include a notice in the application's "About"
-     or settings interface stating that the software is based on
-     SARGA OS / Vahi kernel and that it has been modified.
+     or settings interface stating that the software is a modified
+     version of the original Licensed Work.
 
-  6. Sublicensing Restriction — Any sublicense granted under this
-     License must use this exact License with no additional
-     restrictions. You may not impose any further restrictions on
-     the rights granted herein.
+  6. Sublicensing Restriction -- Any sublicense granted under this
+     License must use this License with no additional restrictions.
+     You may not impose any further restrictions on the rights
+     granted herein.
 
-Maintainer Right
-================
-Notwithstanding any other provision of this License, the Maintainer
-retains the right to incorporate any code, features, improvements,
-bug fixes, security patches, or other work from any Fork into the
-official upstream repository of the Licensed Work. The Maintainer
-may do so with or without credit to the Fork's author, although
-credit is preferred where reasonably practicable. This right applies
-retroactively and prospectively to all Forks.
+[OPTIONAL] Maintainer Right
+============================
+This section is optional. If included in the License notice for a
+given project, the following applies:
+
+The project's original maintainer(s) retain the right to incorporate
+any code, features, improvements, bug fixes, security patches, or
+other work from any fork of the Licensed Work into the official
+project repository. The maintainer(s) may do so with or without
+credit to the fork's author, although credit is preferred where
+reasonably practicable. This right applies retroactively and
+prospectively to all forks.
 
 Trademark Usage
 ===============
 This License does not grant any rights to use the trademarks, service
-marks, or logos of the project ("SKYIOUS", "SARGA", "Vahi", and
-associated logos). Trademark use is permitted only for the purpose of
-attribution as required by Section 1 above or with separate written
-permission from the copyright holder. Any other use must follow
-project trademark guidelines.
+marks, or logos of the project. Trademark use is permitted only for
+the purpose of attribution as required by Section 1 above or with
+separate written permission from the copyright holder.
 
 Disclaimer of Warranty
 ======================
@@ -132,28 +125,28 @@ Termination
 ===========
 This License and the rights granted hereunder will terminate
 automatically if You fail to comply with any of its terms. However,
-if You cure the violation within thirty (30) days of receiving written
-notice from the copyright holder, the License will be reinstated.
-Termination of Your rights under this License does not terminate the
-rights of any other party.
+if You cure the violation within thirty (30) days of receiving
+written notice from the copyright holder, the License will be
+reinstated. Termination of Your rights under this License does not
+terminate the rights of any other party.
 
 Version Compatibility
 =====================
-This License is version 1.0. You may distribute the Licensed Work
-under any later version of the SKYIOUS Software License as published
-by the copyright holder.
+You may distribute the Licensed Work under any later version of the
+SKYIOUS Software License as published by the copyright holder.
 
 How to Apply This License
 =========================
-To apply this License to Your work, attach the following notice
-(adjust the year and project name as needed):
+To apply this License to Your work, attach the following notice,
+replacing the bracketed placeholders with Your information:
 
   SKYIOUS Software License (SSL) v1.0
-  Copyright (c) 2026 SARGA OS Contributors
+  Copyright (c) [Year] [Copyright Holder(s)]
 
   This work is licensed under the SKYIOUS Software License (SSL).
-  You may obtain a copy of the License at:
-  [project URL]
+
+  [OPTIONAL — To include the Maintainer Right clause, add:
+  This license includes the Maintainer Right clause.]
 
   Unless required by applicable law or agreed to in writing, software
   distributed under the License is distributed on an "AS IS" BASIS,
