@@ -20,6 +20,7 @@
 ## Table of Contents
 
 - [Overview](#overview)
+- [How This Project Was Built](#how-this-project-was-built)
 - [Architecture](#architecture)
 - [Features](#features)
   - [Syscalls](#syscalls)
@@ -68,6 +69,26 @@
 | Kernel threads | Async executor + scheduler |
 | Supported archs | x86_64 (mature), aarch64 (in progress) |
 | Boot protocol | UEFI (via `bootloader` crate) |
+
+## How This Project Was Built
+>
+> The vast majority of this codebase was generated with the assistance of AI (large language models).
+> This allowed a single developer to create a full monolithic kernel from scratch — something that
+> would normally require a team of engineers over many years.
+>
+> **We are looking for human contributors.** If you understand Rust, operating systems, or any part
+> of this codebase — whether you wrote none of it or all of it — your help is needed and welcome.
+> We are actively seeking people to:
+>
+> - Review the code for correctness, security, and performance
+> - Fix bugs, edge cases, and incomplete implementations
+> - Refactor AI-generated code into idiomatic, maintainable Rust
+> - Add tests, documentation, and missing features
+> - Port the kernel to real hardware, not just QEMU
+> - Help transition this from an AI-driven prototype to a community-maintained project
+>
+> No contribution is too small. Open an issue, submit a PR, or start a discussion.
+> See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ---
 
