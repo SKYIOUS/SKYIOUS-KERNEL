@@ -96,16 +96,16 @@ impl FileManagerWidget {
     pub fn render(&self, pixel_buffer: &mut [u32], pw: usize, ph: usize, start_x: usize, start_y: usize, content_w: usize, _content_h: usize) {
         let path_bar_height = 16usize;
         // Draw path bar
-        drawing::draw_rect(pixel_buffer, pw, ph, start_x, start_y, content_w, path_bar_height, 0xFF1A1A2E);
+        drawing::draw_rect(pixel_buffer, pw, ph, start_x, start_y, content_w, path_bar_height, 0xFF252526);
         let path_display = if self.current_path.len() > 40 {
             alloc::format!("...{}", &self.current_path[self.current_path.len().saturating_sub(37)..])
         } else {
             self.current_path.clone()
         };
-        drawing::draw_string(pixel_buffer, pw, ph, start_x + 2, start_y + 4, &path_display, 0xFF88AAFF);
+        drawing::draw_string(pixel_buffer, pw, ph, start_x + 2, start_y + 4, &path_display, 0xFF007ACC);
 
         // Separator
-        drawing::draw_line_h(pixel_buffer, pw, ph, start_x, start_y + path_bar_height, content_w, 0xFF444444);
+        drawing::draw_line_h(pixel_buffer, pw, ph, start_x, start_y + path_bar_height, content_w, 0xFF333333);
 
         // List entries
         let list_start_y = start_y + path_bar_height + 1;
@@ -115,7 +115,7 @@ impl FileManagerWidget {
             if idx >= self.entries.len() { break; }
             let (ref name, is_dir) = &self.entries[idx];
             let ly = list_start_y + i * line_h;
-            let color = if *is_dir { 0xFF88CCFF } else { 0xFFFFFFFF };
+            let color = if *is_dir { 0xFF007ACC } else { 0xFFCCCCCC };
             let display = if *is_dir {
                 alloc::format!("d {}/", name)
             } else {

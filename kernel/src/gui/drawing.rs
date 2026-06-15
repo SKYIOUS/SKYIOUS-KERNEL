@@ -24,6 +24,33 @@ pub fn draw_rect(buffer: &mut [u32], width: usize, height: usize, x: usize, y: u
     }
 }
 
+/// Draws a filled rectangle with alpha blending (color has AA in upper 8 bits).
+pub fn draw_rect_alpha(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+    let a = (color >> 24) & 0xFF;
+    if a == 0 { return; }
+    if a >= 254 { draw_rect(buffer, width, height, x, y, w, h, color); return; }
+    let src_r = (color >> 16) & 0xFF;
+    let src_g = (color >> 8) & 0xFF;
+    let src_b = color & 0xFF;
+    for dy in 0..h {
+        let py = y + dy;
+        if py >= height { break; }
+        for dx in 0..w {
+            let px = x + dx;
+            if px >= width { break; }
+            let idx = py * width + px;
+            let dst = buffer[idx];
+            let dst_r = (dst >> 16) & 0xFF;
+            let dst_g = (dst >> 8) & 0xFF;
+            let dst_b = dst & 0xFF;
+            let out_r = (src_r * a + dst_r * (255 - a)) / 255;
+            let out_g = (src_g * a + dst_g * (255 - a)) / 255;
+            let out_b = (src_b * a + dst_b * (255 - a)) / 255;
+            buffer[idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
+        }
+    }
+}
+
 /// Draws a horizontal line to the buffer.
 pub fn draw_line_h(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, w: usize, color: u32) {
     if y >= height { return; }

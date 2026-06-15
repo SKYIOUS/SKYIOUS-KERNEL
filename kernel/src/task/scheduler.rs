@@ -194,19 +194,34 @@ impl PerCpuScheduler {
 
         Some((old_rsp_ptr, new_rsp))
     }
+
+    pub fn prepare_switch_tls(&mut self) -> Option<(*mut u64, u64, u64)> {
+        let (old, new) = self.prepare_switch()?;
+        let fs_base = self.current_thread.as_ref().map(|t| t.fs_base).unwrap_or(0);
+        Some((old, new, fs_base))
+    }
 }
 
 /// Main scheduler loop for each CPU.
 pub fn schedule() -> ! {
+    let mut watchdog_counter = 0u64;
     loop {
-        let (old_ptr, new_sp) = {
+        let (old_ptr, new_sp, new_fs) = {
             let mut s = this_cpu_sched().lock();
-            s.prepare_switch()
-        }.map_or((core::ptr::null_mut(), 0), |(a, b)| (a, b));
+            s.prepare_switch_tls()
+        }.map_or((core::ptr::null_mut(), 0, 0), |(a, b, c)| (a, b, c));
 
         if !old_ptr.is_null() {
-            unsafe { crate::task::thread::switch_context(old_ptr, new_sp); }
+            crate::task::thread::switch_thread(old_ptr, new_sp, new_fs);
         }
+
+        // Check watchdog every ~256 iterations (~2.5s at 100Hz)
+        watchdog_counter = watchdog_counter.wrapping_add(1);
+        if watchdog_counter & 0xFF == 0 {
+            crate::drivers::watchdog::pet();
+            crate::drivers::watchdog::check();
+        }
+
         x86_64::instructions::hlt();
     }
 }
@@ -216,16 +231,14 @@ pub fn try_schedule() {
     let switch = {
         let mut s = this_cpu_sched().try_lock();
         if let Some(ref mut sched) = s {
-            sched.prepare_switch()
+            sched.prepare_switch_tls()
         } else {
             None
         }
     };
 
-    if let Some((old_ptr, next_ptr)) = switch {
-        unsafe {
-            crate::task::thread::switch_context(old_ptr, next_ptr);
-        }
+    if let Some((old_ptr, next_ptr, new_fs)) = switch {
+        crate::task::thread::switch_thread(old_ptr, next_ptr, new_fs);
     }
 }
 

@@ -59,6 +59,7 @@ name = "sarga-disp"
 version = "0.1.0"
 dependencies = [
  "libsarga",
+ "libskyos",
  "skyos-libc",
 ]
 

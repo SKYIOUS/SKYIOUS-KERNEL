@@ -4,6 +4,7 @@ pub enum Errno {
     Success = 0,
     EPERM = -1,      /* Operation not permitted */
     ENOENT = -2,     /* No such file or directory */
+    ENFILE = -23,    /* File table overflow */
     ESRCH = -3,      /* No such process */
     EINTR = -4,      /* Interrupted system call */
     EIO = -5,        /* I/O error */
@@ -41,6 +42,7 @@ pub enum Errno {
     EOPNOTSUPP = -95,   /* Operation not supported on transport endpoint */
     ECONNREFUSED = -111,/* Connection refused */
     EALREADY = -114,    /* Operation already in progress */
+    EDESTADDRREQ = -89, /* Destination address required */
 }
 
 impl From<Errno> for u64 {

@@ -39,29 +39,24 @@ impl Widget {
 
         match &self.data {
             WidgetType::Button { text, pressed } => {
-                let color = if *pressed { 0xFF808080 } else { 0xFFD0D0D0 };
+                let color = if *pressed { 0xFF094771 } else { 0xFF0E639C };
                 drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, self.width, self.height, color);
-                drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, self.width, 0xFFFFFFFF);
-                drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, self.height, 0xFFFFFFFF);
-                drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y + self.height - 1, self.width, 0xFF404040);
-                drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x + self.width - 1, y, self.height, 0xFF404040);
-                
                 let tx = x + (self.width.saturating_sub(text.len() * 8)) / 2;
                 let ty = y + (self.height.saturating_sub(8)) / 2;
-                drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, tx, ty, text, 0xFF000000);
+                drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, tx, ty, text, 0xFFFFFFFF);
             }
             WidgetType::Label { text } => {
-                drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, text, 0xFF000000);
+                drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, text, 0xFFCCCCCC);
             }
             WidgetType::Input { text, focused } => {
-                drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, self.width, self.height, 0xFFFFFFFF);
-                let border = if *focused { 0xFF0000FF } else { 0xFF000000 };
+                drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, self.width, self.height, 0xFF3C3C3C);
+                let border = if *focused { 0xFF007ACC } else { 0xFF555555 };
                 drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, self.width, border);
                 drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y + self.height - 1, self.width, border);
                 drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x, y, self.height, border);
                 drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x + self.width - 1, y, self.height, border);
                 
-                drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x + 4, y + 4, text, 0xFF000000);
+                drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x + 4, y + 4, text, 0xFFCCCCCC);
             }
         }
     }

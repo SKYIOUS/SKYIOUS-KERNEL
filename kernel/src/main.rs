@@ -11,6 +11,7 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
 #![deny(warnings)]
 
 extern crate alloc;
@@ -28,6 +29,7 @@ mod acpi;
 mod vfs;
 mod apic;
 mod pci;
+mod security;
 mod tty;
 pub mod drivers;
 pub mod gui;
@@ -39,6 +41,16 @@ mod smp;
 pub mod debug;
 #[cfg(feature = "ai_rule")]
 pub mod vahiai;
+pub mod elf_dyn;
+pub mod emulation;
+pub mod ebpf;
+pub mod crypto;
+pub mod pty;
+pub mod arch;
+#[cfg(feature = "self_test")]
+mod selftest;
+#[cfg(feature = "self_test")]
+mod tests;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig, config::Mapping};
@@ -52,6 +64,74 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 };
 
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
+
+/// KASLR: kernel base slide offset (0 if not randomized)
+pub static KERNEL_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Stack canary value for `-Z stack-protector=strong`
+#[used]
+#[no_mangle]
+pub static mut __stack_chk_guard: usize = 0;
+
+#[no_mangle]
+pub extern "C" fn __stack_chk_fail() -> ! {
+    use x86_64::instructions::port::Port;
+    let mut data = Port::<u8>::new(0x3f8);
+    let mut lsr = Port::<u8>::new(0x3fd);
+    let msg = b"\nPANIC: Stack smashing detected!\n";
+    for &b in msg {
+        unsafe { while lsr.read() & 0x20 == 0 {} }
+        unsafe { data.write(b); }
+    }
+    loop { x86_64::instructions::hlt(); }
+}
+
+pub fn oom_kill() -> ! {
+    use x86_64::instructions::port::Port;
+    let mut data = Port::<u8>::new(0x3f8);
+    let mut lsr = Port::<u8>::new(0x3fd);
+    let msg = b"\n[OOM] Out of memory - killing process\n";
+    for &b in msg {
+        unsafe { while lsr.read() & 0x20 == 0 {} }
+        unsafe { data.write(b); }
+    }
+    // Kill the last spawned userspace process (highest PID, excluding init=1 and kernel=0)
+    let table = crate::task::process::PROCESS_TABLE.lock();
+    let mut largest_pid: u64 = 0;
+    for (pid, _) in table.iter() {
+        if *pid > 1 && *pid > largest_pid {
+            largest_pid = *pid;
+        }
+    }
+    drop(table);
+    if largest_pid > 1 {
+        let msg2 = alloc::format!("[OOM] Killing pid {}\n", largest_pid);
+        for &b in msg2.as_bytes() {
+            unsafe { while lsr.read() & 0x20 == 0 {} }
+            unsafe { data.write(b); }
+        }
+        // Send SIGKILL directly
+        let table2 = crate::task::process::PROCESS_TABLE.lock();
+        if let Some(proc) = table2.get(&largest_pid) {
+            proc.signals.lock().raise(crate::syscalls::signal::Signal::_SIGKILL);
+        }
+    }
+    loop { x86_64::instructions::hlt(); }
+}
+
+fn init_kaslr() {
+    // Use RDTSC as cheap entropy (available on all x86_64; rdrand #UDs on QEMU's default CPU)
+    let lo: u32;
+    let hi: u32;
+    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, preserves_flags)); }
+    let val = ((hi as u64) << 32) | (lo as u64);
+    let val = if val == 0 { 0x1000 } else { val };
+    KERNEL_SLIDE.store(val & 0xFFFF_FFFF_FFFF_0000, core::sync::atomic::Ordering::Relaxed);
+    // Seed the stack canary. The kernel is NOT compiled with -Z stack-protector
+    // (no such flag in .cargo/config.toml), so no function has canary instrumentation.
+    // This provides the symbol for external code that may reference it.
+    unsafe { __stack_chk_guard = ((val << 1) | val.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize; }
+}
 
 pub fn serial_putc(c: u8) {
     use x86_64::instructions::port::Port;
@@ -71,19 +151,46 @@ pub fn serial_write(msg: &str) {
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     use x86_64::VirtAddr;
+    use core::sync::atomic::Ordering;
 
-    // Enable SSE/SSE2 for userspace (OSFXSR + OSXMMEXCPT in CR4)
-    // Without this, any SSE instruction causes #UD.
-    // Also enable FSGSBASE so userspace can use wrfsbase/wrgsbase for TLS.
+    init_kaslr();
+
     unsafe {
         use x86_64::registers::control::Cr4;
         use x86_64::registers::control::Cr4Flags;
+        // Query CPUID leaf 7 for feature bits
+        let ebx7: u32;
+        let ecx7: u32;
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 7",
+            "xor ecx, ecx",
+            "cpuid",
+            "mov {0:e}, ebx",
+            "mov {1:e}, ecx",
+            "pop rbx",
+            out(reg) ebx7, out(reg) ecx7,
+            out("eax") _, out("edx") _,
+            options(nostack, preserves_flags));
         Cr4::update(|flags| {
             flags.insert(Cr4Flags::OSFXSR);
             flags.insert(Cr4Flags::OSXMMEXCPT_ENABLE);
-            flags.insert(Cr4Flags::FSGSBASE);
+            if ebx7 & 1 != 0 {
+                flags.insert(Cr4Flags::FSGSBASE);
+                crate::task::thread::HAS_FSGSBASE.store(true, Ordering::SeqCst);
+            }
+            // SMEP (bit 20): CPUID.(EAX=7,ECX=0):EBX[7]
+            // Cr4Flags doesn't export SMEP in x86_64 0.14.13, so set via raw bits
+            if ebx7 & (1 << 7) != 0 {
+                flags.insert(Cr4Flags::from_bits_truncate(0x100000));
+            }
+            // UMIP (bit 11): CPUID.(EAX=7,ECX=0):ECX[2]
+            if ecx7 & (1 << 2) != 0 {
+                flags.insert(Cr4Flags::from_bits_truncate(0x800));
+            }
         });
     }
+
     serial_write("[BOOT] memory::init...\n");
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset.into_option().expect("physical_memory_offset required"));
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
@@ -93,10 +200,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if fb.is_some() { serial_write("[BOOT] fb=present\n"); }
     else { serial_write("[BOOT] fb=NONE\n"); }
     drivers::graphics::init(fb);
+    // Show boot splash as soon as framebuffer is ready
+    if crate::drivers::graphics::is_active() {
+        gui::splash::init();
+    }
     if crate::drivers::graphics::is_active() { serial_write("[BOOT] graphics=active\n"); }
     else { serial_write("[BOOT] graphics=INACTIVE\n"); }
-    serial_write("[BOOT] -> Vahi Kernel v0.3.0 — Starting...\n");
-    serial_write("[SPLASH] 🚀 Vahi Kernel loading...\n");
+    serial_write("[BOOT] -> SARGA OS — Vahi Kernel v0.3.0 starting...\n");
+    serial_write("[SPLASH] 🚀 SARGA OS loading...\n");
 
     serial_write("[BOOT] frame allocator...\n");
     unsafe { memory::init_frame_allocator(&boot_info.memory_regions) };
@@ -137,15 +248,33 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     vfs::init();
     #[cfg(feature = "net")]
     { serial_write("[BOOT] net init...\n"); net::init(); }
+
+    // Now that the network stack is ready, enable E1000 interrupts
+    #[cfg(feature = "net")]
+    {
+        if let Some(crate::drivers::net::NicDevice::E1000(ref dev)) = *crate::drivers::net::NIC.lock() {
+            dev.lock().inner.enable_interrupts();
+        }
+    }
+    serial_write("[BOOT] LSM init...\n");
+    security::init();
     serial_write("[BOOT] korlang init...\n");
     korlang::init();
     #[cfg(feature = "ai_rule")]
     { serial_write("[BOOT] vahiai init...\n"); vahiai::init(); }
-    serial_write("[BOOT] -> Vahi: Graphical Console Mode Active!\n");
+    serial_write("[BOOT] -> SARGA OS: Graphical Console Mode Active!\n");
 
     serial_write("[BOOT] RTC init...\n");
     drivers::rtc::init();
     serial_write("[BOOT] RTC initialized\n");
+
+    #[cfg(feature = "self_test")]
+    {
+        serial_write("[SELF-TEST] registering tests...\n");
+        tests::register_all();
+        serial_write("[SELF-TEST] running...\n");
+        selftest::run_all();
+    }
 
     serial_write("[BOOT] scheduler init...\n");
     task::scheduler::init();
@@ -299,6 +428,28 @@ pub async fn gui_refresh_task() {
     loop {
         // Drain any pending scancodes
         while let Some(scancode) = try_pop_scancode() {
+            // Track modifier keys via raw scancodes (make codes)
+            {
+                let mut comp = crate::gui::COMPOSITOR.lock();
+                match scancode {
+                    0x38 => { comp.alt_held = true; }      // Left Alt make
+                    0xB8 => { comp.alt_held = false; }      // Left Alt break
+                    0xE0 => { /* Extended prefix — next byte is the real scancode */ }
+                    0x5B => { comp.super_held = true; }     // Left Win make (after 0xE0)
+                    0xDB => { comp.super_held = false; }    // Left Win break (after 0xE0)
+                    // Alt+Tab: confirm selection when Alt is released
+                    _ if !comp.alt_held && comp.alt_tab_active => {
+                        if comp.alt_tab_index < comp.windows.len() {
+                            let idx = comp.alt_tab_index;
+                            comp.windows[idx].minimized = false;
+                            let w = comp.windows.remove(idx);
+                            comp.windows.push(w);
+                        }
+                        comp.alt_tab_active = false;
+                    }
+                    _ => {}
+                }
+            }
             if let Ok(Some(key_event)) = kbd.add_byte(scancode) {
                 if let Some(key) = kbd.process_keyevent(key_event) {
                     let mut comp = crate::gui::COMPOSITOR.lock();

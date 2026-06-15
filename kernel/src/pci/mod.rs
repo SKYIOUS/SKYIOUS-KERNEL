@@ -35,13 +35,25 @@ pub fn enumerate_pci() {
             let vendor_id = read_config_u16(bus as u8, slot as u8, 0, 0);
             if vendor_id != 0xFFFF {
                 let device_id = read_config_u16(bus as u8, slot as u8, 0, 2);
-                let class_rev = read_config_u16(bus as u8, slot as u8, 0, 8);
-                let class_code = (class_rev >> 8) as u8;
-                let subclass = (class_rev & 0xFF) as u8;
+                let class_full = read_config_u32(bus as u8, slot as u8, 0, 8);
+                let class_code = ((class_full >> 24) & 0xFF) as u8;
+                let subclass = ((class_full >> 16) & 0xFF) as u8;
                 
-                crate::println!("  PCI Device: {:02x}:{:02x}.0 Vendor:{:04x} Device:{:04x} Class:{:02x}.{:02x}",
-                    bus, slot, vendor_id, device_id, class_code, subclass);
+                crate::serial_write(&alloc::format!("  PCI Device: {:02x}:{:02x}.0 Vendor:{:04x} Device:{:04x} Class:{:02x}.{:02x}\n",
+                    bus, slot, vendor_id, device_id, class_code, subclass));
                 
+                if class_code == 0x01 && subclass == 0x08 {
+                    let prog_if = ((class_full >> 8) & 0xFF) as u8;
+                    if prog_if == 0x02 {
+                        crate::println!("    -> NVMe Controller detected!");
+                        let bar0 = read_config_u32(bus as u8, slot as u8, 0, 0x10);
+                        let base_addr = (bar0 & 0xFFFFFFF0) as usize;
+                        let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap_or(&0);
+                        let virt_base = offset as usize + base_addr;
+                        crate::drivers::storage::nvme::NvmeController::new(virt_base);
+                    }
+                }
+
                 if class_code == 0x01 && subclass == 0x06 {
                     crate::println!("    -> AHCI/SATA Controller detected!");
                     
@@ -95,6 +107,28 @@ pub fn enumerate_pci() {
                       }
                  }
 
+                // Check for VirtIO-Block
+                if vendor_id == 0x1AF4 && device_id == 0x1001 {
+                    crate::println!("    -> VirtIO-Block Device detected!");
+                    let bar0 = read_config_u32(bus as u8, slot as u8, 0, 0x10);
+                    if bar0 & 1 != 0 {
+                        let io_base = (bar0 & 0xFFFFFFFC) as u16;
+                        crate::println!("       I/O Base: 0x{:x}", io_base);
+                        crate::drivers::storage::virtio_block::init(io_base);
+                    }
+                }
+
+                // Check for VirtIO-GPU
+                if vendor_id == 0x1AF4 && device_id == 0x1050 {
+                    crate::println!("    -> VirtIO-GPU Device detected!");
+                    let bar0 = read_config_u32(bus as u8, slot as u8, 0, 0x10);
+                    if bar0 & 1 != 0 {
+                        let io_base = (bar0 & 0xFFFFFFFC) as u16;
+                        crate::println!("       I/O Base: 0x{:x}", io_base);
+                        crate::drivers::gpu::virtio_gpu::init(io_base);
+                    }
+                }
+
                 // Check for VirtIO-Net
                 if vendor_id == 0x1AF4 && device_id == 0x1000 {
                     crate::println!("    -> VirtIO-Net Device detected!");
@@ -133,8 +167,9 @@ pub fn enumerate_pci() {
 
                 // Check for Audio devices (class 0x04)
                 if class_code == 0x04 {
+                    crate::serial_write("[PCI] Audio device detected!\n");
                     crate::println!("    -> Audio Device detected!");
-                    if subclass == 0x01 {
+                    if subclass == 0x01 || subclass == 0x03 {
                         crate::println!("       -> Intel HDA Controller");
                         let bar0 = read_config_u32(bus as u8, slot as u8, 0, 0x10);
                         let base_addr = (bar0 & 0xFFFFFFF0) as usize;
@@ -142,6 +177,7 @@ pub fn enumerate_pci() {
                         let virt_base = offset as usize + base_addr;
                         let mut hda = crate::drivers::audio::hda::HdaController::new(virt_base);
                         hda.init();
+                        crate::drivers::audio::register_hda(hda);
                     }
                 }
 

@@ -1,3 +1,5 @@
+cargo-features = ["profile-rustflags"]
+
 [package]
 name = "vahi_kernel"
 version = "0.3.0"
@@ -36,9 +38,15 @@ ai_rule = []
 ai_llm = []
 smp = []
 net = []
+self_test = []
 
 [profile.dev]
 panic = "abort"
+rustflags = ["-Z", "stack-protector=strong"]
 
 [profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
 panic = "abort"
+rustflags = ["-Z", "stack-protector=strong"]

@@ -20,7 +20,10 @@ pub const SYS_NANOSLEEP: u64 = 35;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETPPID: u64 = 110;
 
+pub const SYS_DUP: u64 = 32;
 pub const SYS_DUP2: u64 = 33;
+pub const SYS_ACCESS: u64 = 21;
+pub const SYS_FCNTL: u64 = 72;
 pub const SYS_PIPE: u64 = 22;
 pub const SYS_UNAME: u64 = 63;
 
@@ -37,6 +40,7 @@ pub const SYS_GUI_CREATE_WINDOW: u64 = 100;
 pub const SYS_GUI_GET_BUFFER: u64 = 101;
 pub const SYS_GUI_FLUSH: u64 = 102;
 pub const SYS_GUI_MAP_BUFFER: u64 = 103;
+pub const SYS_GUI_GET_KEY: u64 = 105;
 
 // Audio Syscalls
 pub const SYS_BEEP: u64 = 104;
@@ -74,3 +78,24 @@ pub const SYS_SETUID: u64 = 303;
 pub const SYS_SETGID: u64 = 304;
 pub const SYS_GETEUID: u64 = 305;
 pub const SYS_GETEGID: u64 = 306;
+pub const SYS_IO_URING_SETUP: u64 = 425;
+pub const SYS_IO_URING_ENTER: u64 = 426;
+pub const SYS_BPF: u64 = 321;
+pub const SYS_SYNC: u64 = 36;
+pub const SYS_REBOOT: u64 = 169;
+pub const SYS_DRMCTL: u64 = 400;
+pub const SYS_HASH: u64 = 401;
+pub const SYS_OPENPTY: u64 = 210;
+pub const SYS_STATFS: u64 = 137;
+pub const SYS_SET_TID_ADDRESS: u64 = 218;
+pub const SYS_EXIT_GROUP: u64 = 231;
+
+// GUI Extended Syscalls
+pub const SYS_GUI_GET_MOUSE: u64 = 120;
+pub const SYS_GUI_SET_TITLE: u64 = 121;
+pub const SYS_GUI_DESTROY_WINDOW: u64 = 122;
+pub const SYS_GUI_RESIZE_WINDOW: u64 = 123;
+pub const SYS_GUI_MOVE_WINDOW: u64 = 124;
+pub const SYS_CLIPBOARD: u64 = 125;
+pub const SYS_NOTIFY: u64 = 126;
+pub const SYS_MKFS: u64 = 127;

@@ -1,7 +1,9 @@
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use alloc::sync::Arc;
 use crate::task::process::Process;
 use crate::memory::stack::{Stack, alloc_stack};
+
+pub static HAS_FSGSBASE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ThreadId(u64);
@@ -23,6 +25,7 @@ pub struct Thread {
     pub sleep_until: Option<u64>,
     pub futex_wake_addr: Option<u64>,
     pub pipe_block_key: Option<u64>,
+    pub fs_base: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +95,7 @@ impl Thread {
             sleep_until: None,
             futex_wake_addr: None,
             pipe_block_key: None,
+            fs_base: 0,
         }
     }
 
@@ -156,6 +160,7 @@ impl Thread {
             sleep_until: None,
             futex_wake_addr: None,
             pipe_block_key: None,
+            fs_base: self.fs_base,
         }
     }
 
@@ -229,8 +234,51 @@ impl Thread {
             sleep_until: None,
             futex_wake_addr: None,
             pipe_block_key: None,
+            fs_base: self.fs_base,
         }
     }
+}
+
+const MSR_FS_BASE: u32 = 0xC0000100;
+
+/// Read the current FS base.
+#[allow(dead_code)]
+pub fn read_fs_base() -> u64 {
+    if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let base: u64;
+            core::arch::asm!("rdfsbase {0}", out(reg) base, options(att_syntax));
+            return base;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        return x86_64::registers::model_specific::Msr::new(MSR_FS_BASE).read();
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    0
+}
+
+/// Write FS base.
+pub fn write_fs_base(base: u64) {
+    if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("wrfsbase {0}", in(reg) base, options(att_syntax));
+            return;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        x86_64::registers::model_specific::Msr::new(MSR_FS_BASE).write(base);
+    }
+}
+
+/// Switch threads: saves/restores FS base, then context switches.
+pub fn switch_thread(old_rsp: *mut u64, new_rsp: u64, new_fs_base: u64) {
+    write_fs_base(new_fs_base);
+    unsafe { switch_context(old_rsp, new_rsp); }
 }
 
 extern "C" {

@@ -52,6 +52,15 @@ impl VfsNode for TarNode {
             st_atime: 0, st_mtime: 0, st_ctime: 0,
         })
     }
+    fn statfs(&self) -> Result<crate::vfs::StatFs, ()> {
+        let total_blocks = 16 * 1024 * 1024 / 4096;
+        let free_blocks = total_blocks / 2;
+        Ok(crate::vfs::StatFs {
+            f_type: 0x73717368, f_bsize: 4096,
+            f_blocks: total_blocks, f_bfree: free_blocks, f_bavail: free_blocks,
+            f_files: 1024, f_ffree: 512,
+        })
+    }
     fn readlink(&self) -> Result<String, ()> {
         if !self.is_symlink {
             return Err(());

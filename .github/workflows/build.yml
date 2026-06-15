@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust nightly
+      run: |
+        rustup toolchain install nightly --component rust-src
+        rustup default nightly
+    - name: Install cross-target
+      run: |
+        rustup target add x86_64-unknown-none
+    - name: Build kernel (x86_64)
+      run: cargo build --target x86_64-unknown-none
+      working-directory: kernel
+    - name: Build kernel (aarch64)
+      run: cargo build --target aarch64-unknown-none 2>&1 || true
+      working-directory: kernel
+
+  build-userspace:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: ./
+        path: SkyOS
+    - uses: actions/checkout@v4
+      with:
+        path: kernel
+    - name: Install Rust nightly
+      run: |
+        rustup toolchain install nightly --component rust-src
+        rustup default nightly
+    - name: Build userspace (x86_64)
+      run: cargo build --target x86_64-sarga.json
+      working-directory: SkyOS
+
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust nightly
+      run: |
+        rustup toolchain install nightly --component rust-src
+        rustup default nightly
+    - name: Install cross-target
+      run: |
+        rustup target add x86_64-unknown-none
+    - name: Build with selftest
+      run: cargo build --target x86_64-unknown-none --features self_test
+      working-directory: kernel

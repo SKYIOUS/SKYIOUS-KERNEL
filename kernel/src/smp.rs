@@ -290,7 +290,21 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     unsafe {
         (*core::ptr::addr_of!(BOOT_DATA)).ap_count.fetch_add(1, Ordering::SeqCst);
     }
-    
+
+    // Enable SSE/SSE2 (OSFXSR + OSXMMEXCPT) and FSGSBASE in CR4 for AP,
+    // matching the BSP setup in kernel_main. Without this, any SSE
+    // instruction executed on this core (e.g., by memcpy/memset via
+    // compiler-builtins) triggers #UD (INVALID OPCODE).
+    unsafe {
+        use x86_64::registers::control::Cr4;
+        use x86_64::registers::control::Cr4Flags;
+        Cr4::update(|flags| {
+            flags.insert(Cr4Flags::OSFXSR);
+            flags.insert(Cr4Flags::OSXMMEXCPT_ENABLE);
+            flags.insert(Cr4Flags::FSGSBASE);
+        });
+    }
+
     // Each AP needs its own GS base for per-CPU storage (syscalls)
     let cpu_id = { 
         crate::apic::lapic::LOCAL_APIC.lock().as_ref().map(|l| l.id()).unwrap_or(0) as usize

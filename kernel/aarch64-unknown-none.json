@@ -1,0 +1,24 @@
+{
+  "arch": "aarch64",
+  "os": "none",
+  "env": "vahi",
+  "cpu": "generic",
+  "crt-objects-fallback": "false",
+  "data-layout": "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128",
+  "disable-redzone": true,
+  "features": "+soft-float,+strict-align",
+  "llvm-target": "aarch64-unknown-none",
+  "linker-flavor": "ld.lld",
+  "linker": "rust-lld",
+  "link-script": "aarch64-linker.ld",
+  "max-atomic-width": 64,
+  "metadata": {
+    "description": "Vahi kernel aarch64 bare-metal",
+    "host_tools": false,
+    "std": false,
+    "tier": 2
+  },
+  "panic-strategy": "abort",
+  "relocation-model": "static",
+  "target-pointer-width": 64
+}

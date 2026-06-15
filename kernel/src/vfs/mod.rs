@@ -10,6 +10,8 @@ pub mod ext2;
 pub mod pipe;
 pub mod tarfs;
 pub mod devfs;
+pub mod ctlfs;
+pub mod skyfs;
 
 pub trait FileSystem: Send + Sync {
     fn root(&self) -> Result<Arc<dyn VfsNode>, ()>;
@@ -31,6 +33,18 @@ pub struct Stat {
     pub st_ctime: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct StatFs {
+    pub f_type: u64,
+    pub f_bsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+}
+
 const _MAX_CPUS: usize = 16;
 pub const _S_IFMT: u32 = 0o170000;
 pub const S_IFDIR: u32 = 0o040000;
@@ -47,6 +61,9 @@ pub trait VfsNode: Send + Sync {
     fn read(&self, max_len: usize) -> Result<Vec<u8>, ()>;
     fn stat(&self) -> Result<Stat, ()> {
         Err(()) // Default implementation, override in specific filesystems
+    }
+    fn statfs(&self) -> Result<StatFs, ()> {
+        Err(()) // Default implementation
     }
     fn write(&self, _data: &[u8]) -> Result<(), ()> {
         Err(())
@@ -107,6 +124,13 @@ pub struct VfsManager {
 }
 
 impl VfsManager {
+    pub fn statfs_mount(&self, path: &str) -> Option<Arc<dyn VfsNode>> {
+        self.mounts.iter()
+            .filter(|m| path == m.path || path.starts_with(&m.path))
+            .max_by_key(|m| m.path.len())
+            .and_then(|m| m.fs.root().ok())
+    }
+
     pub const fn new() -> Self {
         VfsManager { mounts: Vec::new() }
     }
@@ -294,34 +318,112 @@ impl VfsManager {
     }
 }
 
+/// Boot device selection: None = initrd, Some(n) = block device index
+pub static BOOT_DEVICE: spin::Mutex<Option<usize>> = spin::Mutex::new(None);
+
+/// Set the boot device by index into BLOCK_DEVICES.
+#[allow(dead_code)]
+pub fn set_boot_device(index: usize) {
+    *BOOT_DEVICE.lock() = Some(index);
+    crate::println!("VFS: boot device set to block device {}", index);
+}
+
 pub static VFS: Mutex<VfsManager> = Mutex::new(VfsManager::new());
 
 pub fn init() {
     let mut vfs = VFS.lock();
 
-    // Mount the embedded initrd (baked in at compile time) as the root filesystem
-    let _initrd_hash = env!("INITRD_HASH");
-    static INITRD: &[u8] = include_bytes!("../../../SkyOS/initrd.tar");
-    let initrd_fs = Arc::new(tarfs::TarfsMemory::new(INITRD));
-    vfs.mount("/", initrd_fs);
-    crate::println!("VFS: Mounted embedded initrd ({} bytes) as root.", INITRD.len());
+    // Try to mount root from a block device first
+    let root_mounted = {
+        let devices = crate::drivers::block::BLOCK_DEVICES.lock();
+        let boot_idx = *BOOT_DEVICE.lock();
+        let mut mounted = false;
+
+        if let Some(idx) = boot_idx {
+            if let Some(dev) = devices.get(idx) {
+                crate::println!("VFS: Attempting root from block device {}...", idx);
+                if let Ok(ext2fs) = ext2::mount(dev.clone()) {
+                    vfs.mount("/", ext2fs);
+                    crate::println!("VFS: Root filesystem mounted from block device {} (ext2).", idx);
+                    mounted = true;
+                } else if let Ok(skyfs) = skyfs::SkyFSHandle::mount(dev.clone()) {
+                    vfs.mount("/", skyfs);
+                    crate::println!("VFS: Root filesystem mounted from block device {} (SkyFS).", idx);
+                    mounted = true;
+                }
+            }
+        } else {
+            // Check for any ext2 partition on first block device
+            if let Some(dev) = devices.first() {
+                let partitions = crate::drivers::block::partition::parse_partitions(dev);
+                if let Some(part) = partitions.first() {
+                    let part_dev = Arc::new(spin::Mutex::new(
+                        crate::drivers::block::partition::PartitionDevice::new(
+                            dev.clone(), part.lba_start, part.sector_count,
+                        )
+                    ));
+                    if let Ok(ext2fs) = ext2::mount(part_dev.clone()) {
+                        vfs.mount("/", ext2fs);
+                        crate::println!("VFS: Root filesystem mounted from first partition (ext2).");
+                        mounted = true;
+                    } else if let Ok(skyfs) = skyfs::SkyFSHandle::mount(part_dev) {
+                        vfs.mount("/", skyfs);
+                        crate::println!("VFS: Root filesystem mounted from first partition (SkyFS).");
+                        mounted = true;
+                    }
+                }
+            }
+            if !mounted {
+                // Try the whole device
+                if let Some(dev) = devices.first() {
+                    if let Ok(ext2fs) = ext2::mount(dev.clone()) {
+                        vfs.mount("/", ext2fs);
+                        crate::println!("VFS: Root filesystem mounted from first block device (ext2).");
+                        mounted = true;
+                    } else if let Ok(skyfs) = skyfs::SkyFSHandle::mount(dev.clone()) {
+                        vfs.mount("/", skyfs);
+                        crate::println!("VFS: Root filesystem mounted from first block device (SkyFS).");
+                        mounted = true;
+                    }
+                }
+            }
+        }
+        mounted
+    };
+
+    if !root_mounted {
+        // Fall back to embedded initrd
+        let _initrd_hash = env!("INITRD_HASH");
+        static INITRD: &[u8] = include_bytes!("../../../SkyOS/initrd.tar");
+        let initrd_fs = Arc::new(tarfs::TarfsMemory::new(INITRD));
+        vfs.mount("/", initrd_fs);
+        crate::println!("VFS: Mounted embedded initrd ({} bytes) as root.", INITRD.len());
+    }
 
     // Mount DevFS at /dev
     let devfs = Arc::new(devfs::DevFs::new());
     vfs.mount("/dev", devfs.clone());
     crate::println!("VFS: Mounted DevFS at /dev.");
 
-    // Also mount a tmpfs for /proc and /tmp (writable)
+    // Mount ctlFS at /ctl (Plan9-style control filesystem replacing /proc + /sys)
+    let ctlfs = Arc::new(ctlfs::CtlFs::new());
+    vfs.mount("/ctl", ctlfs);
+    crate::println!("VFS: Mounted CtlFs at /ctl.");
+
+    // Mount a tmpfs for /tmp (writable shared temporary storage)
     let ramfs = Arc::new(ramfs::Tmpfs::new());
-    vfs.mount("/proc", ramfs);
-    crate::println!("VFS: Mounted Tmpfs at /proc.");
+    vfs.mount("/tmp", ramfs);
+    crate::println!("VFS: Mounted Tmpfs at /tmp.");
 
 
     // Scan block devices for partitions and mount filesystems
-    let devices = crate::drivers::block::BLOCK_DEVICES.lock();
+    let device_snapshots: Vec<_> = {
+        let blk = crate::drivers::block::BLOCK_DEVICES.lock();
+        blk.iter().enumerate().map(|(i, d)| (i, d.clone())).collect()
+    };
     let letters = [b'a', b'b', b'c', b'd', b'e', b'f'];
 
-    for (i, dev) in devices.iter().enumerate() {
+    for (i, dev) in device_snapshots {
         let dev_name = if i < letters.len() {
             alloc::format!("sd{}", letters[i] as char)
         } else {
@@ -350,8 +452,14 @@ pub fn init() {
             crate::println!("VFS: Mounted TarFS at {}", mount_path_tar);
         }
 
+        let mount_path_sky = alloc::format!("/mnt/skyfs_{}", i);
+        if let Ok(skyfs) = skyfs::SkyFSHandle::mount(dev.clone()) {
+            vfs.mount(&mount_path_sky, skyfs);
+            crate::println!("VFS: Mounted SkyFS at {}", mount_path_sky);
+        }
+
         // Scan and register partitions
-        let partitions = crate::drivers::block::partition::parse_partitions(dev);
+        let partitions = crate::drivers::block::partition::parse_partitions(&dev);
         for (_p_idx, part) in partitions.iter().enumerate() {
             let part_name = alloc::format!("{}{}", dev_name, part.index);
 
@@ -361,13 +469,10 @@ pub fn init() {
                     dev.clone(), part.lba_start, part.sector_count,
                 )
             ));
+            let part_dev_idx = crate::drivers::block::BLOCK_DEVICES.lock().len();
             crate::drivers::block::register_block_device(part_dev.clone());
 
             // Add partition device node to DevFS
-            let part_dev_idx = {
-                let blk = crate::drivers::block::BLOCK_DEVICES.lock();
-                blk.len() - 1
-            };
             devfs.add_block_device(&part_name, part_dev_idx);
 
             // Try to mount filesystems on the partition
@@ -381,6 +486,12 @@ pub fn init() {
             if let Ok(fatfs) = fat::FatFileSystem::new(part_dev.clone()) {
                 vfs.mount(&mount_path_fatp, Arc::new(fatfs));
                 crate::println!("VFS: Mounted FAT32 on {} at {}", part_name, mount_path_fatp);
+            }
+
+            let mount_path_skyp = alloc::format!("/mnt/skyfs_{}_{}", i, part.index);
+            if let Ok(skyfs) = skyfs::SkyFSHandle::mount(part_dev.clone()) {
+                vfs.mount(&mount_path_skyp, skyfs);
+                crate::println!("VFS: Mounted SkyFS on {} at {}", part_name, mount_path_skyp);
             }
         }
     }

@@ -56,10 +56,6 @@ pub fn init() {
 }
 
 pub fn poll() {
-    use core::sync::atomic::{AtomicU16, Ordering};
-    static POLL_CNT: AtomicU16 = AtomicU16::new(0);
-    let cnt = POLL_CNT.fetch_add(1, Ordering::Relaxed);
-    
     let mut iface_lock = NETWORK_INTERFACE.lock();
     if let Some(ref mut iface) = *iface_lock {
         let mut sockets = SOCKETS.lock();
@@ -70,9 +66,6 @@ pub fn poll() {
             match nic {
                 NicDevice::E1000(device) => {
                     let mut dev = device.lock();
-                    if cnt < 20 {
-                        dev.inner.dump_rx_status();
-                    }
                     iface.poll(now, &mut *dev, &mut sockets);
                 },
                 NicDevice::VirtIO(device) => {

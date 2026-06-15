@@ -303,8 +303,25 @@ extern "x86-interrupt" fn ipi_func_handler(
 extern "x86-interrupt" fn network_interrupt_handler(
     _stack_frame: InterruptStackFrame) 
 {
-    // Drive the network stack
     #[cfg(feature = "net")]
-    crate::net::poll();
+    {
+        // Read ICR to clear pending causes and check if there's work
+        let icr = crate::drivers::net::NIC.lock().as_ref().map(|nic| {
+            match nic {
+                crate::drivers::net::NicDevice::E1000(dev) => {
+                    dev.lock().inner.read_reg(crate::drivers::net::e1000::REG_ICR)
+                }
+                _ => 0,
+            }
+        }).unwrap_or(0);
+
+        // If no interrupt causes pending, just EOI and return
+        if icr == 0 {
+            crate::apic::eoi();
+            return;
+        }
+
+        crate::net::poll();
+    }
     crate::apic::eoi();
 }

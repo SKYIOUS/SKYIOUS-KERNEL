@@ -1,5 +1,6 @@
 use crate::gui::drawing;
 use crate::gui::{SCREEN_WIDTH, SCREEN_HEIGHT};
+use alloc::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ResizeEdge {
@@ -22,44 +23,54 @@ pub struct Window {
     pub saved_rect: Option<(usize, usize, usize, usize)>,
     pub terminal: Option<crate::gui::terminal::TerminalWidget>,
     pub file_manager: Option<crate::gui::filemanager::FileManagerWidget>,
+    pub key_events: VecDeque<u8>,
 }
 
 impl Window {
     pub fn new(x: usize, y: usize, width: usize, height: usize, title: &'static str) -> Self {
-        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None, file_manager: None }
+        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None, file_manager: None, key_events: VecDeque::new() }
     }
 
-    pub fn render(&self, buffer: &mut [u32]) {
-        // Draw Window Frame (Gray)
-        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.width, self.height, 0xFFC0C0C0);
+    pub fn render(&self, buffer: &mut [u32], mouse_x: usize, mouse_y: usize) {
+        // Draw Window Frame (dark)
+        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.width, self.height, 0xFF1E1E1E);
         
-        // Draw Title Bar (Blue)
+        // Draw Title Bar (dark with accent strip)
         let title_bar_height = 20;
-        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.width, title_bar_height, 0xFF000080);
-        
-        // Draw Title Text (White)
+        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.width, title_bar_height, 0xFF2D2D2D);
+        drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y + title_bar_height - 1, self.width, crate::gui::accent_color());
+
+        // Draw Title Text
         drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + 5, self.y + 4, self.title, 0xFFFFFFFF);
 
-        // Draw Minimize Button (Yellow square with underscore)
+        // Draw Minimize Button (dark with accent underscore)
         let mbx = self.x + self.width - 2 * (Self::BTN_SIZE + 2);
         let mby = self.y + 3;
-        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, mbx, mby, Self::BTN_SIZE, Self::BTN_SIZE, 0xFFE0B040);
-        drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, mbx + 3, mby + Self::BTN_SIZE - 4, Self::BTN_SIZE - 6, 0xFFFFFFFF);
+        let hover_min = self.is_minimize_button(mouse_x, mouse_y);
+        let min_bg = if hover_min { 0xFF505050 } else { 0xFF3C3C3C };
+        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, mbx, mby, Self::BTN_SIZE, Self::BTN_SIZE, min_bg);
+        drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, mbx + 3, mby + Self::BTN_SIZE - 4, Self::BTN_SIZE - 6, crate::gui::accent_color());
 
-        // Draw Close Button (Red square with white X)
+        // Draw Close Button (Fluent red with white X)
         let bx = self.x + self.width - Self::BTN_SIZE - 2;
         let by = self.y + 3;
-        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx, by, Self::BTN_SIZE, Self::BTN_SIZE, 0xFFE04040);
+        let hover_close = self.is_close_button(mouse_x, mouse_y);
+        let close_bg = if hover_close { 0xFFFF5555 } else { 0xFFE81123 };
+        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx, by, Self::BTN_SIZE, Self::BTN_SIZE, close_bg);
         for i in 0..4 {
             drawing::draw_pixel(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx + 4 + i, by + 4 + i, 0xFFFFFFFF);
             drawing::draw_pixel(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx + 4 + i, by + 9 - i, 0xFFFFFFFF);
         }
 
-        // Draw Window Border (Black)
-        drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.width, 0xFF000000);
-        drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y + self.height - 1, self.width, 0xFF000000);
-        drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.height, 0xFF000000);
-        drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + self.width - 1, self.y, self.height, 0xFF000000);
+        // Draw Window Border (subtle)
+        drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.width, 0xFF3C3C3C);
+        drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y + self.height - 1, self.width, 0xFF3C3C3C);
+        drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y, self.height, 0xFF3C3C3C);
+        drawing::draw_line_v(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + self.width - 1, self.y, self.height, 0xFF3C3C3C);
+
+        // Shadow effect (right and bottom edges)
+        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + self.width, self.y + 3, 2, self.height, 0xFF0D0D0D);
+        drawing::draw_rect(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + 3, self.y + self.height, self.width, 2, 0xFF0D0D0D);
 
         // Draw content area
         let content_x = self.x + 1;
@@ -185,6 +196,13 @@ impl Window {
                     } else {
                         term.handle_char(c);
                     }
+                }
+                pc_keyboard::DecodedKey::RawKey(_k) => {}
+            }
+        } else {
+            match key {
+                pc_keyboard::DecodedKey::Unicode(c) => {
+                    self.key_events.push_back(c as u8);
                 }
                 pc_keyboard::DecodedKey::RawKey(_k) => {}
             }

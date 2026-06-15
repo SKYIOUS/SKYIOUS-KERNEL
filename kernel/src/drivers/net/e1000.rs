@@ -84,7 +84,7 @@ impl E1000 {
         Self::write_reg_raw(self.base_addr, offset, value);
     }
     
-    fn read_reg(&self, offset: u32) -> u32 {
+    pub fn read_reg(&self, offset: u32) -> u32 {
         Self::read_reg_raw(self.base_addr, offset)
     }
     
@@ -102,13 +102,16 @@ impl E1000 {
         
         self.dump_rx_status();
         
-        // Enable Interrupts
-        // ICR (Interrupt Cause Read) - clear all
+        // Don't enable interrupts here — wait until net::init() is ready
+        // Call enable_interrupts() after net::init() instead
+    }
+    
+    /// Enable E1000 interrupts. Call this AFTER net::init() sets up the interface.
+    pub fn enable_interrupts(&mut self) {
+        // Clear any pending interrupts
         self.read_reg(REG_ICR);
-        // IMS (Interrupt Mask Set) - enable RXT0 (Receiver Timer Interrupt)
-        self.write_reg(REG_IMS, 1 << 7); // LSC
-        let ims = self.read_reg(REG_IMS);
-        self.write_reg(REG_IMS, ims | (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 6) | (1 << 7));
+        // Enable only: RXT0 (bit 7) = RX Timer Interrupt, LSC (bit 2) = Link Status Change
+        self.write_reg(REG_IMS, (1 << 2) | (1 << 7));
         crate::println!("E1000: Interrupts enabled (IMS: 0x{:x})", self.read_reg(REG_IMS));
     }
     
@@ -272,7 +275,8 @@ impl E1000 {
                 core::ptr::write_unaligned(core::ptr::addr_of_mut!(self.rx_descs[cur].status), 0u8);
             }
             self.rx_cur = (cur + 1) % self.rx_descs.len();
-            self.write_reg(0x2818, cur as u32);
+            // Advance RDT to the new rx_cur — tells hardware the next descriptor it can use
+            self.write_reg(0x2818, self.rx_cur as u32);
             
             Some(buf)
         } else {

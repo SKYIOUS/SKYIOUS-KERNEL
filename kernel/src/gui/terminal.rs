@@ -100,10 +100,10 @@ impl TerminalWidget {
     pub fn render(&self, pixel_buffer: &mut [u32], pw: usize, ph: usize, start_x: usize, start_y: usize, _content_w: usize, _content_h: usize) {
         let term_w = self.width_chars * 8;
         let term_h = self.height_chars * 8;
-        drawing::draw_rect(pixel_buffer, pw, ph, start_x, start_y, term_w, term_h, 0xFF000000);
+        drawing::draw_rect(pixel_buffer, pw, ph, start_x, start_y, term_w, term_h, 0xFF0C0C0C);
 
         if !self.is_monitor {
-            drawing::draw_line_h(pixel_buffer, pw, ph, start_x, start_y + term_h - 1, term_w, 0xFF00AA00);
+            drawing::draw_line_h(pixel_buffer, pw, ph, start_x, start_y + term_h - 1, term_w, 0xFF333333);
         }
 
         let total_lines = self.buffer.len();
@@ -123,11 +123,11 @@ impl TerminalWidget {
             } else {
                 continue;
             };
-            drawing::draw_string(pixel_buffer, pw, ph, start_x, start_y + i * 8, line, 0xFFFFFFFF);
+            drawing::draw_string(pixel_buffer, pw, ph, start_x, start_y + i * 8, line, 0xFFD4D4D4);
         }
 
         if self.scroll_offset == 0 && !self.is_monitor {
-            drawing::draw_rect(pixel_buffer, pw, ph, start_x + self.cursor_x * 8, start_y + self.cursor_y * 8, 8, 8, 0xFFAAAAAA);
+            drawing::draw_rect(pixel_buffer, pw, ph, start_x + self.cursor_x * 8, start_y + self.cursor_y * 8, 8, 8, 0xFF007ACC);
         }
     }
 
@@ -143,37 +143,70 @@ impl TerminalWidget {
 
     pub fn refresh_monitor(&mut self) {
         if !self.is_monitor { return; }
+
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static FRAME_CNT: AtomicU32 = AtomicU32::new(0);
+        FRAME_CNT.fetch_add(1, Ordering::Relaxed);
+        if FRAME_CNT.load(Ordering::Relaxed) % 30 != 0 { return; }
+
         self.buffer.clear();
         self.current_line.clear();
         self.cursor_x = 0;
         self.cursor_y = 0;
-        self.prompt_len = 0;
 
-        let ticks = crate::interrupts::get_ticks();
-        let secs = ticks / 100;
-        let mins = secs / 60;
-        let hrs = mins / 60;
+        self.print_str("=== System Monitor ===\n\n");
 
-        self.print_str(&format!("===== System Monitor =====\n"));
-        self.print_str(&format!("Uptime: {}h {}m {}s\n", hrs, mins % 60, secs % 60));
-        self.print_str(&format!("Ticks: {}\n", ticks));
+        if let Some(node) = crate::vfs::VFS.lock().resolve_path("/ctl/sys/cpu/0/load") {
+            if let Ok(data) = node.read(256) {
+                if let Ok(s) = core::str::from_utf8(&data) {
+                    self.print_str("CPU:  ");
+                    self.print_str(s.trim());
+                    self.print_str("\n");
+                }
+            }
+        }
 
-        let proc_count = crate::task::process::PROCESS_TABLE.lock().len();
-        self.print_str(&format!("Processes: {}\n", proc_count));
+        if let Some(node) = crate::vfs::VFS.lock().resolve_path("/ctl/sys/mem/free") {
+            if let Ok(data) = node.read(256) {
+                if let Ok(s) = core::str::from_utf8(&data) {
+                    self.print_str("Free: ");
+                    self.print_str(s.trim());
+                    self.print_str("\n");
+                }
+            }
+        }
 
-        let free_pages = crate::memory::buddy::BUDDY_ALLOCATOR.lock().count_free_pages();
-        let free_kb = (free_pages * 4) as u64;
-        let total_kb = 131072u64; // ~512 MB total
-        let used_kb = total_kb.saturating_sub(free_kb);
-        let pct = if total_kb > 0 { used_kb * 100 / total_kb } else { 0 };
-        self.print_str(&format!("Memory: {}% used ({} KB / {} KB)\n", pct, used_kb, total_kb));
+        if let Some(node) = crate::vfs::VFS.lock().resolve_path("/ctl/sys/mem/total") {
+            if let Ok(data) = node.read(256) {
+                if let Ok(s) = core::str::from_utf8(&data) {
+                    self.print_str("Total:");
+                    self.print_str(s.trim());
+                    self.print_str("\n");
+                }
+            }
+        }
 
-        self.print_str("\nPID  UID  CWD\n");
-        let table = crate::task::process::PROCESS_TABLE.lock();
-        for (pid, proc) in table.iter() {
-            let cwd = proc.cwd.lock();
-            let uid = *proc.uid.lock();
-            self.print_str(&format!("{:3}  {:3}  {}\n", pid, uid, cwd));
+        if let Some(node) = crate::vfs::VFS.lock().resolve_path("/ctl/kernel/uptime") {
+            if let Ok(data) = node.read(256) {
+                if let Ok(s) = core::str::from_utf8(&data) {
+                    self.print_str("\nUptime: ");
+                    self.print_str(s.trim());
+                    self.print_str("\n");
+                }
+            }
+        }
+
+        self.print_str("\nProcesses:\n");
+        if let Some(node) = crate::vfs::VFS.lock().resolve_path("/ctl/proc/list") {
+            if let Ok(data) = node.read(4096) {
+                if let Ok(s) = core::str::from_utf8(&data) {
+                    for line in s.lines().take(15) {
+                        self.print_str("  ");
+                        self.print_str(line);
+                        self.print_str("\n");
+                    }
+                }
+            }
         }
     }
 
@@ -218,7 +251,7 @@ impl TerminalWidget {
                 self.prompt_len = 0;
             }
             "info" => {
-                self.print_str("Vahi Kernel v0.3.0\n");
+                self.print_str("SARGA OS — Vahi Kernel v0.3.0\n");
                 self.print_str("Build: Rust Nightly, Async/Await\n");
                 self.print_str("Feature: SMP, VFS, POSIX Syscalls\n");
                 self.print_str("Environment: QEMU x86_64\n");
@@ -436,7 +469,7 @@ impl TerminalWidget {
                 let ticks = crate::interrupts::get_ticks();
                 self.print_str("   .---.    User: root@skyos\n");
                 self.print_str("  /     \\   Host: QEMU x86_64\n");
-                self.print_str("  |  |  |   Kernel: Vahi v0.3.0\n");
+                self.print_str("  |  |  |   Kernel: Vahi v0.3.0 — SARGA OS\n");
                 self.print_str(&format!("  \\     /   Uptime: {}s\n", ticks / 100));
                 self.print_str("   '---'    Shell: SkyOS Terminal\n");
             }

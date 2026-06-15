@@ -1,6 +1,7 @@
 pub mod storage;
 pub mod net;
 pub mod graphics;
+pub mod gpu;
 pub mod mouse;
 pub mod ps2;
 pub mod block;

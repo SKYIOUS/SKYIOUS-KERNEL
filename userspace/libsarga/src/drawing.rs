@@ -107,6 +107,64 @@ impl Backbuffer {
         }
     }
 
+    pub fn draw_rounded_rect(&mut self, x: usize, y: usize, w: usize, h: usize, r: usize, color: Color) {
+        if w < 2 || h < 2 { return; }
+        self.fill_rect(x + r, y, w - r * 2, 1, color);
+        self.fill_rect(x + r, y + h - 1, w - r * 2, 1, color);
+        self.fill_rect(x, y + r, 1, h - r * 2, color);
+        self.fill_rect(x + w - 1, y + r, 1, h - r * 2, color);
+        for dy in 0..r {
+            let y1 = y + dy;
+            let y2 = y + h - 1 - dy;
+            self.set_px(x + r - 1 - dy, y1, color);
+            self.set_px(x + w - r + dy, y1, color);
+            self.set_px(x + r - 1 - dy, y2, color);
+            self.set_px(x + w - r + dy, y2, color);
+        }
+    }
+
+    pub fn fill_rounded_rect(&mut self, x: usize, y: usize, w: usize, h: usize, r: usize, color: Color) {
+        if w < 2 || h < 2 { return; }
+        self.fill_rect(x, y + r, w, h - r * 2, color);
+        self.fill_rect(x + r, y, w - r * 2, r, color);
+        self.fill_rect(x + r, y + h - r, w - r * 2, r, color);
+        for dy in 0..r {
+            let y1 = y + r - 1 - dy;
+            let y2 = y + h - r + dy;
+            self.set_px(x + dy, y1, color);
+            self.set_px(x + w - 1 - dy, y1, color);
+            self.set_px(x + dy, y2, color);
+            self.set_px(x + w - 1 - dy, y2, color);
+            for dx in 1..=dy {
+                self.set_px(x + dy - dx, y1, color);
+                self.set_px(x + w - 1 - dy + dx, y1, color);
+                self.set_px(x + dy - dx, y2, color);
+                self.set_px(x + w - 1 - dy + dx, y2, color);
+            }
+        }
+    }
+
+    pub fn draw_shadow(&mut self, x: usize, y: usize, w: usize, h: usize) {
+        let sx = x + w;
+        let sy = y + h;
+        if sx < self.width && sy < self.height {
+            self.fill_rect(sx, y + 2, 2, h - 2, Color::SHADOW);
+            self.fill_rect(x + 2, sy, w - 2, 2, Color::SHADOW);
+            self.fill_rect(sx, sy, 2, 2, Color::SHADOW);
+        }
+    }
+
+    pub fn draw_progress_bar(&mut self, x: usize, y: usize, w: usize, h: usize, pct: usize, fg: Color, bg: Color) {
+        self.fill_rect(x, y, w, h, bg);
+        self.draw_rect(x, y, w, h, Color::BORDER);
+        if pct > 0 {
+            let fill_w = if pct >= 100 { w.saturating_sub(2) } else { (w.saturating_sub(2)) * pct / 100 };
+            if fill_w > 0 {
+                self.fill_rect(x + 1, y + 1, fill_w, h - 2, fg);
+            }
+        }
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         unsafe {
             core::slice::from_raw_parts(

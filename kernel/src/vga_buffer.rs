@@ -171,6 +171,10 @@ pub fn _print(args: fmt::Arguments) {
     use x86_64::instructions::interrupts;
 
     interrupts::without_interrupts(|| {
+        // Suppress on-screen output during boot splash
+        if crate::gui::splash::SPLASH_ACTIVE.load(core::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         if crate::drivers::graphics::is_active() {
             crate::drivers::graphics::console::_print(args);
         } else {

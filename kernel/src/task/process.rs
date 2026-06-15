@@ -36,28 +36,50 @@ use smoltcp::iface::SocketHandle;
 pub enum SocketType { Tcp, Udp }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub enum FileDescriptor {
     File { node: Arc<dyn VfsNode>, offset: usize },
     Socket(SocketHandle, SocketType),
+    PtyMaster { _idx: usize, pair: alloc::sync::Arc<spin::Mutex<crate::pty::PtyPair>> },
+    PtySlave { _idx: usize, pair: alloc::sync::Arc<spin::Mutex<crate::pty::PtyPair>> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmulationMode {
+    Native,
+    Linux,
+    Windows,
 }
 
 pub struct Process {
     pub id: u64,
     pub parent_id: Option<u64>,
+    #[allow(dead_code)]
+    pub tgid: u64,
     pub address_space: AddressSpace,
     pub vmas: Mutex<Vec<Vma>>,
     pub entry_point: u64,
     pub fd_table: Mutex<Vec<Option<FileDescriptor>>>,
+    pub fd_flags: Mutex<Vec<u64>>,
     pub exit_code: Mutex<Option<i32>>,
     pub children: Mutex<Vec<u64>>,
     pub brk: Mutex<u64>,
     pub cwd: Mutex<String>,
     pub signals: Mutex<crate::syscalls::signal::SignalState>,
     pub signal_handlers: Mutex<[u64; 32]>,
+    pub signal_restorers: Mutex<[u64; 32]>,
     pub uid: Mutex<u32>,
     pub gid: Mutex<u32>,
     pub euid: Mutex<u32>,
     pub egid: Mutex<u32>,
+    pub cap_effective: Mutex<u64>,
+    #[allow(dead_code)]
+    pub cap_permitted: Mutex<u64>,
+    #[allow(dead_code)]
+    pub cap_inheritable: Mutex<u64>,
+    pub io_rings: Mutex<Vec<(u64, usize)>>,
+    pub clear_child_tid: Mutex<u64>,
+    pub emulation: Mutex<EmulationMode>,
 }
 
 use crate::vfs::VfsNode;
@@ -67,20 +89,29 @@ impl Process {
         Process {
             id,
             parent_id,
+            tgid: id,
             address_space,
             vmas: Mutex::new(Vec::new()),
             entry_point: 0,
             fd_table: Mutex::new(Vec::new()),
+            fd_flags: Mutex::new(Vec::new()),
             exit_code: Mutex::new(None),
             children: Mutex::new(Vec::new()),
             brk: Mutex::new(0),
             cwd: Mutex::new(String::from("/")),
             signals: Mutex::new(crate::syscalls::signal::SignalState::new()),
             signal_handlers: Mutex::new([0; 32]),
+            signal_restorers: Mutex::new([0; 32]),
             uid: Mutex::new(0),
             gid: Mutex::new(0),
             euid: Mutex::new(0),
             egid: Mutex::new(0),
+            cap_effective: Mutex::new(!0u64),
+            cap_permitted: Mutex::new(!0u64),
+            cap_inheritable: Mutex::new(!0u64),
+            io_rings: Mutex::new(Vec::new()),
+            clear_child_tid: Mutex::new(0),
+            emulation: Mutex::new(EmulationMode::Native),
         }
     }
 
@@ -156,7 +187,14 @@ impl Process {
     }
 
     pub fn load_elf(elf_data: &[u8], mut address_space: AddressSpace) -> Result<Self, &'static str> {
-        let (entry, vmas) = Self::load_elf_static(elf_data, &mut address_space)?;
+        let (mut entry, mut vmas) = Self::load_elf_static(elf_data, &mut address_space)?;
+
+        let elf = ElfFile::new(elf_data).map_err(|_| "Failed to re-parse ELF")?;
+        let has_dynamic = elf.program_iter().any(|ph| matches!(ph.get_type(), Ok(xmas_elf::program::Type::Dynamic)));
+
+        if has_dynamic {
+            crate::elf_dyn::load_dynamic_binary(elf_data, &mut address_space, &mut entry, &mut vmas)?;
+        }
         
         let mut process = Process::new(Process::next_id(), None, address_space);
         process.entry_point = entry;
@@ -349,15 +387,26 @@ impl Process {
         PROCESS_TABLE.lock().insert(process.id, process.clone());
     }
 
+    /// Cheap per-process ASLR entropy (RDTSC-based).
+    fn aslr_entropy() -> u64 {
+        let lo: u32;
+        let hi: u32;
+        unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, preserves_flags)); }
+        ((hi as u64) << 32) | (lo as u64)
+    }
+
     /// PHASE D2: User stack setup in execve
-    /// Maps 64KB stack at 0x7FFF_FFFF_E000 and populates argc/argv.
+    /// Maps 64KB stack at a randomized location and populates argc/argv.
     pub fn setup_user_stack(&self, argv: &[alloc::string::String]) -> u64 {
                         use x86_64::structures::paging::{Mapper, Page, Size4KiB, PageTableFlags, FrameAllocator};
                         use crate::memory::buddy::BuddyFrameAllocator;
         let mut frame_allocator = BuddyFrameAllocator;
         let mut mapper = unsafe { self.address_space.mapper().expect("Failed to get mapper for stack setup") };
 
-        let stack_top_addr = 0x7FFF_FFFF_E000u64;
+        // ASLR: randomize stack base in a 64MB range just below the old hardcoded address.
+        // Old: 0x7FFF_FFFF_E000. New: 0x7FFF_F000_0000 + random * 4096 (up to 0xFFF pages)
+        let stack_random = (Self::aslr_entropy() & 0xFFF) * 4096;
+        let stack_top_addr = 0x7FFF_F000_0000u64 + stack_random;
         let stack_pages = 16; // 64 KB
         
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
@@ -427,4 +476,27 @@ impl Process {
 
         current_rsp
     }
+}
+
+/// Kill a process by PID — marks all its threads as exited and sends SIGCHLD to parent.
+#[allow(dead_code)]
+pub fn kill_process(pid: u64) {
+    let parent_pid = {
+        let table = PROCESS_TABLE.lock();
+        if let Some(proc) = table.get(&pid) {
+            *proc.exit_code.lock() = Some(-1);
+            crate::println!("[OOM] Killed process pid={}", pid);
+            proc.parent_id
+        } else {
+            None
+        }
+    };
+    if let Some(ppid) = parent_pid {
+        let table = PROCESS_TABLE.lock();
+        if let Some(parent) = table.get(&ppid) {
+            parent.signals.lock().raise(crate::syscalls::signal::Signal::SIGCHLD);
+        }
+    }
+    // Remove from process table so it won't be scheduled
+    PROCESS_TABLE.lock().remove(&pid);
 }

@@ -2,11 +2,13 @@
 //!
 //! Provides optimized block storage access in virtualized environments.
 
-use crate::drivers::block::{BlockDevice, BlockDeviceError};
+use crate::drivers::block::{BlockDevice, BlockDeviceError, register_block_device};
 use crate::drivers::net::virtio::{VirtIOQueue, REG_DEVICE_STATUS, REG_QUEUE_SEL, REG_QUEUE_SIZE, REG_QUEUE_PFN, REG_QUEUE_NOTIFY, STATUS_ACK, STATUS_DRIVER, STATUS_DRIVER_OK};
 use x86_64::VirtAddr;
 use x86_64::instructions::port::Port;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
+use spin::Mutex;
 
 pub const VIRTIO_BLOCK_DEVICE_ID: u16 = 0x1001;
 
@@ -185,4 +187,11 @@ impl BlockDevice for VirtIOBlock {
     fn sector_count(&self) -> Result<u64, BlockDeviceError> {
         Ok(self.capacity)
     }
+}
+
+pub fn init(io_base: u16) {
+    let block = VirtIOBlock::new(io_base);
+    let block_arc = Arc::new(Mutex::new(block));
+    register_block_device(block_arc);
+    crate::println!("VirtIO-Block: registered as block device");
 }

@@ -7,8 +7,7 @@
 //! Implement the `BlockDevice trait for specific storage drivers (IDE, AHCI, etc.).
 
 pub mod partition;
-
-// use alloc::vec::Vec;
+pub mod cache;
 use alloc::sync::Arc;
 use spin::Mutex;
 use alloc::vec::Vec;
@@ -19,7 +18,8 @@ lazy_static! {
 }
 
 pub fn register_block_device(device: Arc<Mutex<dyn BlockDevice>>) {
-    BLOCK_DEVICES.lock().push(device);
+    let cached = Arc::new(Mutex::new(cache::BlockCache::new(device)));
+    BLOCK_DEVICES.lock().push(cached);
 }
 pub trait BlockDevice: Send + Sync {
     /// Reads a single sector from the device into the provided buffer.
@@ -47,6 +47,9 @@ pub trait BlockDevice: Send + Sync {
     /// # Errors
     /// Returns `BlockDeviceError::DeviceError` if size cannot be determined.
     fn sector_count(&self) -> Result<u64, BlockDeviceError>;
+
+    /// Flush any pending writes. Default is a no-op.
+    fn sync(&mut self) {}
 }
 
 /// Errors that can occur during block device operations.

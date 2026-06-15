@@ -11,13 +11,87 @@ pub mod errno;
 pub mod numbers;
 pub mod signal;
 pub mod user_access;
+pub mod io_uring;
 
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::String;
 
+// Capability constants (matching Linux CAP_* values)
+pub const CAP_SYS_ADMIN: u64 = 1 << 21;
+pub const CAP_SYS_BOOT: u64 = 1 << 22;
+pub const CAP_KILL: u64 = 1 << 5;
+pub const CAP_SETUID: u64 = 1 << 6;
+pub const CAP_SETGID: u64 = 1 << 7;
 
+/// Check if the current process has the given capability in its effective set.
+fn has_capability(cap_bit: u64) -> bool {
+    let lock = CURRENT_PROCESS.lock();
+    lock.as_ref().map_or(false, |p| (*p.cap_effective.lock() & cap_bit) != 0)
+}
+
+/// Log a security-relevant event to serial for audit trail.
+fn audit_log(event: &str, detail: &str) {
+    let pid = {
+        let lock = CURRENT_PROCESS.lock();
+        lock.as_ref().map(|p| p.id).unwrap_or(0)
+    };
+    crate::serial_write("[AUDIT] ");
+    crate::serial_write(event);
+    crate::serial_write(" pid=");
+    let pid_str = alloc::format!("{}", pid);
+    crate::serial_write(&pid_str);
+    crate::serial_write(" ");
+    crate::serial_write(detail);
+    crate::serial_write("\n");
+}
+
+/// Get euid for the current process. Returns 0 (root) if no process.
+pub fn get_current_euid() -> u32 {
+    let lock = CURRENT_PROCESS.lock();
+    lock.as_ref().map_or(0, |p| *p.euid.lock())
+}
+
+/// Get egid for the current process. Returns 0 (root) if no process.
+fn get_current_egid() -> u32 {
+    let lock = CURRENT_PROCESS.lock();
+    lock.as_ref().map_or(0, |p| *p.egid.lock())
+}
+
+/// Check if the current process can access a file with given mode/uid/gid.
+/// `need` is the access bits required (4=read, 2=write, 1=execute).
+/// Returns true if access is granted.
+fn check_file_permission(st_mode: u32, st_uid: u32, st_gid: u32, need: u32) -> bool {
+    let euid = get_current_euid();
+    let egid = get_current_egid();
+    // Root can access anything
+    if euid == 0 { return true; }
+    let bits = if euid == st_uid { (st_mode >> 6) & 7 }
+               else if egid == st_gid { (st_mode >> 3) & 7 }
+               else { st_mode & 7 };
+    (bits & need) == need
+}
+
+/// Check if current process can access a VfsNode with the given required permission bits.
+fn check_node_permission(node: &Arc<dyn VfsNode>, need: u32) -> bool {
+    if let Ok(stat) = node.stat() {
+        check_file_permission(stat.st_mode, stat.st_uid, stat.st_gid, need)
+    } else {
+        true // If we can't stat, allow (compatibility with special filesystems)
+    }
+}
+
+/// Check if current process owns the given file (euid matches st_uid or is root).
+fn check_file_owner(node: &Arc<dyn VfsNode>) -> bool {
+    let euid = get_current_euid();
+    if euid == 0 { return true; }
+    if let Ok(stat) = node.stat() {
+        euid == stat.st_uid
+    } else {
+        true
+    }
+}
 
 pub fn init() {
     // Detect SMAP and enable if available (must be done before any user access)
@@ -145,15 +219,113 @@ fn sys_dup2(old_fd: u64, new_fd: u64) -> u64 {
         }
         
         let old_desc = fd_table[old_fd as usize].clone();
+        let old_flags = {
+            let flags = p.fd_flags.lock();
+            if (old_fd as usize) < flags.len() { flags[old_fd as usize] } else { 0 }
+        };
         
         if new_fd as usize >= fd_table.len() {
             fd_table.resize(new_fd as usize + 1, None);
+            p.fd_flags.lock().resize(new_fd as usize + 1, 0);
         }
         
         fd_table[new_fd as usize] = old_desc;
+        p.fd_flags.lock()[new_fd as usize] = old_flags;
         return new_fd;
     }
     errno::Errno::ESRCH as u64
+}
+
+fn sys_dup(old_fd: u64) -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock {
+        let mut fd_table = p.fd_table.lock();
+        if old_fd as usize >= fd_table.len() || fd_table[old_fd as usize].is_none() {
+            return errno::Errno::EBADF as u64;
+        }
+        let old_desc = fd_table[old_fd as usize].clone().unwrap();
+        // Find lowest available fd
+        for (i, slot) in fd_table.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(old_desc);
+                return i as u64;
+            }
+        }
+        fd_table.push(Some(old_desc));
+        return (fd_table.len() - 1) as u64;
+    }
+    errno::Errno::ESRCH as u64
+}
+
+fn sys_access(path_ptr: *const u8, mode: i32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let node = match VFS.lock().resolve_path(&path_str) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    // Convert F_OK/R_OK/W_OK/X_OK to permission bits
+    let need = match mode & 7 {
+        0 => 0,          // F_OK: just check existence
+        1 => 1,          // W_OK
+        2 => 4,          // R_OK
+        3 => 5,          // R_OK | W_OK
+        4 => 4,          // X_OK
+        5 => 5,          // X_OK | W_OK
+        6 => 5,          // X_OK | R_OK
+        7 => 7,          // R_OK | W_OK | X_OK
+        _ => 0,
+    };
+    if need == 0 { return 0; } // F_OK: file exists
+    if check_node_permission(&node, need) { 0 } else { errno::Errno::EACCES as u64 }
+}
+
+const F_DUPFD: i32 = 0;
+const F_GETFD: i32 = 1;
+const F_SETFD: i32 = 2;
+const F_GETFL: i32 = 3;
+const F_SETFL: i32 = 4;
+
+fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock {
+        let mut fd_table = p.fd_table.lock();
+        if fd as usize >= fd_table.len() || fd_table[fd as usize].is_none() {
+            return errno::Errno::EBADF as u64;
+        }
+        match cmd {
+            F_DUPFD => {
+                let desc = fd_table[fd as usize].clone().unwrap();
+                for (i, slot) in fd_table.iter_mut().enumerate() {
+                    if slot.is_none() && i as u64 > arg {
+                        *slot = Some(desc);
+                        return i as u64;
+                    }
+                }
+                fd_table.push(Some(desc));
+                (fd_table.len() - 1) as u64
+            }
+            F_GETFD => 0, // No close-on-exec flag tracked yet
+            F_SETFD => 0, // Accept and ignore
+            F_GETFL => {
+                let flags = p.fd_flags.lock();
+                if (fd as usize) < flags.len() { flags[fd as usize] } else { 0 }
+            }
+            F_SETFL => {
+                let mut flags = p.fd_flags.lock();
+                if fd as usize >= flags.len() {
+                    flags.resize(fd as usize + 1, 0);
+                }
+                flags[fd as usize] = arg & 0xFFFF; // O_NONBLOCK=0x800, etc.
+                0
+            }
+            _ => errno::Errno::EINVAL as u64,
+        }
+    } else {
+        errno::Errno::ESRCH as u64
+    }
 }
 
 fn sys_pipe(fds_ptr: *mut u32) -> u64 {
@@ -213,9 +385,9 @@ fn sys_uname(buf: *mut UtsName) -> u64 {
     };
 
     fill(&mut uts.sysname, "Vahi");
-    fill(&mut uts.nodename, "vahi-kernel");
+    fill(&mut uts.nodename, "sarga-os");
     fill(&mut uts.release, "0.3.0");
-    fill(&mut uts.version, "Vahi V5.0 Roadmap Implementation");
+    fill(&mut uts.version, "SARGA OS — Vahi V5.0 Roadmap Implementation");
     fill(&mut uts.machine, "x86_64");
 
     if unsafe { user_access::copy_to_user(buf as *mut u8, core::slice::from_raw_parts(&uts as *const _ as *const u8, core::mem::size_of::<UtsName>())) }.is_err() {
@@ -245,6 +417,29 @@ pub extern "sysv64" fn syscall_handler(
     arg5: u64,
     regs_ptr: *mut u64,
 ) -> u64 {
+    // Check if the current process is in Linux emulation mode
+    let is_linux = {
+        let lock = crate::task::process::CURRENT_PROCESS.lock();
+        lock.as_ref().map(|p| *p.emulation.lock() == crate::task::process::EmulationMode::Linux).unwrap_or(false)
+    };
+    if is_linux {
+        return crate::emulation::dispatch_linux_syscall(n, arg1, arg2, arg3, arg4, arg5, regs_ptr);
+    }
+
+    do_syscall(n, arg1, arg2, arg3, arg4, arg5, regs_ptr)
+}
+
+/// Inner dispatch without emulation redirect — called by both the public entry
+/// point and the Linux emulation layer to avoid infinite recursion.
+pub(crate) fn do_syscall(
+    n: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    regs_ptr: *mut u64,
+) -> u64 {
     let result = match n {
         numbers::SYS_READ => sys_read(arg1, arg2 as *mut u8, arg3 as usize),
         numbers::SYS_WRITE => sys_write(arg1, arg2 as *const u8, arg3 as usize),
@@ -257,11 +452,14 @@ pub extern "sysv64" fn syscall_handler(
         numbers::SYS_MUNMAP => sys_munmap(arg1, arg2),
         numbers::SYS_BRK => sys_brk(arg1),
         numbers::SYS_EXIT => sys_exit(arg1),
-        numbers::SYS_CLONE => sys_clone(arg1, arg2, regs_ptr),
+        numbers::SYS_CLONE => sys_clone(arg1, arg2, arg3 as *mut u32, arg4, arg5 as *mut u32, regs_ptr),
         numbers::SYS_FORK => sys_fork(regs_ptr),
         numbers::SYS_GETPID => sys_getpid(),
         numbers::SYS_GETPPID => sys_getppid(),
+        numbers::SYS_DUP => sys_dup(arg1),
         numbers::SYS_DUP2 => sys_dup2(arg1, arg2),
+        numbers::SYS_ACCESS => sys_access(arg1 as *const u8, arg2 as i32),
+        numbers::SYS_FCNTL => sys_fcntl(arg1, arg2 as i32, arg3),
         numbers::SYS_PIPE => sys_pipe(arg1 as *mut u32),
         numbers::SYS_UNAME => sys_uname(arg1 as *mut UtsName),
         numbers::SYS_WAIT4 => sys_wait4(arg1 as i64, arg2 as *mut i32, arg3 as i32, arg4 as *mut u8),
@@ -278,6 +476,14 @@ pub extern "sysv64" fn syscall_handler(
         numbers::SYS_GUI_GET_BUFFER => sys_gui_get_buffer(arg1),
         numbers::SYS_GUI_FLUSH => sys_gui_flush(arg1, arg2 as *const u32),
         numbers::SYS_GUI_MAP_BUFFER => sys_gui_map_buffer(arg1),
+        numbers::SYS_GUI_GET_KEY => sys_gui_get_key(arg1),
+        numbers::SYS_GUI_GET_MOUSE => sys_gui_get_mouse(arg1),
+        numbers::SYS_GUI_SET_TITLE => sys_gui_set_title(arg1, arg2 as *const u8),
+        numbers::SYS_GUI_DESTROY_WINDOW => sys_gui_destroy_window(arg1),
+        numbers::SYS_GUI_RESIZE_WINDOW => sys_gui_resize_window(arg1, arg2, arg3),
+        numbers::SYS_GUI_MOVE_WINDOW => sys_gui_move_window(arg1, arg2, arg3),
+        numbers::SYS_CLIPBOARD => sys_clipboard(arg1, arg2 as *mut u8, arg3),
+        numbers::SYS_NOTIFY => sys_notify(arg1 as *const u8, arg2, arg3),
         numbers::SYS_NANOSLEEP => sys_nanosleep(arg1, arg2),
         
         numbers::SYS_GETCWD => sys_getcwd(arg1 as *mut u8, arg2 as usize),
@@ -300,6 +506,7 @@ pub extern "sysv64" fn syscall_handler(
         numbers::SYS_CLOCK_GETTIME => sys_clock_gettime(arg1, arg2 as *mut Timespec),
         numbers::SYS_MOUNT => sys_mount(arg1 as *const u8, arg2 as *const u8, arg3 as *const u8, arg4, arg5 as *const u8),
         numbers::SYS_UMOUNT2 => sys_umount2(arg1 as *const u8, arg2),
+        numbers::SYS_MKFS => sys_mkfs(arg1 as *const u8, arg2),
         numbers::SYS_FCHMOD => sys_fchmod(arg1, arg2 as u32),
         numbers::SYS_FCHOWN => sys_fchown(arg1, arg2 as u32, arg3 as u32),
         numbers::SYS_SYMLINK => sys_symlink(arg1 as *const u8, arg2 as *const u8),
@@ -308,19 +515,27 @@ pub extern "sysv64" fn syscall_handler(
         numbers::SYS_ARCH_PRCTL => sys_arch_prctl(arg1, arg2),
         numbers::SYS_BEEP => sys_beep(arg1 as u32, arg2 as u32),
         numbers::SYS_SELECT => sys_select(arg1, arg2 as *mut u64, arg3 as *mut u64, arg4 as *mut u64, arg5 as *const u64),
-        numbers::SYS_POLL => {
-            // Treat poll like select with nfds=1, check fd 0
-            let readfds: *mut u64 = core::ptr::null_mut();
-            let writefds: *mut u64 = core::ptr::null_mut();
-            let exceptfds: *mut u64 = core::ptr::null_mut();
-            sys_select(64, readfds, writefds, exceptfds, arg2 as *const u64)
-        }
+        numbers::SYS_POLL => sys_poll(arg1 as *const u8, arg2 as usize, arg3 as i32),
         numbers::SYS_GETUID => sys_getuid(),
         numbers::SYS_GETGID => sys_getgid(),
         numbers::SYS_SETUID => sys_setuid(arg1),
         numbers::SYS_SETGID => sys_setgid(arg1),
         numbers::SYS_GETEUID => sys_geteuid(),
         numbers::SYS_GETEGID => sys_getegid(),
+        numbers::SYS_IO_URING_SETUP => io_uring::sys_io_uring_setup(arg1),
+        numbers::SYS_IO_URING_ENTER => io_uring::sys_io_uring_enter(arg1, arg2, arg3, arg4, arg5),
+        numbers::SYS_BPF => {
+            let ret = crate::ebpf::sys_bpf(arg1 as u32, arg2, arg3, arg4);
+            ret as u64
+        }
+        numbers::SYS_SYNC => sys_sync(),
+        numbers::SYS_REBOOT => sys_reboot(arg1, arg2),
+        numbers::SYS_DRMCTL => sys_drmctl(arg1, arg2, arg3 as *mut u8),
+        numbers::SYS_HASH => sys_hash(arg1, arg2 as *const u8, arg3, arg4 as *mut u8, arg5),
+        numbers::SYS_STATFS => sys_statfs(arg1 as *const u8, arg2 as *mut u8),
+        numbers::SYS_OPENPTY => sys_openpty(),
+        numbers::SYS_SET_TID_ADDRESS => sys_set_tid_address(arg1 as *const u32),
+        numbers::SYS_EXIT_GROUP => sys_exit_group(arg1),
         _ => {
             crate::println!("[SYSCALL] Unknown syscall: {} (0x{:x})", n, n);
             errno::Errno::ENOSYS as u64
@@ -328,67 +543,99 @@ pub extern "sysv64" fn syscall_handler(
     };
 
     {
-        let proc_lock = CURRENT_PROCESS.lock();
-        if let Some(ref proc) = *proc_lock {
+        let (handler, restorer, sig_num, sig_bit) = {
+            let proc_lock = CURRENT_PROCESS.lock();
+            let proc = match *proc_lock {
+                Some(ref p) => p,
+                None => return result,
+            };
             let mut signals = proc.signals.lock();
-            if signals.has_pending() {
-                let sig_bit = (signals.pending & !signals.masked).trailing_zeros();
-                let sig_num = sig_bit + 1;
-                
-                let handlers = proc.signal_handlers.lock();
-                let handler = handlers[sig_bit as usize];
-                
-                if handler == 0 {
-                    // Default action: Terminate
-                    drop(handlers);
-                    drop(signals);
-                    drop(proc_lock);
-                    sys_exit(128 + sig_num as u64);
-                } else if handler == 1 {
-                    // SIG_IGN: Ignore
+            if !signals.has_pending() { return result; }
+
+            let sig_bit = signals.pending.trailing_zeros();
+            let sig_num = sig_bit + 1;
+            let handler = proc.signal_handlers.lock()[sig_bit as usize];
+            let restorer = proc.signal_restorers.lock()[sig_bit as usize];
+
+            if handler == 1 {
+                signals.pending &= !(1 << sig_bit);
+                return result;
+            }
+
+            (handler, restorer, sig_num, sig_bit)
+        };
+
+        if handler == 0 {
+            sys_exit(128 + sig_num as u64);
+        } else {
+            let old_rsp = unsafe { *regs_ptr.add(17) };
+            let old_rip = unsafe { *regs_ptr.add(15) };
+            let old_rflags = unsafe { *regs_ptr.add(16) };
+
+            let ret_addr_rsp = old_rsp - 8;
+            let frame_size = core::mem::size_of::<SignalFrame>();
+            let new_rsp = (ret_addr_rsp - frame_size as u64) & !0xF;
+
+            let phys = crate::memory::virt_to_phys(x86_64::VirtAddr::new(new_rsp)).unwrap();
+            let k_ptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + phys.as_u64()) as *mut SignalFrame;
+
+            unsafe {
+                (*k_ptr).r15 = *regs_ptr.add(0);
+                (*k_ptr).r14 = *regs_ptr.add(1);
+                (*k_ptr).r13 = *regs_ptr.add(2);
+                (*k_ptr).r12 = *regs_ptr.add(3);
+                (*k_ptr).r11 = *regs_ptr.add(4);
+                (*k_ptr).r10 = *regs_ptr.add(5);
+                (*k_ptr).r9  = *regs_ptr.add(6);
+                (*k_ptr).r8  = *regs_ptr.add(7);
+                (*k_ptr).rdi = *regs_ptr.add(8);
+                (*k_ptr).rsi = *regs_ptr.add(9);
+                (*k_ptr).rbp = *regs_ptr.add(10);
+                (*k_ptr).rbx = *regs_ptr.add(11);
+                (*k_ptr).rdx = *regs_ptr.add(12);
+                (*k_ptr).rcx = *regs_ptr.add(13);
+                (*k_ptr).rax = *regs_ptr.add(14);
+                (*k_ptr).rip = old_rip;
+                (*k_ptr).rflags = old_rflags;
+                (*k_ptr).rsp = old_rsp;
+            }
+
+            let ret_phys = crate::memory::virt_to_phys(x86_64::VirtAddr::new(ret_addr_rsp)).unwrap();
+            let ret_kptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + ret_phys.as_u64()) as *mut u64;
+            unsafe { *ret_kptr = restorer; }
+
+            {
+                let proc_lock = crate::task::process::CURRENT_PROCESS.lock();
+                if let Some(ref proc) = *proc_lock {
+                    let mut signals = proc.signals.lock();
                     signals.pending &= !(1 << sig_bit);
-                } else {
-                    // User-mode handler
-                    signals.pending &= !(1 << sig_bit);
-                    let old_rsp = unsafe { *regs_ptr.add(17) }; // Saved user_rsp
-                    let old_rip = unsafe { *regs_ptr.add(15) }; // Saved user_rip
-                    let old_rflags = unsafe { *regs_ptr.add(16) }; // Saved user_rflags
-                    
-                    // Prepare signal frame on user stack — save all GP registers
-                    let frame_size = core::mem::size_of::<SignalFrame>();
-                    let new_rsp = (old_rsp - frame_size as u64) & !0xF;
-                    
-                    let phys = crate::memory::virt_to_phys(x86_64::VirtAddr::new(new_rsp)).unwrap();
-                    let k_ptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + phys.as_u64()) as *mut SignalFrame;
-                    
-                    unsafe {
-                        (*k_ptr).r15 = *regs_ptr.add(0);
-                        (*k_ptr).r14 = *regs_ptr.add(1);
-                        (*k_ptr).r13 = *regs_ptr.add(2);
-                        (*k_ptr).r12 = *regs_ptr.add(3);
-                        (*k_ptr).r11 = *regs_ptr.add(4);
-                        (*k_ptr).r10 = *regs_ptr.add(5);
-                        (*k_ptr).r9  = *regs_ptr.add(6);
-                        (*k_ptr).r8  = *regs_ptr.add(7);
-                        (*k_ptr).rdi = *regs_ptr.add(8);
-                        (*k_ptr).rsi = *regs_ptr.add(9);
-                        (*k_ptr).rbp = *regs_ptr.add(10);
-                        (*k_ptr).rbx = *regs_ptr.add(11);
-                        (*k_ptr).rdx = *regs_ptr.add(12);
-                        (*k_ptr).rcx = *regs_ptr.add(13);
-                        (*k_ptr).rax = *regs_ptr.add(14);
-                        (*k_ptr).rip = old_rip;
-                        (*k_ptr).rflags = old_rflags;
-                        (*k_ptr).rsp = old_rsp;
-                    }
-                    
-                    // Redirect execution
-                    unsafe {
-                        *regs_ptr.add(17) = new_rsp; // RSP
-                        *regs_ptr.add(15) = handler; // RIP
-                        *regs_ptr.add(8) = sig_num as u64; // RDI (arg1)
-                    }
+                    signals.saved_context = Some(crate::syscalls::signal::SignalContext {
+                        rip: old_rip,
+                        rsp: new_rsp,
+                        rbp: unsafe { *regs_ptr.add(10) },
+                        rax: unsafe { *regs_ptr.add(14) },
+                        rbx: unsafe { *regs_ptr.add(11) },
+                        rcx: unsafe { *regs_ptr.add(13) },
+                        rdx: unsafe { *regs_ptr.add(12) },
+                        rsi: unsafe { *regs_ptr.add(9) },
+                        rdi: unsafe { *regs_ptr.add(8) },
+                        r8:  unsafe { *regs_ptr.add(7) },
+                        r9:  unsafe { *regs_ptr.add(6) },
+                        r10: unsafe { *regs_ptr.add(5) },
+                        r11: unsafe { *regs_ptr.add(4) },
+                        r12: unsafe { *regs_ptr.add(3) },
+                        r13: unsafe { *regs_ptr.add(2) },
+                        r14: unsafe { *regs_ptr.add(1) },
+                        r15: unsafe { *regs_ptr.add(0) },
+                        rflags: old_rflags,
+                    });
                 }
+            }
+
+            unsafe {
+                *regs_ptr.add(17) = new_rsp;
+                *regs_ptr.add(15) = handler;
+                *regs_ptr.add(8) = sig_num as u64;
             }
         }
     }
@@ -449,41 +696,40 @@ fn sys_rt_sigaction(sig: u64, act: *const u64, oldact: *mut u64) -> u64 {
 }
 
 fn sys_rt_sigreturn(regs_ptr: *mut u64) -> u64 {
-    // RSP points to the SignalFrame that was set up before the signal handler ran
-    let old_rsp = unsafe { *regs_ptr.add(17) };
-    let phys = match crate::memory::virt_to_phys(x86_64::VirtAddr::new(old_rsp)) {
-        Some(p) => p,
-        None => return errno::Errno::EFAULT as u64,
+    let proc_lock = crate::task::process::CURRENT_PROCESS.lock();
+    let proc = match *proc_lock {
+        Some(ref p) => p,
+        None => return errno::Errno::ESRCH as u64,
     };
-    let k_ptr = match crate::memory::PHYSICAL_MEMORY_OFFSET.get() {
-        Some(base) => (*base + phys.as_u64()) as *const SignalFrame,
-        None => return errno::Errno::EFAULT as u64,
+    let saved = proc.signals.lock().restore_context();
+    let ctx = match saved {
+        Some(c) => c,
+        None => return errno::Errno::EINVAL as u64,
     };
-    
+    drop(proc_lock);
+
+    // Restore registers from saved context
     unsafe {
-        *regs_ptr.add(0)  = (*k_ptr).r15;
-        *regs_ptr.add(1)  = (*k_ptr).r14;
-        *regs_ptr.add(2)  = (*k_ptr).r13;
-        *regs_ptr.add(3)  = (*k_ptr).r12;
-        *regs_ptr.add(4)  = (*k_ptr).r11;
-        *regs_ptr.add(5)  = (*k_ptr).r10;
-        *regs_ptr.add(6)  = (*k_ptr).r9;
-        *regs_ptr.add(7)  = (*k_ptr).r8;
-        *regs_ptr.add(8)  = (*k_ptr).rdi;
-        *regs_ptr.add(9)  = (*k_ptr).rsi;
-        *regs_ptr.add(10) = (*k_ptr).rbp;
-        *regs_ptr.add(11) = (*k_ptr).rbx;
-        *regs_ptr.add(12) = (*k_ptr).rdx;
-        *regs_ptr.add(13) = (*k_ptr).rcx;
-        *regs_ptr.add(14) = (*k_ptr).rax;
-        *regs_ptr.add(15) = (*k_ptr).rip;
-        *regs_ptr.add(16) = (*k_ptr).rflags;
-        *regs_ptr.add(17) = (*k_ptr).rsp;
+        *regs_ptr.add(0)  = ctx.r15;
+        *regs_ptr.add(1)  = ctx.r14;
+        *regs_ptr.add(2)  = ctx.r13;
+        *regs_ptr.add(3)  = ctx.r12;
+        *regs_ptr.add(4)  = ctx.r11;
+        *regs_ptr.add(5)  = ctx.r10;
+        *regs_ptr.add(6)  = ctx.r9;
+        *regs_ptr.add(7)  = ctx.r8;
+        *regs_ptr.add(8)  = ctx.rdi;
+        *regs_ptr.add(9)  = ctx.rsi;
+        *regs_ptr.add(10) = ctx.rbp;
+        *regs_ptr.add(11) = ctx.rbx;
+        *regs_ptr.add(12) = ctx.rdx;
+        *regs_ptr.add(13) = ctx.rcx;
+        *regs_ptr.add(14) = ctx.rax;
+        *regs_ptr.add(15) = ctx.rip;
+        *regs_ptr.add(16) = ctx.rflags;
+        *regs_ptr.add(17) = ctx.rsp;
     }
-    
-    // Return value from the interrupted context (RAX)
-    unsafe { (*k_ptr).rax }
-    // Note: The restored RAX will be set by the register restore in the assembly epilogue
+    ctx.rax
 }
 
 fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
@@ -525,6 +771,33 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
+        Some(FileDescriptor::PtyMaster { _idx: _, ref pair }) => {
+            let mut data = alloc::vec![0u8; count];
+            match crate::pty::pty_read_master(pair, &mut data) {
+                Ok(n) if n > 0 => {
+                    if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    n as u64
+                },
+                Ok(_) => 0,
+                Err(_) => errno::Errno::EIO as u64,
+            }
+        },
+        Some(FileDescriptor::PtySlave { _idx: _, ref pair }) => {
+            let ldisc = crate::pty::PtyLineDiscipline::default();
+            let mut data = alloc::vec![0u8; count];
+            match crate::pty::pty_read_slave(pair, &mut data, &ldisc) {
+                Ok(n) if n > 0 => {
+                    if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    n as u64
+                },
+                Ok(_) => 0,
+                Err(_) => errno::Errno::EIO as u64,
+            }
+        },
         Some(FileDescriptor::Socket(handle, _stype)) => {
             #[cfg(not(feature = "net"))]
             return errno::Errno::ENOSYS as u64;
@@ -553,9 +826,9 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                         }
                         return errno::Errno::EFAULT as u64;
                     }
-                    0u64
+                    errno::Errno::EAGAIN as u64
                 }) { return n; }
-                0
+                errno::Errno::EAGAIN as u64
             }
         },
         None => errno::Errno::EBADF as u64,
@@ -591,6 +864,26 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
+        Some(FileDescriptor::PtyMaster { _idx: _, ref pair }) => {
+            let mut data = vec![0u8; count];
+            if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            match crate::pty::pty_write_master(pair, &data) {
+                Ok(n) => n as u64,
+                Err(_) => errno::Errno::EIO as u64,
+            }
+        },
+        Some(FileDescriptor::PtySlave { _idx: _, ref pair }) => {
+            let mut data = vec![0u8; count];
+            if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            match crate::pty::pty_write_slave(pair, &data) {
+                Ok(n) => n as u64,
+                Err(_) => errno::Errno::EIO as u64,
+            }
+        },
         Some(FileDescriptor::Socket(handle, _stype)) => {
             #[cfg(not(feature = "net"))]
             return errno::Errno::ENOSYS as u64;
@@ -602,6 +895,7 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                 }
 
                 let mut sockets = crate::net::SOCKETS.lock();
+                // Try TCP
                 if let Some(v) = with_tcp_mut(&mut *sockets, handle, |socket| {
                     if socket.may_send() {
                         let result = socket.send(|slice| {
@@ -613,6 +907,8 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                     }
                     errno::Errno::EAGAIN as u64
                 }) { return v; }
+                // Try UDP — write() only works on connected sockets
+                // For UDP, use sendto() instead
                 errno::Errno::ENOSYS as u64
             }
         },
@@ -630,6 +926,26 @@ fn sys_open(path_ptr: *const u8, flags: i32) -> u64 {
 
     let vfs = VFS.lock();
     if let Some(node) = vfs.resolve_path(&path_str) {
+        // Permission check: determine access needed from flags
+        let acc_mode = (flags & 3) as u32; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+        let need = match acc_mode {
+            1 => 2u32, // write
+            2 => 6u32, // read+write
+            _ => 4u32, // read
+        };
+        if !check_node_permission(&node, need) {
+            return errno::Errno::EACCES as u64;
+        }
+        // LSM hook: file permission check
+        let perm = match acc_mode {
+            1 => "write",
+            2 => "read",
+            _ => "read",
+        };
+        let subj = crate::security::current_subject();
+        if !crate::security::hook_file_perm(&subj, &path_str, perm) {
+            return errno::Errno::EACCES as u64;
+        }
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
             let mut fd_table = process.fd_table.lock();
@@ -652,7 +968,11 @@ fn sys_open(path_ptr: *const u8, flags: i32) -> u64 {
             (&path_str[..last_slash], &path_str[last_slash+1..])
         };
 
+        // For O_CREAT, check write+execute on parent directory
         if let Some(parent_node) = vfs.resolve_path(parent_path) {
+            if !check_node_permission(&parent_node, 3) { // w+x
+                return errno::Errno::EACCES as u64;
+            }
             if let Ok(new_node) = parent_node.create(name) {
                 let process_lock = CURRENT_PROCESS.lock();
                 if let Some(ref process) = *process_lock {
@@ -676,6 +996,15 @@ fn sys_close(fd: u64) -> u64 {
     };
     let mut fd_table = process.fd_table.lock();
     if (fd as usize) < fd_table.len() {
+        if let Some(ref desc) = fd_table[fd as usize] {
+            // Clean up sockets to prevent fd leak
+            if let FileDescriptor::Socket(handle, _stype) = desc {
+                #[cfg(feature = "net")]
+                {
+                    crate::net::SOCKETS.lock().remove(*handle);
+                }
+            }
+        }
         fd_table[fd as usize] = None;
         return 0;
     }
@@ -691,6 +1020,38 @@ fn sys_stat(path_ptr: *const u8, stat_buf: *mut Stat) -> u64 {
     if let Some(node) = VFS.lock().resolve_path(&path_str) {
         if let Ok(stat) = node.stat() {
             if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>())) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            return 0;
+        }
+    }
+    errno::Errno::ENOENT as u64
+}
+
+fn sys_statfs(path_ptr: *const u8, statfs_buf: *mut u8) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+
+    let vfs = VFS.lock();
+    if let Some(node) = vfs.resolve_path(&path_str) {
+        if let Ok(statfs) = node.statfs() {
+            let slice = unsafe {
+                core::slice::from_raw_parts(&statfs as *const _ as *const u8, core::mem::size_of::<crate::vfs::StatFs>())
+            };
+            if unsafe { user_access::copy_to_user(statfs_buf, slice) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            return 0;
+        }
+    }
+    if let Some(root) = vfs.statfs_mount(&path_str) {
+        if let Ok(statfs) = root.statfs() {
+            let slice = unsafe {
+                core::slice::from_raw_parts(&statfs as *const _ as *const u8, core::mem::size_of::<crate::vfs::StatFs>())
+            };
+            if unsafe { user_access::copy_to_user(statfs_buf, slice) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
             return 0;
@@ -721,8 +1082,21 @@ fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
             }
             errno::Errno::EIO as u64
         },
+        Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => {
+            let mut stat = Stat::default();
+            stat.st_mode = 0o020000 | 0o620; // character device, rw-rw----
+            if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            0
+        },
         Some(FileDescriptor::Socket(_, _)) => {
-            errno::Errno::ENOSYS as u64 // Sockets don't support full stat
+            let mut stat = Stat::default();
+            stat.st_mode = 0o140000 | 0o666; // socket, rw-rw-rw-
+            if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            0
         },
         None => errno::Errno::EBADF as u64,
     }
@@ -765,6 +1139,9 @@ fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
 
             *fd_offset = new_offset as usize;
             *fd_offset as u64
+        },
+        Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => {
+            errno::Errno::ESPIPE as u64
         },
         Some(FileDescriptor::Socket(_, _)) => {
             errno::Errno::ESPIPE as u64
@@ -811,8 +1188,23 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: u64, _offset: u64) 
 
     let mut mmap_addr = addr;
     if mmap_addr == 0 {
-        static NEXT_MMAP_ADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x4000_0000_0000);
-        mmap_addr = NEXT_MMAP_ADDR.fetch_add((len + 4095) & !4095, core::sync::atomic::Ordering::SeqCst);
+        // ASLR: pick a random mmap base in [MMAP_MIN, MMAP_MAX) page-aligned.
+        // Sequential fallback ensures forward progress if RDTSC is somehow predictable.
+        const MMAP_MIN: u64 = 0x4000_0000_0000;
+        const MMAP_MAX: u64 = 0x7F00_0000_0000;
+        static MMAP_NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(MMAP_MIN);
+        let lo: u32;
+        let hi: u32;
+        unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, preserves_flags)); }
+        let entropy = ((hi as u64) << 32) | (lo as u64);
+        let range = MMAP_MAX - MMAP_MIN;
+        // Mix entropy with sequential counter for spacing
+        let rand_offset = (entropy.wrapping_mul(len + 1)) & (range - 1);
+        mmap_addr = MMAP_MIN + (rand_offset & !0xFFF);
+        if mmap_addr < MMAP_MIN { mmap_addr = MMAP_MIN; }
+        if mmap_addr >= MMAP_MAX { mmap_addr = MMAP_MIN; }
+        // Advance sequential cursor past this allocation
+        MMAP_NEXT.store(mmap_addr.wrapping_add((len + 4095) & !4095), core::sync::atomic::Ordering::Relaxed);
     }
 
     let len_aligned = (len + 4095) & !4095;
@@ -883,18 +1275,24 @@ fn sys_munmap(addr: u64, len: u64) -> u64 {
 }
 
 fn sys_exit(status: u64) -> u64 {
-    let parent_pid = {
+    let (parent_pid, clear_tid) = {
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
             *process.exit_code.lock() = Some(status as i32);
             if status != 42 {
                 crate::println!("[PROCESS] Pid {} exited with status {}", process.id, status);
             }
-            process.parent_id
+            (process.parent_id, *process.clear_child_tid.lock())
         } else {
-            None
+            (None, 0)
         }
-    }; // CURRENT_PROCESS dropped here
+    };
+    
+    // Clear child tid and wake futex (for pthread_join)
+    if clear_tid != 0 {
+        unsafe { core::ptr::write_volatile(clear_tid as *mut u32, 0); }
+        let _ = sys_futex(clear_tid as *mut u32, 1, 1);
+    }
     
     // Send SIGCHLD to parent process
     if let Some(ppid) = parent_pid {
@@ -911,6 +1309,21 @@ fn sys_exit(status: u64) -> u64 {
         crate::task::scheduler::set_current_thread(thread);
     }
     crate::task::scheduler::schedule();
+}
+
+fn sys_set_tid_address(tidptr: *const u32) -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref proc) = *lock {
+        *proc.clear_child_tid.lock() = tidptr as u64;
+        proc.id
+    } else {
+        0
+    }
+}
+
+fn sys_exit_group(status: u64) -> u64 {
+    crate::println!("[PROCESS] Thread group exited with {}", status);
+    sys_exit(status)
 }
 
 fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
@@ -1008,10 +1421,10 @@ fn sys_sched_yield() -> u64 {
     use crate::task::scheduler;
     let switch = {
         let mut sched = scheduler::this_cpu_sched().lock();
-        sched.prepare_switch()
+        sched.prepare_switch_tls()
     };
-    if let Some((old_ptr, new_sp)) = switch {
-        unsafe { crate::task::thread::switch_context(old_ptr, new_sp); }
+    if let Some((old_ptr, new_sp, new_fs)) = switch {
+        crate::task::thread::switch_thread(old_ptr, new_sp, new_fs);
     }
     0
 }
@@ -1321,6 +1734,11 @@ fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
 }
 
 fn sys_mount(source: *const u8, target: *const u8, fstype: *const u8, _flags: u64, _data: *const u8) -> u64 {
+    let euid = get_current_euid();
+    if euid != 0 && !has_capability(CAP_SYS_ADMIN) {
+        audit_log("CAP_SYS_ADMIN", "mount DENIED");
+        return errno::Errno::EPERM as u64;
+    }
     let mut src_buf = [0u8; 256];
     let mut tgt_buf = [0u8; 256];
     let mut fs_buf = [0u8; 32];
@@ -1348,12 +1766,23 @@ fn sys_mount(source: *const u8, target: *const u8, fstype: *const u8, _flags: u6
     let fs: Option<alloc::sync::Arc<dyn crate::vfs::FileSystem>> = match fs_str {
         "tmpfs" => Some(alloc::sync::Arc::new(crate::vfs::ramfs::Tmpfs::new())),
         "devfs" => Some(alloc::sync::Arc::new(crate::vfs::devfs::DevFs::new())),
+        "ctlfs" => Some(alloc::sync::Arc::new(crate::vfs::ctlfs::CtlFs::new())),
         "ext2" => {
             // Try each block device for ext2
             let mut found = None;
             for dev in devices.iter() {
                 if let Ok(ext2fs) = crate::vfs::ext2::mount(dev.clone()) {
                     found = Some(ext2fs as alloc::sync::Arc<dyn crate::vfs::FileSystem>);
+                    break;
+                }
+            }
+            found
+        }
+        "skyfs" => {
+            let mut found = None;
+            for dev in devices.iter() {
+                if let Ok(skyfs) = crate::vfs::skyfs::SkyFSHandle::mount(dev.clone()) {
+                    found = Some(skyfs as alloc::sync::Arc<dyn crate::vfs::FileSystem>);
                     break;
                 }
             }
@@ -1385,8 +1814,12 @@ fn sys_fchmod(fd: u64, mode: u32) -> u64 {
     }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
+            if !check_file_owner(node) {
+                return errno::Errno::EACCES as u64;
+            }
             if node.chmod(mode).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
         },
+        Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => errno::Errno::ENOSYS as u64,
         Some(FileDescriptor::Socket(_, _)) => errno::Errno::ENOSYS as u64,
         None => errno::Errno::EBADF as u64,
     }
@@ -1404,14 +1837,23 @@ fn sys_fchown(fd: u64, uid: u32, gid: u32) -> u64 {
     }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
+            if !check_file_owner(node) {
+                return errno::Errno::EACCES as u64;
+            }
             if node.chown(uid, gid).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
         },
+        Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => errno::Errno::ENOSYS as u64,
         Some(FileDescriptor::Socket(_, _)) => errno::Errno::ENOSYS as u64,
         None => errno::Errno::EBADF as u64,
     }
 }
 
 fn sys_umount2(target: *const u8, _flags: u64) -> u64 {
+    let euid = get_current_euid();
+    if euid != 0 && !has_capability(CAP_SYS_ADMIN) {
+        audit_log("CAP_SYS_ADMIN", "umount DENIED");
+        return errno::Errno::EPERM as u64;
+    }
     let path_str = match unsafe { user_access::read_user_string(target, 256) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
@@ -1419,6 +1861,34 @@ fn sys_umount2(target: *const u8, _flags: u64) -> u64 {
     match VFS.lock().umount(&path_str) {
         Ok(_) => 0,
         Err(_) => errno::Errno::EINVAL as u64,
+    }
+}
+
+fn sys_mkfs(fstype: *const u8, device: u64) -> u64 {
+    if get_current_euid() != 0 && !has_capability(CAP_SYS_ADMIN) {
+        audit_log("CAP_SYS_ADMIN", "mkfs DENIED");
+        return errno::Errno::EPERM as u64;
+    }
+    let fs_type = match unsafe { user_access::read_user_string(fstype, 32) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let blk = crate::drivers::block::BLOCK_DEVICES.lock();
+    let dev = match blk.get(device as usize) {
+        Some(d) => d.clone(),
+        None => return errno::Errno::ENODEV as u64,
+    };
+    drop(blk);
+
+    match fs_type.as_str() {
+        "skyfs" => {
+            if crate::vfs::skyfs::SkyFSHandle::format(dev).is_ok() {
+                0
+            } else {
+                errno::Errno::EIO as u64
+            }
+        }
+        _ => errno::Errno::EINVAL as u64,
     }
 }
 
@@ -1434,6 +1904,9 @@ fn sys_symlink(target: *const u8, linkpath: *const u8) -> u64 {
     let vfs = crate::vfs::VFS.lock();
     let (parent_path, name) = split_parent(&linkpath_str);
     if let Some(parent) = vfs.resolve_path(&parent_path) {
+        if !check_node_permission(&parent, 2) {
+            return errno::Errno::EACCES as u64;
+        }
         if parent.symlink(&name, &target_str).is_ok() {
             0
         } else {
@@ -1502,6 +1975,7 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
             child_process.vmas = Mutex::new(parent_vmas.clone());
         }                    child_process.entry_point = parent.entry_point;
             *child_process.fd_table.lock() = parent.fd_table.lock().clone();
+            *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
         let child_arc = Arc::new(child_process);
         
         // Track child in parent and global table
@@ -1522,36 +1996,58 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
     errno::Errno::EPERM as u64 
 }
 
-fn sys_clone(_flags: u64, child_stack: u64, regs_ptr: *mut u64) -> u64 {
+fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: u64, child_tidptr: *mut u32, regs_ptr: *mut u64) -> u64 {
     use crate::task::process::{Process, CURRENT_PROCESS};
     use crate::memory::buddy::BuddyFrameAllocator;
 
+    const CLONE_SETTLS: u64 = 0x80000;
+    const CLONE_PARENT_SETTID: u64 = 0x00100000;
+    const CLONE_CHILD_SETTID: u64 = 0x02000000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x00200000;
+
     let parent_lock = CURRENT_PROCESS.lock();
     if let Some(ref parent) = *parent_lock {
-        let parent_id = parent.id;
+        let child_pid = Process::next_id();
 
-        // Clone address space with CoW (shared CLONE_VM requires Arc<AddressSpace> refactor)
-        let mut frame_allocator = BuddyFrameAllocator;
-        let child_as = match parent.address_space.clone_cow(&mut frame_allocator) {
+        let child_as = match parent.address_space.clone_cow(&mut BuddyFrameAllocator) {
             Some(as_space) => as_space,
             None => return errno::Errno::ENOMEM as u64,
         };
 
-        let child_pid = Process::next_id();
-        let mut child_process = Process::new(child_pid, Some(parent_id), child_as);
+        let mut child_process = Process::new(child_pid, Some(parent.id), child_as);
         {
             let parent_vmas = parent.vmas.lock();
             child_process.vmas = Mutex::new(parent_vmas.clone());
         }
         child_process.entry_point = parent.entry_point;
         *child_process.fd_table.lock() = parent.fd_table.lock().clone();
+        *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
+        *child_process.signal_handlers.lock() = parent.signal_handlers.lock().clone();
+
+        if flags & CLONE_CHILD_CLEARTID != 0 && !child_tidptr.is_null() {
+            *child_process.clear_child_tid.lock() = child_tidptr as u64;
+        }
+
+        if flags & CLONE_CHILD_SETTID != 0 && !child_tidptr.is_null() {
+            unsafe { core::ptr::write_unaligned(child_tidptr, child_pid as u32); }
+        }
+
+        if flags & CLONE_PARENT_SETTID != 0 && !parent_tid.is_null() {
+            unsafe { core::ptr::write_unaligned(parent_tid, child_pid as u32); }
+        }
+
         let child_arc = Arc::new(child_process);
 
         parent.children.lock().push(child_pid);
         crate::task::process::Process::register(child_arc.clone());
 
         if let Some(ref current_thread) = crate::task::scheduler::this_cpu_sched().lock().current_thread {
-            let child_thread = current_thread.clone_thread(child_arc, regs_ptr, child_stack);
+            let mut child_thread = current_thread.clone_thread(child_arc, regs_ptr, child_stack);
+
+            if flags & CLONE_SETTLS != 0 {
+                child_thread.fs_base = child_tls;
+            }
+
             crate::task::scheduler::spawn_thread(child_thread);
             return child_pid;
         }
@@ -1622,8 +2118,20 @@ fn sys_kill(pid: i64, sig: u32) -> u64 {
         _ => return errno::Errno::EINVAL as u64,
     };
 
+    let euid = get_current_euid();
     let table = crate::task::process::PROCESS_TABLE.lock();
     if let Some(proc) = table.get(&(pid as u64)) {
+        // Only root or same user (or CAP_KILL) can send signals
+        let target_uid = *proc.uid.lock();
+        if euid != 0 && euid != target_uid && !has_capability(CAP_KILL) {
+            audit_log("CAP_KILL", &alloc::format!("kill({},{}) DENIED", pid, sig));
+            return errno::Errno::EPERM as u64;
+        }
+        // LSM hook: process kill check
+        let subj = crate::security::current_subject();
+        if !crate::security::hook_file_perm(&subj, &alloc::format!("pid:{}", pid), "kill") {
+            return errno::Errno::EPERM as u64;
+        }
         proc.signals.lock().raise(sig_enum);
         return 0;
     }
@@ -2048,6 +2556,12 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
         Err(_) => return errno::Errno::EFAULT as u64,
     };
 
+    // LSM hook: exec permission check
+    let subj = crate::security::current_subject();
+    if !crate::security::hook_file_perm(&subj, &path, "exec") {
+        return errno::Errno::EACCES as u64;
+    }
+
     let mut argv = Vec::new();
     if !argv_ptr.is_null() {
         let mut i = 0;
@@ -2069,20 +2583,26 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
         }
     }
 
-    // 2. Resolve path and read ELF
+    // 2. Resolve path and check permissions
     let node = match crate::vfs::VFS.lock().resolve_path(&path) {
         Some(n) => n,
         None => return errno::Errno::ENOENT as u64,
     };
+
+    // Require execute permission on the binary
+    if !check_node_permission(&node, 1) {
+        return errno::Errno::EACCES as u64;
+    }
 
     let elf_data = match node.read(usize::MAX) {
         Ok(d) => d,
         Err(_) => return errno::Errno::EIO as u64,
     };
 
-    // 3. Copy fd table from old process
-    let old_fd_table = crate::task::process::CURRENT_PROCESS.lock()
-        .as_ref().map(|p| p.fd_table.lock().clone());
+    // 3. Copy fd table and flags from old process
+    let (old_fd_table, old_fd_flags) = crate::task::process::CURRENT_PROCESS.lock()
+        .as_ref().map(|p| (p.fd_table.lock().clone(), p.fd_flags.lock().clone()))
+        .unwrap_or_default();
 
     // 4. Load ELF into new AddressSpace
     use crate::memory::paging::AddressSpace;
@@ -2094,10 +2614,15 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
         Err(_) => return errno::Errno::ENOEXEC as u64,
     };
 
-    // Restore fd table
-    if let Some(fds) = old_fd_table {
-        *process.fd_table.lock() = fds;
+    // Detect emulation mode based on ELF header
+    crate::emulation::set_emulation(&process, &elf_data);
+    if *process.emulation.lock() == crate::task::process::EmulationMode::Linux {
+        crate::println!("[EMULATION] Running Linux binary: {}", path);
     }
+
+    // Restore fd table and flags
+    *process.fd_table.lock() = old_fd_table;
+    *process.fd_flags.lock() = old_fd_flags;
 
     let entry = process.entry_point;
     let process_arc = Arc::new(process);
@@ -2264,6 +2789,143 @@ fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
     0
 }
 
+fn sys_gui_get_key(handle: u64) -> u64 {
+    use crate::gui::COMPOSITOR;
+    let mut comp = COMPOSITOR.lock();
+    if handle as usize >= comp.windows.len() { return 0; }
+    let win = &mut comp.windows[handle as usize];
+    win.key_events.pop_front().map(|k| k as u64).unwrap_or(0)
+}
+
+fn sys_gui_get_mouse(handle: u64) -> u64 {
+    use crate::gui::COMPOSITOR;
+    use crate::drivers::mouse::MOUSE;
+    let comp = COMPOSITOR.lock();
+    if handle as usize >= comp.windows.len() { return 0; }
+    let win = &comp.windows[handle as usize];
+    let m = MOUSE.lock();
+    // Return mouse position relative to window content area
+    let rel_x = (m.x as i64 - win.x as i64 - 1).max(0) as u64;
+    let rel_y = (m.y as i64 - win.y as i64 - 21).max(0) as u64;
+    let buttons = m.buttons as u64;
+    let scroll = (m.scroll as i8 as i64) as u64;
+    // Pack: low16=x, bits16-31=y, bits32-39=buttons, bits40-47=scroll
+    (rel_x & 0xFFFF) | ((rel_y & 0xFFFF) << 16) | ((buttons & 0xFF) << 32) | ((scroll & 0xFF) << 40)
+}
+
+fn sys_gui_set_title(handle: u64, title_ptr: *const u8) -> u64 {
+    use crate::gui::COMPOSITOR;
+    let mut comp = COMPOSITOR.lock();
+    if handle as usize >= comp.windows.len() { return errno::Errno::EINVAL as u64; }
+    let win = &mut comp.windows[handle as usize];
+    if title_ptr.is_null() { return errno::Errno::EINVAL as u64; }
+    let mut len = 0;
+    unsafe {
+        while *title_ptr.add(len) != 0 && len < 64 { len += 1; }
+    }
+    let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, len) };
+    if let Ok(s) = core::str::from_utf8(title_slice) {
+        let boxed = alloc::string::String::from(s).into_boxed_str();
+        let leaked: &'static str = unsafe { core::mem::transmute(&*boxed) };
+        core::mem::forget(boxed);
+        win.title = leaked;
+    }
+    0
+}
+
+fn sys_gui_destroy_window(handle: u64) -> u64 {
+    use crate::gui::COMPOSITOR;
+    let mut comp = COMPOSITOR.lock();
+    if handle as usize >= comp.windows.len() { return errno::Errno::EINVAL as u64; }
+    comp.windows.remove(handle as usize);
+    0
+}
+
+fn sys_gui_resize_window(handle: u64, width: u64, height: u64) -> u64 {
+    use crate::gui::COMPOSITOR;
+    let mut comp = COMPOSITOR.lock();
+    if handle as usize >= comp.windows.len() { return errno::Errno::EINVAL as u64; }
+    let win = &mut comp.windows[handle as usize];
+    win.width = width as usize;
+    win.height = height as usize;
+    0
+}
+
+fn sys_gui_move_window(handle: u64, x: u64, y: u64) -> u64 {
+    use crate::gui::COMPOSITOR;
+    let mut comp = COMPOSITOR.lock();
+    if handle as usize >= comp.windows.len() { return errno::Errno::EINVAL as u64; }
+    let win = &mut comp.windows[handle as usize];
+    win.x = x as usize;
+    win.y = y as usize;
+    0
+}
+
+/// SYS_CLIPBOARD: arg1=mode (0=read, 1=write), arg2=buf ptr, arg3=buf len
+/// Read: copies clipboard to user buffer, returns bytes copied
+/// Write: copies user buffer to clipboard
+fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
+    use crate::gui::COMPOSITOR;
+    let mut comp = COMPOSITOR.lock();
+    match mode {
+        0 => {
+            // Read clipboard
+            let copy_len = (len as usize).min(comp.clipboard.len());
+            if copy_len == 0 { return 0; }
+            if buf.is_null() { return comp.clipboard.len() as u64; }
+            unsafe {
+                core::ptr::copy_nonoverlapping(comp.clipboard.as_ptr(), buf, copy_len);
+            }
+            copy_len as u64
+        }
+        1 => {
+            // Write clipboard
+            if buf.is_null() || len == 0 { comp.clipboard.clear(); return 0; }
+            let mut new_data = alloc::vec![0u8; len as usize];
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf, new_data.as_mut_ptr(), len as usize);
+            }
+            comp.clipboard = new_data;
+            len
+        }
+        2 => {
+            // Get clipboard length
+            comp.clipboard.len() as u64
+        }
+        _ => errno::Errno::EINVAL as u64,
+    }
+}
+
+/// SYS_NOTIFY: arg1=text ptr (null-terminated), arg2=duration_ms, arg3=kind (0=Info,1=Warning,2=Error)
+fn sys_notify(text_ptr: *const u8, duration_ms: u64, kind: u64) -> u64 {
+    use crate::gui::{COMPOSITOR, NotifKind};
+    if text_ptr.is_null() { return errno::Errno::EINVAL as u64; }
+    let mut len = 0;
+    unsafe {
+        while *text_ptr.add(len) != 0 && len < 256 { len += 1; }
+    }
+    let text_slice = unsafe { core::slice::from_raw_parts(text_ptr, len) };
+    let text = match core::str::from_utf8(text_slice) {
+        Ok(s) => alloc::string::String::from(s),
+        Err(_) => return errno::Errno::EINVAL as u64,
+    };
+    let notif_kind = match kind {
+        1 => NotifKind::Warning,
+        2 => NotifKind::Error,
+        _ => NotifKind::Info,
+    };
+    let ticks = (duration_ms / 10).max(10);
+    let mut comp = COMPOSITOR.lock();
+    comp.notifications.push(crate::gui::Notification {
+        text,
+        kind: notif_kind,
+        ticks_remaining: ticks,
+        x: 0,
+        y: 0,
+    });
+    0
+}
+
 fn sys_getcwd(buf: *mut u8, size: usize) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     if let Some(ref process) = *process_lock {
@@ -2289,29 +2951,28 @@ fn sys_chdir(path_ptr: *const u8) -> u64 {
     let path_str = core::str::from_utf8(path_slice).unwrap_or("");
 
     if let Some(node) = VFS.lock().resolve_path(path_str) {
-        if node.is_dir() {
-            let process_lock = CURRENT_PROCESS.lock();
-            if let Some(ref process) = *process_lock {
-                let mut new_cwd = String::from(path_str);
-                if !new_cwd.starts_with('/') {
-                    let cur_cwd = process.cwd.lock();
-                    if *cur_cwd == "/" {
-                        new_cwd = alloc::format!("/{}", new_cwd);
-                    } else {
-                        new_cwd = alloc::format!("{}/{}", cur_cwd, new_cwd);
-                    }
-                }
-                
-                // Simplified normalization: remove trailing slash
-                if new_cwd.len() > 1 && new_cwd.ends_with('/') {
-                    new_cwd.pop();
-                }
-                
-                *process.cwd.lock() = new_cwd;
-                return 0;
-            }
-        } else {
+        if !node.is_dir() {
             return errno::Errno::ENOTDIR as u64;
+        }
+        if !check_node_permission(&node, 1) {
+            return errno::Errno::EACCES as u64;
+        }
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let mut new_cwd = String::from(path_str);
+            if !new_cwd.starts_with('/') {
+                let cur_cwd = process.cwd.lock();
+                if *cur_cwd == "/" {
+                    new_cwd = alloc::format!("/{}", new_cwd);
+                } else {
+                    new_cwd = alloc::format!("{}/{}", cur_cwd, new_cwd);
+                }
+            }
+            if new_cwd.len() > 1 && new_cwd.ends_with('/') {
+                new_cwd.pop();
+            }
+            *process.cwd.lock() = new_cwd;
+            return 0;
         }
     }
     errno::Errno::ENOENT as u64
@@ -2332,7 +2993,12 @@ fn sys_mkdir(path_ptr: *const u8, _mode: u32) -> u64 {
         (&path_str[..last_slash], &path_str[last_slash+1..])
     };
 
-    if let Some(parent_node) = VFS.lock().resolve_path(parent_path) {
+    let vfs = VFS.lock();
+    if let Some(parent_node) = vfs.resolve_path(parent_path) {
+        // Need write+execute on parent directory to create entries
+        if !check_node_permission(&parent_node, 3) {
+            return errno::Errno::EACCES as u64;
+        }
         if parent_node.mkdir(name).is_ok() {
             return 0;
         }
@@ -2355,7 +3021,12 @@ fn sys_unlink(path_ptr: *const u8) -> u64 {
         (&path_str[..last_slash], &path_str[last_slash+1..])
     };
 
-    if let Some(parent_node) = VFS.lock().resolve_path(parent_path) {
+    let vfs = VFS.lock();
+    if let Some(parent_node) = vfs.resolve_path(parent_path) {
+        // Need write+execute on parent directory to remove entries
+        if !check_node_permission(&parent_node, 3) {
+            return errno::Errno::EACCES as u64;
+        }
         if parent_node.unlink(name).is_ok() {
             return 0;
         }
@@ -2381,6 +3052,17 @@ fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
         None => return errno::Errno::ENOENT as u64,
     };
 
+    // Need w+x on source parent directory to unlink the original
+    let src_last_slash = old_path.rfind('/').unwrap_or(0);
+    let src_parent_path = if src_last_slash == 0 && !old_path.starts_with('/') { "." }
+        else if src_last_slash == 0 { "/" }
+        else { &old_path[..src_last_slash] };
+    if let Some(src_parent) = vfs.resolve_path(src_parent_path) {
+        if !check_node_permission(&src_parent, 3) {
+            return errno::Errno::EACCES as u64;
+        }
+    }
+
     let data = match source_node.read(usize::MAX) {
         Ok(d) => d,
         Err(_) => return errno::Errno::EIO as u64,
@@ -2400,6 +3082,11 @@ fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
         Some(n) => n,
         None => return errno::Errno::ENOENT as u64,
     };
+
+    // Need w+x on destination parent to create the new entry
+    if !check_node_permission(&parent_node, 3) {
+        return errno::Errno::EACCES as u64;
+    }
 
     // Create new file
     if parent_node.create(name).is_err() {
@@ -2614,6 +3301,8 @@ fn sys_select(nfds: u64, readfds: *mut u64, writefds: *mut u64, exceptfds: *mut 
                 Some(ref desc) => match desc {
                     FileDescriptor::File { node, .. } => node.stat().map(|s| s.st_size > 0).unwrap_or(false),
                     FileDescriptor::Socket(_, _) => true,
+                    FileDescriptor::PtyMaster { pair, .. } => !pair.lock().master.buf.is_empty(),
+                    FileDescriptor::PtySlave { pair, .. } => !pair.lock().slave.buf.is_empty(),
                 },
                 None => false,
             };
@@ -2665,6 +3354,152 @@ fn sys_select(nfds: u64, readfds: *mut u64, writefds: *mut u64, exceptfds: *mut 
     0
 }
 
+const POLLIN: i16 = 0x001;
+const POLLOUT: i16 = 0x004;
+const POLLNVAL: i16 = 0x020;
+
+fn sys_poll(fds: *const u8, nfds: usize, timeout_ms: i32) -> u64 {
+    if nfds > 256 { return errno::Errno::ENOMEM as u64; }
+    if fds.is_null() { return errno::Errno::EFAULT as u64; }
+
+    let process = match *CURRENT_PROCESS.lock() {
+        Some(ref p) => p.clone(),
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    // Copy pollfd array from userspace
+    let mut poll_fds: alloc::vec::Vec<(i32, i16, i16)> = alloc::vec::Vec::with_capacity(nfds);
+    for i in 0..nfds {
+        let mut buf = [0u8; 8];
+        unsafe {
+            if user_access::copy_from_user(&mut buf, fds.add(i * 8)).is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+        }
+        let fd = i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let events = i16::from_ne_bytes([buf[4], buf[5]]);
+        poll_fds.push((fd, events, 0i16));
+    }
+
+    let deadline = if timeout_ms > 0 {
+        let now = crate::interrupts::get_ticks() * 10;
+        Some(now + timeout_ms as u64 / 10)
+    } else {
+        None
+    };
+
+    let mut poll_count = 0;
+    loop {
+        poll_count += 1;
+        if poll_count > 1000 { break; }
+
+        let fd_table = process.fd_table.lock();
+        let mut ready = 0usize;
+        for (_i, (fd, events, revents)) in poll_fds.iter_mut().enumerate() {
+            if *fd < 0 { continue; }
+            *revents = 0;
+            let desc = if (*fd as usize) < fd_table.len() {
+                fd_table[*fd as usize].as_ref()
+            } else {
+                None
+            };
+            match desc {
+                Some(FileDescriptor::File { node, .. }) => {
+                    if *events & POLLIN != 0 && node.stat().map(|s| s.st_size > 0).unwrap_or(false) {
+                        *revents |= POLLIN;
+                    }
+                    if *events & POLLOUT != 0 { *revents |= POLLOUT; }
+                }
+                Some(FileDescriptor::Socket(_, _)) => {
+                    if *events & POLLIN != 0 { *revents |= POLLIN; }
+                    if *events & POLLOUT != 0 { *revents |= POLLOUT; }
+                }
+                Some(FileDescriptor::PtyMaster { pair, .. }) => {
+                    let buf = &pair.lock().master.buf;
+                    if *events & POLLIN != 0 && !buf.is_empty() { *revents |= POLLIN; }
+                    if *events & POLLOUT != 0 { *revents |= POLLOUT; }
+                }
+                Some(FileDescriptor::PtySlave { pair, .. }) => {
+                    let buf = &pair.lock().slave.buf;
+                    if *events & POLLIN != 0 && !buf.is_empty() { *revents |= POLLIN; }
+                    if *events & POLLOUT != 0 { *revents |= POLLOUT; }
+                }
+                None => { *revents |= POLLNVAL; }
+            }
+            if *revents != 0 { ready += 1; }
+        }
+        drop(fd_table);
+
+        if ready > 0 {
+            for (i, (_fd, _events, revents)) in poll_fds.iter().enumerate() {
+                let r = revents.to_ne_bytes();
+                unsafe { let _ = user_access::copy_to_user(fds.add(i * 8 + 4) as *mut u8, &r); }
+            }
+            return ready as u64;
+        }
+
+        if let Some(dl) = deadline {
+            let ticks = crate::interrupts::get_ticks() * 10;
+            if ticks >= dl { break; }
+        } else if timeout_ms == 0 {
+            break;
+        }
+        crate::task::scheduler::try_schedule();
+    }
+
+    // Timeout or nothing ready: write zero revents back
+    for i in 0..nfds {
+        let zero: [u8; 2] = [0, 0];
+        unsafe { let _ = user_access::copy_to_user(fds.add(i * 8 + 4) as *mut u8, &zero); }
+    }
+    0
+}
+
+fn sys_sync() -> u64 {
+    let devices = crate::drivers::block::BLOCK_DEVICES.lock();
+    for dev in devices.iter() {
+        dev.lock().sync();
+    }
+    0
+}
+
+fn sys_reboot(magic: u64, cmd: u64) -> u64 {
+    if magic != 0xDEAD_BEEF {
+        return errno::Errno::EINVAL as u64;
+    }
+    // Only root or CAP_SYS_BOOT can reboot
+    let euid = get_current_euid();
+    if euid != 0 && !has_capability(CAP_SYS_BOOT) {
+        audit_log("CAP_SYS_BOOT", "DENIED");
+        return errno::Errno::EPERM as u64;
+    }
+    audit_log("REBOOT", if cmd == 0 { "poweroff" } else { "reboot" });
+    match cmd {
+        0 => { // Power off
+            crate::println!("[SYSCALL] system poweroff");
+            // Try ACPI S5 first, then fall back to QEMU-specific
+            if *crate::acpi::PM1A_CNT_PORT.get().unwrap_or(&0) != 0 {
+                crate::acpi::acpi_shutdown();
+            }
+            // QEMU-specific: isa-debug-exit at port 0xf4, exit code 0x10
+            let mut port = x86_64::instructions::port::Port::<u32>::new(0xf4);
+            unsafe { port.write(0x10); }
+            let mut port2 = x86_64::instructions::port::Port::<u16>::new(0x604);
+            unsafe { port2.write(0x2000); }
+            x86_64::instructions::interrupts::disable();
+            loop { x86_64::instructions::hlt(); }
+        }
+        1 => { // Reboot
+            crate::println!("[SYSCALL] system reboot");
+            // Try ACPI reset first, fall back to legacy
+            crate::acpi::acpi_reboot();
+            x86_64::instructions::interrupts::disable();
+            loop { x86_64::instructions::hlt(); }
+        }
+        _ => errno::Errno::EINVAL as u64,
+    }
+}
+
 fn sys_getuid() -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock { *p.uid.lock() as u64 } else { 0 }
@@ -2677,12 +3512,38 @@ fn sys_getgid() -> u64 {
 
 fn sys_setuid(uid: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock { *p.uid.lock() = uid as u32; *p.euid.lock() = uid as u32; 0 } else { errno::Errno::ESRCH as u64 }
+    if let Some(ref p) = *lock {
+        let euid = *p.euid.lock();
+        if euid == 0 || has_capability(CAP_SETUID) {
+            *p.uid.lock() = uid as u32;
+            *p.euid.lock() = uid as u32;
+            0
+        } else if euid == uid as u32 {
+            *p.uid.lock() = uid as u32;
+            0
+        } else {
+            audit_log("CAP_SETUID", &alloc::format!("setuid({}) DENIED", uid));
+            errno::Errno::EPERM as u64
+        }
+    } else { errno::Errno::ESRCH as u64 }
 }
 
 fn sys_setgid(gid: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock { *p.gid.lock() = gid as u32; *p.egid.lock() = gid as u32; 0 } else { errno::Errno::ESRCH as u64 }
+    if let Some(ref p) = *lock {
+        let egid = *p.egid.lock();
+        if egid == 0 || has_capability(CAP_SETGID) {
+            *p.gid.lock() = gid as u32;
+            *p.egid.lock() = gid as u32;
+            0
+        } else if egid == gid as u32 {
+            *p.gid.lock() = gid as u32;
+            0
+        } else {
+            audit_log("CAP_SETGID", &alloc::format!("setgid({}) DENIED", gid));
+            errno::Errno::EPERM as u64
+        }
+    } else { errno::Errno::ESRCH as u64 }
 }
 
 fn sys_geteuid() -> u64 {
@@ -2735,5 +3596,179 @@ fn sys_korlang(id: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u64) -> u64 {
              runtime::_kor_panic(msg.as_ptr(), msg.len());
         },
         _ => 0,
+    }
+}
+
+fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
+    const DRM_IOCTL_GET_DISPLAY_INFO: u64 = 0x0100;
+    const DRM_IOCTL_CREATE_DUMB: u64 = 0x0101;
+    const DRM_IOCTL_DESTROY_DUMB: u64 = 0x0103;
+    const DRM_IOCTL_FLIP: u64 = 0x0104;
+    const DRM_IOCTL_SET_MODE: u64 = 0x0105;
+    const DRM_IOCTL_MAP_DUMB: u64 = 0x0106;
+    const DRM_IOCTL_PAGE_FLIP: u64 = 0x0107;
+    const DRM_IOCTL_GEM_CREATE: u64 = 0x0108;
+    const DRM_IOCTL_GEM_MMAP: u64 = 0x0109;
+
+    match request {
+        DRM_IOCTL_GET_DISPLAY_INFO => {
+            #[repr(C)]
+            struct DisplayInfo { width: u32, height: u32 }
+            let info = DisplayInfo {
+                width: crate::drivers::gpu::width(),
+                height: crate::drivers::gpu::height(),
+            };
+            let bytes = unsafe {
+                core::slice::from_raw_parts(&info as *const DisplayInfo as *const u8, core::mem::size_of::<DisplayInfo>())
+            };
+            if unsafe { user_access::copy_to_user(arg, bytes).is_err() } {
+                return errno::Errno::EFAULT as u64;
+            }
+            0
+        }
+        DRM_IOCTL_CREATE_DUMB => {
+            use alloc::boxed::Box;
+            use alloc::vec;
+            let w = crate::drivers::gpu::width();
+            let h = crate::drivers::gpu::height();
+            let fb: &'static mut [u32] = Box::leak(vec![0u32; (w * h) as usize].into_boxed_slice());
+            let paddr = crate::memory::virt_to_phys(VirtAddr::from_ptr(fb.as_ptr())).unwrap().as_u64();
+            #[repr(C)]
+            struct DumbInfo { id: u64, size: u64, addr: u64 }
+            let di = DumbInfo { id: 1, size: (w * h * 4) as u64, addr: paddr };
+            let bytes = unsafe {
+                core::slice::from_raw_parts(&di as *const DumbInfo as *const u8, core::mem::size_of::<DumbInfo>())
+            };
+            if unsafe { user_access::copy_to_user(arg, bytes).is_err() } {
+                return errno::Errno::EFAULT as u64;
+            }
+            0
+        }
+        DRM_IOCTL_DESTROY_DUMB => {
+            0 // Memory will be freed on process exit; for now, no-op
+        }
+        DRM_IOCTL_FLIP => {
+            crate::drivers::gpu::virtio_gpu::flip();
+            0
+        }
+        DRM_IOCTL_SET_MODE => {
+            // arg1=width, arg2=height (passed as direct args from userspace)
+            let new_w = _fd as usize;
+            let new_h = request as usize;
+            if new_w < 640 || new_w > 3840 || new_h < 480 || new_h > 2160 {
+                return errno::Errno::EINVAL as u64;
+            }
+            crate::drivers::gpu::set_mode(new_w as u32, new_h as u32);
+            crate::drivers::graphics::WIDTH.store(new_w, core::sync::atomic::Ordering::SeqCst);
+            crate::drivers::graphics::HEIGHT.store(new_h, core::sync::atomic::Ordering::SeqCst);
+            crate::drivers::graphics::STRIDE.store(new_w, core::sync::atomic::Ordering::SeqCst);
+            crate::gui::COMPOSITOR.lock().set_resolution(new_w, new_h);
+            crate::println!("DRM: set_mode {}x{}", new_w, new_h);
+            0
+        }
+        DRM_IOCTL_MAP_DUMB => {
+            // Return the virtual address of the framebuffer
+            let fb_ptr = crate::drivers::graphics::FRAMEBUFFER.load(core::sync::atomic::Ordering::Relaxed);
+            fb_ptr as u64
+        }
+        DRM_IOCTL_PAGE_FLIP => {
+            // Flip to a specific buffer (id in arg1)
+            crate::drivers::gpu::virtio_gpu::flip();
+            0
+        }
+        DRM_IOCTL_GEM_CREATE => {
+            // Allocate a GEM object of `_fd` bytes size
+            use alloc::boxed::Box;
+            use alloc::vec;
+            let size = _fd as usize;
+            if size == 0 || size > 64 * 1024 * 1024 {
+                return errno::Errno::EINVAL as u64;
+            }
+            let buf: &'static mut [u8] = Box::leak(vec![0u8; size].into_boxed_slice());
+            buf.as_ptr() as u64
+        }
+        DRM_IOCTL_GEM_MMAP => {
+            // id is the address returned by GEM_CREATE (the kernel buffer address)
+            // Return it as the mmap address
+            _fd
+        }
+        // 0x010A = SET_ACCENT_COLOR: arg = packed ARGB u32
+        0x010A => {
+            let color = arg as u32 | 0xFF000000;
+            unsafe { crate::gui::ACCENT_COLOR = color; }
+            crate::println!("DRM: accent color -> 0x{:08X}", color);
+            0
+        }
+        // 0x010B = SET_WALLPAPER: arg = path string pointer
+        0x010B => {
+            let path = match unsafe { user_access::read_user_string(arg, 256) } {
+                Ok(s) => s,
+                Err(_) => return errno::Errno::EFAULT as u64,
+            };
+            let mut comp = crate::gui::COMPOSITOR.lock();
+            comp.set_wallpaper(path);
+            crate::println!("DRM: wallpaper path set");
+            0
+        }
+        _ => errno::Errno::ENOSYS as u64,
+    }
+}
+
+fn sys_hash(hash_type: u64, password_ptr: *const u8, password_len: u64, salt_out_ptr: *mut u8, _iterations: u64) -> u64 {
+    const HASH_SHA256_PBKDF2: u64 = 0;
+
+    match hash_type {
+        HASH_SHA256_PBKDF2 => {
+            let pw_len = password_len as usize;
+            if pw_len > 256 { return errno::Errno::EINVAL as u64; }
+            let mut password = alloc::vec![0u8; pw_len];
+            if pw_len > 0 {
+                if unsafe { user_access::copy_from_user(&mut password, password_ptr).is_err() } {
+                    return errno::Errno::EFAULT as u64;
+                }
+            }
+
+            // salt_out_ptr points to a 48-byte buffer: [salt 16 | dk 32]
+            let mut buf = [0u8; 48];
+            if unsafe { user_access::copy_from_user(&mut buf[..16], salt_out_ptr).is_err() } {
+                return errno::Errno::EFAULT as u64;
+            }
+
+            let iterations = if _iterations > 0 { _iterations as u32 } else { 10000 };
+
+            let mut dk = [0u8; 32];
+            crate::crypto::pbkdf2(&password, &buf[..16], iterations, 32, &mut dk);
+
+            // Write back: salt (16) + dk (32) = 48 bytes
+            buf[16..48].copy_from_slice(&dk);
+            if unsafe { user_access::copy_to_user(salt_out_ptr, &buf).is_err() } {
+                return errno::Errno::EFAULT as u64;
+            }
+            iterations as u64
+        }
+        _ => errno::Errno::ENOSYS as u64,
+    }
+}
+
+/// SYS_OPENPTY — create master/slave PTY pair, returns packed (master_fd | slave_fd << 16)
+fn sys_openpty() -> u64 {
+    let (idx, pair) = match crate::pty::alloc_pty() {
+        Some(p) => p,
+        None => return errno::Errno::ENFILE as u64,
+    };
+    let proc_lock = CURRENT_PROCESS.lock();
+    if let Some(ref proc) = *proc_lock {
+        let mut ft = proc.fd_table.lock();
+        let m = ft.iter().position(|f| f.is_none()).unwrap_or(ft.len());
+        if m >= 256 { return errno::Errno::ENFILE as u64; }
+        if m == ft.len() { ft.push(None); }
+        ft[m] = Some(FileDescriptor::PtyMaster { _idx: idx, pair: pair.clone() });
+        let s = ft.iter().position(|f| f.is_none()).unwrap_or(ft.len());
+        if s >= 256 { ft[m] = None; return errno::Errno::ENFILE as u64; }
+        if s == ft.len() { ft.push(None); }
+        ft[s] = Some(FileDescriptor::PtySlave { _idx: idx, pair });
+        (m as u64) | ((s as u64) << 16)
+    } else {
+        errno::Errno::ENOTTY as u64
     }
 }

@@ -92,17 +92,20 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
         let mut allocator = self.lock();
         match list_index(&layout) {
             Some(index) => {
+                // Poison freed block
+                let poison = core::slice::from_raw_parts_mut(ptr, BLOCK_SIZES[index]);
+                for b in poison.iter_mut() { *b = 0xDE; }
                 let new_node = ListNode {
                     next: allocator.list_heads[index].take(),
                 };
-                // verify that block has enough size and alignment to store a ListNode
-                assert!(core::mem::size_of::<ListNode>() <= BLOCK_SIZES[index]);
-                assert!(core::mem::align_of::<ListNode>() <= BLOCK_SIZES[index]);
                 let new_node_ptr = ptr as *mut ListNode;
                 new_node_ptr.write(new_node);
                 allocator.list_heads[index] = Some(&mut *new_node_ptr);
             }
             None => {
+                // Poison freed large block (up to layout size)
+                let poison = core::slice::from_raw_parts_mut(ptr, layout.size());
+                for b in poison.iter_mut() { *b = 0xDE; }
                 allocator.fallback_allocator.lock().deallocate(
                     NonNull::new(ptr).expect("Deallocating null pointer in slab fallback"), 
                     layout

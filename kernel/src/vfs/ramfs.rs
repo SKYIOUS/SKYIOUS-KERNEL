@@ -99,6 +99,15 @@ impl VfsNode for TmpNode {
         Ok(result)
     }
 
+    fn statfs(&self) -> Result<crate::vfs::StatFs, ()> {
+        let total_blocks = 64 * 1024 * 1024 / 4096;
+        Ok(crate::vfs::StatFs {
+            f_type: 0x01021994, f_bsize: 4096,
+            f_blocks: total_blocks, f_bfree: total_blocks - 1, f_bavail: total_blocks - 1,
+            f_files: 4096, f_ffree: 4096 - 4,
+        })
+    }
+
     fn stat(&self) -> Result<Stat, ()> {
         let size = if self.is_symlink {
             self.link_target.as_ref().map(|s| s.len() as i64).unwrap_or(0)
