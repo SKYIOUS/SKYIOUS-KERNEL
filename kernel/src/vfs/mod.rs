@@ -12,6 +12,7 @@ pub mod tarfs;
 pub mod devfs;
 pub mod ctlfs;
 pub mod skyfs;
+pub mod page_cache;
 
 pub trait FileSystem: Send + Sync {
     fn root(&self) -> Result<Arc<dyn VfsNode>, ()>;

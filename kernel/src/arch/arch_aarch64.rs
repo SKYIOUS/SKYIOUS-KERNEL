@@ -23,6 +23,10 @@ impl Arch for AArch64Arch {
         crate::serial_write("[ARCH] aarch64 syscalls init (stub)\n");
     }
 
+    unsafe fn init_cpu() {
+        crate::serial_write("[ARCH] aarch64 cpu init (stub)\n");
+    }
+
     fn read_sp() -> u64 {
         let sp: u64;
         unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nostack, preserves_flags)); }
@@ -106,15 +110,34 @@ unsafe fn init_vector_table() {
 /// Initialize the ARM generic timer as the system timer.
 unsafe fn init_timer() {
     // Set timer frequency (CNTFRQ_EL0) - typically read from hardware
+    let freq: u64;
+    core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq);
+
     // Enable timer interrupt (CNTP_CTL_EL0.ENABLE = 1)
-    crate::serial_write("[ARCH] aarch64 timer init (stub)\n");
+    // CNTP_TVAL_EL0 = freq / 100 (for 100Hz)
+    let tval = freq / 100;
+    core::arch::asm!("msr cntp_tval_el0, {}", in(reg) tval);
+    core::arch::asm!("msr cntp_ctl_el0, {}", in(reg) 1u64);
+
+    crate::serial_write("[ARCH] aarch64 timer initialized (100Hz)\n");
 }
 
 /// Initialize the Generic Interrupt Controller (GICv2/GICv3).
 unsafe fn init_gic() {
-    // GICv2: MMIO at 0x0800_0000 (GICD) and 0x0801_0000 (GICC) for QEMU virt
-    // Configure CPU interface, enable distributor
-    crate::serial_write("[ARCH] aarch64 GIC init (stub)\n");
+    // QEMU virt GICv2 base addresses
+    let gicd_base: *mut u32 = 0x0800_0000 as *mut u32;
+    let gicc_base: *mut u32 = 0x0801_0000 as *mut u32;
+
+    // 1. Enable Distributor
+    gicd_base.write_volatile(1); // GICD_CTLR
+
+    // 2. Enable CPU Interface
+    gicc_base.write_volatile(1); // GICC_CTLR
+
+    // 3. Set Priority Mask
+    gicc_base.add(1).write_volatile(0xFF); // GICC_PMR
+
+    crate::serial_write("[ARCH] aarch64 GICv2 initialized\n");
 }
 
 /// Early boot entry point for aarch64.

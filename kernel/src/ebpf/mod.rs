@@ -2,6 +2,7 @@ pub mod vm;
 pub mod verifier;
 pub mod maps;
 pub mod helpers;
+pub mod jit;
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;

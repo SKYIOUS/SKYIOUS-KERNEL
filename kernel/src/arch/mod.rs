@@ -14,6 +14,9 @@ pub trait Arch: Send + Sync {
     /// Initialize the syscall entry mechanism.
     unsafe fn init_syscalls();
 
+    /// Initialize features for the current CPU (SSE, SMEP, etc.).
+    unsafe fn init_cpu();
+
     /// Read the current stack pointer.
     fn read_sp() -> u64;
 

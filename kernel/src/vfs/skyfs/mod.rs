@@ -484,6 +484,57 @@ impl SkyfsNode {
         let inode = read_inode_inner(&fs, ino)?;
         Ok(SkyfsNode { fs, ino, inode: Mutex::new(inode) })
     }
+
+    fn read_blocks_direct(&self, inode: &SkyfsInode, start_block_idx: u64, buf: &mut [u8]) -> Result<(), ()> {
+        let fs_lock = self.fs.lock();
+        let mut dev = fs_lock.device.lock();
+
+        let blocks_to_read = (buf.len() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let mut blocks_read = 0;
+
+        if inode.extent_count == BTREE_MODE {
+            let root_block = u64::from_le_bytes(inode.data[..8].try_into().unwrap());
+            let mut logical_idx = start_block_idx;
+
+            while blocks_read < blocks_to_read {
+                if let Some(extent) = btree::lookup_extent(&self.fs, root_block, logical_idx) {
+                    for b in 0..extent.block_count {
+                        if blocks_read >= blocks_to_read { break; }
+                        let dst = &mut buf[blocks_read * BLOCK_SIZE..(blocks_read + 1) * BLOCK_SIZE];
+                        SkyFS::read_block(&mut *dev, extent.start_block + b, dst)?;
+                        blocks_read += 1;
+                    }
+                    logical_idx += extent.block_count;
+                } else {
+                    return Err(());
+                }
+            }
+        } else {
+            let extents = unsafe {
+                core::slice::from_raw_parts(inode.data.as_ptr() as *const Extent, inode.extent_count as usize)
+            };
+
+            let mut current_logical = 0;
+            for ext in extents {
+                for b in 0..ext.block_count {
+                    if current_logical >= start_block_idx && blocks_read < blocks_to_read {
+                        let dst = &mut buf[blocks_read * BLOCK_SIZE..(blocks_read + 1) * BLOCK_SIZE];
+                        SkyFS::read_block(&mut *dev, ext.start_block + b, dst)?;
+                        blocks_read += 1;
+                    }
+                    current_logical += 1;
+                    if blocks_read >= blocks_to_read { break; }
+                }
+                if blocks_read >= blocks_to_read { break; }
+            }
+        }
+
+        if blocks_read < blocks_to_read {
+            return Err(());
+        }
+
+        Ok(())
+    }
 }
 
 impl VfsNode for SkyfsNode {
@@ -496,6 +547,7 @@ impl VfsNode for SkyfsNode {
     }
 
     fn read(&self, max_len: usize) -> Result<Vec<u8>, ()> {
+        use crate::vfs::page_cache::{GLOBAL_PAGE_CACHE, PAGE_SIZE};
         let inode = self.inode.lock();
         if (inode.mode & 0o170000) != 0o100000 && (inode.mode & 0o170000) != 0o040000 {
             return Err(());
@@ -507,45 +559,30 @@ impl VfsNode for SkyfsNode {
             data.extend_from_slice(&inode.data[..len]);
             return Ok(data);
         }
-        if inode.extent_count == BTREE_MODE {
-            let root_block = u64::from_le_bytes(inode.data[..8].try_into().unwrap());
-            let mut logical_idx = 0u64;
-            let fs_lock = self.fs.lock();
-            let mut dev = fs_lock.device.lock();
-            let mut data = Vec::with_capacity(len);
-            while data.len() < len {
-                if let Some(extent) = btree::lookup_extent(&self.fs, root_block, logical_idx) {
-                    for b in 0..extent.block_count {
-                        if data.len() >= len { break; }
-                        let mut block_buf = [0u8; BLOCK_SIZE];
-                        SkyFS::read_block(&mut *dev, extent.start_block + b, &mut block_buf)?;
-                        let remaining = len - data.len();
-                        let to_copy = BLOCK_SIZE.min(remaining);
-                        data.extend_from_slice(&block_buf[..to_copy]);
-                    }
-                    logical_idx += extent.block_count;
-                } else { break; }
-            }
-            return Ok(data);
-        }
-        let extents = unsafe {
-            core::slice::from_raw_parts(inode.data.as_ptr() as *const Extent, inode.extent_count as usize)
-        };
-        let mut remaining = len;
-        let fs_lock = self.fs.lock();
-        let mut dev = fs_lock.device.lock();
+
         let mut data = Vec::with_capacity(len);
-        for ext in extents {
-            if remaining == 0 { break; }
-            for b in 0..ext.block_count {
-                if remaining == 0 { break; }
-                let mut block_buf = [0u8; BLOCK_SIZE];
-                SkyFS::read_block(&mut *dev, ext.start_block + b, &mut block_buf)?;
-                let to_copy = BLOCK_SIZE.min(remaining);
-                data.extend_from_slice(&block_buf[..to_copy]);
-                remaining -= to_copy;
-            }
+        let mut current_offset = 0;
+
+        while current_offset < len {
+            let page_idx = (current_offset / PAGE_SIZE) as u64;
+            let page_offset = current_offset % PAGE_SIZE;
+            let remaining_in_page = PAGE_SIZE - page_offset;
+            let to_copy = core::cmp::min(len - current_offset, remaining_in_page);
+
+            let page_arc = if let Some(p) = GLOBAL_PAGE_CACHE.get_page(self.ino, page_idx) {
+                p
+            } else {
+                // Cache miss: read from disk and insert
+                let mut buf = [0u8; PAGE_SIZE];
+                self.read_blocks_direct(&inode, page_idx * (PAGE_SIZE as u64 / BLOCK_SIZE as u64), &mut buf)?;
+                GLOBAL_PAGE_CACHE.insert_page(self.ino, page_idx, buf)
+            };
+
+            let page = page_arc.lock();
+            data.extend_from_slice(&page.data[page_offset..page_offset + to_copy]);
+            current_offset += to_copy;
         }
+
         Ok(data)
     }
 

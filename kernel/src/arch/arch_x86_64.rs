@@ -19,6 +19,50 @@ impl Arch for X86_64Arch {
         crate::syscalls::init();
     }
 
+    unsafe fn init_cpu() {
+        use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
+        use core::sync::atomic::Ordering;
+
+        // 1. Enable SSE in CR0
+        Cr0::update(|flags| {
+            flags.remove(Cr0Flags::EMULATE_COPROCESSOR);
+            flags.insert(Cr0Flags::MONITOR_COPROCESSOR);
+            flags.insert(Cr0Flags::NUMERIC_ERROR);
+        });
+
+        // 2. Query leaf 7 for FSGSBASE, SMEP, UMIP
+        let mut ebx7: u32 = 0;
+        let mut ecx7: u32 = 0;
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 7",
+            "xor ecx, ecx",
+            "cpuid",
+            "mov {0:e}, ebx",
+            "mov {1:e}, ecx",
+            "pop rbx",
+            out(reg) ebx7, out(reg) ecx7,
+            out("eax") _, out("edx") _,
+            options(nostack, preserves_flags));
+
+        Cr4::update(|flags| {
+            flags.insert(Cr4Flags::OSFXSR);
+            flags.insert(Cr4Flags::OSXMMEXCPT_ENABLE);
+            if ebx7 & 1 != 0 {
+                flags.insert(Cr4Flags::FSGSBASE);
+                crate::task::thread::HAS_FSGSBASE.store(true, Ordering::SeqCst);
+            }
+            // SMEP (bit 20): EBX bit 7
+            if ebx7 & (1 << 7) != 0 {
+                flags.insert(Cr4Flags::from_bits_truncate(0x100000));
+            }
+            // UMIP (bit 11): ECX bit 2
+            if ecx7 & (1 << 2) != 0 {
+                flags.insert(Cr4Flags::from_bits_truncate(0x800));
+            }
+        });
+    }
+
     fn read_sp() -> u64 {
         let sp: u64;
         unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nostack, preserves_flags)); }

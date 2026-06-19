@@ -22,15 +22,31 @@ impl PerCpuScheduler {
     }
 
     pub fn pick_next(&mut self) -> Option<Box<Thread>> {
+        // 1. Try local ready queues (High priority first)
         for i in (0..8).rev() {
             if let Some(t) = self.ready_queues[i].pop_front() {
                 return Some(t);
             }
         }
-        // Steal from global pending queue
+
+        // 2. Try global pending queue
         if let Some(mut global) = GLOBAL.try_lock() {
             if let Some(t) = global.pending_queue.pop_front() {
                 return Some(t);
+            }
+        }
+
+        // 3. Work Stealing: try to steal from other CPUs
+        let current_cpu = crate::smp::get_cpu_id();
+        for i in 0..MAX_CPUS {
+            if i == current_cpu { continue; }
+            if let Some(mut other_sched) = PER_CPU[i].try_lock() {
+                // Steal from the highest priority non-empty queue
+                for prio in (0..8).rev() {
+                    if let Some(t) = other_sched.ready_queues[prio].pop_back() {
+                        return Some(t);
+                    }
+                }
             }
         }
         None

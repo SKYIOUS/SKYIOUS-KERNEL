@@ -54,6 +54,7 @@ mod tests;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig, config::Mapping};
+use crate::arch::Arch;
 
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
@@ -120,16 +121,12 @@ pub fn oom_kill() -> ! {
 }
 
 fn init_kaslr() {
-    // Use RDTSC as cheap entropy (available on all x86_64; rdrand #UDs on QEMU's default CPU)
-    let lo: u32;
-    let hi: u32;
-    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, preserves_flags)); }
-    let val = ((hi as u64) << 32) | (lo as u64);
+    // Use the robust entropy harvester for KASLR and stack canaries.
+    let val = crate::crypto::GLOBAL_ENTROPY.get_u64();
     let val = if val == 0 { 0x1000 } else { val };
-    KERNEL_SLIDE.store(val & 0xFFFF_FFFF_FFFF_0000, core::sync::atomic::Ordering::Relaxed);
-    // Seed the stack canary. The kernel is NOT compiled with -Z stack-protector
-    // (no such flag in .cargo/config.toml), so no function has canary instrumentation.
-    // This provides the symbol for external code that may reference it.
+    KERNEL_SLIDE.store(val & 0x0000_0000_FFFF_0000, core::sync::atomic::Ordering::Relaxed);
+
+    // Seed the stack canary.
     unsafe { __stack_chk_guard = ((val << 1) | val.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize; }
 }
 
@@ -151,44 +148,11 @@ pub fn serial_write(msg: &str) {
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     use x86_64::VirtAddr;
-    use core::sync::atomic::Ordering;
 
     init_kaslr();
 
     unsafe {
-        use x86_64::registers::control::Cr4;
-        use x86_64::registers::control::Cr4Flags;
-        // Query CPUID leaf 7 for feature bits
-        let ebx7: u32;
-        let ecx7: u32;
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 7",
-            "xor ecx, ecx",
-            "cpuid",
-            "mov {0:e}, ebx",
-            "mov {1:e}, ecx",
-            "pop rbx",
-            out(reg) ebx7, out(reg) ecx7,
-            out("eax") _, out("edx") _,
-            options(nostack, preserves_flags));
-        Cr4::update(|flags| {
-            flags.insert(Cr4Flags::OSFXSR);
-            flags.insert(Cr4Flags::OSXMMEXCPT_ENABLE);
-            if ebx7 & 1 != 0 {
-                flags.insert(Cr4Flags::FSGSBASE);
-                crate::task::thread::HAS_FSGSBASE.store(true, Ordering::SeqCst);
-            }
-            // SMEP (bit 20): CPUID.(EAX=7,ECX=0):EBX[7]
-            // Cr4Flags doesn't export SMEP in x86_64 0.14.13, so set via raw bits
-            if ebx7 & (1 << 7) != 0 {
-                flags.insert(Cr4Flags::from_bits_truncate(0x100000));
-            }
-            // UMIP (bit 11): CPUID.(EAX=7,ECX=0):ECX[2]
-            if ecx7 & (1 << 2) != 0 {
-                flags.insert(Cr4Flags::from_bits_truncate(0x800));
-            }
-        });
+        crate::arch::CurrentArch::init_cpu();
     }
 
     serial_write("[BOOT] memory::init...\n");
