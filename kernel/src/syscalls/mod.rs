@@ -576,7 +576,14 @@ pub(crate) fn do_syscall(
             let frame_size = core::mem::size_of::<SignalFrame>();
             let new_rsp = (ret_addr_rsp - frame_size as u64) & !0xF;
 
-            let phys = crate::memory::virt_to_phys(x86_64::VirtAddr::new(new_rsp)).unwrap();
+            let phys = match crate::memory::virt_to_phys(x86_64::VirtAddr::new(new_rsp)) {
+                Some(p) => p,
+                None => {
+                    crate::serial_write("[SIGNAL] invalid user stack, killing process\n");
+                    sys_exit(128 + sig_num as u64);
+                    unreachable!();
+                }
+            };
             let k_ptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + phys.as_u64()) as *mut SignalFrame;
 
             unsafe {
@@ -600,7 +607,14 @@ pub(crate) fn do_syscall(
                 (*k_ptr).rsp = old_rsp;
             }
 
-            let ret_phys = crate::memory::virt_to_phys(x86_64::VirtAddr::new(ret_addr_rsp)).unwrap();
+            let ret_phys = match crate::memory::virt_to_phys(x86_64::VirtAddr::new(ret_addr_rsp)) {
+                Some(p) => p,
+                None => {
+                    crate::serial_write("[SIGNAL] invalid user return stack, killing process\n");
+                    sys_exit(128 + sig_num as u64);
+                    unreachable!();
+                }
+            };
             let ret_kptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + ret_phys.as_u64()) as *mut u64;
             unsafe { *ret_kptr = restorer; }
 
@@ -1290,7 +1304,8 @@ fn sys_exit(status: u64) -> u64 {
     
     // Clear child tid and wake futex (for pthread_join)
     if clear_tid != 0 {
-        unsafe { core::ptr::write_volatile(clear_tid as *mut u32, 0); }
+        let zero = 0u32;
+        let _ = unsafe { user_access::copy_to_user(clear_tid as *mut u8, core::slice::from_raw_parts(&zero as *const _ as *const u8, 4)) };
         let _ = sys_futex(clear_tid as *mut u32, 1, 1);
     }
     
@@ -1404,7 +1419,10 @@ fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
         ARCH_GET_FS => {
             let base = x86_64::registers::segmentation::FS::read_base();
             if addr != 0 {
-                unsafe { *(addr as *mut u64) = base.as_u64(); }
+                let val = base.as_u64();
+                if unsafe { user_access::copy_to_user(addr as *mut u8, core::slice::from_raw_parts(&val as *const _ as *const u8, 8)) }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
             }
             0
         }
@@ -1525,10 +1543,20 @@ fn sys_sched_getattr(pid: i64, attr_ptr: *mut u8, size: u64, _flags: u64) -> u64
         3 => 5, 2 => 10, 1 => 15, _ => 19,
     };
 
-    unsafe {
-        *(attr_ptr as *mut u32) = out_size;
-        if out_size >= 8 { *(attr_ptr.add(4) as *mut u32) = 0; }
-        if out_size >= 12 { *(attr_ptr.add(8) as *mut i32) = nice; }
+    if unsafe { user_access::copy_to_user(attr_ptr as *mut u8, core::slice::from_raw_parts(&out_size as *const _ as *const u8, 4)) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+    if out_size >= 8 {
+        let zero = 0u32;
+        if unsafe { user_access::copy_to_user(attr_ptr.add(4) as *mut u8, core::slice::from_raw_parts(&zero as *const _ as *const u8, 4)) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+    if out_size >= 12 {
+        let nice_le = nice as u32;
+        if unsafe { user_access::copy_to_user(attr_ptr.add(8) as *mut u8, core::slice::from_raw_parts(&nice_le as *const _ as *const u8, 4)) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
     }
     0
 }
@@ -2632,7 +2660,13 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
     unsafe { process_arc.address_space.activate(); }
 
     // 4. Setup user stack
-    let user_rsp = process_arc.setup_user_stack(&argv);
+    let user_rsp = match process_arc.setup_user_stack(&argv) {
+        Ok(rsp) => rsp,
+        Err(()) => {
+            crate::serial_write("[EXEC] OOM: failed to allocate user stack\n");
+            return errno::Errno::ENOMEM as u64;
+        }
+    };
 
     // 5. Update CURRENT_PROCESS
     {

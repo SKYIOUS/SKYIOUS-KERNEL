@@ -37,7 +37,7 @@ impl PerCpuScheduler {
         }
 
         // 3. Work Stealing: try to steal from other CPUs
-        let current_cpu = crate::smp::get_cpu_id();
+        let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
         for i in 0..MAX_CPUS {
             if i == current_cpu { continue; }
             if let Some(mut other_sched) = PER_CPU[i].try_lock() {
@@ -231,13 +231,14 @@ pub fn schedule() -> ! {
             crate::task::thread::switch_thread(old_ptr, new_sp, new_fs);
         }
 
-        // Check watchdog every ~256 iterations (~2.5s at 100Hz)
         watchdog_counter = watchdog_counter.wrapping_add(1);
         if watchdog_counter & 0xFF == 0 {
             crate::drivers::watchdog::pet();
             crate::drivers::watchdog::check();
         }
 
+        // Drain COW deferred deallocation queue while idle
+        crate::memory::frame_info::drain_deferred();
         x86_64::instructions::hlt();
     }
 }
@@ -247,6 +248,12 @@ pub fn try_schedule() {
     let switch = {
         let mut s = this_cpu_sched().try_lock();
         if let Some(ref mut sched) = s {
+            // Don't switch until schedule() has set up the initial idle thread.
+            // Without this guard, a timer interrupt after `sti` but before
+            // `schedule()` would hijack the boot stack into the DUMMY slot.
+            if sched.current_thread.is_none() {
+                return;
+            }
             sched.prepare_switch_tls()
         } else {
             None

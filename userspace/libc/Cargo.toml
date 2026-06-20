@@ -1,6 +1,0 @@
-[package]
-name = "skyos-libc"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

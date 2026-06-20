@@ -322,6 +322,9 @@ impl VfsManager {
 /// Boot device selection: None = initrd, Some(n) = block device index
 pub static BOOT_DEVICE: spin::Mutex<Option<usize>> = spin::Mutex::new(None);
 
+/// Ramdisk (initrd) provided by bootloader. Set before vfs::init() is called.
+pub static RAMDISK: spin::Mutex<Option<&'static [u8]>> = spin::Mutex::new(None);
+
 /// Set the boot device by index into BLOCK_DEVICES.
 #[allow(dead_code)]
 pub fn set_boot_device(index: usize) {
@@ -393,12 +396,14 @@ pub fn init() {
     };
 
     if !root_mounted {
-        // Fall back to embedded initrd
-        let _initrd_hash = env!("INITRD_HASH");
-        static INITRD: &[u8] = include_bytes!("../../../SkyOS/initrd.tar");
-        let initrd_fs = Arc::new(tarfs::TarfsMemory::new(INITRD));
-        vfs.mount("/", initrd_fs);
-        crate::println!("VFS: Mounted embedded initrd ({} bytes) as root.", INITRD.len());
+        // Fall back to bootloader-provided ramdisk
+        if let Some(ramdisk) = *RAMDISK.lock() {
+            let initrd_fs = Arc::new(tarfs::TarfsMemory::new(ramdisk));
+            vfs.mount("/", initrd_fs);
+            crate::println!("VFS: Mounted bootloader-provided initrd ({} bytes) as root.", ramdisk.len());
+        } else {
+            crate::println!("VFS: WARNING — no initrd available, root filesystem is empty!");
+        }
     }
 
     // Mount DevFS at /dev

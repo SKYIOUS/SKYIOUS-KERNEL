@@ -3,6 +3,13 @@ use alloc::sync::Arc;
 use crate::task::process::Process;
 use crate::memory::stack::{Stack, alloc_stack};
 
+/// User-mode CS/SS selectors (with RPL 3). Initialized by gdt::init().
+/// Read from assembly in fork_child_return — must be plain `mut u64` for asm access.
+#[no_mangle]
+pub static mut FORK_CHILD_CS: u64 = 0x23;
+#[no_mangle]
+pub static mut FORK_CHILD_SS: u64 = 0x1B;
+
 pub static HAS_FSGSBASE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -340,10 +347,12 @@ core::arch::global_asm!(
     fork_child_return:
         cli
         xor eax, eax            # RAX = 0 (fork returns 0 in child)
-        push 0x1B               # SS  = user data segment (0x18 | RPL 3)
+        mov r9, qword ptr [rip + FORK_CHILD_SS]
+        push r9                 # SS  = user data selector | RPL 3 (dynamic)
         push rsi                # RSP = user_rsp
         push r8                 # RFLAGS = user_rflags
-        push 0x23               # CS  = user code segment (0x20 | RPL 3)
+        mov r9, qword ptr [rip + FORK_CHILD_CS]
+        push r9                 # CS  = user code selector | RPL 3 (dynamic)
         push rdi                # RIP = user_rip
         iretq
     "#

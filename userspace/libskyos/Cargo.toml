@@ -1,7 +1,0 @@
-[package]
-name = "libskyos"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-skyos-libc = { path = "../libc" }

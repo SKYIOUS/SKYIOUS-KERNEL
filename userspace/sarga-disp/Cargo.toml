@@ -1,9 +1,0 @@
-[package]
-name = "sarga-disp"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-libsarga = { path = "../libsarga" }
-skyos-libc = { path = "../libc" }
-libskyos = { path = "../libskyos" }

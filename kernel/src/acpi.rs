@@ -31,6 +31,7 @@ pub static AP_LAPIC_IDS: spin::Once<alloc::vec::Vec<u8>> = spin::Once::new();
 pub static PM1A_CNT_PORT: spin::Once<u16> = spin::Once::new();
 pub static PM1B_CNT_PORT: spin::Once<Option<u16>> = spin::Once::new();
 pub static RESET_REG_PORT: spin::Once<Option<(u16, u8)>> = spin::Once::new(); // (port, value)
+pub static PS2_PRESENT: spin::Once<bool> = spin::Once::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Polarity {
@@ -166,6 +167,10 @@ fn parse_fadt(tables: &AcpiTables<SkyAcpiHandler>) {
         } else {
             PM1B_CNT_PORT.call_once(|| None);
         }
+
+        // PS/2 8042 controller presence (copy field to avoid unaligned ref on packed struct)
+        let boot_arch = fadt.iapc_boot_arch;
+        PS2_PRESENT.call_once(|| boot_arch.motherboard_implements_8042());
 
         // Reset Register
         let fadt_flags = fadt.flags; // copy to aligned local

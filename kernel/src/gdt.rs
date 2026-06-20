@@ -80,6 +80,10 @@ pub fn init() {
     gdt_static.load();
     
     unsafe {
+        // Store user CS/SS for fork_child_return assembly to read
+        crate::task::thread::FORK_CHILD_CS = selectors.user_code_selector.0 as u64 | 3;
+        crate::task::thread::FORK_CHILD_SS = selectors.user_data_selector.0 as u64 | 3;
+        
         CS::set_reg(selectors.code_selector);
         load_tss(tss_selector);
         DS::set_reg(selectors.data_selector);

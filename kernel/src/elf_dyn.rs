@@ -3,7 +3,7 @@ use alloc::string::{String, ToString};
 use xmas_elf::ElfFile;
 use xmas_elf::header;
 use xmas_elf::program;
-use x86_64::structures::paging::{Mapper, Page, Size4KiB, FrameAllocator, PageTableFlags};
+use x86_64::structures::paging::{Translate, Mapper, Page, Size4KiB, FrameAllocator, PageTableFlags};
 use x86_64::VirtAddr;
 use crate::memory::buddy::BuddyFrameAllocator;
 use crate::memory::paging::AddressSpace;
@@ -123,8 +123,9 @@ fn map_lib_segments(
     Ok(max_end)
 }
 
-fn parse_dt_entries(dyn_vaddr: u64) -> [(u64, u64); 32] {
-    let phys = crate::memory::virt_to_phys_dma(VirtAddr::new(dyn_vaddr));
+fn parse_dt_entries(dyn_vaddr: u64, mapper: &impl Translate) -> [(u64, u64); 32] {
+    let phys = mapper.translate_addr(VirtAddr::new(dyn_vaddr))
+        .expect("parse_dt_entries: address not mapped in target address space");
     let ptr = phys_to_virt(phys.as_u64()) as *const u64;
     let mut out = [(0u64, 0u64); 32];
     let mut idx = 0;
@@ -144,8 +145,9 @@ fn get_dt(entries: &[(u64, u64); 32], tag: u64) -> Option<u64> {
     entries.iter().find(|&&(t, _)| t == tag).map(|&(_, v)| v)
 }
 
-fn read_dt_str(offset: u64, strtab: u64, strsz: usize) -> Result<String, &'static str> {
-    let phys = crate::memory::virt_to_phys_dma(VirtAddr::new(strtab));
+fn read_dt_str(offset: u64, strtab: u64, strsz: usize, mapper: &impl Translate) -> Result<String, &'static str> {
+    let phys = mapper.translate_addr(VirtAddr::new(strtab))
+        .expect("read_dt_str: strtab not mapped in target address space");
     let ptr = phys_to_virt(phys.as_u64()) as *const u8;
     let o = offset as usize;
     if o >= strsz { return Err("String offset out of bounds"); }
@@ -171,6 +173,7 @@ fn load_library(name: &str, address_space: &mut AddressSpace, vmas: &mut Vec<Vma
 
     let load_base = 0x7f000000000;
     let max_end = map_lib_segments(&elf_data, address_space, vmas, load_base)?;
+    let mapper = unsafe { address_space.mapper().ok_or("Failed to get mapper")? };
 
     let mut symtab = 0u64;
     let mut strtab = 0u64;
@@ -181,7 +184,7 @@ fn load_library(name: &str, address_space: &mut AddressSpace, vmas: &mut Vec<Vma
     for ph in elf.program_iter() {
         if let Ok(program::Type::Dynamic) = ph.get_type() {
             let dyn_vaddr = load_base + ph.virtual_addr();
-            let entries = parse_dt_entries(dyn_vaddr);
+            let entries = parse_dt_entries(dyn_vaddr, &mapper);
 
             if let Some(v) = get_dt(&entries, DT_SYMTAB) { symtab = load_base + v; }
             if let Some(v) = get_dt(&entries, DT_STRTAB) { strtab = load_base + v; }
@@ -190,17 +193,17 @@ fn load_library(name: &str, address_space: &mut AddressSpace, vmas: &mut Vec<Vma
 
             for &(tag, val) in &entries {
                 if tag == DT_NEEDED && strtab != 0 {
-                    needed.push(read_dt_str(val, strtab, strsz)?);
+                    needed.push(read_dt_str(val, strtab, strsz, &mapper)?);
                 }
             }
             break;
         }
     }
 
-    let sym_phys = crate::memory::virt_to_phys_dma(VirtAddr::new(symtab));
-    let str_phys = crate::memory::virt_to_phys_dma(VirtAddr::new(strtab));
-    let sym_ptr = if sym_phys.as_u64() != 0 { phys_to_virt(sym_phys.as_u64()) as *const Sym } else { core::ptr::null() };
-    let _str_ptr = if str_phys.as_u64() != 0 { phys_to_virt(str_phys.as_u64()) as *const u8 } else { core::ptr::null() };
+    let sym_phys = mapper.translate_addr(VirtAddr::new(symtab));
+    let str_phys = mapper.translate_addr(VirtAddr::new(strtab));
+    let sym_ptr = if let Some(p) = sym_phys { phys_to_virt(p.as_u64()) as *const Sym } else { core::ptr::null() };
+    let _str_ptr = if let Some(p) = str_phys { phys_to_virt(p.as_u64()) as *const u8 } else { core::ptr::null() };
     let sym_count = if symt > 0 { 4096 / symt } else { 0 };
 
     Ok(LibInfo {
@@ -232,9 +235,10 @@ fn apply_rela(
     libs: &[LibInfo],
     dyn_vaddr: u64,
     base: u64,
+    mapper: &impl Translate,
 ) -> Result<(), &'static str> {
     let phys_off = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
-    let entries = parse_dt_entries(dyn_vaddr);
+    let entries = parse_dt_entries(dyn_vaddr, mapper);
 
     let rela_addr = get_dt(&entries, DT_RELA);
     let rela_sz = get_dt(&entries, DT_RELASZ).unwrap_or(0) as usize;
@@ -247,7 +251,8 @@ fn apply_rela(
         let rela_base_abs = base + rela_base;
         for i in 0..count {
             let entry_vaddr = rela_base_abs + (i as u64) * 24;
-            let entry_phys = crate::memory::virt_to_phys_dma(VirtAddr::new(entry_vaddr));
+            let entry_phys = mapper.translate_addr(VirtAddr::new(entry_vaddr))
+                .expect("apply_rela: RELA entry not mapped");
             let entry_ptr = (phys_off + entry_phys.as_u64()) as *const u8;
 
             let r_offset = unsafe { core::ptr::read_unaligned::<u64>(entry_ptr as *const u64) };
@@ -257,7 +262,8 @@ fn apply_rela(
             let sym_idx = (r_info >> 32) as usize;
 
             let target_vaddr = base + r_offset;
-            let target_phys = crate::memory::virt_to_phys_dma(VirtAddr::new(target_vaddr));
+            let target_phys = mapper.translate_addr(VirtAddr::new(target_vaddr))
+                .expect("apply_rela: RELA target not mapped");
             let target_ptr = (phys_off + target_phys.as_u64()) as *mut u64;
 
             match r_type {
@@ -277,7 +283,8 @@ fn apply_rela(
         let jmp_base_abs = base + jmp_base;
         for i in 0..128 {
             let entry_vaddr = jmp_base_abs + (i as u64) * 24;
-            let entry_phys = crate::memory::virt_to_phys_dma(VirtAddr::new(entry_vaddr));
+            let entry_phys = mapper.translate_addr(VirtAddr::new(entry_vaddr))
+                .expect("apply_rela: JMPREL entry not mapped");
             let entry_ptr = (phys_off + entry_phys.as_u64()) as *const u8;
 
             let r_offset = unsafe { core::ptr::read_unaligned::<u64>(entry_ptr as *const u64) };
@@ -289,7 +296,8 @@ fn apply_rela(
             let sym_idx = (r_info >> 32) as usize;
 
             let target_vaddr = base + r_offset;
-            let target_phys = crate::memory::virt_to_phys_dma(VirtAddr::new(target_vaddr));
+            let target_phys = mapper.translate_addr(VirtAddr::new(target_vaddr))
+                .expect("apply_rela: JMPREL target not mapped");
             let target_ptr = (phys_off + target_phys.as_u64()) as *mut u64;
 
             match r_type {
@@ -315,7 +323,7 @@ pub fn load_dynamic_binary(
     vmas: &mut Vec<Vma>,
 ) -> Result<(), &'static str> {
     let elf = ElfFile::new(elf_data).map_err(|_| "Failed to parse ELF for dynamic linking")?;
-    let base = 0x400000;
+    let base: u64 = 0;
 
     let mut dyn_vaddr = 0u64;
 
@@ -330,14 +338,16 @@ pub fn load_dynamic_binary(
         return Ok(());
     }
 
+    let mapper = unsafe { address_space.mapper().ok_or("Failed to get mapper")? };
+
     let mut needed_libs = Vec::new();
-    let entries = parse_dt_entries(base + dyn_vaddr);
+    let entries = parse_dt_entries(base + dyn_vaddr, &mapper);
     let strtab_vaddr = get_dt(&entries, DT_STRTAB).map(|v| base + v).unwrap_or(0);
     let strsz = get_dt(&entries, DT_STRSZ).unwrap_or(0) as usize;
 
     for &(tag, val) in &entries {
         if tag == DT_NEEDED && strtab_vaddr != 0 {
-            needed_libs.push(read_dt_str(val, strtab_vaddr, strsz)?);
+            needed_libs.push(read_dt_str(val, strtab_vaddr, strsz, &mapper)?);
         }
     }
 
@@ -351,7 +361,7 @@ pub fn load_dynamic_binary(
         lib_infos.push(info);
     }
 
-    apply_rela(&lib_infos, base + dyn_vaddr, base)?;
+    apply_rela(&lib_infos, base + dyn_vaddr, base, &mapper)?;
 
     Ok(())
 }

@@ -397,7 +397,8 @@ impl Process {
 
     /// PHASE D2: User stack setup in execve
     /// Maps 64KB stack at a randomized location and populates argc/argv.
-    pub fn setup_user_stack(&self, argv: &[alloc::string::String]) -> u64 {
+    /// Returns Err on OOM (partial frames are freed).
+    pub fn setup_user_stack(&self, argv: &[alloc::string::String]) -> Result<u64, ()> {
                         use x86_64::structures::paging::{Mapper, Page, Size4KiB, PageTableFlags, FrameAllocator};
                         use crate::memory::buddy::BuddyFrameAllocator;
         let mut frame_allocator = BuddyFrameAllocator;
@@ -411,15 +412,28 @@ impl Process {
         
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 
-        for i in 0..stack_pages {
-             let page_addr = stack_top_addr - (i + 1) * 4096;
+        // Pre-allocate all frames before mapping so OOM is handled atomically
+        let mut frames = alloc::vec::Vec::with_capacity(stack_pages);
+        for _ in 0..stack_pages {
+            match frame_allocator.allocate_frame() {
+                Some(frame) => frames.push(frame),
+                None => {
+                    // Free any frames already allocated
+                    for f in &frames {
+                        crate::memory::frame_info::decrement(f.start_address());
+                    }
+                    return Err(());
+                }
+            }
+        }
+
+        for (i, frame) in frames.into_iter().enumerate() {
+             let page_addr = stack_top_addr - (i as u64 + 1) * 4096;
              let page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(page_addr));
-             if let Some(frame) = frame_allocator.allocate_frame() {
-                 unsafe {
-                     mapper.map_to(page, frame, flags, &mut frame_allocator).unwrap().flush();
-                 }
-                 crate::memory::frame_info::increment(frame.start_address());
+             unsafe {
+                 mapper.map_to(page, frame, flags, &mut frame_allocator).expect("map_to failed").flush();
              }
+             crate::memory::frame_info::increment(frame.start_address());
         }
 
         // Add VMA for user stack
@@ -474,7 +488,7 @@ impl Process {
         let k_ptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + phys.as_u64()) as *mut u64;
         unsafe { *k_ptr = argv.len() as u64; }
 
-        current_rsp
+        Ok(current_rsp)
     }
 }
 

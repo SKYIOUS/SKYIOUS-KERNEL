@@ -7,7 +7,7 @@ use x86_64::{
 use crate::memory::slab::{FixedSizeBlockAllocator, Locked};
 
 pub const HEAP_START: usize = 0xFFFF_C000_0000_0000;
-pub const HEAP_SIZE: usize = 512 * 1024 * 1024; // 512 MiB
+pub const HEAP_SIZE: usize = 128 * 1024 * 1024; // 128 MiB
 
 #[global_allocator]
 static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());

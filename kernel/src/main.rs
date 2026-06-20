@@ -121,13 +121,9 @@ pub fn oom_kill() -> ! {
 }
 
 fn init_kaslr() {
-    // Use the robust entropy harvester for KASLR and stack canaries.
     let val = crate::crypto::GLOBAL_ENTROPY.get_u64();
     let val = if val == 0 { 0x1000 } else { val };
     KERNEL_SLIDE.store(val & 0x0000_0000_FFFF_0000, core::sync::atomic::Ordering::Relaxed);
-
-    // Seed the stack canary.
-    unsafe { __stack_chk_guard = ((val << 1) | val.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize; }
 }
 
 pub fn serial_putc(c: u8) {
@@ -148,6 +144,15 @@ pub fn serial_write(msg: &str) {
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     use x86_64::VirtAddr;
+
+    // Seed stack canary BEFORE any function with stack protection runs.
+    // This must be the very first action: any callee that has a canary
+    // check will save the current value, so we must set it before calling
+    // anything. Since kernel_main never returns (-> !), its own canary
+    // epilogue is never reached.
+    let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
+    let base = if entropy == 0 { 0x1000 } else { entropy };
+    unsafe { __stack_chk_guard = ((base << 1) | base.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize; }
 
     init_kaslr();
 
@@ -209,6 +214,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_write("[BOOT] PCI enumerate...\n");
     pci::enumerate_pci();
     serial_write("[BOOT] VFS init...\n");
+    if let Some(ramdisk_addr) = boot_info.ramdisk_addr.into_option() {
+        if boot_info.ramdisk_len > 0 {
+            let ramdisk_slice = unsafe {
+                core::slice::from_raw_parts(ramdisk_addr as *const u8, boot_info.ramdisk_len as usize)
+            };
+            *crate::vfs::RAMDISK.lock() = Some(ramdisk_slice);
+            serial_write("[BOOT] initrd from bootloader\n");
+        }
+    }
     vfs::init();
     #[cfg(feature = "net")]
     { serial_write("[BOOT] net init...\n"); net::init(); }
@@ -245,16 +259,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_write("[BOOT] GUI init...\n");
     gui::init();
 
-    serial_write("[BOOT] spawning run_async_tasks...\n");
     task::scheduler::spawn(run_async_tasks);
-    serial_write("[BOOT] spawning init_os_task...\n");
     task::scheduler::spawn(init_os_task);
 
-    serial_write("[BOOT] enabling interrupts...\n");
     x86_64::instructions::interrupts::enable();
-    serial_write("[BOOT] interrupts enabled\n");
-
-    serial_write("[BOOT] entering scheduler\n");
     task::scheduler::schedule();
 }
 
@@ -339,7 +347,13 @@ extern "C" fn init_os_task() -> ! {
                 unsafe { process_arc.address_space.activate(); }
                 crate::serial_write("[INIT] setup_user_stack...\n");
                 let argv = alloc::vec!["/bin/init".into()];
-                let user_rsp = process_arc.setup_user_stack(&argv);
+                let user_rsp = match process_arc.setup_user_stack(&argv) {
+                    Ok(rsp) => rsp,
+                    Err(()) => {
+                        crate::serial_write("[INIT] OOM: failed to allocate user stack, halting\n");
+                        loop { x86_64::instructions::hlt(); }
+                    }
+                };
                 crate::serial_write("[INIT] entry=0x"); 
                 let mut eb = [0u8; 16]; let mut ei = 16u8; let mut en = entry;
                 loop { ei -= 1; let d = (en & 0xf) as u8; eb[ei as usize] = if d < 10 { b'0'+d } else { b'a'+d-10 }; en >>= 4; if en == 0 { break; } }
@@ -542,7 +556,13 @@ pub fn spawn_userspace_app(path: &'static str) {
                         crate::task::scheduler::set_current_thread(thread);
                     }
                     unsafe { process_arc.address_space.activate(); }
-                    let user_rsp = process_arc.setup_user_stack(&alloc::vec![path.clone()]);
+                    let user_rsp = match process_arc.setup_user_stack(&alloc::vec![path.clone()]) {
+                        Ok(rsp) => rsp,
+                        Err(()) => {
+                            crate::serial_write("[LAUNCH] OOM: failed to allocate user stack, halting\n");
+                            loop { x86_64::instructions::hlt(); }
+                        }
+                    };
                     unsafe { crate::task::thread::jump_to_usermode(entry, user_rsp); }
                 }
             }
@@ -562,8 +582,7 @@ lazy_static::lazy_static! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!("{}", info);
-    crate::debug::print_stack_trace();
+    // Serial-only panic output (avoid VGA text mode which may not be mapped on GOP-only UEFI)
     crate::serial_write("\n=== KERNEL PANIC ===\n");
     crate::serial_write("[PANIC] ");
     let msg = info.message();
@@ -578,5 +597,6 @@ fn panic(info: &PanicInfo) -> ! {
         crate::serial_write(&line_str);
         crate::serial_write("\n");
     }
-    loop {}
+    crate::debug::print_stack_trace();
+    loop { x86_64::instructions::hlt(); }
 }
