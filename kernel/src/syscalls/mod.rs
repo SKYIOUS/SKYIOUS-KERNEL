@@ -832,16 +832,16 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                     0u64
                 }) { return n; }
                 // Try UDP
-                if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
-                    let mut data = vec![0u8; count];
-                    if let Ok((n, _ep)) = socket.recv_slice(&mut data) {
-                        if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
-                            return n as u64;
+                    if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
+                        let mut data = vec![0u8; count];
+                        if let Ok((n, _meta)) = socket.recv_slice(&mut data) {
+                            if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
+                                return n as u64;
+                            }
+                            return errno::Errno::EFAULT as u64;
                         }
-                        return errno::Errno::EFAULT as u64;
-                    }
-                    errno::Errno::EAGAIN as u64
-                }) { return n; }
+                        errno::Errno::EAGAIN as u64
+                    }) { return n; }
                 errno::Errno::EAGAIN as u64
             }
         },
@@ -2548,7 +2548,7 @@ fn sys_recvfrom(_sockfd: u64, _buf: *mut u8, _len: u64, _addr_ptr: *mut u8, _add
 }
 
 #[cfg(feature = "net")]
-fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, _addr_ptr: *mut u8, _addrlen_ptr: *mut u32) -> u64 {
+fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
     let fd_table = process.fd_table.lock();
@@ -2560,7 +2560,21 @@ fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, _addr_ptr: *mut u8, _addrle
         match stype {
             crate::task::process::SocketType::Udp => {
                 if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
-                    if let Ok((n, _ep)) = socket.recv_slice(&mut data) {
+                        if let Ok((n, meta)) = socket.recv_slice(&mut data) {
+                        if n == 0 { return 0u64; }
+                        if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
+                            let endpoint = meta.endpoint;
+                            let family: u16 = 2;
+                            let port_be = endpoint.port.to_be();
+                            let smoltcp::wire::IpAddress::Ipv4(ipv4) = endpoint.addr;
+                            let mut sockaddr = [0u8; 16];
+                            sockaddr[0..2].copy_from_slice(&family.to_ne_bytes());
+                            sockaddr[2..4].copy_from_slice(&port_be.to_ne_bytes());
+                            sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
+                            let addr_len: u32 = 16;
+                            let _ = unsafe { user_access::copy_to_user(addr_ptr, &sockaddr) };
+                            let _ = unsafe { user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
+                        }
                         if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
                             return n as u64;
                         }
