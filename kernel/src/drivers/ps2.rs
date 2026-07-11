@@ -67,12 +67,7 @@ fn device_write_to_mouse(data: u8) -> u8 {
 }
 
 pub fn init() {
-    // Check ACPI FADT for 8042 presence (fallback: assume present if FADT unavailable)
-    let ps2_present = crate::acpi::PS2_PRESENT.get().copied().unwrap_or(true);
-    if !ps2_present {
-        crate::serial_write("[PS2] No 8042 controller reported by ACPI, skipping\n");
-        return;
-    }
+    // ponytail: ignore ACPI 8042 presence flag — QEMU doesn't report it but the controller works
 
     let _lock = PS2_LOCK.lock();
 
