@@ -22,10 +22,10 @@ use alloc::string::String;
 
 // Capability constants (matching Linux CAP_* values)
 // ponytail: keepping existing CAP_SETUID/CAP_SETGID as-is (swapped vs Linux)
-#[allow(dead_code)] pub const CAP_CHOWN: u64 = 1 << 0;
-#[allow(dead_code)] pub const CAP_DAC_OVERRIDE: u64 = 1 << 1;
-#[allow(dead_code)] pub const CAP_DAC_READ_SEARCH: u64 = 1 << 2;
-#[allow(dead_code)] pub const CAP_FOWNER: u64 = 1 << 3;
+pub const CAP_CHOWN: u64 = 1 << 0;
+pub const CAP_DAC_OVERRIDE: u64 = 1 << 1;
+pub const CAP_DAC_READ_SEARCH: u64 = 1 << 2;
+pub const CAP_FOWNER: u64 = 1 << 3;
 #[allow(dead_code)] pub const CAP_FSETID: u64 = 1 << 4;
 pub const CAP_KILL: u64 = 1 << 5;
 pub const CAP_SETUID: u64 = 1 << 6;
@@ -79,6 +79,10 @@ fn check_file_permission(st_mode: u32, st_uid: u32, st_gid: u32, need: u32) -> b
     let egid = get_current_egid();
     // Root can access anything
     if euid == 0 { return true; }
+    // CAP_DAC_OVERRIDE: bypass DAC entirely (rwx)
+    if has_capability(CAP_DAC_OVERRIDE) { return true; }
+    // CAP_DAC_READ_SEARCH: bypass DAC for read/search only
+    if has_capability(CAP_DAC_READ_SEARCH) && (need & 2) == 0 { return true; }
     let bits = if euid == st_uid { (st_mode >> 6) & 7 }
                else if egid == st_gid { (st_mode >> 3) & 7 }
                else { st_mode & 7 };
@@ -98,6 +102,8 @@ fn check_node_permission(node: &Arc<dyn VfsNode>, need: u32) -> bool {
 fn check_file_owner(node: &Arc<dyn VfsNode>) -> bool {
     let euid = get_current_euid();
     if euid == 0 { return true; }
+    // CAP_FOWNER: bypass ownership checks for permission-changing ops
+    if has_capability(CAP_FOWNER) { return true; }
     if let Ok(stat) = node.stat() {
         euid == stat.st_uid
     } else {
@@ -278,18 +284,9 @@ fn sys_access(path_ptr: *const u8, mode: i32) -> u64 {
         Some(n) => n,
         None => return errno::Errno::ENOENT as u64,
     };
-    // Convert F_OK/R_OK/W_OK/X_OK to permission bits
-    let need = match mode & 7 {
-        0 => 0,          // F_OK: just check existence
-        1 => 1,          // W_OK
-        2 => 4,          // R_OK
-        3 => 5,          // R_OK | W_OK
-        4 => 4,          // X_OK
-        5 => 5,          // X_OK | W_OK
-        6 => 5,          // X_OK | R_OK
-        7 => 7,          // R_OK | W_OK | X_OK
-        _ => 0,
-    };
+    // Convert F_OK(0)/X_OK(1)/W_OK(2)/R_OK(4) to permission bits
+    // Linux: R_OK=4, W_OK=2, X_OK=1, F_OK=0 — same as our bit layout
+    let need = (mode & 7) as u32;
     if need == 0 { return 0; } // F_OK: file exists
     if check_node_permission(&node, need) { 0 } else { errno::Errno::EACCES as u64 }
 }
@@ -458,7 +455,7 @@ pub(crate) fn do_syscall(
     let result = match n {
         numbers::SYS_READ => sys_read(arg1, arg2 as *mut u8, arg3 as usize),
         numbers::SYS_WRITE => sys_write(arg1, arg2 as *const u8, arg3 as usize),
-        numbers::SYS_OPEN => sys_open(arg1 as *const u8, arg2 as i32),
+        numbers::SYS_OPEN => sys_open(arg1 as *const u8, arg2 as i32, arg3 as u32),
         numbers::SYS_CLOSE => sys_close(arg1),
         numbers::SYS_STAT => sys_stat(arg1 as *const u8, arg2 as *mut crate::vfs::Stat),
         numbers::SYS_FSTAT => sys_fstat(arg1, arg2 as *mut crate::vfs::Stat),
@@ -530,8 +527,11 @@ pub(crate) fn do_syscall(
         numbers::SYS_MOUNT => sys_mount(arg1 as *const u8, arg2 as *const u8, arg3 as *const u8, arg4, arg5 as *const u8),
         numbers::SYS_UMOUNT2 => sys_umount2(arg1 as *const u8, arg2),
         numbers::SYS_MKFS => sys_mkfs(arg1 as *const u8, arg2),
+        numbers::SYS_CHMOD => sys_chmod(arg1 as *const u8, arg2 as u32),
         numbers::SYS_FCHMOD => sys_fchmod(arg1, arg2 as u32),
+        numbers::SYS_CHOWN => sys_chown(arg1 as *const u8, arg2 as u32, arg3 as u32),
         numbers::SYS_FCHOWN => sys_fchown(arg1, arg2 as u32, arg3 as u32),
+        numbers::SYS_UMASK => sys_umask(arg1 as u32),
         numbers::SYS_SYMLINK => sys_symlink(arg1 as *const u8, arg2 as *const u8),
         numbers::SYS_READLINK => sys_readlink(arg1 as *const u8, arg2 as *mut u8, arg3),
         numbers::SYS_RENAME => sys_rename(arg1 as *const u8, arg2 as *const u8),
@@ -1022,7 +1022,7 @@ fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -> u6
     (fd_table.len() - 1) as u64
 }
 
-fn sys_open(path_ptr: *const u8, flags: i32) -> u64 {
+fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
     let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
@@ -1072,6 +1072,18 @@ fn sys_open(path_ptr: *const u8, flags: i32) -> u64 {
                 return errno::Errno::EACCES as u64;
             }
             if let Ok(new_node) = parent_node.create(name) {
+                let (euid, egid, umask) = {
+                    let lock = CURRENT_PROCESS.lock();
+                    let p = lock.as_ref();
+                    (p.map(|p| *p.euid.lock()).unwrap_or(0),
+                     p.map(|p| *p.egid.lock()).unwrap_or(0),
+                     p.map(|p| *p.umask.lock()).unwrap_or(0))
+                };
+                // Default mode 0666 if not specified (O_CREAT without explicit mode)
+                let raw_mode = if mode == 0 { 0o666 } else { mode };
+                let created_mode = raw_mode & !umask;
+                let _ = new_node.chmod(created_mode & 0o777);
+                let _ = new_node.chown(euid, egid);
                 let process_lock = CURRENT_PROCESS.lock();
                 if let Some(ref process) = *process_lock {
                     return add_fd(process, new_node, flags);
@@ -1900,6 +1912,22 @@ fn sys_mount(source: *const u8, target: *const u8, fstype: *const u8, _flags: u6
     0
 }
 
+fn sys_chmod(path_ptr: *const u8, mode: u32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let node = match VFS.lock().resolve_path(&path_str) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    if !check_file_owner(&node) {
+        audit_log("CAP_FOWNER", &alloc::format!("chmod({}) DENIED", path_str));
+        return errno::Errno::EACCES as u64;
+    }
+    if node.chmod(mode).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
+}
+
 fn sys_fchmod(fd: u64, mode: u32) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock {
@@ -1913,6 +1941,7 @@ fn sys_fchmod(fd: u64, mode: u32) -> u64 {
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
             if !check_file_owner(node) {
+                audit_log("CAP_FOWNER", "fchmod DENIED");
                 return errno::Errno::EACCES as u64;
             }
             if node.chmod(mode).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
@@ -1921,6 +1950,48 @@ fn sys_fchmod(fd: u64, mode: u32) -> u64 {
         Some(FileDescriptor::Socket(_, _)) => errno::Errno::ENOSYS as u64,
         None => errno::Errno::EBADF as u64,
     }
+}
+
+/// Check whether the caller may change ownership of a file to `new_uid`/`new_gid`.
+/// Returns true if allowed.
+fn check_chown_permission(current_uid: u32, current_gid: u32, new_uid: u32, new_gid: u32) -> bool {
+    let euid = get_current_euid();
+    // Root can always chown
+    if euid == 0 { return true; }
+    // CAP_CHOWN: arbitrary ownership changes
+    if has_capability(CAP_CHOWN) { return true; }
+    // Non-root: must own the file (checked by caller via check_file_owner)
+    // Can only change group to one of the caller's supplementary groups
+    // (simplified: only to own gid)
+    if new_uid != current_uid { return false; }
+    if new_gid != current_gid && new_gid != get_current_egid() { return false; }
+    true
+}
+
+fn sys_chown(path_ptr: *const u8, uid: u32, gid: u32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let node = match VFS.lock().resolve_path(&path_str) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    let cur = match node.stat() {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EIO as u64,
+    };
+    if !check_file_owner(&node) {
+        audit_log("CAP_FOWNER", &alloc::format!("chown({}) DENIED", path_str));
+        return errno::Errno::EACCES as u64;
+    }
+    if !check_chown_permission(cur.st_uid, cur.st_gid, uid, gid) {
+        audit_log("CAP_CHOWN", &alloc::format!("chown({}) DENIED", path_str));
+        return errno::Errno::EPERM as u64;
+    }
+    let new_uid = if uid as i32 == -1 { cur.st_uid } else { uid };
+    let new_gid = if gid as i32 == -1 { cur.st_gid } else { gid };
+    if node.chown(new_uid, new_gid).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
 }
 
 fn sys_fchown(fd: u64, uid: u32, gid: u32) -> u64 {
@@ -1935,15 +2006,35 @@ fn sys_fchown(fd: u64, uid: u32, gid: u32) -> u64 {
     }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
+            let cur = match node.stat() {
+                Ok(s) => s,
+                Err(_) => return errno::Errno::EIO as u64,
+            };
             if !check_file_owner(node) {
+                audit_log("CAP_FOWNER", "fchown DENIED");
                 return errno::Errno::EACCES as u64;
             }
-            if node.chown(uid, gid).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
+            if !check_chown_permission(cur.st_uid, cur.st_gid, uid, gid) {
+                audit_log("CAP_CHOWN", "fchown DENIED");
+                return errno::Errno::EPERM as u64;
+            }
+            let new_uid = if uid as i32 == -1 { cur.st_uid } else { uid };
+            let new_gid = if gid as i32 == -1 { cur.st_gid } else { gid };
+            if node.chown(new_uid, new_gid).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
         },
         Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => errno::Errno::ENOSYS as u64,
         Some(FileDescriptor::Socket(_, _)) => errno::Errno::ENOSYS as u64,
         None => errno::Errno::EBADF as u64,
     }
+}
+
+fn sys_umask(mask: u32) -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock {
+        let old = *p.umask.lock();
+        *p.umask.lock() = mask & 0o777;
+        old as u64
+    } else { 0 }
 }
 
 fn sys_umount2(target: *const u8, _flags: u64) -> u64 {
@@ -3213,7 +3304,7 @@ fn sys_chdir(path_ptr: *const u8) -> u64 {
     errno::Errno::ENOENT as u64
 }
 
-fn sys_mkdir(path_ptr: *const u8, _mode: u32) -> u64 {
+fn sys_mkdir(path_ptr: *const u8, mode: u32) -> u64 {
     let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
@@ -3239,7 +3330,18 @@ fn sys_mkdir(path_ptr: *const u8, _mode: u32) -> u64 {
         if !crate::security::hook_dir_mkdir(&subj, &path_str) {
             return errno::Errno::EACCES as u64;
         }
-        if parent_node.mkdir(name).is_ok() {
+        if let Ok(new_node) = parent_node.mkdir(name) {
+            let (euid, egid, umask) = {
+                let lock = CURRENT_PROCESS.lock();
+                let p = lock.as_ref();
+                (p.map(|p| *p.euid.lock()).unwrap_or(0),
+                 p.map(|p| *p.egid.lock()).unwrap_or(0),
+                 p.map(|p| *p.umask.lock()).unwrap_or(0))
+            };
+            let raw_mode = if mode == 0 { 0o777 } else { mode };
+            let dir_mode = raw_mode & !umask;
+            let _ = new_node.chmod(dir_mode & 0o777);
+            let _ = new_node.chown(euid, egid);
             return 0;
         }
     }

@@ -84,6 +84,7 @@ pub struct Process {
     pub io_rings: Mutex<Vec<(u64, usize)>>,
     pub clear_child_tid: Mutex<u64>,
     pub emulation: Mutex<EmulationMode>,
+    pub umask: Mutex<u32>,
 }
 
 /// Snapshot of effective credentials used for permission checks.
@@ -98,6 +99,7 @@ pub struct Credentials {
     pub fsuid: u32,
     pub fsgid: u32,
     pub cap_effective: u64,
+    pub umask: u32,
 }
 
 impl Process {
@@ -113,6 +115,7 @@ impl Process {
             fsuid: *self.fsuid.lock(),
             fsgid: *self.fsgid.lock(),
             cap_effective: *self.cap_effective.lock(),
+            umask: *self.umask.lock(),
         }
     }
 
@@ -137,6 +140,7 @@ impl Process {
         *self.cap_effective.lock()  = *parent.cap_effective.lock();
         *self.cap_permitted.lock()  = *parent.cap_permitted.lock();
         *self.cap_inheritable.lock() = *parent.cap_inheritable.lock();
+        *self.umask.lock() = *parent.umask.lock();
     }
 }
 
@@ -174,6 +178,7 @@ impl Process {
             io_rings: Mutex::new(Vec::new()),
             clear_child_tid: Mutex::new(0),
             emulation: Mutex::new(EmulationMode::Native),
+            umask: Mutex::new(0o022),
         }
     }
 
