@@ -12,6 +12,8 @@ pub mod tarfs;
 pub mod devfs;
 pub mod ctlfs;
 pub mod skyfs;
+#[cfg(feature = "ext4")]
+pub mod ext4;
 pub mod page_cache;
 
 pub trait FileSystem: Send + Sync {
@@ -334,6 +336,28 @@ pub fn set_boot_device(index: usize) {
 
 pub static VFS: Mutex<VfsManager> = Mutex::new(VfsManager::new());
 
+// ─── Ext4 mount helpers (cfg-gated for build-flag fallback) ─────────────────
+
+#[cfg(feature = "ext4")]
+fn try_mnt_ext4(vfs: &mut VfsManager, dev: Arc<Mutex<dyn BlockDevice>>, path: &str, msg: &str) -> bool {
+    match ext4::mount(dev) {
+        Ok(fs) => { vfs.mount(path, fs); crate::println!("VFS: Mounted Ext4 at {} ({})", path, msg); true }
+        Err(_) => false,
+    }
+}
+#[cfg(not(feature = "ext4"))]
+fn try_mnt_ext4(_: &mut VfsManager, _: Arc<Mutex<dyn BlockDevice>>, _: &str, _: &str) -> bool { false }
+
+#[cfg(feature = "ext4")]
+fn try_root_ext4(vfs: &mut VfsManager, dev: Arc<Mutex<dyn BlockDevice>>, tag: &str) -> bool {
+    match ext4::mount(dev) {
+        Ok(fs) => { vfs.mount("/", fs); crate::println!("VFS: Root filesystem from {} (ext4).", tag); true }
+        Err(_) => false,
+    }
+}
+#[cfg(not(feature = "ext4"))]
+fn try_root_ext4(_: &mut VfsManager, _: Arc<Mutex<dyn BlockDevice>>, _: &str) -> bool { false }
+
 pub fn init() {
     let mut vfs = VFS.lock();
 
@@ -346,7 +370,9 @@ pub fn init() {
         if let Some(idx) = boot_idx {
             if let Some(dev) = devices.get(idx) {
                 crate::println!("VFS: Attempting root from block device {}...", idx);
-                if let Ok(ext2fs) = ext2::mount(dev.clone()) {
+                if try_root_ext4(&mut vfs, dev.clone(), &alloc::format!("block device {}", idx)) {
+                    mounted = true;
+                } else if let Ok(ext2fs) = ext2::mount(dev.clone()) {
                     vfs.mount("/", ext2fs);
                     crate::println!("VFS: Root filesystem mounted from block device {} (ext2).", idx);
                     mounted = true;
@@ -366,7 +392,9 @@ pub fn init() {
                             dev.clone(), part.lba_start, part.sector_count,
                         )
                     ));
-                    if let Ok(ext2fs) = ext2::mount(part_dev.clone()) {
+                    if try_root_ext4(&mut vfs, part_dev.clone(), "first partition") {
+                        mounted = true;
+                    } else if let Ok(ext2fs) = ext2::mount(part_dev.clone()) {
                         vfs.mount("/", ext2fs);
                         crate::println!("VFS: Root filesystem mounted from first partition (ext2).");
                         mounted = true;
@@ -380,7 +408,9 @@ pub fn init() {
             if !mounted {
                 // Try the whole device
                 if let Some(dev) = devices.first() {
-                    if let Ok(ext2fs) = ext2::mount(dev.clone()) {
+                    if try_root_ext4(&mut vfs, dev.clone(), "first block device") {
+                        mounted = true;
+                    } else if let Ok(ext2fs) = ext2::mount(dev.clone()) {
                         vfs.mount("/", ext2fs);
                         crate::println!("VFS: Root filesystem mounted from first block device (ext2).");
                         mounted = true;
@@ -440,6 +470,9 @@ pub fn init() {
         devfs.add_block_device(&dev_name, i);
 
         // Mount filesystems from the whole disk
+        let mount_path_ext4 = alloc::format!("/mnt/ext4_{}", i);
+        try_mnt_ext4(&mut vfs, dev.clone(), &mount_path_ext4, &dev_name);
+
         let mount_path_ext2 = alloc::format!("/mnt/ext2_{}", i);
         if let Ok(ext2fs) = ext2::mount(dev.clone()) {
             vfs.mount(&mount_path_ext2, ext2fs);
@@ -482,6 +515,9 @@ pub fn init() {
             devfs.add_block_device(&part_name, part_dev_idx);
 
             // Try to mount filesystems on the partition
+            let mount_path_ext4p = alloc::format!("/mnt/ext4_{}_{}", i, part.index);
+            try_mnt_ext4(&mut vfs, part_dev.clone(), &mount_path_ext4p, &part_name);
+
             let mount_path_ext2p = alloc::format!("/mnt/ext2_{}_{}", i, part.index);
             if let Ok(ext2fs) = ext2::mount(part_dev.clone()) {
                 vfs.mount(&mount_path_ext2p, ext2fs);

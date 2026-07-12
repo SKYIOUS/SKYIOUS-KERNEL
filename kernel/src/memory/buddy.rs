@@ -163,3 +163,10 @@ unsafe impl FrameAllocator<Size4KiB> for BuddyFrameAllocator {
         BUDDY_ALLOCATOR.lock().allocate_frame()
     }
 }
+
+/// Architecture-neutral frame allocation that returns a raw physical address.
+/// Used by aarch64 code that cannot depend on x86_64::PhysAddr.
+#[cfg(target_arch = "aarch64")]
+pub fn allocate_raw_frame_addr() -> Option<u64> {
+    BUDDY_ALLOCATOR.lock().allocate_contiguous(0).map(|a| a.as_u64())
+}

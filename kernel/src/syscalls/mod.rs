@@ -5,11 +5,13 @@ use crate::gdt;
 use spin::Mutex;
 use crate::vfs::{VFS, VfsNode, Stat};
 use alloc::sync::Arc;
+use crate::task::process::Process;
 use x86_64::structures::paging::{Page, Size4KiB, Mapper, FrameAllocator, PageTableFlags};
 
 pub mod errno;
 pub mod numbers;
 pub mod signal;
+pub mod futex;
 pub mod user_access;
 pub mod io_uring;
 
@@ -388,7 +390,10 @@ fn sys_uname(buf: *mut UtsName) -> u64 {
     fill(&mut uts.nodename, "sarga-os");
     fill(&mut uts.release, "0.3.0");
     fill(&mut uts.version, "SARGA OS — Vahi V5.0 Roadmap Implementation");
+    #[cfg(not(target_arch = "aarch64"))]
     fill(&mut uts.machine, "x86_64");
+    #[cfg(target_arch = "aarch64")]
+    fill(&mut uts.machine, "aarch64");
 
     if unsafe { user_access::copy_to_user(buf as *mut u8, core::slice::from_raw_parts(&uts as *const _ as *const u8, core::mem::size_of::<UtsName>())) }.is_err() {
         return errno::Errno::EFAULT as u64;
@@ -494,9 +499,16 @@ pub(crate) fn do_syscall(
         numbers::SYS_RESOLVE => sys_resolve(arg1 as *const u8, arg2 as *mut u8),
         numbers::SYS_KILL => sys_kill(arg1 as i64, arg2 as u32),
         numbers::SYS_KORLANG => sys_korlang(arg1, arg2, arg3, arg4, arg5),
-        numbers::SYS_FUTEX => sys_futex(arg1 as *mut u32, arg2 as u32, arg3 as u32),
+        numbers::SYS_FUTEX => {
+            // val3 = saved r9 at regs_ptr offset 6 (between r10 at +5 and r8 at +7)
+            let val3 = unsafe { *regs_ptr.add(6) as u32 };
+            crate::syscalls::futex::sys_futex(
+                arg1 as *mut u32, arg2 as u32, arg3 as u32,
+                arg4 as u32, arg5 as *mut u32, val3,
+            )
+        }
         numbers::SYS_SYSINFO => sys_sysinfo(arg1 as *mut u64),
-        numbers::SYS_RT_SIGACTION => sys_rt_sigaction(arg1, arg2 as *const u64, arg3 as *mut u64),
+        numbers::SYS_RT_SIGACTION => sys_rt_sigaction(arg1, arg2 as *const u64, arg3 as *mut u64, arg4),
         numbers::SYS_RT_SIGRETURN => sys_rt_sigreturn(regs_ptr),
         numbers::SYS_SCHED_YIELD => sys_sched_yield(),
         numbers::SYS_SCHED_SETATTR => sys_sched_setattr(arg1 as i64, arg2 as *const u8, arg3),
@@ -679,30 +691,56 @@ struct SignalFrame {
     rsp: u64,
 }
 
-fn sys_rt_sigaction(sig: u64, act: *const u64, oldact: *mut u64) -> u64 {
+/// struct sigaction { sa_handler(u64), sa_flags(u64), sa_restorer(u64), sa_mask(u64) }
+#[repr(C)]
+struct SigAction {
+    sa_handler: u64,
+    sa_flags: u64,
+    sa_restorer: u64,
+    sa_mask: u64,
+}
+
+fn sys_rt_sigaction(sig: u64, act: *const u64, oldact: *mut u64, _sigsetsize: u64) -> u64 {
+    const SIG_DFL: u64 = 0;
+    const SIG_IGN: u64 = 1;
+
     if sig == 0 || sig > 32 { return errno::Errno::EINVAL as u64; }
     let proc_lock = CURRENT_PROCESS.lock();
     if let Some(ref proc) = *proc_lock {
-        let mut handlers = proc.signal_handlers.lock();
         let idx = (sig - 1) as usize;
 
         if !oldact.is_null() {
-            let old_handler = handlers[idx];
+            let handlers = proc.signal_handlers.lock();
+            let restorers = proc.signal_restorers.lock();
+            let old = SigAction {
+                sa_handler: handlers[idx],
+                sa_flags: 0,
+                sa_restorer: restorers[idx],
+                sa_mask: 0,
+            };
             unsafe {
-                if user_access::copy_to_user(oldact as *mut u8, core::slice::from_raw_parts(&old_handler as *const _ as *const u8, 8)).is_err() {
+                if user_access::copy_to_user(oldact as *mut u8,
+                    core::slice::from_raw_parts(&old as *const _ as *const u8, core::mem::size_of::<SigAction>())).is_err()
+                {
                     return errno::Errno::EFAULT as u64;
                 }
             }
         }
 
         if !act.is_null() {
-            let mut new_handler = 0u64;
+            let mut new = [0u8; 32];
             unsafe {
-                if user_access::copy_from_user(core::slice::from_raw_parts_mut(&mut new_handler as *mut _ as *mut u8, 8), act as *const u8).is_err() {
+                if user_access::copy_from_user(&mut new, act as *const u8).is_err() {
                     return errno::Errno::EFAULT as u64;
                 }
             }
-            handlers[idx] = new_handler;
+            let sa: &SigAction = unsafe { &*(new.as_ptr() as *const SigAction) };
+            let h = sa.sa_handler;
+            let r = sa.sa_restorer;
+            proc.signal_handlers.lock()[idx] = h;
+            if h != SIG_DFL && h != SIG_IGN && r != 0 {
+                proc.signal_restorers.lock()[idx] = r;
+            }
         }
         return 0;
     }
@@ -758,6 +796,13 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
     let mut fd_table = process.fd_table.lock();
     if (fd as usize) >= fd_table.len() {
         return errno::Errno::EBADF as u64;
+    }
+    // Enforce open flags: write-only fd can't read
+    {
+        let fdfl = process.fd_flags.lock();
+        if (fd as usize) < fdfl.len() && (fdfl[fd as usize] & 3) == 1 {
+            return errno::Errno::EBADF as u64;
+        }
     }
 
     match fd_table[fd as usize] {
@@ -863,6 +908,13 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
     if (fd as usize) >= fd_table.len() {
         return errno::Errno::EBADF as u64;
     }
+    // Enforce open flags: read-only fd can't write
+    {
+        let fdfl = process.fd_flags.lock();
+        if (fd as usize) < fdfl.len() && (fdfl[fd as usize] & 3) == 0 {
+            return errno::Errno::EBADF as u64;
+        }
+    }
 
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, ref mut offset }) => {
@@ -930,6 +982,24 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
     }
 }
 
+/// Add a file descriptor with flags tracking. Returns the fd number.
+fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -> u64 {
+    let mut fd_table = process.fd_table.lock();
+    let mut fd_flags = process.fd_flags.lock();
+    let flags_val = open_flags as u64;
+    for (i, slot) in fd_table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(FileDescriptor::File { node, offset: 0 });
+            if fd_flags.len() <= i { fd_flags.resize(i + 1, 0); }
+            fd_flags[i] = flags_val;
+            return i as u64;
+        }
+    }
+    fd_table.push(Some(FileDescriptor::File { node, offset: 0 }));
+    fd_flags.push(flags_val);
+    (fd_table.len() - 1) as u64
+}
+
 fn sys_open(path_ptr: *const u8, flags: i32) -> u64 {
     let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
         Ok(s) => s,
@@ -962,15 +1032,7 @@ fn sys_open(path_ptr: *const u8, flags: i32) -> u64 {
         }
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let mut fd_table = process.fd_table.lock();
-            for (i, slot) in fd_table.iter_mut().enumerate() {
-                if slot.is_none() {
-                    *slot = Some(FileDescriptor::File { node: node.clone() as Arc<dyn VfsNode>, offset: 0 });
-                    return i as u64;
-                }
-            }
-            fd_table.push(Some(FileDescriptor::File { node, offset: 0 }));
-            return (fd_table.len() - 1) as u64;
+            return add_fd(process, node.clone() as Arc<dyn VfsNode>, flags);
         }
     } else if (flags & O_CREAT) != 0 {
         let last_slash = path_str.rfind('/').unwrap_or(0);
@@ -990,9 +1052,7 @@ fn sys_open(path_ptr: *const u8, flags: i32) -> u64 {
             if let Ok(new_node) = parent_node.create(name) {
                 let process_lock = CURRENT_PROCESS.lock();
                 if let Some(ref process) = *process_lock {
-                    let mut fd_table = process.fd_table.lock();
-                    fd_table.push(Some(FileDescriptor::File { node: new_node, offset: 0 }));
-                    return (fd_table.len() - 1) as u64;
+                    return add_fd(process, new_node, flags);
                 }
             }
         }
@@ -1306,7 +1366,7 @@ fn sys_exit(status: u64) -> u64 {
     if clear_tid != 0 {
         let zero = 0u32;
         let _ = unsafe { user_access::copy_to_user(clear_tid as *mut u8, core::slice::from_raw_parts(&zero as *const _ as *const u8, 4)) };
-        let _ = sys_futex(clear_tid as *mut u32, 1, 1);
+        let _ = crate::syscalls::futex::sys_futex(clear_tid as *mut u32, 1, 1, 0, core::ptr::null_mut(), 0);
     }
     
     // Send SIGCHLD to parent process
@@ -1356,30 +1416,6 @@ fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
     }
     
     crate::task::scheduler::schedule();
-}
-
-fn sys_futex(uaddr: *mut u32, op: u32, val: u32) -> u64 {
-    const FUTEX_WAIT: u32 = 0;
-    const FUTEX_WAKE: u32 = 1;
-
-    match op {
-        FUTEX_WAIT => {
-            let current_val = unsafe { core::ptr::read_volatile(uaddr) };
-            if current_val != val {
-                return errno::Errno::EAGAIN as u64;
-            }
-            if let Some(mut current_thread) = crate::task::scheduler::current_thread() {
-                current_thread.status = crate::task::thread::ThreadStatus::Blocked;
-                current_thread.futex_wake_addr = Some(uaddr as u64);
-                crate::task::scheduler::add_futex_thread(*current_thread);
-            }
-            crate::task::scheduler::schedule();
-        }
-        FUTEX_WAKE => {
-            crate::task::scheduler::wake_futex(uaddr as u64, val) as u64
-        }
-        _ => errno::Errno::ENOSYS as u64,
-    }
 }
 
 fn sys_sysinfo(buf: *mut u64) -> u64 {
@@ -1935,6 +1971,11 @@ fn sys_symlink(target: *const u8, linkpath: *const u8) -> u64 {
         if !check_node_permission(&parent, 2) {
             return errno::Errno::EACCES as u64;
         }
+        // LSM hook
+        let subj = crate::security::current_subject();
+        if !crate::security::hook_file_create(&subj, &linkpath_str) {
+            return errno::Errno::EACCES as u64;
+        }
         if parent.symlink(&name, &target_str).is_ok() {
             0
         } else {
@@ -2004,6 +2045,7 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
         }                    child_process.entry_point = parent.entry_point;
             *child_process.fd_table.lock() = parent.fd_table.lock().clone();
             *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
+        child_process.clone_credentials_from(parent);
         let child_arc = Arc::new(child_process);
         
         // Track child in parent and global table
@@ -2051,6 +2093,7 @@ fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: u64,
         *child_process.fd_table.lock() = parent.fd_table.lock().clone();
         *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
         *child_process.signal_handlers.lock() = parent.signal_handlers.lock().clone();
+        child_process.clone_credentials_from(parent);
 
         if flags & CLONE_CHILD_CLEARTID != 0 && !child_tidptr.is_null() {
             *child_process.clear_child_tid.lock() = child_tidptr as u64;
@@ -2160,7 +2203,11 @@ fn sys_kill(pid: i64, sig: u32) -> u64 {
         if !crate::security::hook_file_perm(&subj, &alloc::format!("pid:{}", pid), "kill") {
             return errno::Errno::EPERM as u64;
         }
+        let pid = proc.id;
         proc.signals.lock().raise(sig_enum);
+        // Wake threads blocked on futex/pipe so they can see the signal
+        crate::syscalls::futex::wake_process_futex_threads(pid);
+        crate::syscalls::futex::wake_process_blocked_threads(pid);
         return 0;
     }
     errno::Errno::ESRCH as u64
@@ -2207,6 +2254,13 @@ fn with_udp_mut<R>(sockets: &mut smoltcp::iface::SocketSet, handle: smoltcp::ifa
 fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
     if domain != 2 {
         return errno::Errno::EAFNOSUPPORT as u64;
+    }
+    // LSM: socket creation permission
+    {
+        let subj = crate::security::current_subject();
+        if !crate::security::hook_socket_create(&subj, domain) {
+            return errno::Errno::EACCES as u64;
+        }
     }
 
     #[cfg(not(feature = "net"))]
@@ -2320,6 +2374,14 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
         if family != 2 { return errno::Errno::EAFNOSUPPORT as u64; }
         let port = u16::from_be(unsafe { *(addr_buf.as_ptr().add(2) as *const u16) });
         let ip_bytes = unsafe { *(addr_buf.as_ptr().add(4) as *const [u8; 4]) };
+
+        // LSM: socket connect permission
+        let subj = crate::security::current_subject();
+        let addr_str = alloc::format!("{}.{}.{}.{}:{}", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], port);
+        if !crate::security::hook_socket_connect(&subj, &addr_str) {
+            return errno::Errno::EACCES as u64;
+        }
+
         let endpoint = smoltcp::wire::IpEndpoint::new(
             smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_bytes(&ip_bytes)),
             port,
@@ -2440,8 +2502,9 @@ fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
                                     let family: u16 = 2;
                                     let port_be = ep.port.to_be();
                                     let mut ip_bytes = [0u8; 4];
-                                    let smoltcp::wire::IpAddress::Ipv4(ipv4) = ep.addr;
-                                    ip_bytes.copy_from_slice(ipv4.as_bytes());
+                                    if let smoltcp::wire::IpAddress::Ipv4(ipv4) = ep.addr {
+                                        ip_bytes.copy_from_slice(ipv4.as_bytes());
+                                    }
                                     let mut sockaddr = [0u8; 16];
                                     sockaddr[..2].copy_from_slice(&family.to_ne_bytes());
                                     sockaddr[2..4].copy_from_slice(&port_be.to_ne_bytes());
@@ -2566,14 +2629,15 @@ fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addrlen_
                             let endpoint = meta.endpoint;
                             let family: u16 = 2;
                             let port_be = endpoint.port.to_be();
-                            let smoltcp::wire::IpAddress::Ipv4(ipv4) = endpoint.addr;
-                            let mut sockaddr = [0u8; 16];
-                            sockaddr[0..2].copy_from_slice(&family.to_ne_bytes());
-                            sockaddr[2..4].copy_from_slice(&port_be.to_ne_bytes());
-                            sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
-                            let addr_len: u32 = 16;
-                            let _ = unsafe { user_access::copy_to_user(addr_ptr, &sockaddr) };
-                            let _ = unsafe { user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
+                            if let smoltcp::wire::IpAddress::Ipv4(ipv4) = endpoint.addr {
+                                let mut sockaddr = [0u8; 16];
+                                sockaddr[0..2].copy_from_slice(&family.to_ne_bytes());
+                                sockaddr[2..4].copy_from_slice(&port_be.to_ne_bytes());
+                                sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
+                                let addr_len: u32 = 16;
+                                let _ = unsafe { user_access::copy_to_user(addr_ptr, &sockaddr) };
+                                let _ = unsafe { user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
+                            }
                         }
                         if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
                             return n as u64;
@@ -2634,6 +2698,27 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
     // Require execute permission on the binary
     if !check_node_permission(&node, 1) {
         return errno::Errno::EACCES as u64;
+    }
+
+    // Setuid/setgid enforcement
+    if let Ok(stat) = node.stat() {
+        let mode = stat.st_mode;
+        let is_setuid = (mode & 0o4000) != 0;
+        let is_setgid = (mode & 0o2000) != 0;
+        if is_setuid || is_setgid {
+            // LSM: allow setuid execution?
+            let subj = crate::security::current_subject();
+            if !crate::security::hook_setuid_exec(&subj, &path) {
+                return errno::Errno::EACCES as u64;
+            }
+            let lock = CURRENT_PROCESS.lock();
+            if let Some(ref proc) = *lock {
+                let mut c = proc.credentials();
+                if is_setuid { c.euid = stat.st_uid; c.suid = stat.st_uid; }
+                if is_setgid { c.egid = stat.st_gid; c.sgid = stat.st_gid; }
+                proc.set_credentials(&c);
+            }
+        }
     }
 
     let elf_data = match node.read(usize::MAX) {
@@ -3047,6 +3132,11 @@ fn sys_mkdir(path_ptr: *const u8, _mode: u32) -> u64 {
         if !check_node_permission(&parent_node, 3) {
             return errno::Errno::EACCES as u64;
         }
+        // LSM hook
+        let subj = crate::security::current_subject();
+        if !crate::security::hook_dir_mkdir(&subj, &path_str) {
+            return errno::Errno::EACCES as u64;
+        }
         if parent_node.mkdir(name).is_ok() {
             return 0;
         }
@@ -3073,6 +3163,11 @@ fn sys_unlink(path_ptr: *const u8) -> u64 {
     if let Some(parent_node) = vfs.resolve_path(parent_path) {
         // Need write+execute on parent directory to remove entries
         if !check_node_permission(&parent_node, 3) {
+            return errno::Errno::EACCES as u64;
+        }
+        // LSM hook
+        let subj = crate::security::current_subject();
+        if !crate::security::hook_file_unlink(&subj, &path_str) {
             return errno::Errno::EACCES as u64;
         }
         if parent_node.unlink(name).is_ok() {
@@ -3301,12 +3396,13 @@ fn sys_resolve(name_ptr: *const u8, ip_ptr: *mut u8) -> u64 {
     };
 
     if let Some(ip) = crate::net::dns::resolve_hostname(&name_str) {
-        let smoltcp::wire::IpAddress::Ipv4(ipv4) = ip;
-        let bytes = ipv4.as_bytes();
-        if unsafe { user_access::copy_to_user(ip_ptr, bytes) }.is_err() {
-            return errno::Errno::EFAULT as u64;
+        if let smoltcp::wire::IpAddress::Ipv4(ipv4) = ip {
+            let bytes = ipv4.as_bytes();
+            if unsafe { user_access::copy_to_user(ip_ptr, bytes) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            return 0;
         }
-        return 0;
     }
 
     errno::Errno::ENOENT as u64

@@ -77,9 +77,67 @@ pub struct Process {
     pub cap_permitted: Mutex<u64>,
     #[allow(dead_code)]
     pub cap_inheritable: Mutex<u64>,
+    pub suid: Mutex<u32>,
+    pub sgid: Mutex<u32>,
+    pub fsuid: Mutex<u32>,
+    pub fsgid: Mutex<u32>,
     pub io_rings: Mutex<Vec<(u64, usize)>>,
     pub clear_child_tid: Mutex<u64>,
     pub emulation: Mutex<EmulationMode>,
+}
+
+/// Snapshot of effective credentials used for permission checks.
+#[derive(Clone, Copy)]
+pub struct Credentials {
+    pub uid: u32,
+    pub gid: u32,
+    pub euid: u32,
+    pub egid: u32,
+    pub suid: u32,
+    pub sgid: u32,
+    pub fsuid: u32,
+    pub fsgid: u32,
+    pub cap_effective: u64,
+}
+
+impl Process {
+    /// Take a snapshot of the process's effective credentials.
+    pub fn credentials(&self) -> Credentials {
+        Credentials {
+            uid: *self.uid.lock(),
+            gid: *self.gid.lock(),
+            euid: *self.euid.lock(),
+            egid: *self.egid.lock(),
+            suid: *self.suid.lock(),
+            sgid: *self.sgid.lock(),
+            fsuid: *self.fsuid.lock(),
+            fsgid: *self.fsgid.lock(),
+            cap_effective: *self.cap_effective.lock(),
+        }
+    }
+
+    /// Apply a credential change (e.g., from setuid exec).
+    pub fn set_credentials(&self, cred: &Credentials) {
+        *self.euid.lock() = cred.euid;
+        *self.egid.lock() = cred.egid;
+        *self.suid.lock() = cred.suid;
+        *self.cap_effective.lock() = cred.cap_effective;
+    }
+
+    /// Inherit credentials from a parent process.
+    pub fn clone_credentials_from(&self, parent: &Process) {
+        *self.uid.lock()  = *parent.uid.lock();
+        *self.gid.lock()  = *parent.gid.lock();
+        *self.euid.lock() = *parent.euid.lock();
+        *self.egid.lock() = *parent.egid.lock();
+        *self.suid.lock() = *parent.suid.lock();
+        *self.sgid.lock() = *parent.sgid.lock();
+        *self.fsuid.lock() = *parent.fsuid.lock();
+        *self.fsgid.lock() = *parent.fsgid.lock();
+        *self.cap_effective.lock()  = *parent.cap_effective.lock();
+        *self.cap_permitted.lock()  = *parent.cap_permitted.lock();
+        *self.cap_inheritable.lock() = *parent.cap_inheritable.lock();
+    }
 }
 
 use crate::vfs::VfsNode;
@@ -109,6 +167,10 @@ impl Process {
             cap_effective: Mutex::new(!0u64),
             cap_permitted: Mutex::new(!0u64),
             cap_inheritable: Mutex::new(!0u64),
+            suid: Mutex::new(0),
+            sgid: Mutex::new(0),
+            fsuid: Mutex::new(0),
+            fsgid: Mutex::new(0),
             io_rings: Mutex::new(Vec::new()),
             clear_child_tid: Mutex::new(0),
             emulation: Mutex::new(EmulationMode::Native),

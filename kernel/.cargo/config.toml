@@ -1,8 +1,17 @@
 [build]
 target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
 rustflags = [
     "-C", "target-feature=-mmx,-sse,+soft-float",
     "-C", "link-arg=-Tlinker.ld",
+    "-C", "relocation-model=static",
+]
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "target-feature=+soft-float,+strict-align",
+    "-C", "link-arg=-Taarch64-linker.ld",
     "-C", "relocation-model=static",
 ]
 

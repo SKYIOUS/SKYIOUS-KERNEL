@@ -10,27 +10,34 @@
 
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
+#![cfg_attr(not(target_arch = "aarch64"), feature(abi_x86_interrupt))]
 #![feature(alloc_error_handler)]
 #![deny(warnings)]
 
 extern crate alloc;
 
-mod vga_buffer;
-mod interrupts;
-mod gdt;
-mod keyboard;
 mod memory;
 mod allocator;
 mod shell;
 mod task;
 mod syscalls;
-mod acpi;
 mod vfs;
-mod apic;
-mod pci;
 mod security;
 mod tty;
+#[cfg(not(target_arch = "aarch64"))]
+mod vga_buffer;
+#[cfg(not(target_arch = "aarch64"))]
+mod interrupts;
+#[cfg(not(target_arch = "aarch64"))]
+mod gdt;
+#[cfg(not(target_arch = "aarch64"))]
+mod keyboard;
+#[cfg(not(target_arch = "aarch64"))]
+mod acpi;
+#[cfg(not(target_arch = "aarch64"))]
+mod apic;
+#[cfg(not(target_arch = "aarch64"))]
+mod pci;
 pub mod drivers;
 pub mod gui;
 #[cfg(feature = "net")]
@@ -76,25 +83,17 @@ pub static mut __stack_chk_guard: usize = 0;
 
 #[no_mangle]
 pub extern "C" fn __stack_chk_fail() -> ! {
-    use x86_64::instructions::port::Port;
-    let mut data = Port::<u8>::new(0x3f8);
-    let mut lsr = Port::<u8>::new(0x3fd);
     let msg = b"\nPANIC: Stack smashing detected!\n";
     for &b in msg {
-        unsafe { while lsr.read() & 0x20 == 0 {} }
-        unsafe { data.write(b); }
+        serial_putc(b);
     }
-    loop { x86_64::instructions::hlt(); }
+    loop { crate::arch::CurrentArch::halt(); }
 }
 
 pub fn oom_kill() -> ! {
-    use x86_64::instructions::port::Port;
-    let mut data = Port::<u8>::new(0x3f8);
-    let mut lsr = Port::<u8>::new(0x3fd);
     let msg = b"\n[OOM] Out of memory - killing process\n";
     for &b in msg {
-        unsafe { while lsr.read() & 0x20 == 0 {} }
-        unsafe { data.write(b); }
+        serial_putc(b);
     }
     // Kill the last spawned userspace process (highest PID, excluding init=1 and kernel=0)
     let table = crate::task::process::PROCESS_TABLE.lock();
@@ -107,17 +106,13 @@ pub fn oom_kill() -> ! {
     drop(table);
     if largest_pid > 1 {
         let msg2 = alloc::format!("[OOM] Killing pid {}\n", largest_pid);
-        for &b in msg2.as_bytes() {
-            unsafe { while lsr.read() & 0x20 == 0 {} }
-            unsafe { data.write(b); }
-        }
-        // Send SIGKILL directly
+        serial_write(&msg2);
         let table2 = crate::task::process::PROCESS_TABLE.lock();
         if let Some(proc) = table2.get(&largest_pid) {
             proc.signals.lock().raise(crate::syscalls::signal::Signal::_SIGKILL);
         }
     }
-    loop { x86_64::instructions::hlt(); }
+    loop { crate::arch::CurrentArch::halt(); }
 }
 
 fn init_kaslr() {
@@ -127,12 +122,21 @@ fn init_kaslr() {
 }
 
 pub fn serial_putc(c: u8) {
-    use x86_64::instructions::port::Port;
+    #[cfg(not(target_arch = "aarch64"))]
     unsafe {
+        use x86_64::instructions::port::Port;
         let mut data = Port::<u8>::new(0x3f8);
         let mut lsr = Port::<u8>::new(0x3fd);
         while lsr.read() & 0x20 == 0 {}
         data.write(c);
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        // QEMU virt PL011 UART at MMIO 0x09000000
+        let uart = 0x0900_0000 as *mut u32;
+        // Wait while UART is busy (UARTFR bit 3 = TXFF)
+        while (uart.add(0x18 / 4).read_volatile() & (1 << 5)) != 0 {}
+        uart.add(0x00).write_volatile(c as u32);
     }
 }
 
@@ -143,13 +147,7 @@ pub fn serial_write(msg: &str) {
 }
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    use x86_64::VirtAddr;
-
     // Seed stack canary BEFORE any function with stack protection runs.
-    // This must be the very first action: any callee that has a canary
-    // check will save the current value, so we must set it before calling
-    // anything. Since kernel_main never returns (-> !), its own canary
-    // epilogue is never reached.
     let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
     let base = if entropy == 0 { 0x1000 } else { entropy };
     unsafe { __stack_chk_guard = ((base << 1) | base.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize; }
@@ -161,8 +159,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     serial_write("[BOOT] memory::init...\n");
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset.into_option().expect("physical_memory_offset required"));
+    #[cfg(not(target_arch = "aarch64"))]
+    let phys_mem_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset.into_option().expect("physical_memory_offset required"));
+    #[cfg(not(target_arch = "aarch64"))]
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    #[cfg(target_arch = "aarch64")]
+    let phys_mem_offset_val = boot_info.physical_memory_offset.into_option().expect("physical_memory_offset required");
+    #[cfg(target_arch = "aarch64")]
+    let mut mapper = unsafe { memory::init_aarch64(phys_mem_offset_val) };
     serial_write("[BOOT] memory::init done\n");
 
     let fb = boot_info.framebuffer.as_mut();
@@ -184,13 +188,21 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_write("[BOOT] heap init...\n");
     allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
-    serial_write("[BOOT] gdt init...\n");
-    gdt::init();
-    serial_write("[BOOT] idt+pic init...\n");
-    interrupts::init_idt();
-    unsafe { interrupts::PICS.lock().initialize() };
-    serial_write("[BOOT] syscalls init...\n");
-    syscalls::init();
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        serial_write("[BOOT] gdt init...\n");
+        gdt::init();
+        serial_write("[BOOT] idt+pic init...\n");
+        interrupts::init_idt();
+        unsafe { interrupts::PICS.lock().initialize() };
+        serial_write("[BOOT] syscalls init...\n");
+        syscalls::init();
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        serial_write("[BOOT] arch init...\n");
+        unsafe { crate::arch::CurrentArch::init_boot(); }
+    }
     serial_write("[BOOT] frame tracker init...\n");
     let mut max_phys = 0;
     for region in boot_info.memory_regions.iter() {
@@ -203,16 +215,23 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     test_memory_allocations();
 
-    serial_write("[BOOT] ACPI init...\n");
-    acpi::init(boot_info.rsdp_addr.into_option());
-    serial_write("[BOOT] APIC init...\n");
-    apic::init();
-    #[cfg(feature = "smp")]
-    { serial_write("[BOOT] SMP init...\n"); smp::init(); }
-    serial_write("[BOOT] PS/2 init...\n");
-    drivers::ps2::init();
-    serial_write("[BOOT] PCI enumerate...\n");
-    pci::enumerate_pci();
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        serial_write("[BOOT] ACPI init...\n");
+        acpi::init(boot_info.rsdp_addr.into_option());
+        serial_write("[BOOT] APIC init...\n");
+        apic::init();
+        #[cfg(feature = "smp")]
+        { serial_write("[BOOT] SMP init...\n"); smp::init(); }
+        serial_write("[BOOT] PS/2 init...\n");
+        drivers::ps2::init();
+        serial_write("[BOOT] PCI enumerate...\n");
+        pci::enumerate_pci();
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        serial_write("[BOOT] aarch64 platform init...\n");
+    }
     serial_write("[BOOT] VFS init...\n");
     if let Some(ramdisk_addr) = boot_info.ramdisk_addr.into_option() {
         if boot_info.ramdisk_len > 0 {
@@ -228,7 +247,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     { serial_write("[BOOT] net init...\n"); net::init(); }
 
     // Now that the network stack is ready, enable E1000 interrupts
-    #[cfg(feature = "net")]
+    #[cfg(all(feature = "net", not(target_arch = "aarch64")))]
     {
         if let Some(crate::drivers::net::NicDevice::E1000(ref dev)) = *crate::drivers::net::NIC.lock() {
             dev.lock().inner.enable_interrupts();
@@ -262,7 +281,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::scheduler::spawn(run_async_tasks);
     task::scheduler::spawn(init_os_task);
 
+    #[cfg(not(target_arch = "aarch64"))]
     x86_64::instructions::interrupts::enable();
+    #[cfg(target_arch = "aarch64")]
+    unsafe { core::arch::asm!("msr daifclr, #2"); } // Clear IRQ mask
     task::scheduler::schedule();
 }
 
@@ -351,7 +373,7 @@ extern "C" fn init_os_task() -> ! {
                     Ok(rsp) => rsp,
                     Err(()) => {
                         crate::serial_write("[INIT] OOM: failed to allocate user stack, halting\n");
-                        loop { x86_64::instructions::hlt(); }
+                        loop { crate::arch::CurrentArch::halt(); }
                     }
                 };
                 crate::serial_write("[INIT] entry=0x"); 
@@ -560,7 +582,7 @@ pub fn spawn_userspace_app(path: &'static str) {
                         Ok(rsp) => rsp,
                         Err(()) => {
                             crate::serial_write("[LAUNCH] OOM: failed to allocate user stack, halting\n");
-                            loop { x86_64::instructions::hlt(); }
+                            loop { crate::arch::CurrentArch::halt(); }
                         }
                     };
                     unsafe { crate::task::thread::jump_to_usermode(entry, user_rsp); }
@@ -598,5 +620,5 @@ fn panic(info: &PanicInfo) -> ! {
         crate::serial_write("\n");
     }
     crate::debug::print_stack_trace();
-    loop { x86_64::instructions::hlt(); }
+    loop { crate::arch::CurrentArch::halt(); }
 }

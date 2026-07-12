@@ -74,6 +74,36 @@ pub fn hook_file_perm(subject: &str, path: &str, perm: &str) -> bool {
     check(subject, path, "file", perm)
 }
 
+pub fn hook_file_create(subject: &str, path: &str) -> bool {
+    check(subject, path, "file", "create")
+}
+
+pub fn hook_file_unlink(subject: &str, path: &str) -> bool {
+    check(subject, path, "file", "unlink")
+}
+
+pub fn hook_dir_mkdir(subject: &str, path: &str) -> bool {
+    check(subject, path, "dir", "create")
+}
+
+pub fn hook_execve(subject: &str, path: &str) -> bool {
+    check(subject, path, "file", "exec")
+}
+
+pub fn hook_setuid_exec(subject: &str, path: &str) -> bool {
+    // Allow setuid only if LSM doesn't explicitly deny it
+    check(subject, path, "process", "setuid_exec")
+}
+
+pub fn hook_socket_create(subject: &str, family: u64) -> bool {
+    let fam = match family { 2 => "ipv4", 10 => "ipv6", _ => "raw" };
+    check(subject, fam, "socket", "create")
+}
+
+pub fn hook_socket_connect(subject: &str, addr: &str) -> bool {
+    check(subject, addr, "socket", "connect")
+}
+
 pub fn hook_capable(subject: &str, cap: &str) -> bool {
     check(subject, "*", "capability", cap)
 }

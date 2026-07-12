@@ -36,6 +36,7 @@ pub fn init() {
             }
         };
 
+        // ponytail: IFACE_MAX_ADDR_COUNT defaults to 2 in smoltcp 0.10, so no IPv6 for now
         iface.update_ip_addrs(|addrs| {
             addrs.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 15)), 24)).unwrap();
             addrs.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)), 8)).unwrap();

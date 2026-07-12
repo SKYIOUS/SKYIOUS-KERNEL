@@ -1,25 +1,32 @@
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use x86_64::structures::paging::PageTableFlags;
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+#[cfg(not(target_arch = "aarch64"))]
 use crate::println;
-use lazy_static::lazy_static;
-use pic8259::ChainedPics;
+#[cfg(not(target_arch = "aarch64"))]
 use spin;
 
+#[cfg(not(target_arch = "aarch64"))]
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+#[cfg(not(target_arch = "aarch64"))]
+use x86_64::structures::paging::PageTableFlags;
+#[cfg(not(target_arch = "aarch64"))]
+use pic8259::ChainedPics;
+
+#[cfg(not(target_arch = "aarch64"))]
 pub const PIC_1_OFFSET: u8 = 32;
+#[cfg(not(target_arch = "aarch64"))]
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
+#[cfg(not(target_arch = "aarch64"))]
 pub static PICS: spin::Mutex<ChainedPics> =
     spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
-static TICKS: spin::Mutex<u64> = spin::Mutex::new(0);
+static TICKS: AtomicU64 = AtomicU64::new(0);
 
 pub fn get_ticks() -> u64 {
-    use x86_64::instructions::interrupts;
-    interrupts::without_interrupts(|| {
-        *TICKS.lock()
-    })
+    TICKS.load(Ordering::Relaxed)
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
@@ -27,11 +34,12 @@ pub enum InterruptIndex {
     Keyboard = 33,
         _PageFault = 14,
     Mouse = 44,
-    Network = 43, // IRQ 11 (mapped to PIC2+3)
+    Network = 43,
     TlbFlush = 250,
     IpiFunc = 251,
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 impl InterruptIndex {
     fn as_u8(self) -> u8 {
         self as u8
@@ -42,52 +50,93 @@ impl InterruptIndex {
     }
 }
 
-lazy_static! {
-    static ref IDT: InterruptDescriptorTable = {
-        let mut idt = InterruptDescriptorTable::new();
-        idt.breakpoint.set_handler_fn(breakpoint_handler);
-        unsafe {
-            idt.double_fault.set_handler_fn(double_fault_handler)
-                .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
-        }
-        idt.page_fault.set_handler_fn(page_fault_handler);
-        idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
-        idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
-        idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
-        idt.device_not_available.set_handler_fn(device_not_available_handler);
+// ponytail: box-leaked IDT for 'static lifetime; raw ptr for interior mutability
+#[cfg(not(target_arch = "aarch64"))]
+struct IdtPtr(*mut InterruptDescriptorTable);
+#[cfg(not(target_arch = "aarch64"))]
+unsafe impl Send for IdtPtr {}
+#[cfg(not(target_arch = "aarch64"))]
+unsafe impl Sync for IdtPtr {}
 
-        idt[InterruptIndex::Timer.as_usize()]
-            .set_handler_fn(timer_interrupt_handler);
-        idt[InterruptIndex::Keyboard.as_usize()]
-            .set_handler_fn(keyboard_interrupt_handler);
-        idt[InterruptIndex::Mouse.as_usize()]
-            .set_handler_fn(mouse_interrupt_handler);
-        idt[InterruptIndex::Network.as_usize()]
-            .set_handler_fn(network_interrupt_handler);
-        idt[InterruptIndex::TlbFlush.as_usize()]
-            .set_handler_fn(tlb_flush_handler);
-        idt[InterruptIndex::IpiFunc.as_usize()]
-            .set_handler_fn(ipi_func_handler);
-        idt
-    };
-}
+#[cfg(not(target_arch = "aarch64"))]
+static IDT: spin::Mutex<Option<IdtPtr>> = spin::Mutex::new(None);
 
+#[cfg(not(target_arch = "aarch64"))]
 pub fn init_idt() {
-    IDT.load();
-    // Disable legacy PIC
+    use alloc::boxed::Box;
+    let mut idt = Box::new(InterruptDescriptorTable::new());
+    idt.breakpoint.set_handler_fn(breakpoint_handler);
+    unsafe {
+        idt.double_fault.set_handler_fn(double_fault_handler)
+            .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+    }
+    idt.page_fault.set_handler_fn(page_fault_handler);
+    idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+    idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
+    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+    idt.device_not_available.set_handler_fn(device_not_available_handler);
+
+    idt[InterruptIndex::Timer.as_usize()]
+        .set_handler_fn(timer_interrupt_handler);
+    idt[InterruptIndex::Keyboard.as_usize()]
+        .set_handler_fn(keyboard_interrupt_handler);
+    idt[InterruptIndex::Mouse.as_usize()]
+        .set_handler_fn(mouse_interrupt_handler);
+    idt[InterruptIndex::Network.as_usize()]
+        .set_handler_fn(network_interrupt_handler);
+    idt[InterruptIndex::TlbFlush.as_usize()]
+        .set_handler_fn(tlb_flush_handler);
+    idt[InterruptIndex::IpiFunc.as_usize()]
+        .set_handler_fn(ipi_func_handler);
+
+    let raw = Box::into_raw(idt);
+    // SAFETY: table is box-leaked (into_raw never freed), lives forever
+    unsafe { (*raw).load(); }
+    *IDT.lock() = Some(IdtPtr(raw));
+
     unsafe {
         let mut pics = PICS.lock();
-        // Mask all interrupts on both PICs
         pics.write_masks(0xFF, 0xFF);
-        // Then initialize and mask again just to be sure it's quiet
         pics.initialize();
         pics.write_masks(0xFF, 0xFF);
     }
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 pub fn init_ap() {
-    IDT.load();
+    if let Some(IdtPtr(ptr)) = *IDT.lock() {
+        use x86_64::instructions::tables::{lidt, DescriptorTablePointer};
+        use x86_64::VirtAddr;
+        // SAFETY: table is box-leaked, never freed
+        unsafe {
+            let pointer = DescriptorTablePointer {
+                base: VirtAddr::from_ptr(ptr as *const InterruptDescriptorTable),
+                limit: (core::mem::size_of::<InterruptDescriptorTable>() - 1) as u16,
+            };
+            lidt(&pointer);
+        }
+    }
 }
+
+#[cfg(not(target_arch = "aarch64"))]
+type MsiHandler = extern "x86-interrupt" fn(InterruptStackFrame);
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn set_handler(vector: u8, handler: MsiHandler) {
+    if let Some(IdtPtr(ptr)) = *IDT.lock() {
+        // SAFETY: single-core during registration; idt lives forever
+        unsafe { (&mut *ptr)[vector as usize].set_handler_fn(handler); }
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn set_network_vector(vector: u8) {
+    set_handler(vector, network_interrupt_handler);
+    NET_VECTOR.store(vector, Ordering::Relaxed);
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+static NET_VECTOR: AtomicU8 = AtomicU8::new(InterruptIndex::Network as u8);
 
 extern "x86-interrupt" fn breakpoint_handler(
     stack_frame: InterruptStackFrame)
@@ -116,7 +165,6 @@ extern "x86-interrupt" fn invalid_opcode_handler(
 extern "x86-interrupt" fn device_not_available_handler(
     _stack_frame: InterruptStackFrame)
 {
-    // Necessary for FPU/SSE lazy loading if implemented, otherwise just panic for now
     panic!("EXCEPTION: DEVICE NOT AVAILABLE (NM)");
 }
 
@@ -129,19 +177,12 @@ extern "x86-interrupt" fn double_fault_handler(
 extern "x86-interrupt" fn timer_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    let ticks = {
-        let mut ticks = TICKS.lock();
-        *ticks += 1;
-        *ticks
-    };
+    let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
-    // Pet watchdog every tick regardless of scheduler lock state
     crate::drivers::watchdog::pet();
 
-    // Send EOI before any context switch so LAPIC stays alive
     crate::apic::eoi();
 
-    // Update scheduler for sleeping threads and trigger preemption
     crate::task::scheduler::tick(ticks);
     crate::task::scheduler::try_schedule();
 }
@@ -149,7 +190,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(
 extern "x86-interrupt" fn tlb_flush_handler(
     _stack_frame: InterruptStackFrame)
 {
-    // A simple way to flush TLB on x86_64 is to reload CR3
     unsafe {
         use x86_64::registers::control::Cr3;
         let (frame, flags) = Cr3::read();
@@ -164,34 +204,29 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::Cr2;
     let fault_addr = Cr2::read();
-    
-    // 1. Try COW resolution
+
     let cur = crate::task::process::CURRENT_PROCESS.lock();
     if let Some(ref proc) = *cur {
         let page = x86_64::structures::paging::Page::containing_address(fault_addr);
         if let Some(true) = unsafe { proc.address_space.handle_cow(page) } {
-            return; // COW resolved — iretq back
+            return;
         }
-        // 2. Try demand paging (valid VMA, page not present)
         if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
             if let Some(vma) = proc.find_vma(fault_addr.as_u64()) {
-                // Allocate frame and map it
                 use crate::memory::buddy::BuddyFrameAllocator;
                 use x86_64::structures::paging::{Mapper, FrameAllocator};
                 let mut fa = BuddyFrameAllocator;
                 if let Some(frame) = fa.allocate_frame() {
                     if let Some(mut mapper) = unsafe { proc.address_space.mapper() } {
                         let mut flags = vma.flags | PageTableFlags::PRESENT;
-                        
-                        // Ensure USER_ACCESSIBLE is set for user VMAs
+
                         if fault_addr.as_u64() < 0x8000_0000_0000 {
                             flags |= PageTableFlags::USER_ACCESSIBLE;
                         }
 
                         let _ = unsafe { mapper.map_to(page, frame, flags, &mut fa).map(|f| f.flush()) };
                         crate::memory::frame_info::increment(frame.start_address());
-                        
-                        // Zero the new page
+
                         let virt = x86_64::VirtAddr::new(
                             *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap()
                             + frame.start_address().as_u64()
@@ -201,7 +236,6 @@ extern "x86-interrupt" fn page_fault_handler(
                     }
                 }
             }
-            // 2a. Try demand paging for brk region
             let fault_u64 = fault_addr.as_u64();
             if fault_u64 >= 0x6000_0000_0000 && fault_u64 < *proc.brk.lock() {
                 use crate::memory::buddy::BuddyFrameAllocator;
@@ -225,7 +259,6 @@ extern "x86-interrupt" fn page_fault_handler(
     }
     drop(cur);
 
-    // 3. Not resolvable — kernel panic
     panic!(
         "PAGE FAULT at {:?}  error={:?}\n{:#?}",
         fault_addr, error_code, stack_frame
@@ -262,12 +295,10 @@ extern "x86-interrupt" fn mouse_interrupt_handler(
 {
     use x86_64::instructions::port::Port;
 
-    // Drain all available bytes from the PS/2 controller
     loop {
         let mut status_port = Port::<u8>::new(0x64);
         let status = unsafe { status_port.read() };
         if status & 1 == 0 {
-            // Output buffer empty
             break;
         }
         let mut data_port = Port::<u8>::new(0x60);
@@ -287,8 +318,6 @@ extern "x86-interrupt" fn mouse_interrupt_handler(
 extern "x86-interrupt" fn ipi_func_handler(
     _stack_frame: InterruptStackFrame)
 {
-    // Execute a function queued via smp_call_function.
-    // The function pointer and argument are in per-CPU data.
     let cpu = crate::syscalls::get_per_cpu();
     if cpu.ipi_pending != 0 {
         let func: extern "C" fn(u64) = unsafe { core::mem::transmute(cpu.ipi_pending) };
@@ -305,7 +334,6 @@ extern "x86-interrupt" fn network_interrupt_handler(
 {
     #[cfg(feature = "net")]
     {
-        // Read ICR to clear pending causes and check if there's work
         let icr = crate::drivers::net::NIC.lock().as_ref().map(|nic| {
             match nic {
                 crate::drivers::net::NicDevice::E1000(dev) => {
@@ -315,7 +343,6 @@ extern "x86-interrupt" fn network_interrupt_handler(
             }
         }).unwrap_or(0);
 
-        // If no interrupt causes pending, just EOI and return
         if icr == 0 {
             crate::apic::eoi();
             return;

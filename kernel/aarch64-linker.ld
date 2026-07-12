@@ -2,18 +2,20 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x40080000;
+    . = 0xFFFFFFFF80000000;
 
     .text : ALIGN(4K)
     {
         *(.text .text.*)
     }
 
+    . = ALIGN(4K);
     .rodata : ALIGN(4K)
     {
         *(.rodata .rodata.*)
     }
 
+    . = ALIGN(4K);
     .data : ALIGN(4K)
     {
         *(.data .data.*)
@@ -29,6 +31,14 @@ SECTIONS
     .got : ALIGN(4K)
     {
         *(.got .got.*)
+    }
+
+    /* Stack for initial boot (64KB) */
+    .stack : ALIGN(16)
+    {
+        _stack_bottom = .;
+        . += 64K;
+        _stack_top = .;
     }
 
     /DISCARD/ :

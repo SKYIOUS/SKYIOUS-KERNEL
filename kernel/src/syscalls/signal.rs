@@ -17,6 +17,8 @@ pub enum Signal {
     _SIGALRM = 14,
     _SIGTERM = 15,
     SIGCHLD = 17,
+    SIGCONT = 18,
+    SIGSTOP = 19,
 }
 
 pub struct SignalState {

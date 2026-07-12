@@ -314,6 +314,60 @@ pub fn wake_futex(uaddr: u64, max_wake: u32) -> u32 {
     global.wake_futex(uaddr, max_wake, &mut *sched)
 }
 
+/// Wake all threads in the futex queue whose process ID matches.
+pub fn wake_process_futex(pid: u64) -> u32 {
+    let mut sched = this_cpu_sched().lock();
+    let mut global = GLOBAL.lock();
+    let mut woken = 0u32;
+    let mut still_waiting = alloc::collections::VecDeque::new();
+    while let Some(mut thread) = global.futex_queue.pop_front() {
+        let matches = thread.process.as_ref().map(|p| p.id == pid).unwrap_or(false);
+        if matches {
+            thread.status = crate::task::thread::ThreadStatus::Ready;
+            thread.futex_wake_addr = None;
+            let p = if thread.priority > 7 { 7 } else { thread.priority };
+            sched.ready_queues[p as usize].push_back(thread);
+            woken += 1;
+        } else {
+            still_waiting.push_back(thread);
+        }
+    }
+    global.futex_queue = still_waiting;
+    woken
+}
+
+/// Wake all pipe-blocked threads whose process ID matches.
+pub fn wake_process_blocked(pid: u64) -> u32 {
+    let mut sched = this_cpu_sched().lock();
+    let mut global = GLOBAL.lock();
+    let mut woken = 0u32;
+    let mut still_waiting = alloc::collections::VecDeque::new();
+    while let Some(mut thread) = global.block_queue.pop_front() {
+        let matches = thread.process.as_ref().map(|p| p.id == pid).unwrap_or(false);
+        if matches {
+            thread.status = crate::task::thread::ThreadStatus::Ready;
+            thread.pipe_block_key = None;
+            let p = if thread.priority > 7 { 7 } else { thread.priority };
+            sched.ready_queues[p as usize].push_back(thread);
+            woken += 1;
+        } else {
+            still_waiting.push_back(thread);
+        }
+    }
+    global.block_queue = still_waiting;
+    woken
+}
+
+/// Boost the priority of a thread belonging to a specific process.
+/// Returns true if a thread was boosted.
+pub fn boost_thread_priority(_pid: u64, _target_priority: u8) -> bool {
+    // ponytail: single-thread-per-process model; full priority inheritance
+    // requires per-thread priority tracking across process boundaries.
+    // If this kernel gains shared-memory threading, implement by scanning
+    // the ready queues for the target PID and raising its priority.
+    false
+}
+
 /// Process timer tick: wake sleeping threads. Non-blocking for interrupt context.
 pub fn tick(current_ticks: u64) {
     if let Some(mut sched) = this_cpu_sched().try_lock() {

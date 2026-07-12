@@ -50,7 +50,7 @@ impl IoApic {
         }
     }
 
-    pub fn _max_redirection_entry(&self) -> u8 {
+    pub fn max_redirection_entry(&self) -> u8 {
         ((self._read(_IOAPICVER) >> 16) & 0xFF) as u8
     }
 
