@@ -54,6 +54,9 @@ impl VfsNode for PipeReader {
                 return Ok(data);
             }
             drop(buffer);
+            if crate::syscalls::signal::has_pending_signal() {
+                return Err(());
+            }
             crate::task::scheduler::block_on_pipe(self.pipe.id);
         }
     }

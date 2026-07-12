@@ -843,7 +843,13 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                         len as u64
                     }
                 }
-                Err(_) => errno::Errno::EIO as u64,
+                Err(_) => {
+                    if check_signal_interrupt() {
+                        errno::Errno::EINTR as u64
+                    } else {
+                        errno::Errno::EIO as u64
+                    }
+                }
             }
         },
         Some(FileDescriptor::PtyMaster { _idx: _, ref pair }) => {
@@ -1432,6 +1438,8 @@ fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
     // 1 tick = 1 timer interrupt. Assuming 100Hz = 10ms per tick.
     let ms = (seconds * 1000) + (nanoseconds / 1_000_000);
     let sleep_ticks = core::cmp::max(1, ms / 10);
+
+    if check_signal_interrupt() { return errno::Errno::EINTR as u64; }
 
     let target_tick = crate::interrupts::get_ticks() + sleep_ticks;
 
@@ -2199,7 +2207,10 @@ fn sys_wait4(pid: i64, status_ptr: *mut i32, _options: i32, _rusage: *mut u8) ->
             return child_pid;
         }
 
-        // No child exited yet — yield to other threads (child gets a chance to run)
+        // No child exited yet — check for signals before yielding
+        if check_signal_interrupt() { return errno::Errno::EINTR as u64; }
+
+        // Yield to other threads (child gets a chance to run)
         crate::task::scheduler::try_schedule();
     }
 }

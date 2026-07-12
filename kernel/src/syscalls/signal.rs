@@ -86,3 +86,14 @@ impl SignalState {
         self.saved_context.take()
     }
 }
+
+/// Returns true if the current process has any unmasked pending signal.
+pub fn has_pending_signal() -> bool {
+    let lock = crate::task::process::CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock {
+        let sig = p.signals.lock();
+        sig.has_unmasked_pending(sig.blocked)
+    } else {
+        false
+    }
+}
