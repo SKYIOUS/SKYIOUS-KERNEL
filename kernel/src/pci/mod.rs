@@ -149,6 +149,12 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             crate::drivers::storage::ahci::init(virt_abar);
         }
 
+        // PATA/IDE fallback
+        if class_code == 0x01 && subclass == 0x01 {
+            crate::println!("    -> PATA/IDE Controller detected, using PIO fallback.");
+            crate::drivers::storage::pata::init();
+        }
+
         // E1000
         if vendor_id == 0x8086 && device_id == 0x100E {
              crate::println!("    -> Intel E1000 Network Card detected!");

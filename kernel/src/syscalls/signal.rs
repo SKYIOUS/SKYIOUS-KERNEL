@@ -23,6 +23,7 @@ pub enum Signal {
 
 pub struct SignalState {
     pub pending: u64,
+    pub blocked: u64,       // bitmask of blocked signals (sigprocmask)
     pub saved_context: Option<SignalContext>,
 }
 
@@ -50,7 +51,7 @@ pub struct SignalContext {
 
 impl SignalState {
     pub fn new() -> Self {
-        SignalState { pending: 0, saved_context: None }
+        SignalState { pending: 0, blocked: 0, saved_context: None }
     }
 
     pub fn raise(&mut self, sig: Signal) {
@@ -61,12 +62,10 @@ impl SignalState {
         self.pending != 0
     }
 
-    #[allow(dead_code)]
     pub fn has_unmasked_pending(&self, mask: u64) -> bool {
         (self.pending & !mask) != 0
     }
 
-    #[allow(dead_code)]
     pub fn pop_unmasked(&mut self, mask: u64) -> Option<u32> {
         let available = self.pending & !mask;
         if available == 0 { return None; }

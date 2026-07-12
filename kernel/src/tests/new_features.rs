@@ -1,4 +1,5 @@
 use crate::selftest;
+use super::pata_read_test;
 
 pub fn test_entropy() -> Result<(), &'static str> {
     let e1 = crate::crypto::GLOBAL_ENTROPY.get_u64();
@@ -31,7 +32,59 @@ pub fn test_page_cache() -> Result<(), &'static str> {
     Ok(())
 }
 
+pub fn test_gdt_selectors() -> Result<(), &'static str> {
+    let sel = crate::gdt::get_selectors();
+    if sel.code_selector.0 == 0 {
+        return Err("GDT code_selector is null");
+    }
+    if sel.data_selector.0 == 0 {
+        return Err("GDT data_selector is null");
+    }
+    if sel.user_code_selector.0 == 0 {
+        return Err("GDT user_code_selector is null");
+    }
+    if sel.user_data_selector.0 == 0 {
+        return Err("GDT user_data_selector is null");
+    }
+    if sel.tss_selector.0 == 0 {
+        return Err("GDT tss_selector is null");
+    }
+    Ok(())
+}
+
+pub fn test_tss_stack() -> Result<(), &'static str> {
+    let stack = crate::gdt::get_kernel_stack();
+    if stack.as_u64() == 0 {
+        return Err("TSS privilege stack is zero");
+    }
+    Ok(())
+}
+
+pub fn test_ticks() -> Result<(), &'static str> {
+    let t1 = crate::interrupts::get_ticks();
+    for _ in 0..100_000 { core::hint::spin_loop(); }
+    let t2 = crate::interrupts::get_ticks();
+    if t2 < t1 {
+        return Err("Ticks decreased");
+    }
+    Ok(())
+}
+
+pub fn test_phys_alloc() -> Result<(), &'static str> {
+    crate::memory::phys::test_alloc_free()
+}
+
+pub fn test_virt_constants() -> Result<(), &'static str> {
+    crate::memory::virt::test_page_constants()
+}
+
 pub fn register_all() {
     selftest::register("entropy::robust_harvester", test_entropy);
     selftest::register("vfs::page_cache_basic", test_page_cache);
+    selftest::register("gdt::selectors_nonzero", test_gdt_selectors);
+    selftest::register("gdt::tss_stack", test_tss_stack);
+    selftest::register("interrupts::ticks_monotonic", test_ticks);
+    selftest::register("phys::bitmap_alloc_free", test_phys_alloc);
+    selftest::register("virt::page_constants", test_virt_constants);
+    selftest::register("pata::mbr_signature", pata_read_test::test_pata_mbr_sig);
 }

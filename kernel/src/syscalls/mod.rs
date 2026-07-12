@@ -21,11 +21,21 @@ use alloc::vec;
 use alloc::string::String;
 
 // Capability constants (matching Linux CAP_* values)
-pub const CAP_SYS_ADMIN: u64 = 1 << 21;
-pub const CAP_SYS_BOOT: u64 = 1 << 22;
+// ponytail: keepping existing CAP_SETUID/CAP_SETGID as-is (swapped vs Linux)
+#[allow(dead_code)] pub const CAP_CHOWN: u64 = 1 << 0;
+#[allow(dead_code)] pub const CAP_DAC_OVERRIDE: u64 = 1 << 1;
+#[allow(dead_code)] pub const CAP_DAC_READ_SEARCH: u64 = 1 << 2;
+#[allow(dead_code)] pub const CAP_FOWNER: u64 = 1 << 3;
+#[allow(dead_code)] pub const CAP_FSETID: u64 = 1 << 4;
 pub const CAP_KILL: u64 = 1 << 5;
 pub const CAP_SETUID: u64 = 1 << 6;
 pub const CAP_SETGID: u64 = 1 << 7;
+#[allow(dead_code)] pub const CAP_SETPCAP: u64 = 1 << 8;
+#[allow(dead_code)] pub const CAP_NET_BIND_SERVICE: u64 = 1 << 10;
+#[allow(dead_code)] pub const CAP_NET_ADMIN: u64 = 1 << 12;
+pub const CAP_NET_RAW: u64 = 1 << 13;
+pub const CAP_SYS_ADMIN: u64 = 1 << 21;
+pub const CAP_SYS_BOOT: u64 = 1 << 22;
 
 /// Check if the current process has the given capability in its effective set.
 fn has_capability(cap_bit: u64) -> bool {
@@ -476,6 +486,7 @@ pub(crate) fn do_syscall(
         numbers::SYS_ACCEPT => sys_accept(arg1, arg2 as *mut u8, arg3 as *mut u32),
         numbers::SYS_SENDTO => sys_sendto(arg1, arg2 as *const u8, arg3, arg4 as *const u8, arg5),
         numbers::SYS_RECVFROM => sys_recvfrom(arg1, arg2 as *mut u8, arg3, arg4 as *mut u8, arg5 as *mut u32),
+        numbers::SYS_SETSOCKOPT => sys_setsockopt(arg1, arg2 as i32, arg3 as i32, arg4 as *const u8, arg5),
         
         numbers::SYS_GUI_CREATE_WINDOW => sys_gui_create_window(arg1 as *const u8, arg2 as usize, arg3 as usize),
         numbers::SYS_GUI_GET_BUFFER => sys_gui_get_buffer(arg1),
@@ -534,6 +545,9 @@ pub(crate) fn do_syscall(
         numbers::SYS_SETGID => sys_setgid(arg1),
         numbers::SYS_GETEUID => sys_geteuid(),
         numbers::SYS_GETEGID => sys_getegid(),
+        numbers::SYS_CAPGET => sys_capget(arg1 as *mut u8, arg2 as *mut u8),
+        numbers::SYS_CAPSET => sys_capset(arg1 as *const u8, arg2 as *const u8),
+        numbers::SYS_SIGPROCMASK => sys_sigprocmask(arg1 as i32, arg2 as *const u64, arg3 as *mut u64),
         numbers::SYS_IO_URING_SETUP => io_uring::sys_io_uring_setup(arg1),
         numbers::SYS_IO_URING_ENTER => io_uring::sys_io_uring_enter(arg1, arg2, arg3, arg4, arg5),
         numbers::SYS_BPF => {
@@ -562,9 +576,11 @@ pub(crate) fn do_syscall(
                 None => return result,
             };
             let mut signals = proc.signals.lock();
-            if !signals.has_pending() { return result; }
+            // Only deliver unmasked signals
+            if !signals.has_unmasked_pending(signals.blocked) { return result; }
 
-            let sig_bit = signals.pending.trailing_zeros();
+            let available = signals.pending & !signals.blocked;
+            let sig_bit = available.trailing_zeros();
             let sig_num = sig_bit + 1;
             let handler = proc.signal_handlers.lock()[sig_bit as usize];
             let restorer = proc.signal_restorers.lock()[sig_bit as usize];
@@ -1401,12 +1417,22 @@ fn sys_exit_group(status: u64) -> u64 {
     sys_exit(status)
 }
 
+/// Check if current process has pending unmasked signals; return EINTR if so
+fn check_signal_interrupt() -> bool {
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *lock {
+        let sig = p.signals.lock();
+        sig.has_unmasked_pending(sig.blocked)
+    } else {
+        false
+    }
+}
+
 fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
     // 1 tick = 1 timer interrupt. Assuming 100Hz = 10ms per tick.
-    // This is a rough estimation for now.
     let ms = (seconds * 1000) + (nanoseconds / 1_000_000);
-    let sleep_ticks = core::cmp::max(1, ms / 10); // Minimum 1 tick
-    
+    let sleep_ticks = core::cmp::max(1, ms / 10);
+
     let target_tick = crate::interrupts::get_ticks() + sleep_ticks;
 
     if let Some(mut current_thread) = crate::task::scheduler::current_thread() {
@@ -1414,7 +1440,7 @@ fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
         current_thread.sleep_until = Some(target_tick);
         crate::task::scheduler::add_sleeping_thread(*current_thread);
     }
-    
+
     crate::task::scheduler::schedule();
 }
 
@@ -2251,8 +2277,64 @@ fn with_udp_mut<R>(sockets: &mut smoltcp::iface::SocketSet, handle: smoltcp::ifa
     None
 }
 
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+
+fn parse_sockaddr(addr_ptr: *const u8, addrlen: u64) -> Result<(u16, smoltcp::wire::IpAddress), errno::Errno> {
+    if addr_ptr.is_null() || addrlen < 8 {
+        return Err(errno::Errno::EINVAL);
+    }
+    let mut family_buf = [0u8; 2];
+    unsafe { user_access::copy_from_user(&mut family_buf, addr_ptr).map_err(|_| errno::Errno::EFAULT)?; }
+    let family = u16::from_ne_bytes(family_buf);
+    if addrlen < (if family == AF_INET6 { 28 } else { 16 }) {
+        return Err(errno::Errno::EINVAL);
+    }
+    let mut port_buf = [0u8; 2];
+    unsafe { user_access::copy_from_user(&mut port_buf, addr_ptr.wrapping_add(2)).map_err(|_| errno::Errno::EFAULT)?; }
+    let port = u16::from_be_bytes(port_buf);
+    Ok((port,
+        match family {
+            AF_INET => {
+                let mut ip = [0u8; 4];
+                unsafe { user_access::copy_from_user(&mut ip, addr_ptr.wrapping_add(4)).map_err(|_| errno::Errno::EFAULT)?; }
+                smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_bytes(&ip))
+            }
+            AF_INET6 => {
+                let mut ip = [0u8; 16];
+                unsafe { user_access::copy_from_user(&mut ip, addr_ptr.wrapping_add(8)).map_err(|_| errno::Errno::EFAULT)?; }
+                smoltcp::wire::IpAddress::Ipv6(smoltcp::wire::Ipv6Address::from_bytes(&ip))
+            }
+            _ => return Err(errno::Errno::EAFNOSUPPORT),
+        }))
+}
+
+fn write_sockaddr(addr_ptr: *mut u8, addrlen_ptr: *mut u32, ep: &smoltcp::wire::IpEndpoint) {
+    if addr_ptr.is_null() || addrlen_ptr.is_null() { return; }
+    match ep.addr {
+        smoltcp::wire::IpAddress::Ipv4(ipv4) => {
+            let mut sockaddr = [0u8; 16];
+            sockaddr[..2].copy_from_slice(&AF_INET.to_ne_bytes());
+            sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
+            sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
+            let addr_len: u32 = 16;
+            let _ = unsafe { user_access::copy_to_user(addr_ptr, &sockaddr) };
+            let _ = unsafe { user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
+        }
+        smoltcp::wire::IpAddress::Ipv6(ipv6) => {
+            let mut sockaddr = [0u8; 28];
+            sockaddr[..2].copy_from_slice(&AF_INET6.to_ne_bytes());
+            sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
+            sockaddr[8..24].copy_from_slice(ipv6.as_bytes());
+            let addr_len: u32 = 28;
+            let _ = unsafe { user_access::copy_to_user(addr_ptr, &sockaddr) };
+            let _ = unsafe { user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
+        }
+    }
+}
+
 fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
-    if domain != 2 {
+    if domain != AF_INET as u64 && domain != AF_INET6 as u64 {
         return errno::Errno::EAFNOSUPPORT as u64;
     }
     // LSM: socket creation permission
@@ -2271,6 +2353,12 @@ fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
 
     #[cfg(feature = "net")]
     {
+        // SOCK_RAW requires CAP_NET_RAW
+        if ty == 3 && !has_capability(CAP_NET_RAW) {
+            audit_log("CAP_NET_RAW", "socket(SOCK_RAW) DENIED");
+            return errno::Errno::EPERM as u64;
+        }
+
         let handle = if ty == 2 { // SOCK_DGRAM
             let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 16], vec![0; 4096]);
             let tx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 16], vec![0; 4096]);
@@ -2281,11 +2369,24 @@ fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
             let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 4096]);
             let socket = smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer);
             crate::net::SOCKETS.lock().add(socket)
+        } else if ty == 3 { // SOCK_RAW — ponytail: backed by ICMP socket for ping
+            let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
+                vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4],
+                vec![0u8; 4096],
+            );
+            let tx_buffer = smoltcp::socket::udp::PacketBuffer::new(
+                vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4],
+                vec![0u8; 4096],
+            );
+            let socket = smoltcp::socket::udp::Socket::new(rx_buffer, tx_buffer);
+            crate::net::SOCKETS.lock().add(socket)
         } else {
             return errno::Errno::EINVAL as u64;
         };
 
-        let socket_type = if ty == 1 { crate::task::process::SocketType::Tcp } else { crate::task::process::SocketType::Udp };
+        let socket_type = if ty == 1 { crate::task::process::SocketType::Tcp }
+            else if ty == 3 { crate::task::process::SocketType::Raw }
+            else { crate::task::process::SocketType::Udp };
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
             let mut fd_table = process.fd_table.lock();
@@ -2313,24 +2414,16 @@ lazy_static::lazy_static! {
 }
 
 fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
-    if addrlen < 8 { return errno::Errno::EINVAL as u64; }
-    let mut addr_buf = [0u8; 16];
-    let copy_len = core::cmp::min(addrlen as usize, 16);
-    if unsafe { user_access::copy_from_user(&mut addr_buf[..copy_len], addr_ptr) }.is_err() {
-        return errno::Errno::EFAULT as u64;
-    }
-
     #[cfg(not(feature = "net"))]
     return errno::Errno::ENOSYS as u64;
 
     #[cfg(feature = "net")]
     {
-        let family = unsafe { *(addr_buf.as_ptr() as *const u16) };
-        if family != 2 { return errno::Errno::EAFNOSUPPORT as u64; }
-        let port = u16::from_be(unsafe { *(addr_buf.as_ptr().add(2) as *const u16) });
-        let ip_bytes = unsafe { *(addr_buf.as_ptr().add(4) as *const [u8; 4]) };
-        let ip = smoltcp::wire::Ipv4Address::from_bytes(&ip_bytes);
-        let endpoint = smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(ip), port);
+        let (_port, addr) = match parse_sockaddr(addr_ptr, addrlen) {
+            Ok(v) => v,
+            Err(e) => return e as u64,
+        };
+        let endpoint = smoltcp::wire::IpEndpoint::new(addr, _port);
 
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
@@ -2349,6 +2442,9 @@ fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
                     crate::task::process::SocketType::Tcp => {
                         TCP_BIND_ENDPOINTS.lock().insert((pid, handle), endpoint);
                     }
+                    crate::task::process::SocketType::Raw => {
+                        // ponytail: raw sockets don't need explicit bind
+                    }
                 }
                 return 0;
             }
@@ -2363,29 +2459,18 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
 
     #[cfg(feature = "net")]
     {
-        if addrlen < 8 { return errno::Errno::EINVAL as u64; }
-        let mut addr_buf = [0u8; 16];
-        let copy_len = core::cmp::min(addrlen as usize, 16);
-        if unsafe { user_access::copy_from_user(&mut addr_buf[..copy_len], addr_ptr) }.is_err() {
-            return errno::Errno::EFAULT as u64;
-        }
-
-        let family = unsafe { *(addr_buf.as_ptr() as *const u16) };
-        if family != 2 { return errno::Errno::EAFNOSUPPORT as u64; }
-        let port = u16::from_be(unsafe { *(addr_buf.as_ptr().add(2) as *const u16) });
-        let ip_bytes = unsafe { *(addr_buf.as_ptr().add(4) as *const [u8; 4]) };
+        let (_port, addr) = match parse_sockaddr(addr_ptr, addrlen) {
+            Ok(v) => v,
+            Err(e) => return e as u64,
+        };
+        let endpoint = smoltcp::wire::IpEndpoint::new(addr, _port);
 
         // LSM: socket connect permission
         let subj = crate::security::current_subject();
-        let addr_str = alloc::format!("{}.{}.{}.{}:{}", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], port);
+        let addr_str = alloc::format!("{}", endpoint);
         if !crate::security::hook_socket_connect(&subj, &addr_str) {
             return errno::Errno::EACCES as u64;
         }
-
-        let endpoint = smoltcp::wire::IpEndpoint::new(
-            smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_bytes(&ip_bytes)),
-            port,
-        );
 
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
@@ -2423,6 +2508,10 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
                         }
                     }
                     crate::task::process::SocketType::Udp => {
+                        return 0;
+                    }
+                    crate::task::process::SocketType::Raw => {
+                        // ponytail: raw sockets are connectionless
                         return 0;
                     }
                 }
@@ -2471,6 +2560,7 @@ fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
 
     #[cfg(feature = "net")]
     {
+        if check_signal_interrupt() { return errno::Errno::EINTR as u64; }
         crate::net::poll();
 
         let process = {
@@ -2498,21 +2588,7 @@ fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
                     Some(Ok((remote, lp))) => {
                         match remote {
                             Some(ep) => {
-                                if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
-                                    let family: u16 = 2;
-                                    let port_be = ep.port.to_be();
-                                    let mut ip_bytes = [0u8; 4];
-                                    if let smoltcp::wire::IpAddress::Ipv4(ipv4) = ep.addr {
-                                        ip_bytes.copy_from_slice(ipv4.as_bytes());
-                                    }
-                                    let mut sockaddr = [0u8; 16];
-                                    sockaddr[..2].copy_from_slice(&family.to_ne_bytes());
-                                    sockaddr[2..4].copy_from_slice(&port_be.to_ne_bytes());
-                                    sockaddr[4..8].copy_from_slice(&ip_bytes);
-                                    let _ = unsafe { user_access::copy_to_user(addr_ptr, &sockaddr) };
-                                    let addr_len: u32 = 16;
-                                    let _ = unsafe { user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
-                                }
+                                write_sockaddr(addr_ptr, addrlen_ptr, &ep);
                                 (h, lp)
                             }
                             None => return errno::Errno::EINVAL as u64,
@@ -2574,16 +2650,10 @@ fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, addrle
             if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
 
             let dest_endpoint = if !addr_ptr.is_null() && addrlen >= 8 {
-                 let mut addr_buf = [0u8; 16];
-                 let clen = core::cmp::min(addrlen as usize, 16);
-                 if unsafe { user_access::copy_from_user(&mut addr_buf[..clen], addr_ptr) }.is_err() {
-                     return errno::Errno::EFAULT as u64;
-                 }
-                 {
-                     let port = u16::from_be(unsafe { *(addr_buf.as_ptr().add(2) as *const u16) });
-                     let ip_bytes = unsafe { *(addr_buf.as_ptr().add(4) as *const [u8; 4]) };
-                     Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_bytes(&ip_bytes)), port))
-                 }
+                match parse_sockaddr(addr_ptr, addrlen) {
+                    Ok((port, addr)) => Some(smoltcp::wire::IpEndpoint::new(addr, port)),
+                    Err(_) => return errno::Errno::EINVAL as u64,
+                }
             } else {
                  None
             };
@@ -2625,20 +2695,7 @@ fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addrlen_
                 if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
                         if let Ok((n, meta)) = socket.recv_slice(&mut data) {
                         if n == 0 { return 0u64; }
-                        if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
-                            let endpoint = meta.endpoint;
-                            let family: u16 = 2;
-                            let port_be = endpoint.port.to_be();
-                            if let smoltcp::wire::IpAddress::Ipv4(ipv4) = endpoint.addr {
-                                let mut sockaddr = [0u8; 16];
-                                sockaddr[0..2].copy_from_slice(&family.to_ne_bytes());
-                                sockaddr[2..4].copy_from_slice(&port_be.to_ne_bytes());
-                                sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
-                                let addr_len: u32 = 16;
-                                let _ = unsafe { user_access::copy_to_user(addr_ptr, &sockaddr) };
-                                let _ = unsafe { user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
-                            }
-                        }
+                        write_sockaddr(addr_ptr, addrlen_ptr, &meta.endpoint);
                         if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
                             return n as u64;
                         }
@@ -2651,6 +2708,40 @@ fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addrlen_
         return 0;
     }
     errno::Errno::EBADF as u64
+}
+
+const SOL_SOCKET: i32 = 1;
+const SO_RCVTIMEO: i32 = 20;
+const SO_SNDTIMEO: i32 = 21;
+const IPPROTO_TCP: i32 = 6;
+const TCP_NODELAY: i32 = 1;
+
+fn sys_setsockopt(sockfd: u64, level: i32, optname: i32, _optval: *const u8, _optlen: u64) -> u64 {
+    #[cfg(not(feature = "net"))]
+    return errno::Errno::ENOSYS as u64;
+
+    #[cfg(feature = "net")]
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let fd_table = process.fd_table.lock();
+        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+        if fd_table[sockfd as usize].is_none() { return errno::Errno::EBADF as u64; }
+
+        // ponytail: smoltcp sockets are non-blocking; timeouts are accepted but unused
+        let r = match level {
+            SOL_SOCKET => match optname {
+                SO_RCVTIMEO | SO_SNDTIMEO => 0u64,
+                _ => errno::Errno::ENOPROTOOPT as u64,
+            },
+            IPPROTO_TCP => match optname {
+                TCP_NODELAY => 0u64,
+                _ => errno::Errno::ENOPROTOOPT as u64,
+            },
+            _ => errno::Errno::ENOPROTOOPT as u64,
+        };
+        r
+    }
 }
 
 fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const *const u8, _regs_ptr: *mut u64) -> u64 {
@@ -3698,6 +3789,93 @@ fn sys_geteuid() -> u64 {
 fn sys_getegid() -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock { *p.egid.lock() as u64 } else { 0 }
+}
+
+/// Linux-compatible capget: read capability sets
+fn sys_capget(hdrp: *mut u8, datap: *mut u8) -> u64 {
+    if hdrp.is_null() { return errno::Errno::EFAULT as u64; }
+    let mut header = [0u8; 8];
+    if unsafe { user_access::copy_from_user(&mut header, hdrp) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+    let version = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]);
+    let _pid = i32::from_ne_bytes([header[4], header[5], header[6], header[7]]);
+
+    if version != 0x19980330 { return errno::Errno::EINVAL as u64; }
+    if datap.is_null() { return errno::Errno::EFAULT as u64; }
+
+    let lock = CURRENT_PROCESS.lock();
+    let proc = match *lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+    let data = [
+        (*proc.cap_effective.lock() as u32).to_ne_bytes(),
+        (*proc.cap_permitted.lock() as u32).to_ne_bytes(),
+        (*proc.cap_inheritable.lock() as u32).to_ne_bytes(),
+    ]
+    .concat();
+    if unsafe { user_access::copy_to_user(datap, &data) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+    0
+}
+
+/// Linux-compatible capset: set capability sets (root only)
+fn sys_capset(hdrp: *const u8, datap: *const u8) -> u64 {
+    if hdrp.is_null() || datap.is_null() { return errno::Errno::EFAULT as u64; }
+    let mut header = [0u8; 8];
+    if unsafe { user_access::copy_from_user(&mut header, hdrp) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+    let version = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]);
+    let _pid = i32::from_ne_bytes([header[4], header[5], header[6], header[7]]);
+
+    if version != 0x19980330 { return errno::Errno::EINVAL as u64; }
+
+    let mut caps = [0u8; 12];
+    if unsafe { user_access::copy_from_user(&mut caps, datap) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+    let eff = u32::from_ne_bytes([caps[0], caps[1], caps[2], caps[3]]) as u64;
+    let perm = u32::from_ne_bytes([caps[4], caps[5], caps[6], caps[7]]) as u64;
+    let inh = u32::from_ne_bytes([caps[8], caps[9], caps[10], caps[11]]) as u64;
+
+    let lock = CURRENT_PROCESS.lock();
+    let proc = match *lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+
+    let euid = *proc.euid.lock();
+    if euid != 0 && !has_capability(CAP_SETPCAP) {
+        return errno::Errno::EPERM as u64;
+    }
+
+    *proc.cap_effective.lock() = eff;
+    *proc.cap_permitted.lock() = perm;
+    *proc.cap_inheritable.lock() = inh;
+    0
+}
+
+/// sigprocmask: examine/change signal mask
+fn sys_sigprocmask(how: i32, set_ptr: *const u64, oldset_ptr: *mut u64) -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    let proc = match *lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+    let mut sigstate = proc.signals.lock();
+    let blocked = &mut sigstate.blocked;
+
+    if !oldset_ptr.is_null() {
+        let old = *blocked;
+        if unsafe { user_access::copy_to_user(oldset_ptr as *mut u8, &old.to_ne_bytes()) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    if !set_ptr.is_null() {
+        let val = unsafe { *set_ptr };
+        match how {
+            0 => *blocked |= val,    // SIG_BLOCK
+            1 => *blocked &= !val,   // SIG_UNBLOCK
+            2 => *blocked = val,     // SIG_SETMASK
+            _ => return errno::Errno::EINVAL as u64,
+        }
+    }
+    0
 }
 
 fn sys_korlang(id: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u64) -> u64 {

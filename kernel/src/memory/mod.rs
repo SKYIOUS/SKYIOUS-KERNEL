@@ -12,6 +12,9 @@ pub mod slab;
 pub mod paging;
 pub mod frame_info;
 pub mod stack;
+pub mod phys;
+#[cfg(not(target_arch = "aarch64"))]
+pub mod virt;
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
 
@@ -135,6 +138,8 @@ pub unsafe fn init_frame_allocator(memory_regions: &'static MemoryRegions) {
             );
         }
     }
+    // Initialize bitmap page frame allocator alongside buddy
+    phys::init(memory_regions);
 }
 
 

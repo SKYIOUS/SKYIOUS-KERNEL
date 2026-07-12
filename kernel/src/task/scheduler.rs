@@ -1,7 +1,33 @@
+//! Preemptive priority-based round-robin scheduler.
+//!
+//! ## Design
+//! Each CPU owns a `PerCpuScheduler` with 8 priority-sorted ready queues (level 7 =
+//! highest). The LAPIC timer fires at ~100 Hz; its handler calls `try_schedule()`,
+//! which picks the highest-priority ready thread and context-switches to it.
+//!
+//! Pick order:
+//!   1. Local ready queues (highest priority first, round-robin within a level).
+//!   2. Global pending queue (newly-spawned threads).
+//!   3. Work stealing from other CPUs' highest-priority queues.
+//!
+//! Blocked threads are tracked in global sleep/futex/pipe queues and woken by
+//! `tick()` (timer) or explicit `wake_*` calls.
+//!
+//! ## Context Switch
+//! `switch_thread()` in `thread.rs` invokes inline assembly that saves/restores
+//! all callee-saved registers (r15–r12, rbp, rbx, rflags) and the stack pointer.
+//! The switch is triggered either preemptively (timer IRQ) or cooperatively
+//! (`try_schedule()`, `sched_yield()` syscall).
+//!
+//! ## Thread States
+//! - `Ready` — in a ready queue, eligible to run.
+//! - `Running` — currently executing on a CPU.
+//! - `Blocked` — waiting on a pipe, futex, or sleep timer.
+//! - `Exited` — finished; cleaned up on next context switch.
+
 use alloc::collections::VecDeque;
 use spin::Mutex;
 use crate::task::thread::Thread;
-
 use alloc::boxed::Box;
 
 /// Per-CPU scheduler: ready queues + currently running thread.
@@ -83,15 +109,24 @@ impl GlobalScheduler {
     pub fn tick(&mut self, current_ticks: u64, target_ready: &mut PerCpuScheduler) {
         let mut still_sleeping = VecDeque::new();
         while let Some(mut thread) = self.sleep_queue.pop_front() {
+            let mut wake = false;
             if let Some(wake_time) = thread.sleep_until {
-                if current_ticks >= wake_time {
-                    thread.status = crate::task::thread::ThreadStatus::Ready;
-                    thread.sleep_until = None;
-                    let priority = thread.priority as usize;
-                    let p = if priority > 7 { 7 } else { priority };
-                    target_ready.ready_queues[p].push_back(thread);
-                    continue;
+                if current_ticks >= wake_time { wake = true; }
+            }
+            // Wake on pending signal (enables signal-interruptible sleep)
+            if !wake {
+                if let Some(ref proc) = thread.process {
+                    let sig = proc.signals.lock();
+                    if sig.has_unmasked_pending(sig.blocked) { wake = true; }
                 }
+            }
+            if wake {
+                thread.status = crate::task::thread::ThreadStatus::Ready;
+                thread.sleep_until = None;
+                let priority = thread.priority as usize;
+                let p = if priority > 7 { 7 } else { priority };
+                target_ready.ready_queues[p].push_back(thread);
+                continue;
             }
             still_sleeping.push_back(thread);
         }

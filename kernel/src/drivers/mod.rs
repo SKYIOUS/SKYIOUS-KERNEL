@@ -10,3 +10,4 @@ pub mod watchdog;
 pub mod audio;
 pub mod input;
 pub mod rtc;
+pub mod serial;

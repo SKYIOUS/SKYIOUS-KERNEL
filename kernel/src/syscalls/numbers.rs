@@ -34,6 +34,7 @@ pub const SYS_RECVFROM: u64 = 45;
 pub const SYS_BIND: u64 = 49;
 pub const SYS_LISTEN: u64 = 50;
 pub const SYS_ACCEPT: u64 = 43;
+pub const SYS_SETSOCKOPT: u64 = 54;
 
 // GUI Syscalls
 pub const SYS_GUI_CREATE_WINDOW: u64 = 100;
@@ -78,6 +79,9 @@ pub const SYS_SETUID: u64 = 303;
 pub const SYS_SETGID: u64 = 304;
 pub const SYS_GETEUID: u64 = 305;
 pub const SYS_GETEGID: u64 = 306;
+pub const SYS_CAPGET: u64 = 307;
+pub const SYS_CAPSET: u64 = 308;
+pub const SYS_SIGPROCMASK: u64 = 309;
 pub const SYS_IO_URING_SETUP: u64 = 425;
 pub const SYS_IO_URING_ENTER: u64 = 426;
 pub const SYS_BPF: u64 = 321;

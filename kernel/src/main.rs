@@ -121,20 +121,19 @@ fn init_kaslr() {
     KERNEL_SLIDE.store(val & 0x0000_0000_FFFF_0000, core::sync::atomic::Ordering::Relaxed);
 }
 
+pub fn init_serial() {
+    #[cfg(not(target_arch = "aarch64"))]
+    crate::drivers::serial::init(0x3F8);
+}
+
 pub fn serial_putc(c: u8) {
     #[cfg(not(target_arch = "aarch64"))]
-    unsafe {
-        use x86_64::instructions::port::Port;
-        let mut data = Port::<u8>::new(0x3f8);
-        let mut lsr = Port::<u8>::new(0x3fd);
-        while lsr.read() & 0x20 == 0 {}
-        data.write(c);
+    {
+        crate::drivers::serial::putc(c);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        // QEMU virt PL011 UART at MMIO 0x09000000
         let uart = 0x0900_0000 as *mut u32;
-        // Wait while UART is busy (UARTFR bit 3 = TXFF)
         while (uart.add(0x18 / 4).read_volatile() & (1 << 5)) != 0 {}
         uart.add(0x00).write_volatile(c as u32);
     }
@@ -153,6 +152,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     unsafe { __stack_chk_guard = ((base << 1) | base.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize; }
 
     init_kaslr();
+    init_serial();
 
     unsafe {
         crate::arch::CurrentArch::init_cpu();
@@ -181,6 +181,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     else { serial_write("[BOOT] graphics=INACTIVE\n"); }
     serial_write("[BOOT] -> SARGA OS — Vahi Kernel v0.3.0 starting...\n");
     serial_write("[SPLASH] 🚀 SARGA OS loading...\n");
+
+    crate::vga_buffer::init();
 
     serial_write("[BOOT] frame allocator...\n");
     unsafe { memory::init_frame_allocator(&boot_info.memory_regions) };
@@ -280,6 +282,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     task::scheduler::spawn(run_async_tasks);
     task::scheduler::spawn(init_os_task);
+    task::scheduler::spawn(threading_demo);
 
     #[cfg(not(target_arch = "aarch64"))]
     x86_64::instructions::interrupts::enable();
@@ -402,6 +405,35 @@ extern "C" fn init_os_task() -> ! {
 
     loop {
         core::hint::spin_loop();
+    }
+}
+
+extern "C" fn threading_demo() -> ! {
+    crate::serial_write("[DEMO] threading_demo: spawning two threads...\n");
+
+    extern "C" fn thread_a() -> ! {
+        loop {
+            crate::serial_write("[thread-A] A\n");
+            for _ in 0..5_000_000 { core::hint::spin_loop(); }
+            crate::task::scheduler::try_schedule();
+        }
+    }
+    extern "C" fn thread_b() -> ! {
+        loop {
+            crate::serial_write("[thread-B] B\n");
+            for _ in 0..5_000_000 { core::hint::spin_loop(); }
+            crate::task::scheduler::try_schedule();
+        }
+    }
+
+    let t_a = crate::task::thread::Thread::new(thread_a);
+    let t_b = crate::task::thread::Thread::new(thread_b);
+    crate::task::scheduler::spawn_thread(t_a);
+    crate::task::scheduler::spawn_thread(t_b);
+
+    crate::serial_write("[DEMO] threading_demo: threads spawned, entering idle loop.\n");
+    loop {
+        crate::arch::CurrentArch::halt();
     }
 }
 

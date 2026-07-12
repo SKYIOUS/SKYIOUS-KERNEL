@@ -472,11 +472,27 @@ cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
 ### Run in QEMU
 
 ```powershell
+# Quick boot (uses existing bootimage-vahi_kernel.bin)
+.\run.ps1
+
 # With display
 .\run_qemu_display.ps1
 
 # No display (serial only, for testing)
 .\run_test_nographic.ps1
+```
+
+#### Direct QEMU commands
+
+```powershell
+# Boot from UEFI disk image with serial console
+qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=bootimage-vahi_kernel.bin -m 512M -smp 2 -serial stdio
+
+# Boot with display + serial
+qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=bootimage-vahi_kernel.bin -m 512M -smp 2 -serial file:serial.log
+
+# Full build + boot
+.\make_bootimage.ps1; if ($?) { .\run.ps1 }
 ```
 
 ### QEMU Configuration
@@ -490,6 +506,77 @@ cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
 - VGA display (GOP framebuffer)
 - Serial console for logging
 ```
+
+## Filesystem Support
+
+### Supported Filesystems
+
+| FS | R/W | Mount point | Notes |
+|----|-----|-------------|-------|
+| Ext2 | ✅ | Auto-detected on block devices | Full R/W, indirect blocks, mkdir, create |
+| Ext4 | Read | Auto-detected | Read-only, extent trees (cfg feature) |
+| FAT32 | ✅ | Auto-detected on block devices | Via fatfs crate |
+| TarFS | Read | Initrd / block devices | ustar format |
+| Tmpfs | ✅ | `/tmp` | In-memory, writable |
+| DevFS | ✅ | `/dev` | Device nodes (tty0, fb0, null, zero, block devs) |
+| CtlFS | Read | `/ctl` | Plan9-style control files |
+
+### Auto-Mount Behavior
+
+During boot, `vfs::init()` scans all block devices and partitions, auto-detecting and mounting ext2, ext4, FAT32, TarFS, and SkyFS under `/mnt/`. The root filesystem is selected from:
+
+1. Explicit `BOOT_DEVICE` index → tries ext4 → ext2 → SkyFS
+2. First block device partition → tries ext4 → ext2 → SkyFS
+3. First whole block device → tries ext4 → ext2 → SkyFS
+4. Bootloader initrd → TarFS (fallback)
+
+### Testing with an Ext2 Disk Image
+
+```bash
+# Create a test ext2 image with known files
+python scripts/make_test_ext2.py test_ext2.img 32
+
+# Boot QEMU with the test disk attached
+qemu-system-x86_64 -bios OVMF.fd \
+    -drive format=raw,file=bootimage-vahi_kernel.bin,if=ide,index=0 \
+    -drive format=raw,file=test_ext2.img,if=ide,index=1 \
+    -m 512M -smp 2 -serial stdio
+```
+
+The kernel auto-mounts the ext2 partition at `/mnt/ext2_0` (or similar). Use the in-kernel shell (`ls`, `cat`, `mkdir`, `touch`) to interact with it.
+
+### Package Manager (.sky packages)
+
+The package format is a ustar tar archive containing a `manifest` file plus payload files. Build and install:
+
+```bash
+# Create a package directory
+mkdir -p mypkg
+echo "name=hello-world" > mypkg/manifest
+echo "version=1.0.0" >> mypkg/manifest
+echo "description=Example" >> mypkg/manifest
+echo 'echo Hello!' > mypkg/hello.sh
+
+# Build the .skp package
+python scripts/make_sky_pkg.py mypkg hello-world.skp
+
+# Install (from userspace shell)
+spkg install hello-world.skp
+```
+
+### In-Kernel Self-Tests
+
+With the `self_test` feature enabled, five ext2 filesystem tests run at boot:
+
+```
+ext2_format_mount   — Format and mount minimal ext2
+ext2_read_file      — Read pre-written file, verify content
+ext2_write_file     — Create, write, read back file
+ext2_mkdir_and_stat — Create directory, verify stat
+ext2_permissions    — Verify permission bits in stat
+```
+
+See `docs/filesystem-design.md` for the full FS architecture.
 
 ---
 
@@ -876,3 +963,27 @@ Key provisions:
 - Optional Maintainer Right clause for upstream fork incorporation
 - 30-day cure period for license violations
 - "or any later version" compatibility
+
+## Testing with a Disk Drive
+
+Create a test disk image and boot the kernel with it attached as a secondary IDE drive:
+
+```powershell
+.\test_drive_qemu.ps1
+```
+
+This runs `make_disk_image.ps1` to create `test_disk.img` (32 MB, MBR-partitioned) and boots QEMU with both the kernel disk and the test disk attached. The kernel's PCI enumeration detects the IDE controller and probes the PATA/IDE fallback driver (if AHCI is not available) or the AHCI driver directly.
+
+To create just the disk image:
+
+```powershell
+.\make_disk_image.ps1 -Size "64M" -OutFile "my_disk.img"
+```
+
+To boot with a disk image manually:
+
+```powershell
+qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=skyos_uefi.img,if=ide,index=0 -drive format=raw,file=test_disk.img,if=ide,index=1 -m 512M -smp 2 -serial stdio
+```
+
+The kernel's `pata::mbr_signature` self-test reads sector 0 from the first block device and verifies the 0x55AA MBR signature. Check the serial console for test results.

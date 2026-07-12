@@ -33,7 +33,7 @@ pub struct Vma {
 use smoltcp::iface::SocketHandle;
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum SocketType { Tcp, Udp }
+pub enum SocketType { Tcp, Udp, Raw }
 
 #[derive(Clone)]
 #[allow(dead_code)]

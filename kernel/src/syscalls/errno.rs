@@ -43,6 +43,7 @@ pub enum Errno {
     ECONNREFUSED = -111,/* Connection refused */
     EALREADY = -114,    /* Operation already in progress */
     EDESTADDRREQ = -89, /* Destination address required */
+    ENOPROTOOPT = -92,  /* Protocol not available */
 }
 
 impl From<Errno> for u64 {

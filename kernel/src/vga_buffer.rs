@@ -194,6 +194,20 @@ pub fn clear_screen() {
     });
 }
 
+pub fn init() {
+    use core::fmt::Write;
+    use x86_64::instructions::interrupts;
+    clear_screen();
+    set_color(Color::Yellow, Color::Black);
+    interrupts::without_interrupts(|| {
+        if crate::drivers::graphics::is_active() {
+            crate::drivers::graphics::console::WRITER.lock().write_str("SKYIOUS Kernel booting...\n").ok();
+        } else {
+            WRITER.lock().write_str("SKYIOUS Kernel booting...\n").ok();
+        }
+    });
+}
+
 pub fn set_color(foreground: Color, background: Color) {
     use x86_64::instructions::interrupts;
     interrupts::without_interrupts(|| {
