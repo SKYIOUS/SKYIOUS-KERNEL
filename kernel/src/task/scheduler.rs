@@ -329,7 +329,20 @@ pub fn block_on_pipe(key: u64) {
 pub fn wake_pipe(key: u64) {
     let mut sched = this_cpu_sched().lock();
     let mut global = GLOBAL.lock();
-    global.wake_blocked_threads(key, u32::MAX, &mut *sched);
+    let woken = global.wake_blocked_threads(key, u32::MAX, &mut *sched);
+    if woken > 0 { broadcast_reschedule_ipi(); }
+}
+
+/// IPI handler: trigger `try_schedule()` on the receiving CPU.
+/// Called from interrupt context (IpiFunc vector 251).
+extern "C" fn ipi_reschedule_handler(_arg: u64) {
+    try_schedule();
+}
+
+/// Broadcast a reschedule IPI to all other CPUs so they pick up
+/// newly-ready threads (e.g. after `wake_futex`).
+pub fn broadcast_reschedule_ipi() {
+    crate::smp::smp_broadcast_func(ipi_reschedule_handler as extern "C" fn(u64), 0);
 }
 
 /// Move current thread to sleep queue.
@@ -346,7 +359,9 @@ pub fn add_futex_thread(thread: Thread) {
 pub fn wake_futex(uaddr: u64, max_wake: u32) -> u32 {
     let mut sched = this_cpu_sched().lock();
     let mut global = GLOBAL.lock();
-    global.wake_futex(uaddr, max_wake, &mut *sched)
+    let woken = global.wake_futex(uaddr, max_wake, &mut *sched);
+    if woken > 0 { broadcast_reschedule_ipi(); }
+    woken
 }
 
 /// Wake all threads in the futex queue whose process ID matches.
@@ -368,6 +383,7 @@ pub fn wake_process_futex(pid: u64) -> u32 {
         }
     }
     global.futex_queue = still_waiting;
+    if woken > 0 { broadcast_reschedule_ipi(); }
     woken
 }
 
@@ -390,6 +406,7 @@ pub fn wake_process_blocked(pid: u64) -> u32 {
         }
     }
     global.block_queue = still_waiting;
+    if woken > 0 { broadcast_reschedule_ipi(); }
     woken
 }
 

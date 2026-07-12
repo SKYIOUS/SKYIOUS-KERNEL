@@ -373,6 +373,26 @@ pub fn smp_broadcast(func: extern "C" fn(u64), arg: u64) {
     }
 }
 
+/// Fire-and-forget broadcast: set func+arg on every other CPU's PerCpuData
+/// and send a single broadcast IPI.  Unlike `smp_broadcast` this does NOT
+/// wait for each IPI to finish, making it suitable for reschedule hints.
+pub fn smp_broadcast_func(func: extern "C" fn(u64), arg: u64) {
+    let areas = crate::syscalls::PER_CPU_AREAS.lock();
+    for (_cpu_id, ptr) in areas.iter().enumerate() {
+        let raw = ptr.0;
+        if !raw.is_null() {
+            unsafe {
+                (*raw).ipi_pending = func as u64;
+                (*raw).ipi_arg = arg;
+            }
+        }
+    }
+    drop(areas);
+    if let Some(ref mut lapic) = *crate::apic::lapic::LOCAL_APIC.lock() {
+        lapic.send_broadcast_ipi(251);
+    }
+}
+
 /// Broadcasts a TLB flush IPI to all other CPU cores.
 /// Phase H1: Ensure memory coherence during page table changes.
 pub fn broadcast_tlb_flush(addr: u64) {

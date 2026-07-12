@@ -1,6 +1,5 @@
 // ponytail: single sector read test, no framework
 use crate::drivers::block::BLOCK_DEVICES;
-use crate::drivers::block::BlockDevice;
 
 pub fn test_pata_mbr_sig() -> Result<(), &'static str> {
     let devices = BLOCK_DEVICES.lock();
