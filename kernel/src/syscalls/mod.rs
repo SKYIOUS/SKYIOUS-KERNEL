@@ -562,6 +562,8 @@ pub(crate) fn do_syscall(
         numbers::SYS_OPENPTY => sys_openpty(),
         numbers::SYS_SET_TID_ADDRESS => sys_set_tid_address(arg1 as *const u32),
         numbers::SYS_EXIT_GROUP => sys_exit_group(arg1),
+        numbers::SYS_TRUNCATE => sys_truncate(arg1 as *const u8, arg2 as i64),
+        numbers::SYS_FTRUNCATE => sys_ftruncate(arg1, arg2 as i64),
         _ => {
             crate::println!("[SYSCALL] Unknown syscall: {} (0x{:x})", n, n);
             errno::Errno::ENOSYS as u64
@@ -3381,6 +3383,51 @@ fn sys_unlink(path_ptr: *const u8) -> u64 {
     errno::Errno::EIO as u64
 }
 
+fn sys_truncate(path_ptr: *const u8, len: i64) -> u64 {
+    let path = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let vfs = VFS.lock();
+    match vfs.resolve_path(&path) {
+        Some(node) => {
+            if !check_node_permission(&node, 2) {
+                return errno::Errno::EACCES as u64;
+            }
+            if node.truncate(len).is_ok() { 0 }
+            else { errno::Errno::EIO as u64 }
+        }
+        None => errno::Errno::ENOENT as u64,
+    }
+}
+
+fn sys_ftruncate(fd: u64, len: i64) -> u64 {
+    let proc = CURRENT_PROCESS.lock();
+    if let Some(ref p) = *proc {
+        let fd_table = p.fd_table.lock();
+        if let Some(Some(desc)) = fd_table.get(fd as usize) {
+            match desc {
+                FileDescriptor::File { node, .. } => {
+                    let n = node.clone();
+                    drop(fd_table);
+                    drop(proc);
+                    if n.truncate(len).is_ok() { 0 }
+                    else { errno::Errno::EIO as u64 }
+                }
+                _ => {
+                    drop(fd_table);
+                    drop(proc);
+                    errno::Errno::EBADF as u64
+                }
+            }
+        } else {
+            errno::Errno::EBADF as u64
+        }
+    } else {
+        errno::Errno::EBADF as u64
+    }
+}
+
 fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
     let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
         Ok(s) => s,
@@ -3393,75 +3440,59 @@ fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
 
     let vfs = VFS.lock();
 
-    // Read source
+    // Resolve source
     let source_node = match vfs.resolve_path(&old_path) {
         Some(n) => n,
         None => return errno::Errno::ENOENT as u64,
     };
+    if !check_node_permission(&source_node, 2) {
+        return errno::Errno::EACCES as u64;
+    }
 
-    // Need w+x on source parent directory to unlink the original
+    // Try native rename on same parent first
     let src_last_slash = old_path.rfind('/').unwrap_or(0);
-    let src_parent_path = if src_last_slash == 0 && !old_path.starts_with('/') { "." }
-        else if src_last_slash == 0 { "/" }
-        else { &old_path[..src_last_slash] };
-    if let Some(src_parent) = vfs.resolve_path(src_parent_path) {
-        if !check_node_permission(&src_parent, 3) {
-            return errno::Errno::EACCES as u64;
+    let dst_last_slash = new_path.rfind('/').unwrap_or(0);
+    let (src_parent_path, src_name) = if src_last_slash == 0 { ("/", &old_path[1..]) } else { (&old_path[..src_last_slash], &old_path[src_last_slash+1..]) };
+    let (dst_parent_path, dst_name) = if dst_last_slash == 0 { ("/", &new_path[1..]) } else { (&new_path[..dst_last_slash], &new_path[dst_last_slash+1..]) };
+
+    // If same parent, try native rename
+    if src_parent_path == dst_parent_path {
+        if let Some(parent) = vfs.resolve_path(src_parent_path) {
+            if !check_node_permission(&parent, 3) {
+                return errno::Errno::EACCES as u64;
+            }
+            if parent.rename(src_name, dst_name).is_ok() {
+                return 0;
+            }
         }
     }
 
+    // Fallback: copy + delete
     let data = match source_node.read(usize::MAX) {
         Ok(d) => d,
         Err(_) => return errno::Errno::EIO as u64,
     };
 
-    // Resolve destination parent
-    let last_slash = new_path.rfind('/').unwrap_or(0);
-    let (parent_path, name) = if last_slash == 0 && !new_path.starts_with('/') {
-        (".", new_path.as_str())
-    } else if last_slash == 0 {
-        ("/", &new_path[1..])
-    } else {
-        (&new_path[..last_slash], &new_path[last_slash+1..])
-    };
-
-    let parent_node = match vfs.resolve_path(parent_path) {
+    let dst_parent = match vfs.resolve_path(dst_parent_path) {
         Some(n) => n,
         None => return errno::Errno::ENOENT as u64,
     };
-
-    // Need w+x on destination parent to create the new entry
-    if !check_node_permission(&parent_node, 3) {
+    if !check_node_permission(&dst_parent, 3) {
         return errno::Errno::EACCES as u64;
     }
 
-    // Create new file
-    if parent_node.create(name).is_err() {
+    if dst_parent.create(dst_name).is_err() {
         return errno::Errno::EIO as u64;
     }
+    if let Some(new_node) = dst_parent.find_child(dst_name) {
+        let _ = new_node.write(&data);
+    }
 
-    // Write data to new file
-    let new_node = match parent_node.find_child(name) {
+    let src_parent = match vfs.resolve_path(src_parent_path) {
         Some(n) => n,
-        None => return errno::Errno::EIO as u64,
+        None => return errno::Errno::ENOENT as u64,
     };
-    if new_node.write(&data).is_err() {
-        return errno::Errno::EIO as u64;
-    }
-
-    // Remove old source
-    let old_last_slash = old_path.rfind('/').unwrap_or(0);
-    let (old_parent_path, old_name) = if old_last_slash == 0 && !old_path.starts_with('/') {
-        (".", old_path.as_str())
-    } else if old_last_slash == 0 {
-        ("/", &old_path[1..])
-    } else {
-        (&old_path[..old_last_slash], &old_path[old_last_slash+1..])
-    };
-
-    if let Some(old_parent) = vfs.resolve_path(old_parent_path) {
-        let _ = old_parent.unlink(old_name);
-    }
+    let _ = src_parent.unlink(src_name);
 
     0
 }

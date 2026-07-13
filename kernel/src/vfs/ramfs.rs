@@ -12,7 +12,7 @@ impl Tmpfs {
     pub fn new() -> Self {
         Tmpfs {
             root: Arc::new(TmpNode {
-                name: String::from("/"),
+                name: Mutex::new(String::from("/")),
                 is_dir: true,
                 is_symlink: false,
                 link_target: None,
@@ -27,7 +27,7 @@ impl Tmpfs {
     
     pub fn _add_file(&self, name: &str, data: Vec<u8>) {
         let node = Arc::new(TmpNode {
-            name: String::from(name),
+            name: Mutex::new(String::from(name)),
             is_dir: false,
             is_symlink: false,
             link_target: None,
@@ -48,7 +48,7 @@ impl FileSystem for Tmpfs {
 }
 
 struct TmpNode {
-    name: String,
+    name: Mutex<String>,
     is_dir: bool,
     is_symlink: bool,
     link_target: Option<String>,
@@ -61,7 +61,7 @@ struct TmpNode {
 
 impl VfsNode for TmpNode {
     fn name(&self) -> String {
-        self.name.clone()
+        self.name.lock().clone()
     }
     
     fn is_dir(&self) -> bool {
@@ -148,12 +148,12 @@ impl VfsNode for TmpNode {
             return Err(());
         }
         let mut children = self.children.lock();
-        if children.iter().any(|c| c.name == name) {
+        if children.iter().any(|c| *c.name.lock() == name) {
             return Err(());
         }
         
         let new_node = Arc::new(TmpNode {
-            name: String::from(name),
+            name: Mutex::new(String::from(name)),
             is_dir: true,
             is_symlink: false,
             link_target: None,
@@ -172,12 +172,12 @@ impl VfsNode for TmpNode {
             return Err(());
         }
         let mut children = self.children.lock();
-        if children.iter().any(|c| c.name == name) {
+        if children.iter().any(|c| *c.name.lock() == name) {
             return Err(());
         }
         
         let new_node = Arc::new(TmpNode {
-            name: String::from(name),
+            name: Mutex::new(String::from(name)),
             is_dir: false,
             is_symlink: false,
             link_target: None,
@@ -202,12 +202,29 @@ impl VfsNode for TmpNode {
         Ok(())
     }
 
+    fn truncate(&self, len: i64) -> Result<(), ()> {
+        if self.is_dir { return Err(()); }
+        if len < 0 { return Err(()); }
+        let mut content = self.content.lock();
+        content.truncate(len as usize);
+        Ok(())
+    }
+
+    fn rename(&self, old_name: &str, new_name: &str) -> Result<(), ()> {
+        if !self.is_dir { return Err(()); }
+        let children = self.children.lock();
+        let pos = children.iter().position(|c| *c.name.lock() == old_name).ok_or(())?;
+        if children.iter().any(|c| *c.name.lock() == new_name) { return Err(()); }
+        *children[pos].name.lock() = String::from(new_name);
+        Ok(())
+    }
+
     fn unlink(&self, name: &str) -> Result<(), ()> {
         if !self.is_dir {
             return Err(());
         }
         let mut children = self.children.lock();
-        let pos = children.iter().position(|c| c.name == name).ok_or(())?;
+        let pos = children.iter().position(|c| *c.name.lock() == name).ok_or(())?;
         children.remove(pos);
         Ok(())
     }
@@ -224,11 +241,11 @@ impl VfsNode for TmpNode {
             return Err(());
         }
         let mut children = self.children.lock();
-        if children.iter().any(|c| c.name == name) {
+        if children.iter().any(|c| *c.name.lock() == name) {
             return Err(());
         }
         let new_node = Arc::new(TmpNode {
-            name: String::from(name),
+            name: Mutex::new(String::from(name)),
             is_dir: false,
             is_symlink: true,
             link_target: Some(String::from(target)),

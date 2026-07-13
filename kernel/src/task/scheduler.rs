@@ -187,6 +187,11 @@ lazy_static::lazy_static! {
 /// Global shared queues.
 pub static GLOBAL: Mutex<GlobalScheduler> = Mutex::new(GlobalScheduler::new());
 
+/// Access a specific CPU's scheduler by index (for monitoring / debugging).
+pub fn cpu_sched(cpu_id: usize) -> Option<&'static Mutex<PerCpuScheduler>> {
+    PER_CPU.get(cpu_id)
+}
+
 /// Get the per-CPU scheduler for the current CPU.
 pub fn this_cpu_sched() -> &'static Mutex<PerCpuScheduler> {
     let cpu_id = crate::syscalls::get_per_cpu().cpu_id as usize;

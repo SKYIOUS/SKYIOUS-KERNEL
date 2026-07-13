@@ -115,6 +115,14 @@ pub trait VfsNode: Send + Sync {
     fn symlink(&self, _name: &str, _target: &str) -> Result<(), ()> {
         Err(())
     }
+
+    fn rename(&self, _old_name: &str, _new_name: &str) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn truncate(&self, _len: i64) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 pub struct MountPoint {

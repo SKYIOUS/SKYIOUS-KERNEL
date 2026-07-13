@@ -94,6 +94,8 @@ pub const SYS_DRMCTL: u64 = 400;
 pub const SYS_HASH: u64 = 401;
 pub const SYS_OPENPTY: u64 = 210;
 pub const SYS_STATFS: u64 = 137;
+pub const SYS_TRUNCATE: u64 = 76;
+pub const SYS_FTRUNCATE: u64 = 77;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
 pub const SYS_EXIT_GROUP: u64 = 231;
 

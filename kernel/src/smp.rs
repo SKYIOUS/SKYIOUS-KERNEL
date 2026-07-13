@@ -282,7 +282,9 @@ pub fn init() {
         }
     }
 
-    println!("SMP: Multicore Initialization complete.");
+    let total = 1 + ap_ids.len();
+    let booted_count = ap_ids.len(); // If we got here, all APs in the loop booted or we would have continued
+    println!("SMP: {} cores initialized (1 BSP + {} AP)", total, booted_count);
 }
 
 
@@ -317,6 +319,7 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     x86_64::instructions::interrupts::enable();
     
     // This core is now ready to be scheduled.
+    crate::println!("SMP: CPU {} entering scheduler", cpu_id);
     crate::task::scheduler::schedule();
 }
 /// Returns the LAPIC ID of the current CPU.
