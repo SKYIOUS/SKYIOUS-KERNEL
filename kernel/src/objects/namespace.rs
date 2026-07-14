@@ -123,8 +123,22 @@ lazy_static! {
     pub static ref OBJECT_NAMESPACE: Mutex<ObjectNamespace> = Mutex::new(ObjectNamespace::new());
 }
 
+pub fn resolve_object(path: &str) -> Option<Arc<dyn KernelObject>> {
+    OBJECT_NAMESPACE.lock().lookup(path).cloned()
+}
+
+pub fn register_object(name: &str, object: Arc<dyn KernelObject>) {
+    let path = alloc::format!("System/{}", name);
+    OBJECT_NAMESPACE.lock().insert(&path, object);
+}
+
+pub fn audit_by_pid(_pid: u64) -> alloc::vec::Vec<(alloc::string::String, super::ObjectTypeId)> {
+    alloc::vec::Vec::new()
+}
+
 pub fn init() {
     OBJECT_NAMESPACE.lock().root().mkdir("Device");
     OBJECT_NAMESPACE.lock().root().mkdir("Process");
     OBJECT_NAMESPACE.lock().root().mkdir("Tmp");
+    OBJECT_NAMESPACE.lock().root().mkdir("System");
 }

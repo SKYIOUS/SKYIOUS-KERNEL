@@ -16,6 +16,9 @@ pub fn register() {
     crate::selftest::register("ebpf_pass_call_helper", ebpf_pass_call_helper);
     crate::selftest::register("ebpf_fail_call_bad_helper", ebpf_fail_call_bad_helper);
     crate::selftest::register("ebpf_fail_jump_out_of_bounds", ebpf_fail_jump_out_of_bounds);
+    crate::selftest::register("ebpf_pass_tnum_simple_alu", ebpf_pass_tnum_simple_alu);
+    crate::selftest::register("ebpf_fail_stack_oob", ebpf_fail_stack_oob);
+    crate::selftest::register("ebpf_fail_div_by_zero", ebpf_fail_div_by_zero);
 }
 
 fn mk(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> EbpfInsn {
@@ -126,10 +129,28 @@ fn ebpf_fail_ldx_r10() -> Result<(), &'static str> {
     if !verifier::verify(p) { Ok(()) } else { Err("LDX with dst=R10 should fail") }
 }
 
+
+fn ebpf_pass_tnum_simple_alu() -> Result<(), &'static str> {
+    let p = &[mk(0xbf, 0, 0, 0, 42), exit()];
+    if verifier::tnum_verify(p) { Ok(()) } else { Err("simple tnum ALU should pass") }
+}
+fn ebpf_fail_stack_oob() -> Result<(), &'static str> {
+    let p = &[mk(0xbf, 1, 0, 0, 1), mk(0x1b, 10, 1, -8, 0), mk(0x19, 0, 10, 256, 0), exit()];
+    if !verifier::tnum_verify(p) { Ok(()) } else { Err("OOB stack access should fail tnum") }
+}
+fn ebpf_fail_div_by_zero() -> Result<(), &'static str> {
+    let p = &[mk(0xbf, 0, 0, 0, 42), mk(0xbf, 1, 0, 0, 0), mk(0x37, 0, 1, 0, 0), exit()];
+    if !verifier::tnum_verify(p) { Ok(()) } else { Err("division by zero should fail tnum") }
+}
+
 fn ebpf_fail_jump_out_of_bounds() -> Result<(), &'static str> {
+    let p = &[mk(0x05, 0, 0, 100, 0), exit()];
+    if !verifier::verify(p) { Ok(()) } else { Err("jump out of bounds should fail") }
+} -> Result<(), &'static str> {
     let p = &[
         mk(0x05, 0, 0, 100, 0),     // ja +100 (out of bounds)
         exit(),
     ];
     if !verifier::verify(p) { Ok(()) } else { Err("jump out of bounds should fail") }
 }
+

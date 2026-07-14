@@ -548,6 +548,8 @@ pub(crate) fn do_syscall(
         numbers::SYS_EXIT_GROUP => sys_exit_group(arg1),
         numbers::SYS_TRUNCATE => sys_truncate(arg1 as *const u8, arg2 as i64),
         numbers::SYS_FTRUNCATE => sys_ftruncate(arg1, arg2 as i64),
+        numbers::SYS_OBJMGR_ENUM => sys_objmgr_enum(arg1 as *mut u8, arg2 as usize),
+        numbers::SYS_OBJMGR_AUDIT => sys_objmgr_audit(arg1, arg2 as *mut u8, arg3 as usize),
         _ => {
             crate::println!("[SYSCALL] Unknown syscall: {} (0x{:x})", n, n);
             errno::Errno::ENOSYS as u64
@@ -1007,6 +1009,8 @@ fn sys_close(fd: u64) -> u64 {
         let process_lock = CURRENT_PROCESS.lock();
         match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
     };
+    let mut found = false;
+    // Close from fd_table (DEPRECATED path)
     let mut fd_table = process.fd_table.lock();
     if (fd as usize) < fd_table.len() {
         if let Some(ref desc) = fd_table[fd as usize] {
@@ -1014,9 +1018,16 @@ fn sys_close(fd: u64) -> u64 {
                 #[cfg(feature = "net")]
                 { crate::net::SOCKETS.lock().remove(*handle); }
             }
+            found = true;
         }
-        fd_table[fd as usize] = None; 0
-    } else { errno::Errno::EBADF as u64 }
+        fd_table[fd as usize] = None;
+    }
+    drop(fd_table);
+    // Also close from handle_table
+    if process.handle_table.lock().close(fd).is_some() {
+        found = true;
+    }
+    if found { 0 } else { errno::Errno::EBADF as u64 }
 }
 
 fn sys_stat(path_ptr: *const u8, stat_buf: *mut Stat) -> u64 {
@@ -4141,4 +4152,51 @@ fn sys_openpty() -> u64 {
     } else {
         errno::Errno::ENOTTY as u64
     }
+}
+
+/// SYS_OBJMGR_ENUM — list all open handles for the current process.
+fn sys_objmgr_enum(buf: *mut u8, len: usize) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let handles = process.enum_handles();
+    let entry_size = core::mem::size_of::<(crate::objects::handle::HandleValue, crate::objects::ObjectTypeId, u64)>();
+    if entry_size == 0 { return 0; }
+    let max_entries = len / entry_size;
+    let count = core::cmp::min(handles.len(), max_entries);
+    if count > 0 {
+        let mut serialized = alloc::vec::Vec::with_capacity(count * entry_size);
+        for &(hv, oti) in handles.iter().take(count) {
+            serialized.extend_from_slice(&hv.to_le_bytes());
+            serialized.extend_from_slice(&oti.0.to_le_bytes());
+            serialized.extend_from_slice(&0u64.to_le_bytes());
+        }
+        if unsafe { crate::syscalls::user_access::copy_to_user(buf, &serialized) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+    count as u64
+}
+
+/// SYS_OBJMGR_AUDIT — return audit trail entries for a given PID.
+fn sys_objmgr_audit(pid: u64, buf: *mut u8, len: usize) -> u64 {
+    let audits = crate::objects::namespace::audit_by_pid(pid);
+    let entry_size = core::mem::size_of::<(u64, u16, u64)>();
+    if entry_size == 0 { return 0; }
+    let max_entries = len / entry_size;
+    let count = core::cmp::min(audits.len(), max_entries);
+    if count > 0 {
+        let mut serialized = alloc::vec::Vec::with_capacity(count * entry_size);
+        for &(ref name, oti) in audits.iter().take(count) {
+            let name_len = name.len() as u64;
+            serialized.extend_from_slice(&name_len.to_le_bytes());
+            serialized.extend_from_slice(&oti.0.to_le_bytes());
+            serialized.extend_from_slice(&0u64.to_le_bytes());
+        }
+        if unsafe { crate::syscalls::user_access::copy_to_user(buf, &serialized) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+    count as u64
 }

@@ -4,9 +4,13 @@
 //! Implements CPU init, exception vectors, syscall entry, and context switch.
 
 use super::Arch;
+use crate::hal::platform::{PlatformInfo, PlatformArch};
+#[allow(unused_imports)]
+use alloc::sync::Arc;
 
 pub struct AArch64Arch;
 
+#[allow(unused_variables)]
 impl Arch for AArch64Arch {
     unsafe fn init_boot() {
         init_vector_table();
@@ -21,32 +25,22 @@ impl Arch for AArch64Arch {
 
     unsafe fn init_cpu() {
         crate::serial_write("[ARCH] aarch64 cpu init\n");
-        // 1. Enable FPU/SIMD access at EL1 and EL0
-        //    CPACR_EL1.FPEN = 0b11 (both EL1 and EL0 can access FP/SIMD)
         let cpacr: u64;
         core::arch::asm!("mrs {}, cpacr_el1", out(reg) cpacr);
         cpacr |= 3 << 20;
         core::arch::asm!("msr cpacr_el1, {}", in(reg) cpacr);
 
-        // 2. Enable cache and MMU later (done in _start_aarch64 before kernel_main)
-        //    For now, configure SCTLR_EL1 basics:
-        //    - SA0 (stack alignment check EL0)
-        //    - SA (stack alignment check EL1)
-        //    - C (data cache) and I (instruction cache) - enabled if MMU on
         let sctlr: u64;
         core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr);
-        sctlr |= 1 << 4;  // SA0
-        sctlr |= 1 << 3;  // SA
+        sctlr |= 1 << 4;
+        sctlr |= 1 << 3;
         core::arch::asm!("msr sctlr_el1, {}", in(reg) sctlr);
 
-        // 3. Disable access to EL1-only timer registers from EL0
-        //    CNTKCTL_EL1.EL0PCTEN = 0, .EL0VCTEN = 0
         core::arch::asm!("msr cntkctl_el1, xzr");
 
-        // 4. Set exception entry alignment check
         let sctlr2: u64;
         core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr2);
-        sctlr2 |= 1 << 7;  // nAA (non-aligned access disabled for EL1)
+        sctlr2 |= 1 << 7;
         core::arch::asm!("msr sctlr_el1, {}", in(reg) sctlr2);
     }
 
@@ -111,6 +105,24 @@ impl Arch for AArch64Arch {
 
     unsafe fn write_thread_pointer(val: u64) {
         core::arch::asm!("msr tpidr_el0, {}", in(reg) val, options(nostack, preserves_flags));
+    }
+
+    fn probe_platform() -> PlatformInfo {
+        PlatformInfo {
+            arch: PlatformArch::AArch64,
+            cpu_count: 1,
+            cpu_freq_hz: 0,
+            ram_size: 0,
+            has_fpu: true,
+            has_simd: true,
+            boot_time_ticks: 0,
+        }
+    }
+
+    fn init_hal_irq() {
+    }
+
+    fn init_hal_timer() {
     }
 }
 

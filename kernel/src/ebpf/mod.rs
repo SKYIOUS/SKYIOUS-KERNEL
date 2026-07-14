@@ -3,6 +3,7 @@ pub mod verifier;
 pub mod maps;
 pub mod helpers;
 pub mod jit;
+pub mod tnum;
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -10,7 +11,7 @@ use core::slice;
 use spin::Mutex;
 use lazy_static::lazy_static;
 use vm::{EbpfVm, EbpfInsn, EbpfRegs, STACK_SIZE};
-use verifier::verify;
+use verifier::{verify, tnum_verify};
 use maps::{Map, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_PERF_EVENT_ARRAY, BPF_MAP_TYPE_RINGBUF};
 use crate::syscalls::errno::Errno;
 
@@ -151,6 +152,10 @@ fn bpf_prog_load(attr_ptr: *const u8, _prog_type: u64) -> u64 {
         return Errno::EINVAL as u64;
     }
 
+    if !tnum_verify(insns) {
+        return Errno::EINVAL as u64;
+    }
+
     let licensed = license.contains("GPL");
     let prog = EbpfProg {
         insns: insns.to_vec(),
@@ -227,3 +232,5 @@ pub struct BpfProgLoadAttr {
     pub log_buf: *mut u8,
     pub kern_version: u32,
 }
+
+

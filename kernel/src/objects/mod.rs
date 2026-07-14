@@ -20,6 +20,10 @@ pub const TYPE_PTY_MASTER: ObjectTypeId = ObjectTypeId(7);
 pub const TYPE_PTY_SLAVE: ObjectTypeId = ObjectTypeId(8);
 pub const TYPE_PROCESS: ObjectTypeId = ObjectTypeId(9);
 pub const TYPE_THREAD: ObjectTypeId = ObjectTypeId(10);
+pub const TYPE_MUTEX: ObjectTypeId = ObjectTypeId(11);
+pub const TYPE_SEMAPHORE: ObjectTypeId = ObjectTypeId(12);
+pub const TYPE_TIMER: ObjectTypeId = ObjectTypeId(13);
+pub const TYPE_EVENT: ObjectTypeId = ObjectTypeId(14);
 
 /// Reference-counted header embedded in every kernel object.
 pub struct ObjectHeader {
@@ -76,6 +80,15 @@ pub trait KernelObject: Send + Sync {
     fn socket_peer_name(&self) -> Result<alloc::vec::Vec<u8>, ()> { Err(()) }
     fn socket_local_name(&self) -> Result<alloc::vec::Vec<u8>, ()> { Err(()) }
 
+    // ── Metadata ──────────────────────────────────────────────────────────────────
+    fn type_name(&self) -> &'static str { "KernelObject" }
+    fn query_name(&self) -> Option<alloc::string::String> { None }
+    fn set_name(&self, _name: &str) {}
+
+    // ── Handle lifecycle hooks ─────────────────────────────────────────────────
+    fn on_handle_create(&self) {}
+    fn on_handle_close(&self) {}
+
     // ── Lifecycle ──────────────────────────────────────────────────
     fn on_close(&self) {}
 }
@@ -100,3 +113,5 @@ pub fn current_credentials() -> security::Credentials {
         None => security::Credentials::new(),
     }
 }
+
+// PYTHON_WROTE_THIS

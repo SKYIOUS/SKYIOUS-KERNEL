@@ -591,6 +591,17 @@ impl KernelObject for VfsObject {
         &self.header
     }
 
+    fn type_name(&self) -> &'static str {
+        if self.header.object_type == crate::objects::TYPE_DIR { "VfsDir" } else { "VfsFile" }
+    }
+
+    fn query_name(&self) -> Option<alloc::string::String> {
+        Some(self.node.name())
+    }
+
+    fn on_close(&self) {
+    }
+
     fn read(&self, offset: &mut u64, buf: &mut [u8]) -> Result<usize, ()> {
         let data = self.node.read(buf.len())?;
         let start = core::cmp::min(*offset as usize, data.len());

@@ -3,6 +3,8 @@
 //! Delegates to the existing x86_64-specific modules (gdt, interrupts, task::thread, etc.).
 
 use super::Arch;
+use crate::hal::platform::{PlatformInfo, PlatformArch};
+use alloc::sync::Arc;
 
 pub struct X86_64Arch;
 
@@ -23,14 +25,12 @@ impl Arch for X86_64Arch {
         use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
         use core::sync::atomic::Ordering;
 
-        // 1. Enable SSE in CR0
         Cr0::update(|flags| {
             flags.remove(Cr0Flags::EMULATE_COPROCESSOR);
             flags.insert(Cr0Flags::MONITOR_COPROCESSOR);
             flags.insert(Cr0Flags::NUMERIC_ERROR);
         });
 
-        // 2. Query leaf 7 for FSGSBASE, SMEP, UMIP
         let mut ebx7: u32 = 0;
         let mut ecx7: u32 = 0;
         core::arch::asm!(
@@ -52,11 +52,9 @@ impl Arch for X86_64Arch {
                 flags.insert(Cr4Flags::FSGSBASE);
                 crate::task::thread::HAS_FSGSBASE.store(true, Ordering::SeqCst);
             }
-            // SMEP (bit 20): EBX bit 7
             if ebx7 & (1 << 7) != 0 {
                 flags.insert(Cr4Flags::from_bits_truncate(0x100000));
             }
-            // UMIP (bit 11): ECX bit 2
             if ecx7 & (1 << 2) != 0 {
                 flags.insert(Cr4Flags::from_bits_truncate(0x800));
             }
@@ -93,5 +91,108 @@ impl Arch for X86_64Arch {
 
     unsafe fn write_thread_pointer(val: u64) {
         crate::task::thread::write_fs_base(val)
+    }
+
+    fn probe_platform() -> PlatformInfo {
+        let cpu_count = if let Some(ids) = crate::acpi::AP_LAPIC_IDS.get() {
+            ids.len() + 1
+        } else {
+            1
+        };
+
+        // SAFETY: CPUID is always available on x86_64
+        let (has_fpu, has_simd, cpu_freq_hz) = unsafe {
+            let mut eax1: u32;
+            let mut edx1: u32;
+            core::arch::asm!(
+                "push rbx",
+                "mov eax, 1",
+                "cpuid",
+                "mov {0:e}, ebx",
+                "pop rbx",
+                out(reg) _,
+                lateout("ecx") _,
+                lateout("edx") edx1,
+                lateout("eax") eax1,
+                options(nostack, preserves_flags)
+            );
+
+            let fpu = (edx1 & 1) != 0;
+            let simd = (edx1 & (1 << 26)) != 0;
+
+            let freq = if eax1 >= 0x16 {
+                let mut ecx16: u32;
+                core::arch::asm!(
+                    "push rbx",
+                    "mov eax, 0x16",
+                    "cpuid",
+                    "pop rbx",
+                    lateout("ecx") ecx16,
+                    lateout("edx") _,
+                    lateout("eax") _,
+                    options(nostack, preserves_flags)
+                );
+                (ecx16 as u64) * 1_000_000
+            } else {
+                0
+            };
+
+            (fpu, simd, freq)
+        };
+
+        let boot_ticks = {
+            let lo: u32; let hi: u32;
+            unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+            ((hi as u64) << 32) | lo as u64
+        };
+
+        PlatformInfo {
+            arch: PlatformArch::X86_64,
+            cpu_count,
+            cpu_freq_hz,
+            ram_size: 0,
+            has_fpu,
+            has_simd,
+            boot_time_ticks: boot_ticks,
+        }
+    }
+
+    fn init_hal_irq() {
+        let ctrl = Arc::new(X86IrqController);
+        crate::hal::irq::register_controller(ctrl);
+    }
+
+    fn init_hal_timer() {
+        let pf = crate::hal::platform::get();
+        let tsc_timer = crate::hal::timer::TscTimer::new();
+        if pf.cpu_freq_hz > 0 {
+            tsc_timer.init(pf.cpu_freq_hz);
+        }
+        crate::hal::timer::register_timer(Arc::new(tsc_timer));
+    }
+}
+
+struct X86IrqController;
+
+impl crate::hal::irq::InterruptController for X86IrqController {
+    fn eoi(&self, _vector: crate::hal::irq::IrqVector) {
+        crate::apic::eoi();
+    }
+
+    fn mask_irq(&self, _irq: u8, _masked: bool) {
+    }
+
+    fn route_pci_irq(&self, _bus: u8, _device: u8, pin: u8, vector: crate::hal::irq::IrqVector) {
+        crate::apic::route_pci_irq(pin, vector);
+    }
+
+    fn controller_id(&self) -> u32 {
+        crate::apic::lapic::LOCAL_APIC.lock()
+            .as_ref()
+            .map_or(0, |l| l.id())
+    }
+
+    unsafe fn enable_cpu(&self) {
+        x86_64::instructions::interrupts::enable();
     }
 }

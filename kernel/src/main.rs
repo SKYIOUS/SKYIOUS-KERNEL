@@ -55,6 +55,7 @@ pub mod ebpf;
 pub mod crypto;
 pub mod pty;
 pub mod arch;
+pub mod hal;
 #[cfg(feature = "self_test")]
 mod selftest;
 #[cfg(feature = "self_test")]
@@ -206,6 +207,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         serial_write("[BOOT] arch init...\n");
         unsafe { crate::arch::CurrentArch::init_boot(); }
     }
+    serial_write("[BOOT] HAL init...\n");
+    let platform_info = arch::CurrentArch::probe_platform();
+    hal::platform::init(platform_info);
+    arch::CurrentArch::init_hal_irq();
+    arch::CurrentArch::init_hal_timer();
+    serial_write("[BOOT] HAL init done\n");
     serial_write("[BOOT] frame tracker init...\n");
     let mut max_phys = 0;
     for region in boot_info.memory_regions.iter() {

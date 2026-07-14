@@ -6,6 +6,8 @@
 //!
 //! Current targets: x86_64 (mature), aarch64 (in progress)
 
+use crate::hal::platform::PlatformInfo;
+
 /// Architecture-specific operations required by the kernel.
 pub trait Arch: Send + Sync {
     /// Initialize boot-time architecture (GDT/IDT for x86, vector table for aarch64).
@@ -42,6 +44,15 @@ pub trait Arch: Send + Sync {
 
     /// Write the current thread pointer.
     unsafe fn write_thread_pointer(val: u64);
+
+    /// Probe platform information (CPU count, frequency, features).
+    fn probe_platform() -> PlatformInfo;
+
+    /// Initialize and register the HAL interrupt controller for this arch.
+    fn init_hal_irq();
+
+    /// Initialize and register the HAL timer for this arch.
+    fn init_hal_timer();
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -56,9 +67,18 @@ pub mod arch_aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use self::arch_aarch64::AArch64Arch;
 
+#[cfg(target_arch = "riscv64")]
+pub mod arch_riscv64;
+
+#[cfg(target_arch = "riscv64")]
+pub use self::arch_riscv64::RiscV64Arch;
+
 // Re-export the current architecture's implementation as `CurrentArch`.
 #[cfg(target_arch = "x86_64")]
 pub type CurrentArch = self::arch_x86_64::X86_64Arch;
 
 #[cfg(target_arch = "aarch64")]
 pub type CurrentArch = self::arch_aarch64::AArch64Arch;
+
+#[cfg(target_arch = "riscv64")]
+pub type CurrentArch = self::arch_riscv64::RiscV64Arch;

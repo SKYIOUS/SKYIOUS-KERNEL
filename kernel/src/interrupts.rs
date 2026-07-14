@@ -23,7 +23,12 @@ pub static PICS: spin::Mutex<ChainedPics> =
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
 pub fn get_ticks() -> u64 {
-    TICKS.load(Ordering::Relaxed)
+    let hal_ticks = crate::hal::timer::get_ticks();
+    if hal_ticks > 0 {
+        hal_ticks
+    } else {
+        TICKS.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(not(target_arch = "aarch64"))]

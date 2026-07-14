@@ -7,6 +7,7 @@ use crate::memory::paging::AddressSpace;
 use x86_64::structures::paging::PageTableFlags;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::objects::handle::{HandleTable, HandleValue};
+use crate::objects::ObjectTypeId;
 
 pub static CURRENT_PROCESS: Mutex<Option<Arc<Process>>> = Mutex::new(None);
 
@@ -62,6 +63,7 @@ pub struct Process {
     pub fd_table: Mutex<Vec<Option<FileDescriptor>>>,
     pub fd_flags: Mutex<Vec<u64>>,
     pub handle_table: Mutex<HandleTable>,
+    pub handle_audit_id_counter: AtomicU64,
     pub exit_code: Mutex<Option<i32>>,
     pub children: Mutex<Vec<u64>>,
     pub brk: Mutex<u64>,
@@ -188,6 +190,12 @@ impl Process {
         self.handle_table.lock().close(fd)
     }
 
+    pub fn enum_handles(&self) -> Vec<(HandleValue, ObjectTypeId)> {
+        self.handle_table.lock().audit_trail().into_iter().map(|(hv, _)| {
+            (hv, ObjectTypeId(0))
+        }).collect()
+    }
+
     pub fn new(id: u64, parent_id: Option<u64>, address_space: AddressSpace) -> Self {
         Process {
             id,
@@ -199,6 +207,7 @@ impl Process {
             fd_table: Mutex::new(Vec::new()),
             fd_flags: Mutex::new(Vec::new()),
             handle_table: Mutex::new(HandleTable::new()),
+            handle_audit_id_counter: AtomicU64::new(1),
             exit_code: Mutex::new(None),
             children: Mutex::new(Vec::new()),
             brk: Mutex::new(0),

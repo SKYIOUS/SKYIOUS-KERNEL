@@ -108,3 +108,5 @@ pub const SYS_GUI_MOVE_WINDOW: u64 = 124;
 pub const SYS_CLIPBOARD: u64 = 125;
 pub const SYS_NOTIFY: u64 = 126;
 pub const SYS_MKFS: u64 = 127;
+pub const SYS_OBJMGR_ENUM: u64 = 380;
+pub const SYS_OBJMGR_AUDIT: u64 = 381;
