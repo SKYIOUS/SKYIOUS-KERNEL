@@ -16,6 +16,7 @@ pub mod user_access;
 pub mod io_uring;
 
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use crate::objects::KernelObject;
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::String;
@@ -40,7 +41,7 @@ pub const CAP_SYS_BOOT: u64 = 1 << 22;
 /// Check if the current process has the given capability in its effective set.
 fn has_capability(cap_bit: u64) -> bool {
     let lock = CURRENT_PROCESS.lock();
-    lock.as_ref().map_or(false, |p| (*p.cap_effective.lock() & cap_bit) != 0)
+    lock.as_ref().map_or(false, |p| (p.creds.lock().cap_effective & cap_bit) != 0)
 }
 
 /// Log a security-relevant event to serial for audit trail.
@@ -62,13 +63,13 @@ fn audit_log(event: &str, detail: &str) {
 /// Get euid for the current process. Returns 0 (root) if no process.
 pub fn get_current_euid() -> u32 {
     let lock = CURRENT_PROCESS.lock();
-    lock.as_ref().map_or(0, |p| *p.euid.lock())
+    lock.as_ref().map_or(0, |p| p.creds.lock().euid)
 }
 
 /// Get egid for the current process. Returns 0 (root) if no process.
 fn get_current_egid() -> u32 {
     let lock = CURRENT_PROCESS.lock();
-    lock.as_ref().map_or(0, |p| *p.egid.lock())
+    lock.as_ref().map_or(0, |p| p.creds.lock().egid)
 }
 
 /// Check if the current process can access a file with given mode/uid/gid.
@@ -171,6 +172,7 @@ pub fn init_gs_base(cpu_id: usize) {
         ipi_pending: 0,
         ipi_arg: 0,
         idle_count: 0,
+        current_process: core::sync::atomic::AtomicU64::new(0),
     }));
     data.self_ptr = data as *mut PerCpuData as u64; // self-referential pointer
     
@@ -186,7 +188,6 @@ pub fn init_gs_base(cpu_id: usize) {
     areas[cpu_id] = PerCpuPtr(data as *mut PerCpuData);
 }
 
-#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct PerCpuData {
     pub self_ptr:  u64,      // offset 0x00 — pointer to self (gs:0x0 reads this)
@@ -196,6 +197,10 @@ pub struct PerCpuData {
     pub ipi_pending: u64,    // offset 0x20 — IPI function pointer
     pub ipi_arg: u64,        // offset 0x28 — IPI argument
     pub idle_count: u64,     // offset 0x30 — idle loop counter
+    /// Per-CPU current process pointer (uintptr to Arc<Process>).
+    /// Read lock-free on the owning CPU; written only by that CPU's scheduler.
+    /// Other CPUs must use the global PROCESS_TABLE for cross-process ops.
+    pub current_process: core::sync::atomic::AtomicU64, // offset 0x38
 }
 
 #[repr(C)]
@@ -340,41 +345,20 @@ fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
 fn sys_pipe(fds_ptr: *mut u32) -> u64 {
     let (reader, writer) = crate::vfs::pipe::Pipe::new();
     
-    let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock {
-        let mut fd_table = p.fd_table.lock();
-        
-        let find_slot = |table: &mut Vec<Option<FileDescriptor>>| {
-            for (i, slot) in table.iter_mut().enumerate() {
-                if slot.is_none() { return Some(i); }
-            }
-            None
-        };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
 
-        let r_fd = if let Some(i) = find_slot(&mut fd_table) {
-            fd_table[i] = Some(FileDescriptor::File { node: reader, offset: 0 });
-            i
-        } else {
-            fd_table.push(Some(FileDescriptor::File { node: reader, offset: 0 }));
-            fd_table.len() - 1
-        };
+    let r_fd = add_fd(&process, reader, 0);  // O_RDONLY
+    let w_fd = add_fd(&process, writer, 1);  // O_WRONLY
 
-        let w_fd = if let Some(i) = find_slot(&mut fd_table) {
-            fd_table[i] = Some(FileDescriptor::File { node: writer, offset: 0 });
-            i
-        } else {
-            fd_table.push(Some(FileDescriptor::File { node: writer, offset: 0 }));
-            fd_table.len() - 1
-        };
-
-        unsafe {
-            if user_access::copy_to_user(fds_ptr as *mut u8, &[r_fd as u8, 0, 0, 0, w_fd as u8, 0, 0, 0]).is_err() {
-                return errno::Errno::EFAULT as u64;
-            }
+    unsafe {
+        if user_access::copy_to_user(fds_ptr as *mut u8, &[r_fd as u8, 0, 0, 0, w_fd as u8, 0, 0, 0]).is_err() {
+            return errno::Errno::EFAULT as u64;
         }
-        return 0;
     }
-    errno::Errno::ESRCH as u64
+    0
 }
 
 fn sys_uname(buf: *mut UtsName) -> u64 {
@@ -805,52 +789,35 @@ fn sys_rt_sigreturn(regs_ptr: *mut u64) -> u64 {
 fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
     let process = {
         let process_lock = CURRENT_PROCESS.lock();
-        match *process_lock {
-            Some(ref p) => p.clone(),
-            None => return errno::Errno::ESRCH as u64,
-        }
+        match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
     };
-
     let mut fd_table = process.fd_table.lock();
-    if (fd as usize) >= fd_table.len() {
-        return errno::Errno::EBADF as u64;
-    }
-    // Enforce open flags: write-only fd can't read
+    if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     {
         let fdfl = process.fd_flags.lock();
         if (fd as usize) < fdfl.len() && (fdfl[fd as usize] & 3) == 1 {
             return errno::Errno::EBADF as u64;
         }
     }
-
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, ref mut offset }) => {
-            // Reset offset for streaming devices (character, pipe) since
-            // each read() returns a fresh snapshot. Detect via stat mode.
             if let Ok(stat) = node.stat() {
-                let is_regular = (stat.st_mode & 0o170000) == 0o100000;
-                if !is_regular { *offset = 0; }
+                if (stat.st_mode & 0o170000) != 0o100000 { *offset = 0; }
             }
             match node.read(count) {
                 Ok(data) => {
-                    if *offset >= data.len() {
-                        0
-                    } else {
+                    if *offset >= data.len() { 0 }
+                    else {
                         let available = data.len() - *offset;
                         let len = core::cmp::min(available, count);
                         if unsafe { user_access::copy_to_user(buf, &data[*offset..*offset + len]) }.is_err() {
                             return errno::Errno::EFAULT as u64;
                         }
-                        *offset += len;
-                        len as u64
+                        *offset += len; len as u64
                     }
                 }
                 Err(_) => {
-                    if check_signal_interrupt() {
-                        errno::Errno::EINTR as u64
-                    } else {
-                        errno::Errno::EIO as u64
-                    }
+                    if check_signal_interrupt() { errno::Errno::EINTR as u64 } else { errno::Errno::EIO as u64 }
                 }
             }
         },
@@ -858,13 +825,10 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             let mut data = alloc::vec![0u8; count];
             match crate::pty::pty_read_master(pair, &mut data) {
                 Ok(n) if n > 0 => {
-                    if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_err() {
-                        return errno::Errno::EFAULT as u64;
-                    }
+                    if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_err() { return errno::Errno::EFAULT as u64; }
                     n as u64
                 },
-                Ok(_) => 0,
-                Err(_) => errno::Errno::EIO as u64,
+                Ok(_) => 0, Err(_) => errno::Errno::EIO as u64,
             }
         },
         Some(FileDescriptor::PtySlave { _idx: _, ref pair }) => {
@@ -872,22 +836,16 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             let mut data = alloc::vec![0u8; count];
             match crate::pty::pty_read_slave(pair, &mut data, &ldisc) {
                 Ok(n) if n > 0 => {
-                    if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_err() {
-                        return errno::Errno::EFAULT as u64;
-                    }
+                    if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_err() { return errno::Errno::EFAULT as u64; }
                     n as u64
                 },
-                Ok(_) => 0,
-                Err(_) => errno::Errno::EIO as u64,
+                Ok(_) => 0, Err(_) => errno::Errno::EIO as u64,
             }
         },
         Some(FileDescriptor::Socket(handle, _stype)) => {
-            #[cfg(not(feature = "net"))]
-            return errno::Errno::ENOSYS as u64;
-            #[cfg(feature = "net")]
-            {
+            #[cfg(not(feature = "net"))] return errno::Errno::ENOSYS as u64;
+            #[cfg(feature = "net")] {
                 let mut sockets = crate::net::SOCKETS.lock();
-                // Try TCP
                 if let Some(n) = with_tcp_mut(&mut *sockets, handle, |socket| {
                     if socket.may_recv() {
                         let mut n = 0usize;
@@ -900,17 +858,14 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                     }
                     0u64
                 }) { return n; }
-                // Try UDP
-                    if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
-                        let mut data = vec![0u8; count];
-                        if let Ok((n, _meta)) = socket.recv_slice(&mut data) {
-                            if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
-                                return n as u64;
-                            }
-                            return errno::Errno::EFAULT as u64;
-                        }
-                        errno::Errno::EAGAIN as u64
-                    }) { return n; }
+                if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
+                    let mut d = vec![0u8; count];
+                    if let Ok((n, _meta)) = socket.recv_slice(&mut d) {
+                        if unsafe { user_access::copy_to_user(buf, &d[..n]) }.is_ok() { return n as u64; }
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    errno::Errno::EAGAIN as u64
+                }) { return n; }
                 errno::Errno::EAGAIN as u64
             }
         },
@@ -919,86 +874,53 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
 }
 
 fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
-    // Clone Arc and drop CURRENT_PROCESS early to avoid deadlock with timer ISR
     let process = {
         let process_lock = CURRENT_PROCESS.lock();
-        match *process_lock {
-            Some(ref p) => p.clone(),
-            None => return errno::Errno::ESRCH as u64,
-        }
+        match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
     };
-
     let mut fd_table = process.fd_table.lock();
-    if (fd as usize) >= fd_table.len() {
-        return errno::Errno::EBADF as u64;
-    }
-    // Enforce open flags: read-only fd can't write
+    if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     {
         let fdfl = process.fd_flags.lock();
         if (fd as usize) < fdfl.len() && (fdfl[fd as usize] & 3) == 0 {
             return errno::Errno::EBADF as u64;
         }
     }
-
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, ref mut offset }) => {
             let mut data = vec![0u8; count];
-            if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() {
-                 return errno::Errno::EFAULT as u64;
-            }
+            if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
             match node.write(&data) {
-                Ok(_) => {
-                    *offset += count;
-                    count as u64
-                },
+                Ok(_) => { *offset += count; count as u64 },
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
         Some(FileDescriptor::PtyMaster { _idx: _, ref pair }) => {
             let mut data = vec![0u8; count];
-            if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() {
-                return errno::Errno::EFAULT as u64;
-            }
-            match crate::pty::pty_write_master(pair, &data) {
-                Ok(n) => n as u64,
-                Err(_) => errno::Errno::EIO as u64,
-            }
+            if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
+            match crate::pty::pty_write_master(pair, &data) { Ok(n) => n as u64, Err(_) => errno::Errno::EIO as u64, }
         },
         Some(FileDescriptor::PtySlave { _idx: _, ref pair }) => {
             let mut data = vec![0u8; count];
-            if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() {
-                return errno::Errno::EFAULT as u64;
-            }
-            match crate::pty::pty_write_slave(pair, &data) {
-                Ok(n) => n as u64,
-                Err(_) => errno::Errno::EIO as u64,
-            }
+            if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
+            match crate::pty::pty_write_slave(pair, &data) { Ok(n) => n as u64, Err(_) => errno::Errno::EIO as u64, }
         },
         Some(FileDescriptor::Socket(handle, _stype)) => {
-            #[cfg(not(feature = "net"))]
-            return errno::Errno::ENOSYS as u64;
-            #[cfg(feature = "net")]
-            {
-                let mut write_data = vec![0u8; count];
-                if unsafe { user_access::copy_from_user(&mut write_data, buf) }.is_err() {
-                    return errno::Errno::EFAULT as u64;
-                }
-
+            #[cfg(not(feature = "net"))] return errno::Errno::ENOSYS as u64;
+            #[cfg(feature = "net")] {
+                let mut wdata = vec![0u8; count];
+                if unsafe { user_access::copy_from_user(&mut wdata, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
                 let mut sockets = crate::net::SOCKETS.lock();
-                // Try TCP
                 if let Some(v) = with_tcp_mut(&mut *sockets, handle, |socket| {
                     if socket.may_send() {
                         let result = socket.send(|slice| {
-                            let n = core::cmp::min(slice.len(), write_data.len());
-                            slice[..n].copy_from_slice(&write_data[..n]);
-                            (n, true)
+                            let n = core::cmp::min(slice.len(), wdata.len());
+                            slice[..n].copy_from_slice(&wdata[..n]); (n, true)
                         });
                         if result.unwrap_or(false) { return count as u64; }
                     }
                     errno::Errno::EAGAIN as u64
                 }) { return v; }
-                // Try UDP — write() only works on connected sockets
-                // For UDP, use sendto() instead
                 errno::Errno::ENOSYS as u64
             }
         },
@@ -1006,22 +928,23 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
     }
 }
 
-/// Add a file descriptor with flags tracking. Returns the fd number.
+fn get_current_process() -> Option<Arc<Process>> {
+    CURRENT_PROCESS.lock().as_ref().map(|p| p.clone())
+}
+
+/// Add a file descriptor via the Object Manager (bind-time security).
 fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -> u64 {
-    let mut fd_table = process.fd_table.lock();
-    let mut fd_flags = process.fd_flags.lock();
-    let flags_val = open_flags as u64;
-    for (i, slot) in fd_table.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(FileDescriptor::File { node, offset: 0 });
-            if fd_flags.len() <= i { fd_flags.resize(i + 1, 0); }
-            fd_flags[i] = flags_val;
-            return i as u64;
-        }
+    let type_id = if node.is_dir() { crate::objects::TYPE_DIR } else { crate::objects::TYPE_FILE };
+    let obj = crate::vfs::VfsObject::new(node, type_id);
+    let access = match open_flags & 3 {
+        1 => crate::objects::security::ACCESS_WRITE,
+        2 => crate::objects::security::ACCESS_READ | crate::objects::security::ACCESS_WRITE,
+        _ => crate::objects::security::ACCESS_READ,
+    };
+    match process.new_handle(obj as Arc<dyn KernelObject>, access, open_flags as u64) {
+        Ok(fd) => fd,
+        Err(_) => errno::Errno::EACCES as u64,
     }
-    fd_table.push(Some(FileDescriptor::File { node, offset: 0 }));
-    fd_flags.push(flags_val);
-    (fd_table.len() - 1) as u64
 }
 
 fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
@@ -1034,29 +957,18 @@ fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
 
     let vfs = VFS.lock();
     if let Some(node) = vfs.resolve_path(&path_str) {
-        // Permission check: determine access needed from flags
-        let acc_mode = (flags & 3) as u32; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
-        let need = match acc_mode {
-            1 => 2u32, // write
-            2 => 6u32, // read+write
-            _ => 4u32, // read
-        };
-        if !check_node_permission(&node, need) {
-            return errno::Errno::EACCES as u64;
-        }
-        // LSM hook: file permission check
-        let perm = match acc_mode {
+        let subj = crate::security::current_subject();
+        let perm = match flags & 3 {
             1 => "write",
             2 => "read",
             _ => "read",
         };
-        let subj = crate::security::current_subject();
         if !crate::security::hook_file_perm(&subj, &path_str, perm) {
             return errno::Errno::EACCES as u64;
         }
-        let process_lock = CURRENT_PROCESS.lock();
-        if let Some(ref process) = *process_lock {
-            return add_fd(process, node.clone() as Arc<dyn VfsNode>, flags);
+        if let Some(process) = get_current_process() {
+            // Bind-time security check inside add_fd → HandleTable::insert
+            return add_fd(&process, node.clone() as Arc<dyn VfsNode>, flags);
         }
     } else if (flags & O_CREAT) != 0 {
         let last_slash = path_str.rfind('/').unwrap_or(0);
@@ -1068,27 +980,21 @@ fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
             (&path_str[..last_slash], &path_str[last_slash+1..])
         };
 
-        // For O_CREAT, check write+execute on parent directory
         if let Some(parent_node) = vfs.resolve_path(parent_path) {
-            if !check_node_permission(&parent_node, 3) { // w+x
-                return errno::Errno::EACCES as u64;
-            }
             if let Ok(new_node) = parent_node.create(name) {
                 let (euid, egid, umask) = {
-                    let lock = CURRENT_PROCESS.lock();
-                    let p = lock.as_ref();
-                    (p.map(|p| *p.euid.lock()).unwrap_or(0),
-                     p.map(|p| *p.egid.lock()).unwrap_or(0),
-                     p.map(|p| *p.umask.lock()).unwrap_or(0))
+                    let p = get_current_process();
+                    p.as_ref().map(|p| {
+                        let c = p.creds.lock();
+                        (c.euid, c.egid, *p.umask.lock())
+                    }).unwrap_or((0, 0, 0))
                 };
-                // Default mode 0666 if not specified (O_CREAT without explicit mode)
                 let raw_mode = if mode == 0 { 0o666 } else { mode };
                 let created_mode = raw_mode & !umask;
                 let _ = new_node.chmod(created_mode & 0o777);
                 let _ = new_node.chown(euid, egid);
-                let process_lock = CURRENT_PROCESS.lock();
-                if let Some(ref process) = *process_lock {
-                    return add_fd(process, new_node, flags);
+                if let Some(process) = get_current_process() {
+                    return add_fd(&process, new_node, flags);
                 }
             }
         }
@@ -1099,26 +1005,18 @@ fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
 fn sys_close(fd: u64) -> u64 {
     let process = {
         let process_lock = CURRENT_PROCESS.lock();
-        match *process_lock {
-            Some(ref p) => p.clone(),
-            None => return errno::Errno::ESRCH as u64,
-        }
+        match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
     };
     let mut fd_table = process.fd_table.lock();
     if (fd as usize) < fd_table.len() {
         if let Some(ref desc) = fd_table[fd as usize] {
-            // Clean up sockets to prevent fd leak
             if let FileDescriptor::Socket(handle, _stype) = desc {
                 #[cfg(feature = "net")]
-                {
-                    crate::net::SOCKETS.lock().remove(*handle);
-                }
+                { crate::net::SOCKETS.lock().remove(*handle); }
             }
         }
-        fd_table[fd as usize] = None;
-        return 0;
-    }
-    errno::Errno::EBADF as u64
+        fd_table[fd as usize] = None; 0
+    } else { errno::Errno::EBADF as u64 }
 }
 
 fn sys_stat(path_ptr: *const u8, stat_buf: *mut Stat) -> u64 {
@@ -1582,15 +1480,15 @@ fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
     drop(sched);
 
     // Update global pending queue threads
-    let mut global = crate::task::scheduler::GLOBAL.lock();
-    for t in global.pending_queue.iter_mut() {
+    let mut pend = crate::task::scheduler::GLOBAL.pending_queue.lock();
+    for t in pend.iter_mut() {
         if let Some(ref p) = t.process {
             if p.id == proc.id {
                 t.priority = priority;
             }
         }
     }
-    drop(global);
+    drop(pend);
     0
 }
 
@@ -2323,7 +2221,7 @@ fn sys_kill(pid: i64, sig: u32) -> u64 {
     let table = crate::task::process::PROCESS_TABLE.lock();
     if let Some(proc) = table.get(&(pid as u64)) {
         // Only root or same user (or CAP_KILL) can send signals
-        let target_uid = *proc.uid.lock();
+        let target_uid = proc.creds.lock().uid;
         if euid != 0 && euid != target_uid && !has_capability(CAP_KILL) {
             audit_log("CAP_KILL", &alloc::format!("kill({},{}) DENIED", pid, sig));
             return errno::Errno::EPERM as u64;
@@ -3044,7 +2942,7 @@ fn sys_gui_get_buffer(handle: u64) -> u64 {
     ((content_w as u64) & 0xFFFF_FFFF) | ((content_h as u64) << 32)
 }
 
-fn sys_gui_map_buffer(handle: u64) -> u64 {
+pub(crate) fn sys_gui_map_buffer(handle: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     let comp = COMPOSITOR.lock();
     if handle as usize >= comp.windows.len() { return 0; }
@@ -3093,7 +2991,7 @@ fn sys_gui_map_buffer(handle: u64) -> u64 {
     v_addr
 }
 
-fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
+pub(crate) fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
     use crate::gui::COMPOSITOR;
     let mut comp = COMPOSITOR.lock();
     if handle as usize >= comp.windows.len() { return errno::Errno::EBADF as u64; }
@@ -3336,9 +3234,10 @@ fn sys_mkdir(path_ptr: *const u8, mode: u32) -> u64 {
             let (euid, egid, umask) = {
                 let lock = CURRENT_PROCESS.lock();
                 let p = lock.as_ref();
-                (p.map(|p| *p.euid.lock()).unwrap_or(0),
-                 p.map(|p| *p.egid.lock()).unwrap_or(0),
-                 p.map(|p| *p.umask.lock()).unwrap_or(0))
+                p.map(|p| {
+                    let c = p.creds.lock();
+                    (c.euid, c.egid, *p.umask.lock())
+                }).unwrap_or((0, 0, 0))
             };
             let raw_mode = if mode == 0 { 0o777 } else { mode };
             let dir_mode = raw_mode & !umask;
@@ -3881,24 +3780,25 @@ fn sys_reboot(magic: u64, cmd: u64) -> u64 {
 
 fn sys_getuid() -> u64 {
     let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock { *p.uid.lock() as u64 } else { 0 }
+    if let Some(ref p) = *lock { p.creds.lock().uid as u64 } else { 0 }
 }
 
 fn sys_getgid() -> u64 {
     let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock { *p.gid.lock() as u64 } else { 0 }
+    if let Some(ref p) = *lock { p.creds.lock().gid as u64 } else { 0 }
 }
 
 fn sys_setuid(uid: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
-        let euid = *p.euid.lock();
+        let euid = p.creds.lock().euid;
         if euid == 0 || has_capability(CAP_SETUID) {
-            *p.uid.lock() = uid as u32;
-            *p.euid.lock() = uid as u32;
+            let mut c = p.creds.lock();
+            c.uid = uid as u32;
+            c.euid = uid as u32;
             0
         } else if euid == uid as u32 {
-            *p.uid.lock() = uid as u32;
+            p.creds.lock().uid = uid as u32;
             0
         } else {
             audit_log("CAP_SETUID", &alloc::format!("setuid({}) DENIED", uid));
@@ -3910,13 +3810,14 @@ fn sys_setuid(uid: u64) -> u64 {
 fn sys_setgid(gid: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
-        let egid = *p.egid.lock();
+        let egid = p.creds.lock().egid;
         if egid == 0 || has_capability(CAP_SETGID) {
-            *p.gid.lock() = gid as u32;
-            *p.egid.lock() = gid as u32;
+            let mut c = p.creds.lock();
+            c.gid = gid as u32;
+            c.egid = gid as u32;
             0
         } else if egid == gid as u32 {
-            *p.gid.lock() = gid as u32;
+            p.creds.lock().gid = gid as u32;
             0
         } else {
             audit_log("CAP_SETGID", &alloc::format!("setgid({}) DENIED", gid));
@@ -3927,12 +3828,12 @@ fn sys_setgid(gid: u64) -> u64 {
 
 fn sys_geteuid() -> u64 {
     let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock { *p.euid.lock() as u64 } else { 0 }
+    if let Some(ref p) = *lock { p.creds.lock().euid as u64 } else { 0 }
 }
 
 fn sys_getegid() -> u64 {
     let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock { *p.egid.lock() as u64 } else { 0 }
+    if let Some(ref p) = *lock { p.creds.lock().egid as u64 } else { 0 }
 }
 
 /// Linux-compatible capget: read capability sets
@@ -3950,12 +3851,14 @@ fn sys_capget(hdrp: *mut u8, datap: *mut u8) -> u64 {
 
     let lock = CURRENT_PROCESS.lock();
     let proc = match *lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+    let c = proc.creds.lock();
     let data = [
-        (*proc.cap_effective.lock() as u32).to_ne_bytes(),
-        (*proc.cap_permitted.lock() as u32).to_ne_bytes(),
-        (*proc.cap_inheritable.lock() as u32).to_ne_bytes(),
+        (c.cap_effective as u32).to_ne_bytes(),
+        (c.cap_permitted as u32).to_ne_bytes(),
+        (c.cap_inheritable as u32).to_ne_bytes(),
     ]
     .concat();
+    drop(c);
     if unsafe { user_access::copy_to_user(datap, &data) }.is_err() {
         return errno::Errno::EFAULT as u64;
     }
@@ -3985,14 +3888,15 @@ fn sys_capset(hdrp: *const u8, datap: *const u8) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     let proc = match *lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
 
-    let euid = *proc.euid.lock();
+    let euid = proc.creds.lock().euid;
     if euid != 0 && !has_capability(CAP_SETPCAP) {
         return errno::Errno::EPERM as u64;
     }
 
-    *proc.cap_effective.lock() = eff;
-    *proc.cap_permitted.lock() = perm;
-    *proc.cap_inheritable.lock() = inh;
+    let mut c = proc.creds.lock();
+    c.cap_effective = eff;
+    c.cap_permitted = perm;
+    c.cap_inheritable = inh;
     0
 }
 

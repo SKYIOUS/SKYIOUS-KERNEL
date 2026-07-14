@@ -33,7 +33,21 @@ pub struct Thread {
     pub futex_wake_addr: Option<u64>,
     pub pipe_block_key: Option<u64>,
     pub fs_base: u64,
+    // ── Stride scheduling fields ──────────────────────────────────
+    /// Accumulated virtual-pass value. The thread with the smallest pass
+    /// among all ready threads runs next.
+    pub pass: u64,
+    /// stride = STRIDE_MAX / tickets (set on priority change / init).
+    pub stride: u64,
+    /// Proportional-share tickets (higher = more CPU). Default 20.
+    pub tickets: u32,
 }
+
+/// Maximum stride value (virtual time units). Must be >> max threads.
+pub const STRIDE_MAX: u64 = 1 << 20;
+
+/// Default tickets for a normal thread.
+pub const DEFAULT_TICKETS: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadStatus {
@@ -92,6 +106,8 @@ impl Thread {
             core::ptr::write(ptr, context);
         }
 
+        let stride = if DEFAULT_TICKETS > 0 { STRIDE_MAX / DEFAULT_TICKETS as u64 } else { STRIDE_MAX };
+
         Thread {
             _id: ThreadId::new(),
             stack,
@@ -103,7 +119,17 @@ impl Thread {
             futex_wake_addr: None,
             pipe_block_key: None,
             fs_base: 0,
+            pass: 0,
+            stride,
+            tickets: DEFAULT_TICKETS,
         }
+    }
+
+    /// Recalculate stride when tickets change.
+    #[allow(dead_code)]
+    pub fn set_tickets(&mut self, tickets: u32) {
+        self.tickets = tickets;
+        self.stride = if tickets > 0 { STRIDE_MAX / tickets as u64 } else { STRIDE_MAX };
     }
 
     pub fn stack_top(&self) -> u64 {
@@ -168,6 +194,9 @@ impl Thread {
             futex_wake_addr: None,
             pipe_block_key: None,
             fs_base: self.fs_base,
+            pass: 0,        // fresh pass for child
+            stride: self.stride,
+            tickets: self.tickets,
         }
     }
 
@@ -242,6 +271,9 @@ impl Thread {
             futex_wake_addr: None,
             pipe_block_key: None,
             fs_base: self.fs_base,
+            pass: 0,        // fresh pass for forked child
+            stride: self.stride,
+            tickets: self.tickets,
         }
     }
 }

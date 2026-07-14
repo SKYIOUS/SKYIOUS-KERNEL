@@ -2,7 +2,7 @@ use x86_64::{
     structures::paging::{PhysFrame, Size4KiB, FrameAllocator},
     PhysAddr, VirtAddr,
 };
-use spin::Mutex;
+use crate::task::lock::SchedLock;
 use crate::memory::PHYSICAL_MEMORY_OFFSET;
 
 pub const MAX_ORDER: usize = 11; // Blocks up to 2^11 * 4096 = 8MB
@@ -154,7 +154,7 @@ impl BuddyAllocator {
     }
 }
 
-pub static BUDDY_ALLOCATOR: Mutex<BuddyAllocator> = Mutex::new(BuddyAllocator::new());
+pub static BUDDY_ALLOCATOR: SchedLock<BuddyAllocator> = SchedLock::new(BuddyAllocator::new());
 
 pub struct BuddyFrameAllocator;
 

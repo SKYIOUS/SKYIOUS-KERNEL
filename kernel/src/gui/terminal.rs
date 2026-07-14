@@ -478,7 +478,7 @@ impl TerminalWidget {
                 let table = crate::task::process::PROCESS_TABLE.lock();
                 for (pid, proc) in table.iter() {
                     let cwd = proc.cwd.lock();
-                    let uid = *proc.uid.lock();
+                    let uid = proc.creds.lock().uid;
                     self.print_str(&format!("{:3}  {:3}  {}\n", pid, uid, cwd));
                 }
             }

@@ -24,11 +24,12 @@ pub struct Window {
     pub terminal: Option<crate::gui::terminal::TerminalWidget>,
     pub file_manager: Option<crate::gui::filemanager::FileManagerWidget>,
     pub key_events: VecDeque<u8>,
+    pub dirty: bool,
 }
 
 impl Window {
     pub fn new(x: usize, y: usize, width: usize, height: usize, title: &'static str) -> Self {
-        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None, file_manager: None, key_events: VecDeque::new() }
+        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None, file_manager: None, key_events: VecDeque::new(), dirty: true }
     }
 
     pub fn render(&self, buffer: &mut [u32], mouse_x: usize, mouse_y: usize) {
@@ -175,6 +176,7 @@ impl Window {
             self.width = crate::gui::SCREEN_WIDTH;
             self.height = crate::gui::SCREEN_HEIGHT;
         }
+        self.dirty = true;
     }
 
     pub fn handle_scroll(&mut self, delta: i8) {

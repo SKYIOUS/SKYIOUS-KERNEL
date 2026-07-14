@@ -275,14 +275,16 @@ impl VirtioGpu {
     }
 
     pub fn flip(&mut self) {
-        let w = self.width;
-        let h = self.height;
+        self.flip_rect(0, 0, self.width, self.height);
+    }
 
-        // Transfer to host
-        let mut cmd = [0u8; 48];
+    pub fn flip_rect(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        if w == 0 || h == 0 { return; }
+        // Transfer to host (partial rect)
+        let mut cmd = [0u8; 56];
         cmd[..4].copy_from_slice(&CMD_TRANSFER_TO_HOST_2D.to_le_bytes());
-        cmd[24..28].copy_from_slice(&0u32.to_le_bytes()); // rect.x
-        cmd[28..32].copy_from_slice(&0u32.to_le_bytes()); // rect.y
+        cmd[24..28].copy_from_slice(&x.to_le_bytes());    // rect.x
+        cmd[28..32].copy_from_slice(&y.to_le_bytes());    // rect.y
         cmd[32..36].copy_from_slice(&w.to_le_bytes());    // rect.w
         cmd[36..40].copy_from_slice(&h.to_le_bytes());    // rect.h
         cmd[40..48].copy_from_slice(&0u64.to_le_bytes()); // offset
@@ -291,15 +293,14 @@ impl VirtioGpu {
         let mut rsp = [0u8; 24];
         self.submit(&cmd, &mut rsp);
 
-        // Flush
+        // Flush (partial rect)
         let mut cmd2 = [0u8; 44];
         cmd2[..4].copy_from_slice(&CMD_RESOURCE_FLUSH.to_le_bytes());
-        cmd2[24..28].copy_from_slice(&0u32.to_le_bytes()); // rect.x
-        cmd2[28..32].copy_from_slice(&0u32.to_le_bytes()); // rect.y
-        cmd2[32..36].copy_from_slice(&w.to_le_bytes());    // rect.w
-        cmd2[36..40].copy_from_slice(&h.to_le_bytes());    // rect.h
+        cmd2[24..28].copy_from_slice(&x.to_le_bytes());   // rect.x
+        cmd2[28..32].copy_from_slice(&y.to_le_bytes());   // rect.y
+        cmd2[32..36].copy_from_slice(&w.to_le_bytes());   // rect.w
+        cmd2[36..40].copy_from_slice(&h.to_le_bytes());   // rect.h
         cmd2[40..44].copy_from_slice(&1u32.to_le_bytes()); // resource_id
-        // padding at 44
         let mut rsp2 = [0u8; 24];
         self.submit(&cmd2, &mut rsp2);
     }
@@ -323,5 +324,12 @@ pub fn flip() {
     let mut guard = GPU.lock();
     if let Some(gpu) = guard.as_mut() {
         gpu.flip();
+    }
+}
+
+pub fn flip_rect(x: u32, y: u32, w: u32, h: u32) {
+    let mut guard = GPU.lock();
+    if let Some(gpu) = guard.as_mut() {
+        gpu.flip_rect(x, y, w, h);
     }
 }

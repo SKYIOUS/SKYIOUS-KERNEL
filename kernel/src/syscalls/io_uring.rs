@@ -14,6 +14,8 @@ pub const IORING_OP_CONNECT: u8 = 14;
 pub const IORING_OP_SEND: u8 = 17;
 pub const IORING_OP_RECV: u8 = 18;
 pub const IORING_OP_TIMEOUT: u8 = 19;
+pub const IORING_OP_GUI_FLUSH: u8 = 30;
+pub const IORING_OP_GUI_MAP_BUFFER: u8 = 31;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -122,6 +124,14 @@ fn process_sqe(sqe: &IoUringSqe) -> IoUringCqe {
             let res = do_timeout(sqe.addr);
             IoUringCqe { user_data: sqe.user_data, res, flags: 0 }
         }
+        IORING_OP_GUI_FLUSH => {
+            let res = do_gui_flush(sqe.fd as u64, sqe.addr as *const u32);
+            IoUringCqe { user_data: sqe.user_data, res, flags: 0 }
+        }
+        IORING_OP_GUI_MAP_BUFFER => {
+            let res = do_gui_map_buffer(sqe.fd as u64);
+            IoUringCqe { user_data: sqe.user_data, res, flags: 0 }
+        }
         _ => IoUringCqe { user_data: sqe.user_data, res: Errno::ENOSYS as i32, flags: 0 },
     }
 }
@@ -179,6 +189,14 @@ fn do_timeout(addr: u64) -> i32 {
         crate::task::scheduler::try_schedule();
     }
     0
+}
+
+fn do_gui_flush(handle: u64, buf_ptr: *const u32) -> i32 {
+    crate::syscalls::sys_gui_flush(handle, buf_ptr) as i32
+}
+
+fn do_gui_map_buffer(handle: u64) -> i32 {
+    crate::syscalls::sys_gui_map_buffer(handle) as i32
 }
 
 pub fn sys_io_uring_setup(entries: u64) -> u64 {

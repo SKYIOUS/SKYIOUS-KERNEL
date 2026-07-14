@@ -32,6 +32,9 @@ use alloc::boxed::Box;
 
 /// Per-CPU scheduler: ready queues + currently running thread.
 pub struct PerCpuScheduler {
+    /// Ready queues retained for `tick()`/`wake_*()` API compatibility.
+    /// Stride scheduling picks the min-pass thread across ALL queues,
+    /// ignoring priority order — priority is expressed via tickets.
     ready_queues: [VecDeque<Box<Thread>>; 8],
     pub current_thread: Option<Box<Thread>>,
 }
@@ -47,19 +50,33 @@ impl PerCpuScheduler {
         }
     }
 
-    pub fn pick_next(&mut self) -> Option<Box<Thread>> {
-        // 1. Try local ready queues (High priority first)
-        for i in (0..8).rev() {
-            if let Some(t) = self.ready_queues[i].pop_front() {
-                return Some(t);
+    /// Find the thread with the smallest `pass` value across all ready queues
+    /// (stride scheduling). Linear scan — O(N) in ready-thread count.
+    fn stride_min_pass<'a>(queues: &'a mut [VecDeque<Box<Thread>>; 8]) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize, u64)> = None; // (q_idx, pos, pass)
+        for (qi, q) in queues.iter().enumerate() {
+            for (pi, t) in q.iter().enumerate() {
+                let pass = t.pass;
+                match best {
+                    Some((_, _, bp)) if pass < bp => best = Some((qi, pi, pass)),
+                    None => best = Some((qi, pi, pass)),
+                    _ => {}
+                }
             }
+        }
+        best.map(|(q, p, _)| (q, p))
+    }
+
+    pub fn pick_next(&mut self) -> Option<Box<Thread>> {
+        // 1. Stride: find min-pass thread across all local queues
+        if let Some((qidx, pidx)) = Self::stride_min_pass(&mut self.ready_queues) {
+            let t = self.ready_queues[qidx].remove(pidx).unwrap();
+            return Some(t);
         }
 
         // 2. Try global pending queue
-        if let Some(mut global) = GLOBAL.try_lock() {
-            if let Some(t) = global.pending_queue.pop_front() {
-                return Some(t);
-            }
+        if let Some(t) = GLOBAL.pending_queue.lock().pop_front() {
+            return Some(t);
         }
 
         // 3. Work Stealing: try to steal from other CPUs
@@ -67,11 +84,10 @@ impl PerCpuScheduler {
         for i in 0..MAX_CPUS {
             if i == current_cpu { continue; }
             if let Some(mut other_sched) = PER_CPU[i].try_lock() {
-                // Steal from the highest priority non-empty queue
-                for prio in (0..8).rev() {
-                    if let Some(t) = other_sched.ready_queues[prio].pop_back() {
-                        return Some(t);
-                    }
+                // Steal the min-pass thread from the other CPU
+                if let Some((qidx, pidx)) = Self::stride_min_pass(&mut other_sched.ready_queues) {
+                    let t = other_sched.ready_queues[qidx].remove(pidx).unwrap();
+                    return Some(t);
                 }
             }
         }
@@ -80,64 +96,40 @@ impl PerCpuScheduler {
 }
 
 /// Global queues shared across all CPUs.
+/// Each queue has its own Mutex so operations on different queues
+/// (e.g. spawn→pending vs tick→sleep) don't contend.
 pub struct GlobalScheduler {
-    pub pending_queue: VecDeque<Box<Thread>>,
-    pub sleep_queue: VecDeque<Box<Thread>>,
-    pub block_queue: VecDeque<Box<Thread>>,
-    pub futex_queue: VecDeque<Box<Thread>>,
+    pub pending_queue: Mutex<VecDeque<Box<Thread>>>,
+    pub sleep_queue: Mutex<VecDeque<Box<Thread>>>,
+    pub block_queue: Mutex<VecDeque<Box<Thread>>>,
+    pub futex_queue: Mutex<VecDeque<Box<Thread>>>,
 }
 
 impl GlobalScheduler {
     const fn new() -> Self {
         GlobalScheduler {
-            pending_queue: VecDeque::new(),
-            sleep_queue: VecDeque::new(),
-            block_queue: VecDeque::new(),
-            futex_queue: VecDeque::new(),
+            pending_queue: Mutex::new(VecDeque::new()),
+            sleep_queue: Mutex::new(VecDeque::new()),
+            block_queue: Mutex::new(VecDeque::new()),
+            futex_queue: Mutex::new(VecDeque::new()),
         }
     }
 
-    pub fn add_sleeping_thread(&mut self, thread: Thread) {
-        self.sleep_queue.push_back(Box::new(thread));
+    pub fn add_sleeping_thread(&self, thread: Thread) {
+        self.sleep_queue.lock().push_back(Box::new(thread));
     }
 
-    pub fn add_futex_thread(&mut self, thread: Thread) {
-        self.futex_queue.push_back(Box::new(thread));
-    }
-
-    /// Check sleep queue, move woken threads into `target_ready`.
-    pub fn tick(&mut self, current_ticks: u64, target_ready: &mut PerCpuScheduler) {
-        let mut still_sleeping = VecDeque::new();
-        while let Some(mut thread) = self.sleep_queue.pop_front() {
-            let mut wake = false;
-            if let Some(wake_time) = thread.sleep_until {
-                if current_ticks >= wake_time { wake = true; }
-            }
-            // Wake on pending signal (enables signal-interruptible sleep)
-            if !wake {
-                if let Some(ref proc) = thread.process {
-                    let sig = proc.signals.lock();
-                    if sig.has_unmasked_pending(sig.blocked) { wake = true; }
-                }
-            }
-            if wake {
-                thread.status = crate::task::thread::ThreadStatus::Ready;
-                thread.sleep_until = None;
-                let priority = thread.priority as usize;
-                let p = if priority > 7 { 7 } else { priority };
-                target_ready.ready_queues[p].push_back(thread);
-                continue;
-            }
-            still_sleeping.push_back(thread);
-        }
-        self.sleep_queue = still_sleeping;
+    pub fn add_futex_thread(&self, thread: Thread) {
+        self.futex_queue.lock().push_back(Box::new(thread));
     }
 
     /// Wake threads blocked on a pipe key.
-    pub fn wake_blocked_threads(&mut self, key: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
+    /// Only holds block_queue lock — does not block other queues.
+    pub fn wake_blocked_threads(&self, key: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
+        let mut block = self.block_queue.lock();
         let mut woken = 0u32;
         let mut still_waiting = VecDeque::new();
-        while let Some(mut thread) = self.block_queue.pop_front() {
+        while let Some(mut thread) = block.pop_front() {
             if woken < max_wake && thread.pipe_block_key == Some(key) {
                 thread.status = crate::task::thread::ThreadStatus::Ready;
                 thread.pipe_block_key = None;
@@ -148,15 +140,17 @@ impl GlobalScheduler {
                 still_waiting.push_back(thread);
             }
         }
-        self.block_queue = still_waiting;
+        *block = still_waiting;
         woken
     }
 
     /// Wake threads waiting on a futex.
-    pub fn wake_futex(&mut self, uaddr: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
+    /// Only holds futex_queue lock — does not block other queues.
+    pub fn wake_futex(&self, uaddr: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
+        let mut futex = self.futex_queue.lock();
         let mut woken = 0u32;
         let mut still_waiting = VecDeque::new();
-        while let Some(mut thread) = self.futex_queue.pop_front() {
+        while let Some(mut thread) = futex.pop_front() {
             if woken < max_wake && thread.futex_wake_addr == Some(uaddr) {
                 thread.status = crate::task::thread::ThreadStatus::Ready;
                 thread.futex_wake_addr = None;
@@ -167,7 +161,7 @@ impl GlobalScheduler {
                 still_waiting.push_back(thread);
             }
         }
-        self.futex_queue = still_waiting;
+        *futex = still_waiting;
         woken
     }
 }
@@ -184,8 +178,9 @@ lazy_static::lazy_static! {
     };
 }
 
-/// Global shared queues.
-pub static GLOBAL: Mutex<GlobalScheduler> = Mutex::new(GlobalScheduler::new());
+/// Global shared queues — each has its own Mutex to minimize contention.
+/// Access via `GLOBAL.pending_queue.lock()`, `GLOBAL.sleep_queue.lock()`, etc.
+pub static GLOBAL: GlobalScheduler = GlobalScheduler::new();
 
 /// Access a specific CPU's scheduler by index (for monitoring / debugging).
 pub fn cpu_sched(cpu_id: usize) -> Option<&'static Mutex<PerCpuScheduler>> {
@@ -235,6 +230,8 @@ impl PerCpuScheduler {
             } else {
                 old.status = crate::task::thread::ThreadStatus::Ready;
                 let p = &mut old.stack_ptr as *mut u64;
+                // Advance pass by stride (virtual time accounting)
+                old.pass = old.pass.wrapping_add(old.stride);
                 let p_idx = old.priority as usize;
                 let p_idx = if p_idx > 7 { 7 } else { p_idx };
                 self.ready_queues[p_idx].push_back(old);
@@ -308,12 +305,12 @@ pub fn try_schedule() {
 /// Spawn a new thread, placed in the global pending pool for any CPU to pick up.
 pub fn spawn(entry: extern "C" fn() -> !) {
     let thread = Thread::new(entry);
-    GLOBAL.lock().pending_queue.push_back(Box::new(thread));
+    GLOBAL.pending_queue.lock().push_back(Box::new(thread));
 }
 
 /// Add an already-constructed thread to the global pending pool.
 pub fn spawn_thread(thread: Thread) {
-    GLOBAL.lock().pending_queue.push_back(Box::new(thread));
+    GLOBAL.pending_queue.lock().push_back(Box::new(thread));
 }
 
 /// Block the current thread on a pipe.
@@ -322,9 +319,7 @@ pub fn block_on_pipe(key: u64) {
     if let Some(mut current) = sched.current_thread.take() {
         current.status = crate::task::thread::ThreadStatus::Blocked;
         current.pipe_block_key = Some(key);
-        let mut global = GLOBAL.lock();
-        global.block_queue.push_back(current);
-        drop(global);
+        GLOBAL.block_queue.lock().push_back(current);
     }
     drop(sched);
     schedule();
@@ -333,8 +328,7 @@ pub fn block_on_pipe(key: u64) {
 /// Wake all threads blocked on a pipe key.
 pub fn wake_pipe(key: u64) {
     let mut sched = this_cpu_sched().lock();
-    let mut global = GLOBAL.lock();
-    let woken = global.wake_blocked_threads(key, u32::MAX, &mut *sched);
+    let woken = GLOBAL.wake_blocked_threads(key, u32::MAX, &mut *sched);
     if woken > 0 { broadcast_reschedule_ipi(); }
 }
 
@@ -352,19 +346,18 @@ pub fn broadcast_reschedule_ipi() {
 
 /// Move current thread to sleep queue.
 pub fn add_sleeping_thread(thread: Thread) {
-    GLOBAL.lock().add_sleeping_thread(thread);
+    GLOBAL.add_sleeping_thread(thread);
 }
 
 /// Add thread to futex wait queue.
 pub fn add_futex_thread(thread: Thread) {
-    GLOBAL.lock().add_futex_thread(thread);
+    GLOBAL.add_futex_thread(thread);
 }
 
 /// Wake threads from futex wait queue.
 pub fn wake_futex(uaddr: u64, max_wake: u32) -> u32 {
     let mut sched = this_cpu_sched().lock();
-    let mut global = GLOBAL.lock();
-    let woken = global.wake_futex(uaddr, max_wake, &mut *sched);
+    let woken = GLOBAL.wake_futex(uaddr, max_wake, &mut *sched);
     if woken > 0 { broadcast_reschedule_ipi(); }
     woken
 }
@@ -372,10 +365,10 @@ pub fn wake_futex(uaddr: u64, max_wake: u32) -> u32 {
 /// Wake all threads in the futex queue whose process ID matches.
 pub fn wake_process_futex(pid: u64) -> u32 {
     let mut sched = this_cpu_sched().lock();
-    let mut global = GLOBAL.lock();
+    let mut futex = GLOBAL.futex_queue.lock();
     let mut woken = 0u32;
     let mut still_waiting = alloc::collections::VecDeque::new();
-    while let Some(mut thread) = global.futex_queue.pop_front() {
+    while let Some(mut thread) = futex.pop_front() {
         let matches = thread.process.as_ref().map(|p| p.id == pid).unwrap_or(false);
         if matches {
             thread.status = crate::task::thread::ThreadStatus::Ready;
@@ -387,7 +380,7 @@ pub fn wake_process_futex(pid: u64) -> u32 {
             still_waiting.push_back(thread);
         }
     }
-    global.futex_queue = still_waiting;
+    *futex = still_waiting;
     if woken > 0 { broadcast_reschedule_ipi(); }
     woken
 }
@@ -395,10 +388,10 @@ pub fn wake_process_futex(pid: u64) -> u32 {
 /// Wake all pipe-blocked threads whose process ID matches.
 pub fn wake_process_blocked(pid: u64) -> u32 {
     let mut sched = this_cpu_sched().lock();
-    let mut global = GLOBAL.lock();
+    let mut block = GLOBAL.block_queue.lock();
     let mut woken = 0u32;
     let mut still_waiting = alloc::collections::VecDeque::new();
-    while let Some(mut thread) = global.block_queue.pop_front() {
+    while let Some(mut thread) = block.pop_front() {
         let matches = thread.process.as_ref().map(|p| p.id == pid).unwrap_or(false);
         if matches {
             thread.status = crate::task::thread::ThreadStatus::Ready;
@@ -410,7 +403,7 @@ pub fn wake_process_blocked(pid: u64) -> u32 {
             still_waiting.push_back(thread);
         }
     }
-    global.block_queue = still_waiting;
+    *block = still_waiting;
     if woken > 0 { broadcast_reschedule_ipi(); }
     woken
 }
@@ -428,8 +421,29 @@ pub fn boost_thread_priority(_pid: u64, _target_priority: u8) -> bool {
 /// Process timer tick: wake sleeping threads. Non-blocking for interrupt context.
 pub fn tick(current_ticks: u64) {
     if let Some(mut sched) = this_cpu_sched().try_lock() {
-        if let Some(mut global) = GLOBAL.try_lock() {
-            global.tick(current_ticks, &mut *sched);
+        if let Some(mut sleep) = GLOBAL.sleep_queue.try_lock() {
+            let mut still_sleeping = VecDeque::new();
+            while let Some(mut thread) = sleep.pop_front() {
+                let mut wake = false;
+                if let Some(wake_time) = thread.sleep_until {
+                    if current_ticks >= wake_time { wake = true; }
+                }
+                if !wake {
+                    if let Some(ref proc) = thread.process {
+                        let sig = proc.signals.lock();
+                        if sig.has_unmasked_pending(sig.blocked) { wake = true; }
+                    }
+                }
+                if wake {
+                    thread.status = crate::task::thread::ThreadStatus::Ready;
+                    thread.sleep_until = None;
+                    let p = (thread.priority as usize).min(7);
+                    sched.ready_queues[p].push_back(thread);
+                } else {
+                    still_sleeping.push_back(thread);
+                }
+            }
+            *sleep = still_sleeping;
         }
     }
 }

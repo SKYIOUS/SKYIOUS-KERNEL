@@ -155,3 +155,58 @@ pub fn poll() {
         }
     }
 }
+
+// ─── SocketObject: wraps smoltcp SocketHandle as a KernelObject ─────
+
+use alloc::sync::Arc;
+use crate::objects::{KernelObject, ObjectHeader, ObjectTypeId, security::SecurityDescriptor};
+
+#[allow(dead_code)]
+pub struct SocketObject {
+    pub header: ObjectHeader,
+    pub handle: SocketHandle,
+    pub socket_type: crate::task::process::SocketType,
+}
+
+#[allow(dead_code)]
+impl SocketObject {
+    pub fn new(handle: SocketHandle, socket_type: crate::task::process::SocketType) -> Arc<Self> {
+        Arc::new(SocketObject {
+            header: ObjectHeader::new(ObjectTypeId(6), SecurityDescriptor::default()),
+            handle,
+            socket_type,
+        })
+    }
+}
+
+impl KernelObject for SocketObject {
+    fn header(&self) -> &ObjectHeader { &self.header }
+
+    fn poll_readable(&self) -> bool {
+        let sockets = SOCKETS.lock();
+        for (h, socket) in sockets.iter() {
+            if h == self.handle {
+                use smoltcp::socket::Socket;
+                match socket {
+                    Socket::Tcp(ref tcp) => return tcp.may_recv(),
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
+    fn poll_writable(&self) -> bool {
+        let sockets = SOCKETS.lock();
+        for (h, socket) in sockets.iter() {
+            if h == self.handle {
+                use smoltcp::socket::Socket;
+                match socket {
+                    Socket::Tcp(ref tcp) => return tcp.may_send(),
+                    _ => {}
+                }
+            }
+        }
+        true
+    }
+}

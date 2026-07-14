@@ -3,6 +3,7 @@ use alloc::string::String;
 use crate::drivers::block::BlockDevice;
 use alloc::sync::Arc;
 use spin::Mutex;
+use crate::task::lock::SchedLock;
 
 pub mod ramfs;
 pub mod fat;
@@ -342,7 +343,7 @@ pub fn set_boot_device(index: usize) {
     crate::println!("VFS: boot device set to block device {}", index);
 }
 
-pub static VFS: Mutex<VfsManager> = Mutex::new(VfsManager::new());
+pub static VFS: SchedLock<VfsManager> = SchedLock::new(VfsManager::new());
 
 // ─── Ext4 mount helpers (cfg-gated for build-flag fallback) ─────────────────
 
@@ -550,4 +551,91 @@ pub fn init() {
 pub fn _mount_fat32(_path: &str, _device: Arc<Mutex<dyn BlockDevice>>) {
 }
 
+// ─── VfsObject: bridges VfsNode → KernelObject ─────────────────────
+
+use crate::objects::{KernelObject, ObjectHeader, ObjectTypeId, security::SecurityDescriptor};
+
+#[allow(dead_code)]
+
+/// Wraps any VfsNode as a KernelObject. The ObjectHeader is populated
+/// from the node's `stat()` at construction time (mode/uid/gid) or
+/// falls back to defaults for filesystems that don't implement stat().
+pub struct VfsObject {
+    pub header: ObjectHeader,
+    pub node: Arc<dyn VfsNode>,
+}
+
+#[allow(dead_code)]
+impl VfsObject {
+    pub fn new(node: Arc<dyn VfsNode>, type_id: ObjectTypeId) -> Arc<Self> {
+        let sec = match node.stat() {
+            Ok(s) => SecurityDescriptor::from(&s),
+            Err(_) => SecurityDescriptor::default(),
+        };
+        Arc::new(VfsObject {
+            header: ObjectHeader::new(type_id, sec),
+            node,
+        })
+    }
+
+    pub fn new_with_sec(node: Arc<dyn VfsNode>, type_id: ObjectTypeId, sec: SecurityDescriptor) -> Arc<Self> {
+        Arc::new(VfsObject {
+            header: ObjectHeader::new(type_id, sec),
+            node,
+        })
+    }
+}
+
+impl KernelObject for VfsObject {
+    fn header(&self) -> &ObjectHeader {
+        &self.header
+    }
+
+    fn read(&self, offset: &mut u64, buf: &mut [u8]) -> Result<usize, ()> {
+        let data = self.node.read(buf.len())?;
+        let start = core::cmp::min(*offset as usize, data.len());
+        let available = &data[start..];
+        let len = core::cmp::min(available.len(), buf.len());
+        buf[..len].copy_from_slice(&available[..len]);
+        *offset += len as u64;
+        Ok(len)
+    }
+
+    fn write(&self, _offset: &mut u64, buf: &[u8]) -> Result<usize, ()> {
+        self.node.write(buf).map(|_| buf.len())
+    }
+
+    fn ioctl(&self, request: u64, argp: *mut u8) -> Result<u64, ()> {
+        self.node.ioctl(request, argp)
+    }
+
+    fn stat(&self) -> Result<Stat, ()> {
+        self.node.stat()
+    }
+
+    fn truncate(&self, len: i64) -> Result<(), ()> {
+        self.node.truncate(len)
+    }
+
+    fn poll_readable(&self) -> bool {
+        if self.node.is_dir() { return true; }
+        // For dirs, check children; for files, try reading a byte
+        if let Ok(children) = self.node.children() { return !children.is_empty(); }
+        self.node.read(1).map_or(false, |d| !d.is_empty())
+    }
+
+    fn poll_writable(&self) -> bool {
+        self.node.write(&[]).is_ok()
+    }
+}
+
+/// Helper: open a VFS path and return a KernelObject handle.
+/// Used by sys_open to create handles with bind-time security.
+#[allow(dead_code)]
+pub fn resolve_as_object(path: &str) -> Option<Arc<VfsObject>> {
+    let vfs = VFS.lock();
+    let node = vfs.resolve_path(path)?;
+    let type_id = if node.is_dir() { ObjectTypeId(2) } else { ObjectTypeId(1) };
+    Some(VfsObject::new(node, type_id))
+}
 

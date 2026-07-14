@@ -103,8 +103,10 @@ impl IntentEngine {
                 let table = crate::task::process::PROCESS_TABLE.lock();
                 for (p, proc) in table.iter() {
                     if *p == pid {
-                        let uid = *proc.uid.lock();
-                        let gid = *proc.gid.lock();
+                        let (uid, gid) = {
+                            let c = proc.creds.lock();
+                            (c.uid, c.gid)
+                        };
                         let cwd = proc.cwd.lock().clone();
                         let vma_count = proc.vmas.lock().len();
                         return IntentResult::Success(alloc::format!(
@@ -319,8 +321,14 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("sched.info"),
             handler: |_args| {
-                let sched = crate::task::scheduler::GLOBAL.lock();
-                IntentResult::Success(alloc::format!("Scheduler: Priority 8-level round-robin, 100 Hz tick\n  Pending: {}, Sleep: {}, Blocked: {}, Futex: {}", sched.pending_queue.len(), sched.sleep_queue.len(), sched.block_queue.len(), sched.futex_queue.len()))
+                let (pend, sleep, block, futex) = {
+                    let p = crate::task::scheduler::GLOBAL.pending_queue.lock().len();
+                    let s = crate::task::scheduler::GLOBAL.sleep_queue.lock().len();
+                    let b = crate::task::scheduler::GLOBAL.block_queue.lock().len();
+                    let f = crate::task::scheduler::GLOBAL.futex_queue.lock().len();
+                    (p, s, b, f)
+                };
+                IntentResult::Success(alloc::format!("Scheduler: Priority 8-level round-robin, 100 Hz tick\n  Pending: {}, Sleep: {}, Blocked: {}, Futex: {}", pend, sleep, block, futex))
             },
         });
         self.intents.push(Intent {
@@ -393,14 +401,14 @@ impl IntentEngine {
             name: String::from("sec.uid"),
             handler: |_args| {
                 let p = crate::task::process::CURRENT_PROCESS.lock();
-                IntentResult::Success(alloc::format!("UID: {}", p.as_ref().map(|p| *p.uid.lock()).unwrap_or(0)))
+                IntentResult::Success(alloc::format!("UID: {}", p.as_ref().map(|p| p.creds.lock().uid).unwrap_or(0)))
             },
         });
         self.intents.push(Intent {
             name: String::from("sec.gid"),
             handler: |_args| {
                 let p = crate::task::process::CURRENT_PROCESS.lock();
-                IntentResult::Success(alloc::format!("GID: {}", p.as_ref().map(|p| *p.gid.lock()).unwrap_or(0)))
+                IntentResult::Success(alloc::format!("GID: {}", p.as_ref().map(|p| p.creds.lock().gid).unwrap_or(0)))
             },
         });
         self.intents.push(Intent {
@@ -408,7 +416,7 @@ impl IntentEngine {
             handler: |_args| {
                 let p = crate::task::process::CURRENT_PROCESS.lock();
                 if let Some(ref proc) = *p {
-                    let eff = *proc.cap_effective.lock();
+                    let eff = proc.creds.lock().cap_effective;
                     let mut caps = Vec::new();
                     if eff & (1 << 21) != 0 { caps.push("CAP_SYS_ADMIN"); }
                     if eff & (1 << 12) != 0 { caps.push("CAP_NET_ADMIN"); }

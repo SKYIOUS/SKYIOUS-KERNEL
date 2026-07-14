@@ -12,11 +12,15 @@ pub mod filemanager;
 pub mod splash;
 pub mod wallpaper;
 
+pub mod dma_buffer;
+pub mod surface;
+
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use spin::Mutex;
 use core::sync::atomic::Ordering;
 use crate::drivers::graphics::FRAMEBUFFER;
+use self::surface::{DamageTracker, DirtyRect};
 
 pub const SCREEN_WIDTH: usize = 800;
 pub const SCREEN_HEIGHT: usize = 600;
@@ -51,6 +55,7 @@ pub struct Compositor {
     pub wallpaper_path: Option<alloc::string::String>,
     pub wallpaper_dirty: bool,
     pub(crate) animations: alloc::vec::Vec<WindowAnimation>,
+    pub damage: DamageTracker,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -141,11 +146,14 @@ impl Compositor {
             wallpaper_path: None,
             wallpaper_dirty: false,
             animations: alloc::vec::Vec::new(),
+            damage: DamageTracker::new(SCREEN_WIDTH, SCREEN_HEIGHT),
         }
     }
 
-    pub fn add_window(&mut self, window: window::Window) {
+    pub fn add_window(&mut self, mut window: window::Window) {
         let idx = self.windows.len();
+        window.dirty = true;
+        self.damage.mark(window.x, window.y, window.width, window.height);
         self.windows.push(window);
         self.animations.push(WindowAnimation {
             window_idx: idx,
@@ -159,7 +167,6 @@ impl Compositor {
         let size = new_w * new_h;
         self.backbuffer = alloc::vec![0x001A237E; size].into_boxed_slice();
         self.background_cache = alloc::vec![0x001A237E; size].into_boxed_slice();
-        // Re-center windows that are off-screen
         for win in &mut self.windows {
             if win.x + win.width > new_w {
                 win.x = new_w.saturating_sub(win.width);
@@ -168,12 +175,12 @@ impl Compositor {
                 win.y = new_h.saturating_sub(win.height + 40);
             }
         }
-        // Regenerate gradient if no wallpaper
         if self.wallpaper_path.is_none() {
             shell::draw_background(&mut self.background_cache);
         } else {
             self.wallpaper_dirty = true;
         }
+        self.damage.mark_full();
     }
 
     pub fn set_wallpaper(&mut self, path: alloc::string::String) {
@@ -369,13 +376,14 @@ impl Compositor {
               }
               // Check minimize/close buttons on all windows (reverse order = top first)
               for (i, win) in self.windows.iter().enumerate().rev() {
-                  if win.is_minimize_button(x, y) {
-                      self.windows[i].minimized = !self.windows[i].minimized;
-                      // Bring to front
-                      let w = self.windows.remove(i);
-                      self.windows.push(w);
-                      return;
-                  }
+                   if win.is_minimize_button(x, y) {
+                       self.damage.mark(self.windows[i].x, self.windows[i].y, self.windows[i].width, self.windows[i].height);
+                       self.windows[i].minimized = !self.windows[i].minimized;
+                       // Bring to front
+                       let w = self.windows.remove(i);
+                       self.windows.push(w);
+                       return;
+                   }
                   if win.is_close_button(x, y) {
                       self.close_pending = Some(i);
                       return;
@@ -404,6 +412,7 @@ impl Compositor {
             if let Some(idx) = self.drag_index {
                 if self.resize_edge != window::ResizeEdge::None {
                     let win = &mut self.windows[idx];
+                    self.damage.mark(win.x, win.y, win.width, win.height);
                     match self.resize_edge {
                         window::ResizeEdge::Right => {
                             win.width = x.saturating_sub(win.x).max(150);
@@ -417,9 +426,17 @@ impl Compositor {
                         }
                         _ => {}
                     }
+                    self.damage.mark(win.x, win.y, win.width, win.height);
                 } else {
+                    let (old_x, old_y, old_w, old_h) = {
+                        let w = &self.windows[idx];
+                        (w.x, w.y, w.width, w.height)
+                    };
+                    self.damage.mark(old_x, old_y, old_w, old_h);
                     self.windows[idx].x = x.saturating_sub(self.drag_offset_x);
                     self.windows[idx].y = y.saturating_sub(self.drag_offset_y);
+                    let new_win = &self.windows[idx];
+                    self.damage.mark(new_win.x, new_win.y, new_win.width, new_win.height);
                 }
             } else {
                 // Check if we started dragging or interacting with content
@@ -479,6 +496,8 @@ impl Compositor {
 
             if let Some(idx) = self.close_pending {
                 if idx < self.windows.len() {
+                    let win = &self.windows[idx];
+                    self.damage.mark(win.x, win.y, win.width, win.height);
                     self.windows.remove(idx);
                 }
                 self.close_pending = None;
@@ -662,7 +681,8 @@ impl Compositor {
             notif.ticks_remaining = notif.ticks_remaining.saturating_sub(1);
         }
 
-        // Copy cached gradient background via raw pointers to avoid borrow conflict
+        // Full background + overlay composite (always correct, keep simple)
+        // ponytail: always full-composite, only framebuffer copy is delta
         unsafe {
             core::ptr::copy_nonoverlapping(
                 self.background_cache.as_ptr(),
@@ -672,7 +692,6 @@ impl Compositor {
         }
         shell::draw_taskbar(&mut self.backbuffer);
 
-        // Window entries on taskbar
         let taskbar_y = SCREEN_HEIGHT - 40;
         for (i, win) in self.windows.iter().enumerate() {
             let bx = 70 + i * 120;
@@ -688,7 +707,6 @@ impl Compositor {
 
         shell::draw_icons(&mut self.backbuffer);
 
-        // Refresh monitor windows before rendering
         for win in &mut self.windows {
             if let Some(ref mut term) = win.terminal {
                 if term.is_monitor {
@@ -701,7 +719,6 @@ impl Compositor {
             if !window.minimized { window.render(&mut self.backbuffer, mouse_x, mouse_y); }
         }
 
-        // Apply window animations (fade-in overlays)
         self.animations.retain(|anim| anim.frame < anim.total);
         for anim in &mut self.animations {
             anim.frame += 1;
@@ -709,13 +726,11 @@ impl Compositor {
             let win = &self.windows[anim.window_idx];
             if win.minimized { continue; }
             if anim.fade_out {
-                // Fade out: alpha increases from low to full
                 let a = (255 * anim.frame / anim.total) as u32;
                 let overlay = (a.min(255) << 24) | 0x000000;
                 drawing::draw_rect_alpha(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT,
                     win.x, win.y, win.width, win.height, overlay);
             } else {
-                // Fade in: alpha decreases from full to 0
                 let a = 255 - (255 * anim.frame / anim.total) as u32;
                 let overlay = (a.min(255) << 24) | 0x000000;
                 drawing::draw_rect_alpha(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT,
@@ -727,7 +742,6 @@ impl Compositor {
             shell::draw_start_menu(&mut self.backbuffer, mouse_x, mouse_y);
         }
 
-        // Context menu
         if self.context_menu.open {
             let item_h = 24;
             let menu_w = 160;
@@ -756,21 +770,16 @@ impl Compositor {
             }
         }
 
-        // Snap zone hint (when dragging near screen edges)
         if let Some(_idx) = self.drag_index {
             if mouse_x < 5 {
-                // Left half snap hint
                 drawing::draw_rect(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 40, 0x300078D4);
             } else if mouse_x > SCREEN_WIDTH - 5 {
-                // Right half snap hint
                 drawing::draw_rect(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 40, 0x300078D4);
             } else if mouse_y < 5 {
-                // Maximize snap hint
                 drawing::draw_rect(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT - 40, 0x300078D4);
             }
         }
 
-        // Alt+Tab overlay
         if self.alt_tab_active && self.windows.len() > 1 {
             let overlay_w = (self.windows.len() as u32) * 130 + 20;
             let overlay_h: u32 = 60;
@@ -788,7 +797,6 @@ impl Compositor {
             }
         }
 
-        // Notifications (toast popups) with type-colored left border and icon
         let mut notif_y = 50usize;
         for notif in &self.notifications {
             let text_w = notif.text.len() * 8 + 36;
@@ -808,16 +816,36 @@ impl Compositor {
 
         mouse::draw_cursor(&mut self.backbuffer, mouse_x, mouse_y);
 
-        // Commit to hardware framebuffer
+        // Commit dirty rects to hardware framebuffer + flip
         let fb_ptr = FRAMEBUFFER.load(Ordering::Relaxed);
-        if !fb_ptr.is_null() {
-            unsafe {
-                core::ptr::copy_nonoverlapping(self.backbuffer.as_ptr(), fb_ptr, SCREEN_WIDTH * SCREEN_HEIGHT);
+        let rects = self.damage.drain();
+        if rects.is_empty() {
+            if !fb_ptr.is_null() {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(self.backbuffer.as_ptr(), fb_ptr, SCREEN_WIDTH * SCREEN_HEIGHT);
+                }
             }
+            crate::drivers::gpu::virtio_gpu::flip();
+        } else {
+            let mut merge = DirtyRect::from_xywh(usize::MAX, usize::MAX, 0, 0);
+            for r in &rects {
+                merge.x = merge.x.min(r.x);
+                merge.y = merge.y.min(r.y);
+                merge.w = (r.x + r.w).max(merge.x + merge.w) - merge.x;
+                merge.h = (r.y + r.h).max(merge.y + merge.h) - merge.y;
+                if !fb_ptr.is_null() {
+                    for row in r.y..r.y + r.h {
+                        if row >= SCREEN_HEIGHT { break; }
+                        let src = &self.backbuffer[row * SCREEN_WIDTH + r.x..][..r.w];
+                        let dst = unsafe { &mut *fb_ptr.add(row * SCREEN_WIDTH + r.x) };
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(src.as_ptr(), dst, r.w);
+                        }
+                    }
+                }
+            }
+            crate::drivers::gpu::virtio_gpu::flip_rect(merge.x as u32, merge.y as u32, merge.w as u32, merge.h as u32);
         }
-
-        // If VirtIO GPU is active, flip (transfer + flush) to display
-        crate::drivers::gpu::virtio_gpu::flip();
     }
 }
 

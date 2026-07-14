@@ -7,6 +7,7 @@ pub mod keyboard;
 pub mod scheduler;
 pub mod thread;
 pub mod process;
+pub mod lock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TaskId(u64);

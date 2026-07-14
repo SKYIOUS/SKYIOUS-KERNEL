@@ -5,8 +5,8 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use crate::memory::paging::AddressSpace;
 use x86_64::structures::paging::PageTableFlags;
-
 use core::sync::atomic::{AtomicU64, Ordering};
+use crate::objects::handle::{HandleTable, HandleValue};
 
 pub static CURRENT_PROCESS: Mutex<Option<Arc<Process>>> = Mutex::new(None);
 
@@ -61,6 +61,7 @@ pub struct Process {
     pub entry_point: u64,
     pub fd_table: Mutex<Vec<Option<FileDescriptor>>>,
     pub fd_flags: Mutex<Vec<u64>>,
+    pub handle_table: Mutex<HandleTable>,
     pub exit_code: Mutex<Option<i32>>,
     pub children: Mutex<Vec<u64>>,
     pub brk: Mutex<u64>,
@@ -68,27 +69,16 @@ pub struct Process {
     pub signals: Mutex<crate::syscalls::signal::SignalState>,
     pub signal_handlers: Mutex<[u64; 32]>,
     pub signal_restorers: Mutex<[u64; 32]>,
-    pub uid: Mutex<u32>,
-    pub gid: Mutex<u32>,
-    pub euid: Mutex<u32>,
-    pub egid: Mutex<u32>,
-    pub cap_effective: Mutex<u64>,
-    #[allow(dead_code)]
-    pub cap_permitted: Mutex<u64>,
-    #[allow(dead_code)]
-    pub cap_inheritable: Mutex<u64>,
-    pub suid: Mutex<u32>,
-    pub sgid: Mutex<u32>,
-    pub fsuid: Mutex<u32>,
-    pub fsgid: Mutex<u32>,
+    /// All POSIX credentials in one struct — single-lock atomic read.
+    pub creds: spin::Mutex<Credentials>,
     pub io_rings: Mutex<Vec<(u64, usize)>>,
     pub clear_child_tid: Mutex<u64>,
     pub emulation: Mutex<EmulationMode>,
     pub umask: Mutex<u32>,
 }
 
-/// Snapshot of effective credentials used for permission checks.
-#[derive(Clone, Copy)]
+/// All POSIX credentials in one struct — single-lock snapshot.
+#[derive(Clone, Copy, Debug)]
 pub struct Credentials {
     pub uid: u32,
     pub gid: u32,
@@ -99,54 +89,105 @@ pub struct Credentials {
     pub fsuid: u32,
     pub fsgid: u32,
     pub cap_effective: u64,
+    #[allow(dead_code)]
+    pub cap_permitted: u64,
+    #[allow(dead_code)]
+    pub cap_inheritable: u64,
     pub umask: u32,
 }
 
-impl Process {
-    /// Take a snapshot of the process's effective credentials.
-    pub fn credentials(&self) -> Credentials {
+impl Default for Credentials {
+    fn default() -> Self {
         Credentials {
-            uid: *self.uid.lock(),
-            gid: *self.gid.lock(),
-            euid: *self.euid.lock(),
-            egid: *self.egid.lock(),
-            suid: *self.suid.lock(),
-            sgid: *self.sgid.lock(),
-            fsuid: *self.fsuid.lock(),
-            fsgid: *self.fsgid.lock(),
-            cap_effective: *self.cap_effective.lock(),
-            umask: *self.umask.lock(),
+            uid: 0, gid: 0, euid: 0, egid: 0,
+            suid: 0, sgid: 0, fsuid: 0, fsgid: 0,
+            cap_effective: !0,
+            cap_permitted: !0,
+            cap_inheritable: 0,
+            umask: 0o022,
         }
+    }
+}
+
+impl Process {
+    /// Take a snapshot of the process's credentials (single Mutex lock).
+    pub fn credentials(&self) -> Credentials {
+        self.creds.lock().clone()
     }
 
     /// Apply a credential change (e.g., from setuid exec).
     pub fn set_credentials(&self, cred: &Credentials) {
-        *self.euid.lock() = cred.euid;
-        *self.egid.lock() = cred.egid;
-        *self.suid.lock() = cred.suid;
-        *self.cap_effective.lock() = cred.cap_effective;
+        let mut c = self.creds.lock();
+        c.euid = cred.euid;
+        c.egid = cred.egid;
+        c.suid = cred.suid;
+        c.cap_effective = cred.cap_effective;
     }
 
     /// Inherit credentials from a parent process.
     pub fn clone_credentials_from(&self, parent: &Process) {
-        *self.uid.lock()  = *parent.uid.lock();
-        *self.gid.lock()  = *parent.gid.lock();
-        *self.euid.lock() = *parent.euid.lock();
-        *self.egid.lock() = *parent.egid.lock();
-        *self.suid.lock() = *parent.suid.lock();
-        *self.sgid.lock() = *parent.sgid.lock();
-        *self.fsuid.lock() = *parent.fsuid.lock();
-        *self.fsgid.lock() = *parent.fsgid.lock();
-        *self.cap_effective.lock()  = *parent.cap_effective.lock();
-        *self.cap_permitted.lock()  = *parent.cap_permitted.lock();
-        *self.cap_inheritable.lock() = *parent.cap_inheritable.lock();
+        let pc = parent.creds.lock();
+        let mut c = self.creds.lock();
+        c.uid = pc.uid;
+        c.gid = pc.gid;
+        c.euid = pc.euid;
+        c.egid = pc.egid;
+        c.suid = pc.suid;
+        c.sgid = pc.sgid;
+        c.fsuid = pc.fsuid;
+        c.fsgid = pc.fsgid;
+        c.cap_effective = pc.cap_effective;
+        c.cap_permitted = pc.cap_permitted;
+        c.cap_inheritable = pc.cap_inheritable;
         *self.umask.lock() = *parent.umask.lock();
     }
 }
 
 use crate::vfs::VfsNode;
+use crate::objects::KernelObject;
 
 impl Process {
+    /// Execute a closure with mutable access to a handle entry.
+    pub fn with_handle<F, R>(&self, fd: HandleValue, f: F) -> Result<R, u64>
+    where F: FnOnce(&mut crate::objects::handle::HandleEntry) -> Result<R, u64> {
+        let mut ht = self.handle_table.lock();
+        let entry = ht.get_mut(fd).ok_or(crate::syscalls::errno::Errno::EBADF as u64)?;
+        f(entry)
+    }
+
+    /// Read-only access to a handle entry.
+    pub fn with_handle_readonly<F, R>(&self, fd: HandleValue, f: F) -> Result<R, u64>
+    where F: FnOnce(&crate::objects::handle::HandleEntry) -> Result<R, u64> {
+        let ht = self.handle_table.lock();
+        let entry = ht.get(fd).ok_or(crate::syscalls::errno::Errno::EBADF as u64)?;
+        f(entry)
+    }
+
+    /// Create a new handle with bind-time security check.
+    pub fn new_handle(&self, object: Arc<dyn KernelObject>, access: u32, flags: u64) -> Result<HandleValue, ()> {
+        self.handle_table.lock().insert(object, access, flags)
+    }
+
+    /// Set flags on a handle (e.g., O_NONBLOCK).
+    pub fn set_handle_flags(&self, fd: HandleValue, flags: u64) -> Result<(), u64> {
+        let mut ht = self.handle_table.lock();
+        let entry = ht.get_mut(fd).ok_or(crate::syscalls::errno::Errno::EBADF as u64)?;
+        entry.flags = flags;
+        Ok(())
+    }
+
+    /// Get flags from a handle.
+    pub fn get_handle_flags(&self, fd: HandleValue) -> Result<u64, u64> {
+        let ht = self.handle_table.lock();
+        let entry = ht.get(fd).ok_or(crate::syscalls::errno::Errno::EBADF as u64)?;
+        Ok(entry.flags)
+    }
+
+    /// Close a handle.
+    pub fn close_handle(&self, fd: HandleValue) -> Option<Arc<dyn KernelObject>> {
+        self.handle_table.lock().close(fd)
+    }
+
     pub fn new(id: u64, parent_id: Option<u64>, address_space: AddressSpace) -> Self {
         Process {
             id,
@@ -157,6 +198,7 @@ impl Process {
             entry_point: 0,
             fd_table: Mutex::new(Vec::new()),
             fd_flags: Mutex::new(Vec::new()),
+            handle_table: Mutex::new(HandleTable::new()),
             exit_code: Mutex::new(None),
             children: Mutex::new(Vec::new()),
             brk: Mutex::new(0),
@@ -164,17 +206,7 @@ impl Process {
             signals: Mutex::new(crate::syscalls::signal::SignalState::new()),
             signal_handlers: Mutex::new([0; 32]),
             signal_restorers: Mutex::new([0; 32]),
-            uid: Mutex::new(0),
-            gid: Mutex::new(0),
-            euid: Mutex::new(0),
-            egid: Mutex::new(0),
-            cap_effective: Mutex::new(!0u64),
-            cap_permitted: Mutex::new(!0u64),
-            cap_inheritable: Mutex::new(!0u64),
-            suid: Mutex::new(0),
-            sgid: Mutex::new(0),
-            fsuid: Mutex::new(0),
-            fsgid: Mutex::new(0),
+            creds: spin::Mutex::new(Credentials::default()),
             io_rings: Mutex::new(Vec::new()),
             clear_child_tid: Mutex::new(0),
             emulation: Mutex::new(EmulationMode::Native),

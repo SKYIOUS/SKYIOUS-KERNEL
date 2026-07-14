@@ -23,6 +23,7 @@ mod task;
 mod syscalls;
 mod vfs;
 mod security;
+pub mod objects;
 mod tty;
 #[cfg(not(target_arch = "aarch64"))]
 mod vga_buffer;
@@ -245,6 +246,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
     vfs::init();
+    serial_write("[BOOT] object manager init...\n");
+    objects::namespace::init();
     #[cfg(feature = "net")]
     { serial_write("[BOOT] net init...\n"); net::init(); }
 
@@ -581,11 +584,14 @@ pub fn spawn_userspace_app(path: &'static str) {
             use alloc::sync::Arc;
             let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
             if let Some(address_space) = crate::memory::paging::AddressSpace::new(&mut frame_allocator) {
-                if let Ok(mut process) = crate::task::process::Process::load_elf(&elf_data, address_space) {
-                    process.uid = spin::Mutex::new(1000);
-                    process.gid = spin::Mutex::new(1000);
-                    process.euid = spin::Mutex::new(1000);
-                    process.egid = spin::Mutex::new(1000);
+                if let Ok(process) = crate::task::process::Process::load_elf(&elf_data, address_space) {
+                    {
+                        let mut c = process.creds.lock();
+                        c.uid = 1000;
+                        c.gid = 1000;
+                        c.euid = 1000;
+                        c.egid = 1000;
+                    }
                     let entry = process.entry_point;
                     let process_arc = Arc::new(process);
                     crate::task::process::Process::register(process_arc.clone());
