@@ -108,5 +108,23 @@ pub const SYS_GUI_MOVE_WINDOW: u64 = 124;
 pub const SYS_CLIPBOARD: u64 = 125;
 pub const SYS_NOTIFY: u64 = 126;
 pub const SYS_MKFS: u64 = 127;
+// ASH (Application-Specific Safe Handler) Syscalls
+pub const SYS_ASH_REGISTER: u64 = 310;
+pub const SYS_ASH_UNREGISTER: u64 = 311;
+pub const SYS_ASH_STATS: u64 = 312;
+pub const SYS_ASH_CONTROL: u64 = 313;
+
+// Hypervisor syscalls
+pub const SYS_VM_CREATE: u64 = 340;
+pub const SYS_VM_DESTROY: u64 = 341;
+pub const SYS_VM_START: u64 = 342;
+pub const SYS_VM_STOP: u64 = 343;
+pub const SYS_VM_PAUSE: u64 = 344;
+pub const SYS_VM_RESUME: u64 = 345;
+pub const SYS_VM_LOAD_KERNEL: u64 = 346;
+pub const SYS_VM_GET_INFO: u64 = 347;
+pub const SYS_VM_SET_MEMORY: u64 = 348;
+pub const SYS_VM_INJECT_IRQ: u64 = 349;
+
 pub const SYS_OBJMGR_ENUM: u64 = 380;
 pub const SYS_OBJMGR_AUDIT: u64 = 381;

@@ -49,17 +49,25 @@ mod smp;
 pub mod debug;
 #[cfg(feature = "ai_rule")]
 pub mod vahiai;
+#[cfg(feature = "verification")]
+mod verified;
 pub mod elf_dyn;
 pub mod emulation;
 pub mod ebpf;
 pub mod crypto;
 pub mod pty;
+#[cfg(feature = "ash")]
+pub mod ash;
 pub mod arch;
 pub mod hal;
+#[cfg(feature = "gpu")]
+pub mod compositor;
 #[cfg(feature = "self_test")]
 mod selftest;
 #[cfg(feature = "self_test")]
 mod tests;
+#[cfg(feature = "hypervisor")]
+pub mod hypervisor;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig, config::Mapping};
@@ -271,6 +279,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     korlang::init();
     #[cfg(feature = "ai_rule")]
     { serial_write("[BOOT] vahiai init...\n"); vahiai::init(); }
+    #[cfg(feature = "ash")]
+    { serial_write("[BOOT] ASH init...\n"); ash::manager::init(); }
+    #[cfg(feature = "hypervisor")]
+    { serial_write("[BOOT] hypervisor init...\n"); hypervisor::init(); }
     serial_write("[BOOT] -> SARGA OS: Graphical Console Mode Active!\n");
 
     serial_write("[BOOT] RTC init...\n");
@@ -283,6 +295,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         tests::register_all();
         serial_write("[SELF-TEST] running...\n");
         selftest::run_all();
+    }
+
+    #[cfg(feature = "verification")]
+    {
+        serial_write("[VERIFY] initializing verification runner...\n");
+        use crate::verified::runner::VERIFICATION_RUNNER;
+        VERIFICATION_RUNNER.lock().set_enabled(true);
+        serial_write("[VERIFY] runtime invariant checking enabled\n");
     }
 
     serial_write("[BOOT] scheduler init...\n");
@@ -298,6 +318,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     x86_64::instructions::interrupts::enable();
     #[cfg(target_arch = "aarch64")]
     unsafe { core::arch::asm!("msr daifclr, #2"); } // Clear IRQ mask
+
+    #[cfg(feature = "verification")]
+    {
+        let _vreport = crate::verified::runner::VERIFICATION_RUNNER.lock().report();
+        serial_write("[VERIFY] boot-phase invariant checks complete\n");
+    }
+
     task::scheduler::schedule();
 }
 

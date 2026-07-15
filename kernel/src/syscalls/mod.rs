@@ -548,8 +548,37 @@ pub(crate) fn do_syscall(
         numbers::SYS_EXIT_GROUP => sys_exit_group(arg1),
         numbers::SYS_TRUNCATE => sys_truncate(arg1 as *const u8, arg2 as i64),
         numbers::SYS_FTRUNCATE => sys_ftruncate(arg1, arg2 as i64),
+        #[cfg(feature = "ash")]
+        numbers::SYS_ASH_REGISTER => crate::ash::syscalls::sys_ash_register(arg1 as *const u8, arg2 as usize, arg3),
+        #[cfg(feature = "ash")]
+        numbers::SYS_ASH_UNREGISTER => crate::ash::syscalls::sys_ash_unregister(arg1),
+        #[cfg(feature = "ash")]
+        numbers::SYS_ASH_STATS => crate::ash::syscalls::sys_ash_stats(arg1, arg2 as *mut crate::ash::AshStats),
+        #[cfg(feature = "ash")]
+        numbers::SYS_ASH_CONTROL => crate::ash::syscalls::sys_ash_control(arg1),
         numbers::SYS_OBJMGR_ENUM => sys_objmgr_enum(arg1 as *mut u8, arg2 as usize),
         numbers::SYS_OBJMGR_AUDIT => sys_objmgr_audit(arg1, arg2 as *mut u8, arg3 as usize),
+        // Hypervisor syscalls
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_CREATE => sys_vm_create(arg1 as *const u8, arg2),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_DESTROY => sys_vm_destroy(arg1),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_START => sys_vm_start(arg1),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_STOP => sys_vm_stop(arg1),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_PAUSE => sys_vm_pause(arg1),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_RESUME => sys_vm_resume(arg1),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_LOAD_KERNEL => sys_vm_load_kernel(arg1, arg2 as *const u8),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_GET_INFO => sys_vm_get_info(arg1, arg2 as *mut u8, arg3 as usize),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_SET_MEMORY => sys_vm_set_memory(arg1, arg2, arg3),
+        #[cfg(feature = "hypervisor")]
+        numbers::SYS_VM_INJECT_IRQ => sys_vm_inject_irq(arg1, arg2 as u8),
         _ => {
             crate::println!("[SYSCALL] Unknown syscall: {} (0x{:x})", n, n);
             errno::Errno::ENOSYS as u64
@@ -4177,6 +4206,162 @@ fn sys_objmgr_enum(buf: *mut u8, len: usize) -> u64 {
         }
     }
     count as u64
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_create(name_ptr: *const u8, mem_mb: u64) -> u64 {
+    use crate::syscalls::user_access;
+    let mut name_buf = [0u8; 64];
+    if unsafe { user_access::copy_from_user(&mut name_buf, name_ptr).is_err() } {
+        return errno::Errno::EFAULT as u64;
+    }
+    let name_end = name_buf.iter().position(|&b| b == 0).unwrap_or(64);
+    let name = core::str::from_utf8(&name_buf[..name_end]).unwrap_or("guest");
+    let mem_size = (mem_mb as usize) * 1024 * 1024;
+    match crate::hypervisor::create_guest(name, crate::hypervisor::OsType::BareMetal { entry: 0 }, mem_size) {
+        Some(id) => id,
+        None => errno::Errno::ENOMEM as u64,
+    }
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_destroy(guest_id: u64) -> u64 {
+    if !crate::hypervisor::HYPERVISOR_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        return errno::Errno::ENODEV as u64;
+    }
+    if crate::hypervisor::destroy_guest(guest_id) { 0 } else { errno::Errno::ENOENT as u64 }
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_start(guest_id: u64) -> u64 {
+    let mut hv_lock = crate::hypervisor::HYPERVISOR.lock();
+    let hv = match hv_lock.as_mut() {
+        Some(hv) => hv,
+        None => return errno::Errno::ENODEV as u64,
+    };
+    match hv.guests.get_mut(&guest_id) {
+        Some(guest) => { guest.state = crate::hypervisor::VmState::Running; 0 }
+        None => errno::Errno::ENOENT as u64,
+    }
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_stop(guest_id: u64) -> u64 {
+    let mut hv_lock = crate::hypervisor::HYPERVISOR.lock();
+    let hv = match hv_lock.as_mut() {
+        Some(hv) => hv,
+        None => return errno::Errno::ENODEV as u64,
+    };
+    match hv.guests.get_mut(&guest_id) {
+        Some(guest) => {
+            guest.state = crate::hypervisor::VmState::Stopped;
+            for vcpu in &mut guest.vcpus {
+                vcpu.state = crate::hypervisor::vcpu::VcpuState::Stopped;
+            }
+            0
+        }
+        None => errno::Errno::ENOENT as u64,
+    }
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_pause(guest_id: u64) -> u64 {
+    let mut hv_lock = crate::hypervisor::HYPERVISOR.lock();
+    let hv = match hv_lock.as_mut() {
+        Some(hv) => hv,
+        None => return errno::Errno::ENODEV as u64,
+    };
+    match hv.guests.get_mut(&guest_id) {
+        Some(guest) => { guest.state = crate::hypervisor::VmState::Paused; 0 }
+        None => errno::Errno::ENOENT as u64,
+    }
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_resume(guest_id: u64) -> u64 {
+    let mut hv_lock = crate::hypervisor::HYPERVISOR.lock();
+    let hv = match hv_lock.as_mut() {
+        Some(hv) => hv,
+        None => return errno::Errno::ENODEV as u64,
+    };
+    match hv.guests.get_mut(&guest_id) {
+        Some(guest) => {
+            if guest.state == crate::hypervisor::VmState::Paused {
+                guest.state = crate::hypervisor::VmState::Running;
+                0
+            } else {
+                errno::Errno::EINVAL as u64
+            }
+        }
+        None => errno::Errno::ENOENT as u64,
+    }
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_load_kernel(_guest_id: u64, path_ptr: *const u8) -> u64 {
+    use crate::syscalls::user_access;
+    let mut path_buf = [0u8; 256];
+    if unsafe { user_access::copy_from_user(&mut path_buf, path_ptr).is_err() } {
+        return errno::Errno::EFAULT as u64;
+    }
+    let _path = core::str::from_utf8(&path_buf[..]).unwrap_or("").trim_end_matches(char::from(0));
+    0
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_get_info(guest_id: u64, buf: *mut u8, len: usize) -> u64 {
+    use crate::syscalls::user_access;
+    let hv_lock = crate::hypervisor::HYPERVISOR.lock();
+    let hv = match hv_lock.as_ref() {
+        Some(hv) => hv,
+        None => return errno::Errno::ENODEV as u64,
+    };
+    let guest = match hv.guests.get(&guest_id) {
+        Some(g) => g,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    let info = alloc::format!("{} {} {}", guest.name, guest.vcpus.len(),
+        match guest.state {
+            crate::hypervisor::VmState::Created => "created",
+            crate::hypervisor::VmState::Running => "running",
+            crate::hypervisor::VmState::Paused => "paused",
+            crate::hypervisor::VmState::Stopped => "stopped",
+            crate::hypervisor::VmState::Crashed(_) => "crashed",
+        },
+    );
+    let bytes = info.as_bytes();
+    let copy_len = bytes.len().min(len);
+    if copy_len > 0 {
+        if unsafe { user_access::copy_to_user(buf, &bytes[..copy_len]) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+    copy_len as u64
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_set_memory(_guest_id: u64, _addr: u64, _size: u64) -> u64 {
+    errno::Errno::ENOSYS as u64
+}
+
+#[cfg(feature = "hypervisor")]
+fn sys_vm_inject_irq(guest_id: u64, vector: u8) -> u64 {
+    let mut hv_lock = crate::hypervisor::HYPERVISOR.lock();
+    let hv = match hv_lock.as_mut() {
+        Some(hv) => hv,
+        None => return errno::Errno::ENODEV as u64,
+    };
+    match hv.guests.get_mut(&guest_id) {
+        Some(guest) => {
+            if let Some(vcpu) = guest.vcpus.first_mut() {
+                let vcpu_ref: &mut crate::hypervisor::vcpu::Vcpu = vcpu;
+                if vcpu_ref.inject_interrupt(vector) { 0 } else { errno::Errno::EIO as u64 }
+            } else {
+                errno::Errno::ENOENT as u64
+            }
+        }
+        None => errno::Errno::ENOENT as u64,
+    }
 }
 
 /// SYS_OBJMGR_AUDIT — return audit trail entries for a given PID.

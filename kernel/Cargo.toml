@@ -36,7 +36,8 @@ test-success-exit-code = 33         # (0x10 << 1) | 1
 run-args = ["-serial", "stdio", "-smp", "1", "-cpu", "max"]
 
 [features]
-default = ["smp", "net", "ai_rule", "ext4"]
+default = ["smp", "net", "ai_rule", "ext4", "ash", "hypervisor"]
+verification = []
 ai_rule = []
 ai_llm = []
 smp = []
@@ -44,6 +45,10 @@ net = []
 uhci = []
 ext4 = []
 self_test = []
+ash = []
+gpu = []
+hypervisor = []
+objects_v2 = []
 
 [profile.dev]
 panic = "abort"

@@ -2,7 +2,7 @@ pub const STACK_SIZE: usize = 512;
 
 // ── eBPF instruction ──────────────────────────────────────────────
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct EbpfInsn {
     pub code: u8,
     pub dst_reg: u8,
