@@ -8,4 +8,4 @@ if (!(Test-Path $img)) {
 }
 
 Write-Host "--- Booting SKYIOUS Kernel in QEMU ---" -ForegroundColor Cyan
-qemu-system-x86_64 -bios $bios -drive format=raw,file=$img -m 512M -smp 2 -serial stdio
+qemu-system-x86_64 -bios $bios -drive format=raw,file=$img -m 512M -smp 2 -cpu max -serial stdio

@@ -109,21 +109,35 @@ pub const SYS_CLIPBOARD: u64 = 125;
 pub const SYS_NOTIFY: u64 = 126;
 pub const SYS_MKFS: u64 = 127;
 // ASH (Application-Specific Safe Handler) Syscalls
+#[cfg_attr(not(feature = "ash"), allow(dead_code))]
 pub const SYS_ASH_REGISTER: u64 = 310;
+#[cfg_attr(not(feature = "ash"), allow(dead_code))]
 pub const SYS_ASH_UNREGISTER: u64 = 311;
+#[cfg_attr(not(feature = "ash"), allow(dead_code))]
 pub const SYS_ASH_STATS: u64 = 312;
+#[cfg_attr(not(feature = "ash"), allow(dead_code))]
 pub const SYS_ASH_CONTROL: u64 = 313;
 
 // Hypervisor syscalls
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_CREATE: u64 = 340;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_DESTROY: u64 = 341;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_START: u64 = 342;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_STOP: u64 = 343;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_PAUSE: u64 = 344;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_RESUME: u64 = 345;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_LOAD_KERNEL: u64 = 346;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_GET_INFO: u64 = 347;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_SET_MEMORY: u64 = 348;
+#[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_INJECT_IRQ: u64 = 349;
 
 pub const SYS_OBJMGR_ENUM: u64 = 380;
