@@ -133,6 +133,12 @@ impl HwCompositor {
                     &COMMAND_RING, self.display_surface, ws.gpu_surface,
                     ws.position, ws.opacity, BlendMode::Normal,
                 )?;
+            } else {
+                // Opaque window: full copy via normal blend w/ opacity=1
+                crate::compositor::blend::blend_surface(
+                    &COMMAND_RING, self.display_surface, ws.gpu_surface,
+                    ws.position, 1.0, BlendMode::Normal,
+                )?;
             }
         }
 

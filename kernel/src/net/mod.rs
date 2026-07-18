@@ -187,10 +187,7 @@ impl KernelObject for SocketObject {
         for (h, socket) in sockets.iter() {
             if h == self.handle {
                 use smoltcp::socket::Socket;
-                match socket {
-                    Socket::Tcp(ref tcp) => return tcp.may_recv(),
-                    _ => {}
-                }
+                if let Socket::Tcp(ref tcp) = socket { return tcp.may_recv(); }
             }
         }
         false
@@ -201,10 +198,7 @@ impl KernelObject for SocketObject {
         for (h, socket) in sockets.iter() {
             if h == self.handle {
                 use smoltcp::socket::Socket;
-                match socket {
-                    Socket::Tcp(ref tcp) => return tcp.may_send(),
-                    _ => {}
-                }
+                if let Socket::Tcp(ref tcp) = socket { return tcp.may_send(); }
             }
         }
         true

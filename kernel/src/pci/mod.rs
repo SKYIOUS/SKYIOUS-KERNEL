@@ -53,7 +53,7 @@ pub fn read_bar64(bus: u8, slot: u8, func: u8, bar_offset: u8) -> u64 {
 
 fn bar_to_virt(bar_val: u64) -> usize {
     let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap_or(&0);
-    (offset as u64 + bar_val) as usize
+    (offset + bar_val) as usize
 }
 
 /// Walk PCI capabilities list, return offset of matching capability ID

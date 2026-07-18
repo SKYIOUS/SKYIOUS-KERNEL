@@ -41,7 +41,7 @@ pub const CAP_SYS_BOOT: u64 = 1 << 22;
 /// Check if the current process has the given capability in its effective set.
 fn has_capability(cap_bit: u64) -> bool {
     let lock = CURRENT_PROCESS.lock();
-    lock.as_ref().map_or(false, |p| (p.creds.lock().cap_effective & cap_bit) != 0)
+    lock.as_ref().is_some_and(|p| (p.creds.lock().cap_effective & cap_bit) != 0)
 }
 
 /// Log a security-relevant event to serial for audit trail.
@@ -535,8 +535,7 @@ pub(crate) fn do_syscall(
         numbers::SYS_IO_URING_SETUP => io_uring::sys_io_uring_setup(arg1),
         numbers::SYS_IO_URING_ENTER => io_uring::sys_io_uring_enter(arg1, arg2, arg3, arg4, arg5),
         numbers::SYS_BPF => {
-            let ret = crate::ebpf::sys_bpf(arg1 as u32, arg2, arg3, arg4);
-            ret as u64
+            crate::ebpf::sys_bpf(arg1 as u32, arg2, arg3, arg4)
         }
         numbers::SYS_SYNC => sys_sync(),
         numbers::SYS_REBOOT => sys_reboot(arg1, arg2),
@@ -877,7 +876,7 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             #[cfg(not(feature = "net"))] return errno::Errno::ENOSYS as u64;
             #[cfg(feature = "net")] {
                 let mut sockets = crate::net::SOCKETS.lock();
-                if let Some(n) = with_tcp_mut(&mut *sockets, handle, |socket| {
+                if let Some(n) = with_tcp_mut(&mut sockets, handle, |socket| {
                     if socket.may_recv() {
                         let mut n = 0usize;
                         let result = socket.recv(|slice| {
@@ -889,7 +888,7 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                     }
                     0u64
                 }) { return n; }
-                if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
+                if let Some(n) = with_udp_mut(&mut sockets, handle, |socket| {
                     let mut d = vec![0u8; count];
                     if let Ok((n, _meta)) = socket.recv_slice(&mut d) {
                         if unsafe { user_access::copy_to_user(buf, &d[..n]) }.is_ok() { return n as u64; }
@@ -942,7 +941,7 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                 let mut wdata = vec![0u8; count];
                 if unsafe { user_access::copy_from_user(&mut wdata, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
                 let mut sockets = crate::net::SOCKETS.lock();
-                if let Some(v) = with_tcp_mut(&mut *sockets, handle, |socket| {
+                if let Some(v) = with_tcp_mut(&mut sockets, handle, |socket| {
                     if socket.may_send() {
                         let result = socket.send(|slice| {
                             let n = core::cmp::min(slice.len(), wdata.len());
@@ -1131,16 +1130,20 @@ fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
             errno::Errno::EIO as u64
         },
         Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => {
-            let mut stat = Stat::default();
-            stat.st_mode = 0o020000 | 0o620; // character device, rw-rw----
+            let stat = Stat {
+                st_mode: 0o020000 | 0o620,
+                ..Stat::default()
+            };
             if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
             0
         },
         Some(FileDescriptor::Socket(_, _)) => {
-            let mut stat = Stat::default();
-            stat.st_mode = 0o140000 | 0o666; // socket, rw-rw-rw-
+            let stat = Stat {
+                st_mode: 0o140000 | 0o666,
+                ..Stat::default()
+            };
             if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
@@ -1169,7 +1172,7 @@ fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, offset: ref mut fd_offset }) => {
             let file_size = if let Ok(stat) = node.stat() {
-                stat.st_size as i64
+                stat.st_size
             } else {
                 return errno::Errno::EIO as u64;
             };
@@ -1565,18 +1568,18 @@ fn sys_sched_getattr(pid: i64, attr_ptr: *mut u8, size: u64, _flags: u64) -> u64
         3 => 5, 2 => 10, 1 => 15, _ => 19,
     };
 
-    if unsafe { user_access::copy_to_user(attr_ptr as *mut u8, core::slice::from_raw_parts(&out_size as *const _ as *const u8, 4)) }.is_err() {
+        if unsafe { user_access::copy_to_user(attr_ptr, core::slice::from_raw_parts(&out_size as *const _ as *const u8, 4)) }.is_err() {
         return errno::Errno::EFAULT as u64;
     }
     if out_size >= 8 {
         let zero = 0u32;
-        if unsafe { user_access::copy_to_user(attr_ptr.add(4) as *mut u8, core::slice::from_raw_parts(&zero as *const _ as *const u8, 4)) }.is_err() {
+        if unsafe { user_access::copy_to_user(attr_ptr.add(4), core::slice::from_raw_parts(&zero as *const _ as *const u8, 4)) }.is_err() {
             return errno::Errno::EFAULT as u64;
         }
     }
     if out_size >= 12 {
         let nice_le = nice as u32;
-        if unsafe { user_access::copy_to_user(attr_ptr.add(8) as *mut u8, core::slice::from_raw_parts(&nice_le as *const _ as *const u8, 4)) }.is_err() {
+        if unsafe { user_access::copy_to_user(attr_ptr.add(8), core::slice::from_raw_parts(&nice_le as *const _ as *const u8, 4)) }.is_err() {
             return errno::Errno::EFAULT as u64;
         }
     }
@@ -1589,11 +1592,8 @@ fn sys_getdents64(fd: u64, buf: *mut u8, len: usize) -> u64 {
     let proc = CURRENT_PROCESS.lock();
     let node = if let Some(ref p) = *proc {
         let fd_table = p.fd_table.lock();
-        if let Some(entry) = fd_table.get(fd as usize) {
-            match entry {
-                Some(crate::task::process::FileDescriptor::File { node, .. }) => node.clone(),
-                _ => return errno::Errno::EBADF as u64,
-            }
+        if let Some(Some(crate::task::process::FileDescriptor::File { node, .. })) = fd_table.get(fd as usize) {
+            node.clone()
         } else {
             return errno::Errno::EBADF as u64;
         }
@@ -2157,7 +2157,7 @@ fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: u64,
         child_process.entry_point = parent.entry_point;
         *child_process.fd_table.lock() = parent.fd_table.lock().clone();
         *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
-        *child_process.signal_handlers.lock() = parent.signal_handlers.lock().clone();
+        *child_process.signal_handlers.lock() = *parent.signal_handlers.lock();
         child_process.clone_credentials_from(parent);
 
         if flags & CLONE_CHILD_CLEARTID != 0 && !child_tidptr.is_null() {
@@ -2476,7 +2476,7 @@ fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
                 match stype {
                     crate::task::process::SocketType::Udp => {
                         let mut sockets = crate::net::SOCKETS.lock();
-                        let success = with_udp_mut(&mut *sockets, handle, |socket| {
+                        let success = with_udp_mut(&mut sockets, handle, |socket| {
                             socket.bind(endpoint).is_ok()
                         }).unwrap_or(false);
                         if !success { return errno::Errno::EADDRINUSE as u64; }
@@ -2525,7 +2525,7 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
                         let mut iface_lock = crate::net::NETWORK_INTERFACE.lock();
                         let result = iface_lock.as_mut().map(|iface| {
                             let cx = iface.context();
-                            with_tcp_mut(&mut *sockets, handle, |socket| {
+                            with_tcp_mut(&mut sockets, handle, |socket| {
                                 if !socket.is_active() {
                                     let local_endpoint = smoltcp::wire::IpListenEndpoint {
                                         addr: None,
@@ -2582,7 +2582,7 @@ fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
             let port = bind_ep.map(|ep| ep.port).unwrap_or(0);
             if port == 0 { return errno::Errno::EINVAL as u64; }
             let mut sockets = crate::net::SOCKETS.lock();
-            let success = with_tcp_mut(&mut *sockets, handle, |socket| {
+            let success = with_tcp_mut(&mut sockets, handle, |socket| {
                 let listen_ep = smoltcp::wire::IpListenEndpoint {
                     addr: None,
                     port,
@@ -2618,7 +2618,7 @@ fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
                     return errno::Errno::EOPNOTSUPP as u64;
                 }
                 let mut sockets = crate::net::SOCKETS.lock();
-                let result = with_tcp_mut(&mut *sockets, h, |socket| {
+                let result = with_tcp_mut(&mut sockets, h, |socket| {
                     if socket.is_listening() || !socket.is_open() {
                         return Err(errno::Errno::EAGAIN);
                     }
@@ -2627,15 +2627,11 @@ fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
                     Ok((remote, local_port))
                 });
                 match result {
-                    Some(Ok((remote, lp))) => {
-                        match remote {
-                            Some(ep) => {
-                                write_sockaddr(addr_ptr, addrlen_ptr, &ep);
-                                (h, lp)
-                            }
-                            None => return errno::Errno::EINVAL as u64,
-                        }
+                    Some(Ok((Some(ep), lp))) => {
+                        write_sockaddr(addr_ptr, addrlen_ptr, &ep);
+                        (h, lp)
                     }
+                    Some(Ok((None, _))) => return errno::Errno::EINVAL as u64,
                     Some(Err(e)) => return e as u64,
                     None => return errno::Errno::EINVAL as u64,
                 }
@@ -2704,7 +2700,7 @@ fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, addrle
             match stype {
                 crate::task::process::SocketType::Udp => {
                     if let Some(endpoint) = dest_endpoint {
-                        if with_udp_mut(&mut *sockets, handle, |socket| {
+                        if with_udp_mut(&mut sockets, handle, |socket| {
                             socket.send_slice(&data, endpoint).is_ok()
                         }).unwrap_or(false) { return len; }
                     }
@@ -2734,7 +2730,7 @@ fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addrlen_
         let mut data = vec![0u8; len as usize];
         match stype {
             crate::task::process::SocketType::Udp => {
-                if let Some(n) = with_udp_mut(&mut *sockets, handle, |socket| {
+                if let Some(n) = with_udp_mut(&mut sockets, handle, |socket| {
                         if let Ok((n, meta)) = socket.recv_slice(&mut data) {
                         if n == 0 { return 0u64; }
                         write_sockaddr(addr_ptr, addrlen_ptr, &meta.endpoint);
@@ -2771,7 +2767,7 @@ fn sys_setsockopt(sockfd: u64, level: i32, optname: i32, _optval: *const u8, _op
         if fd_table[sockfd as usize].is_none() { return errno::Errno::EBADF as u64; }
 
         // ponytail: smoltcp sockets are non-blocking; timeouts are accepted but unused
-        let r = match level {
+        match level {
             SOL_SOCKET => match optname {
                 SO_RCVTIMEO | SO_SNDTIMEO => 0u64,
                 _ => errno::Errno::ENOPROTOOPT as u64,
@@ -2781,8 +2777,7 @@ fn sys_setsockopt(sockfd: u64, level: i32, optname: i32, _optval: *const u8, _op
                 _ => errno::Errno::ENOPROTOOPT as u64,
             },
             _ => errno::Errno::ENOPROTOOPT as u64,
-        };
-        r
+        }
     }
 }
 
@@ -2940,28 +2935,26 @@ fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) -> u
         leaked
     };
 
-    let mut win = Window::new(100, 100, width + 2, height + 22, title_str); // Add borders/titlebar
+    let mut win = Window::new(0, 0, width + 2, height + 22, title_str);
     
     // PHASE G3: Allocate shared physical memory for high-performance rendering
     let content_len = width * height;
     let size_bytes = content_len * 4;
     
     use crate::memory::buddy::BUDDY_ALLOCATOR;
-    // Simple integer log2 for power-of-2 allocation
     let mut order = 0;
     while (4096 << order) < size_bytes && order < crate::memory::buddy::MAX_ORDER {
         order += 1;
     }
 
-    if let Some(phys_addr) = BUDDY_ALLOCATOR.lock().allocate_contiguous(order) {
-        win.phys_addr = Some(phys_addr.as_u64());
-        
-        // Zero the memory
+    // Try contiguous first, then fall back to content (which needs copy in flush)
+    let phys_addr = BUDDY_ALLOCATOR.lock().allocate_contiguous(order);
+    if let Some(pa) = phys_addr {
+        win.phys_addr = Some(pa.as_u64());
         let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
-        let k_ptr = (offset + phys_addr.as_u64()) as *mut u8;
+        let k_ptr = (offset + pa.as_u64()) as *mut u8;
         unsafe { core::ptr::write_bytes(k_ptr, 0, (4096 << order) as usize); }
     } else {
-        // Fallback to kernel box (slow)
         win.content = Some(alloc::vec![0; content_len].into_boxed_slice());
     }
     
@@ -2990,13 +2983,13 @@ pub(crate) fn sys_gui_map_buffer(handle: u64) -> u64 {
     let win = &comp.windows[handle as usize];
     let phys_addr = match win.phys_addr {
         Some(p) => p,
-        None => return 0, // Not a shared memory window
+        None => return 0,
     };
 
     let content_w = win.width.saturating_sub(2);
     let content_h = win.height.saturating_sub(22);
     let size_bytes = content_w * content_h * 4;
-    let pages_needed = (size_bytes + 4095) / 4096;
+    let pages_needed = size_bytes.div_ceil(4096);
 
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock { Some(ref p) => p, None => return 0 };
@@ -3039,17 +3032,18 @@ pub(crate) fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
     let win = &mut comp.windows[handle as usize];
     if win.phys_addr.is_some() {
         // Zero copy: buffer is already updated by user
-        // We just need to trigger a compositor render
     } else if let Some(ref mut content) = win.content {
-        let len: usize = (*content).len();
+        let len = content.len();
         if !buf_ptr.is_null() {
             unsafe {
-                crate::syscalls::user_access::copy_from_user(
-                    core::slice::from_raw_parts_mut(content.as_mut_ptr() as *mut u8, len * 4), 
-                    buf_ptr as *const u8
-                ).unwrap_or(());
+                let _ = crate::syscalls::user_access::copy_from_user(
+                    core::slice::from_raw_parts_mut(content.as_mut_ptr() as *mut u8, len * 4),
+                    buf_ptr as *const u8,
+                );
             }
         }
+    } else {
+        return errno::Errno::ENOSYS as u64;
     }
     comp.render(0, 0);
     0
@@ -3074,7 +3068,7 @@ fn sys_gui_get_mouse(handle: u64) -> u64 {
     let rel_x = (m.x as i64 - win.x as i64 - 1).max(0) as u64;
     let rel_y = (m.y as i64 - win.y as i64 - 21).max(0) as u64;
     let buttons = m.buttons as u64;
-    let scroll = (m.scroll as i8 as i64) as u64;
+    let scroll = (m.scroll as i64) as u64;
     // Pack: low16=x, bits16-31=y, bits32-39=buttons, bits40-47=scroll
     (rel_x & 0xFFFF) | ((rel_y & 0xFFFF) << 16) | ((buttons & 0xFF) << 32) | ((scroll & 0xFF) << 40)
 }
@@ -3487,6 +3481,7 @@ core::arch::global_asm!(
     r#"
     .global syscall_entry
     syscall_entry:
+        endbr64             # CET IBT landing pad
         swapgs              # Switch to kernel GS base
         mov gs:[0x18], rsp  # Save user RSP to PerCpuData.user_rsp (offset 0x18)
         mov rsp, gs:[0x10]  # Load kernel RSP from PerCpuData.kernel_rsp (offset 0x10)
@@ -3569,14 +3564,12 @@ fn sys_resolve(name_ptr: *const u8, ip_ptr: *mut u8) -> u64 {
         Err(_) => return errno::Errno::EFAULT as u64,
     };
 
-    if let Some(ip) = crate::net::dns::resolve_hostname(&name_str) {
-        if let smoltcp::wire::IpAddress::Ipv4(ipv4) = ip {
+    if let Some(smoltcp::wire::IpAddress::Ipv4(ipv4)) = crate::net::dns::resolve_hostname(&name_str) {
             let bytes = ipv4.as_bytes();
             if unsafe { user_access::copy_to_user(ip_ptr, bytes) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
             return 0;
-        }
     }
 
     errno::Errno::ENOENT as u64
@@ -3713,7 +3706,7 @@ fn sys_poll(fds: *const u8, nfds: usize, timeout_ms: i32) -> u64 {
 
         let fd_table = process.fd_table.lock();
         let mut ready = 0usize;
-        for (_i, (fd, events, revents)) in poll_fds.iter_mut().enumerate() {
+        for (fd, events, revents) in poll_fds.iter_mut() {
             if *fd < 0 { continue; }
             *revents = 0;
             let desc = if (*fd as usize) < fd_table.len() {
@@ -4065,7 +4058,7 @@ fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
             // arg1=width, arg2=height (passed as direct args from userspace)
             let new_w = _fd as usize;
             let new_h = request as usize;
-            if new_w < 640 || new_w > 3840 || new_h < 480 || new_h > 2160 {
+            if !(640..=3840).contains(&new_w) || !(480..=2160).contains(&new_h) {
                 return errno::Errno::EINVAL as u64;
             }
             crate::drivers::gpu::set_mode(new_w as u32, new_h as u32);
@@ -4132,10 +4125,8 @@ fn sys_hash(hash_type: u64, password_ptr: *const u8, password_len: u64, salt_out
             let pw_len = password_len as usize;
             if pw_len > 256 { return errno::Errno::EINVAL as u64; }
             let mut password = alloc::vec![0u8; pw_len];
-            if pw_len > 0 {
-                if unsafe { user_access::copy_from_user(&mut password, password_ptr).is_err() } {
-                    return errno::Errno::EFAULT as u64;
-                }
+            if pw_len > 0 && unsafe { user_access::copy_from_user(&mut password, password_ptr).is_err() } {
+                return errno::Errno::EFAULT as u64;
             }
 
             // salt_out_ptr points to a 48-byte buffer: [salt 16 | dk 32]

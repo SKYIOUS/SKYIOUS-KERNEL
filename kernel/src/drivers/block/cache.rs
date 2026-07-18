@@ -51,22 +51,19 @@ impl BlockCache {
     fn evict_one(&self) -> Option<usize> {
         let mut lines = self.lines.lock();
         let clock = self.access_clock.fetch_add(1, Ordering::Relaxed);
-        for offset in 0..CACHE_SIZE {
-            let i = ((clock as usize) + offset) % CACHE_SIZE;
-            if !lines[i].valid {
-                return Some(i);
-            }
-            if lines[i].dirty {
-                let sector = lines[i].sector;
-                let data = lines[i].data;
-                let mut dev = self.inner.lock();
-                let _ = dev.write_sector(sector, &data);
-                lines[i].dirty = false;
-            }
-            lines[i].valid = false;
+        let i = (clock as usize) % CACHE_SIZE;
+        if !lines[i].valid {
             return Some(i);
         }
-        None
+        if lines[i].dirty {
+            let sector = lines[i].sector;
+            let data = lines[i].data;
+            let mut dev = self.inner.lock();
+            let _ = dev.write_sector(sector, &data);
+            lines[i].dirty = false;
+        }
+        lines[i].valid = false;
+        Some(i)
     }
 
     fn fetch_sector(&self, sector: u64, slot: usize) -> Result<(), BlockDeviceError> {

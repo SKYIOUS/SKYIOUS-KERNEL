@@ -144,7 +144,7 @@ impl fmt::Write for Writer {
     }
 }
 
-pub const VGA_BUFFER_VIRT: u64 = 0xFFFF_8000_000b_8000;
+pub const VGA_BUFFER_VIRT: u64 = 0xffff_8000_000b_8000;
 
 lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {

@@ -2,8 +2,6 @@ use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 #[cfg(not(target_arch = "aarch64"))]
 use crate::println;
 #[cfg(not(target_arch = "aarch64"))]
-use spin;
-
 #[cfg(not(target_arch = "aarch64"))]
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 #[cfg(not(target_arch = "aarch64"))]
@@ -27,7 +25,7 @@ pub fn get_ticks() -> u64 {
     if hal_ticks > 0 {
         hal_ticks
     } else {
-        TICKS.load(Ordering::Relaxed)
+        TICKS.load(Ordering::Acquire)
     }
 }
 
@@ -182,7 +180,7 @@ extern "x86-interrupt" fn double_fault_handler(
 extern "x86-interrupt" fn timer_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let ticks = TICKS.fetch_add(1, Ordering::Release) + 1;
 
     crate::drivers::watchdog::pet();
 
@@ -270,7 +268,7 @@ extern "x86-interrupt" fn page_fault_handler(
     );
 }
 
-extern "x86-interrupt" fn keyboard_interrupt_handler(
+extern "x86-interrupt" fn mouse_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
     use x86_64::instructions::port::Port;
@@ -295,7 +293,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     crate::apic::eoi();
 }
 
-extern "x86-interrupt" fn mouse_interrupt_handler(
+extern "x86-interrupt" fn keyboard_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
     use x86_64::instructions::port::Port;

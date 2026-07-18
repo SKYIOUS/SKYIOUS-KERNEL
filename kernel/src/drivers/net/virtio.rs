@@ -218,7 +218,7 @@ impl VirtIONet {
             let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
             let virt_addr = offset + desc.addr;
             
-            let result_len = if len > 10 { len - 10 } else { 0 };
+            let result_len = len.saturating_sub(10);
             let mut data = vec![0u8; result_len];
             unsafe {
                 core::ptr::copy_nonoverlapping((virt_addr + 10) as *const u8, data.as_mut_ptr(), result_len);

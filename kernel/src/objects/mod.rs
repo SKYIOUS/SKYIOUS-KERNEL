@@ -58,6 +58,7 @@ impl ObjectHeader {
 
 /// Unified trait for every kernel resource.
 /// Default methods return `Err(())` — implementors override what they support.
+#[allow(clippy::result_unit_err)]
 pub trait KernelObject: Send + Sync {
     fn header(&self) -> &ObjectHeader;
 

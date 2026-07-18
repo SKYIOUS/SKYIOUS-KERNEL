@@ -139,27 +139,27 @@ impl Shell {
             "reboot" => commands::system::reboot(),
             "poweroff" => commands::system::poweroff(),
             "neofetch" => commands::system::neofetch(),
-            "sleep" => commands::system::sleep(args.get(0).unwrap_or(&"0")),
-            "exec" => commands::system::exec(args.get(0).unwrap_or(&"")),
-            "kor" => commands::system::kor(args.get(0).unwrap_or(&"")),
+            "sleep" => commands::system::sleep(args.first().unwrap_or(&"0")),
+            "exec" => commands::system::exec(args.first().unwrap_or(&"")),
+            "kor" => commands::system::kor(args.first().unwrap_or(&"")),
 
-            "ls" => commands::fs::ls(args.get(0).unwrap_or(&".")),
-            "cd" => commands::fs::cd(args.get(0).unwrap_or(&"")),
+            "ls" => commands::fs::ls(args.first().unwrap_or(&".")),
+            "cd" => commands::fs::cd(args.first().unwrap_or(&"")),
             "pwd" => commands::fs::pwd(),
-            "mkdir" => commands::fs::mkdir(args.get(0).unwrap_or(&"")),
-            "rm" => commands::fs::rm(args.get(0).unwrap_or(&"")),
-            "touch" => commands::fs::touch(args.get(0).unwrap_or(&"")),
-            "cat" => commands::fs::cat(args.get(0).unwrap_or(&"")),
-            "stat" => commands::fs::stat(args.get(0).unwrap_or(&"")),
-            "cp" => commands::fs::cp(args.get(0).unwrap_or(&""), args.get(1).unwrap_or(&"")),
+            "mkdir" => commands::fs::mkdir(args.first().unwrap_or(&"")),
+            "rm" => commands::fs::rm(args.first().unwrap_or(&"")),
+            "touch" => commands::fs::touch(args.first().unwrap_or(&"")),
+            "cat" => commands::fs::cat(args.first().unwrap_or(&"")),
+            "stat" => commands::fs::stat(args.first().unwrap_or(&"")),
+            "cp" => commands::fs::cp(args.first().unwrap_or(&""), args.get(1).unwrap_or(&"")),
             "mount" => commands::fs::mount(),
 
             #[cfg(feature = "net")]
-            "ping" => commands::net::ping(args.get(0).unwrap_or(&"")),
+            "ping" => commands::net::ping(args.first().unwrap_or(&"")),
             #[cfg(feature = "net")]
-            "nslookup" => commands::net::nslookup(args.get(0).unwrap_or(&"")),
+            "nslookup" => commands::net::nslookup(args.first().unwrap_or(&"")),
             #[cfg(feature = "net")]
-            "fetch" => commands::net::fetch(args.get(0).unwrap_or(&"")),
+            "fetch" => commands::net::fetch(args.first().unwrap_or(&"")),
 
             "heap_test" => commands::debug::heap_test(),
             "lspci" => commands::debug::lspci(),
@@ -170,7 +170,7 @@ impl Shell {
             #[cfg(feature = "ai_rule")]
             "vahiai" => commands::ai::vahiai(&args),
 
-            "theme" => commands::theme::theme(args.get(0).unwrap_or(&"")),
+            "theme" => commands::theme::theme(args.first().unwrap_or(&"")),
 
             _ => {
                 vga_buffer::set_color(Color::Red, Color::Black);

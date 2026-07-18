@@ -101,7 +101,7 @@ fn map_lib_segments(
                 };
 
                 let page_start = page.start_address().as_u64();
-                let copy_start = virt_start + if page_start > virt_start { page_start - virt_start } else { 0 };
+                let copy_start = virt_start + page_start.saturating_sub(virt_start);
                 let copy_end = core::cmp::min(virt_start + file_size, page_start + 4096);
                 if copy_start < copy_end {
                     let len = copy_end - copy_start;

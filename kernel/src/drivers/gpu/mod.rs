@@ -1,7 +1,6 @@
 pub mod virtio_gpu;
 
 /// DRM/KMS abstraction entry point for all GPU backends.
-
 pub fn width() -> u32 {
     if let Some(gpu) = virtio_gpu::GPU.lock().as_ref() {
         gpu.width

@@ -140,9 +140,9 @@ impl XhciController {
         let cmd_ring = unsafe {
             let layout = core::alloc::Layout::from_size_align(64 * 16, 16).unwrap();
             let ptr = alloc::alloc::alloc_zeroed(layout);
-            Box::from_raw(core::slice::from_raw_parts_mut(ptr as *mut XhciTrb, 64))
+            Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr as *mut XhciTrb, 64))
         };
-        let cmd_ring_ptr = Box::into_raw(cmd_ring) as *mut [XhciTrb] as *mut XhciTrb;
+        let cmd_ring_ptr = Box::into_raw(cmd_ring) as *mut XhciTrb;
         self.cmd_ring_base = cmd_ring_ptr;
         let cphys = crate::memory::virt_to_phys(VirtAddr::from_ptr(cmd_ring_ptr)).unwrap();
         op_regs.crcr.write(cphys.as_u64() | 1);
@@ -151,9 +151,9 @@ impl XhciController {
         let event_ring = unsafe {
             let layout = core::alloc::Layout::from_size_align(64 * 16, 16).unwrap();
             let ptr = alloc::alloc::alloc_zeroed(layout);
-            Box::from_raw(core::slice::from_raw_parts_mut(ptr as *mut XhciTrb, 64))
+            Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr as *mut XhciTrb, 64))
         };
-        let event_ring_ptr = Box::into_raw(event_ring) as *mut [XhciTrb] as *mut XhciTrb;
+        let event_ring_ptr = Box::into_raw(event_ring) as *mut XhciTrb;
         self.event_ring_base = event_ring_ptr;
         let ephys = crate::memory::virt_to_phys(VirtAddr::from_ptr(event_ring_ptr)).unwrap();
 
@@ -222,7 +222,7 @@ impl XhciController {
             let ctx = core::slice::from_raw_parts_mut(ptr as *mut u64, 512);
             ctx[0] = 1 << 1;
             ctx[2] = 1 << 1;
-            ctx[4] = (8u64 << 3) | 0; // slot context: max exit latency, root hub port
+            ctx[4] = 8u64 << 3; // slot context: max exit latency, root hub port
             ctx[9] = 1;  // endpoint 1: CERR, max packet size (set later)
             ctx[10] = 0x100; // TR dequeue pointer low
         }
@@ -322,7 +322,7 @@ impl XhciController {
     fn set_configuration(&mut self, slot_id: u8, config: u8) {
         let buf = DmaBuf::new(64);
         let setup = XhciTrb {
-            data: (0u64 << 56) | (0u64 << 48) | ((config as u64) << 16) | (9u64), // bmReqType=0, bReq=9, wVal=config
+            data: ((config as u64) << 16) | (9u64), // bmReqType=0, bReq=9, wVal=config
             status: 0,
             control: 0,
         };

@@ -75,7 +75,7 @@ impl ObjectDirectory {
             true
         } else {
             self.subdirs.get_mut(name)
-                .map_or(false, |d| d.mkdir_slice(&parts[1..]))
+                .is_some_and(|d| d.mkdir_slice(&parts[1..]))
         }
     }
 }

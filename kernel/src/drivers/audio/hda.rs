@@ -92,7 +92,7 @@ impl HdaController {
         }
     }
 
-    fn regs(&self) -> &mut HdaRegisters {
+    fn regs(&mut self) -> &mut HdaRegisters {
         unsafe { &mut *(self.base_addr as *mut HdaRegisters) }
     }
 
@@ -127,7 +127,7 @@ impl HdaController {
     const RIRBSTS: usize = 0x5C;
     const RIRBSIZE: usize = 0x5D;
 
-    fn corb_buf_mut(&self) -> &mut [u32] {
+    fn corb_buf_mut(&mut self) -> &mut [u32] {
         let (ptr, _) = self.corb_buf.unwrap();
         unsafe { core::slice::from_raw_parts_mut(ptr, CORB_SIZE) }
     }
@@ -201,11 +201,12 @@ impl HdaController {
     }
 
     pub fn init(&mut self) {
+        let base_addr = self.base_addr;
         let (_vmaj, _vmin, num_out) = {
             let regs = self.regs();
             let vmaj = regs.vmaj.read();
             let vmin = regs.vmin.read();
-            hda_println!("HDA: Controller at 0x{:x}, Version {}.{}", self.base_addr, vmaj, vmin);
+            hda_println!("HDA: Controller at 0x{:x}, Version {}.{}", base_addr, vmaj, vmin);
 
             // Reset controller
             hda_println!("HDA: Resetting controller...");

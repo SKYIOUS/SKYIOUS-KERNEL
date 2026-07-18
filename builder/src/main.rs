@@ -11,12 +11,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let kernel_path = root_dir.join(format!("kernel/target/{}/{}/vahi_kernel", target_triple, profile));
-    let initrd_path = root_dir.join("../../SkyOS/initrd.tar");
-    let initrd_path = if initrd_path.exists() {
-        initrd_path
-    } else {
-        root_dir.join("SkyOS/initrd.tar")
-    };
+    let initrd_path = root_dir.join("kernel/initrd.tar");
 
     let out_dir = root_dir.join(format!("target/{}/{}", out_dir_name, profile));
     if !out_dir.exists() {

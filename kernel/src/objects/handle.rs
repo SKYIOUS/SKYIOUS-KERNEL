@@ -146,7 +146,7 @@ impl HandleTable {
 
     pub fn handle_count_by_type(&self, type_id: super::ObjectTypeId) -> usize {
         self.table.iter().filter(|slot| {
-            slot.as_ref().map_or(false, |e| e.object.header().object_type == type_id)
+            slot.as_ref().is_some_and(|e| e.object.header().object_type == type_id)
         }).count()
     }
 
@@ -170,7 +170,7 @@ impl HandleTable {
     /// Clone the entire table (for fork).
     pub fn clone_table(&self) -> Vec<Option<HandleEntry>> {
         // ponytail: simple clone, no close-on-exec filtering needed yet
-        self.table.iter().map(|e| e.clone()).collect()
+        self.table.clone()
     }
 }
 

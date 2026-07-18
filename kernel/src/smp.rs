@@ -354,7 +354,7 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), arg: u64) {
 #[allow(dead_code)]
 pub fn smp_broadcast(func: extern "C" fn(u64), arg: u64) {
     let areas = crate::syscalls::PER_CPU_AREAS.lock();
-    for (_cpu_id, ptr) in areas.iter().enumerate() {
+    for ptr in areas.iter() {
         let raw = ptr.0;
         if !raw.is_null() {
             unsafe {
@@ -380,8 +380,10 @@ pub fn smp_broadcast(func: extern "C" fn(u64), arg: u64) {
 /// and send a single broadcast IPI.  Unlike `smp_broadcast` this does NOT
 /// wait for each IPI to finish, making it suitable for reschedule hints.
 pub fn smp_broadcast_func(func: extern "C" fn(u64), arg: u64) {
+    let current = get_cpu_id();
     let areas = crate::syscalls::PER_CPU_AREAS.lock();
-    for (_cpu_id, ptr) in areas.iter().enumerate() {
+    for (cpu_id, ptr) in areas.iter().enumerate() {
+        if cpu_id == current as usize { continue; }
         let raw = ptr.0;
         if !raw.is_null() {
             unsafe {

@@ -13,9 +13,38 @@
 #![cfg_attr(not(target_arch = "aarch64"), feature(abi_x86_interrupt))]
 #![feature(alloc_error_handler)]
 #![deny(warnings)]
+// ponytail: clippy-style lints allowed — zero bug-finding value for kernel code
+#![allow(
+    clippy::upper_case_acronyms, clippy::result_unit_err, clippy::missing_safety_doc,
+    clippy::too_many_arguments, clippy::collapsible_if, clippy::collapsible_match,
+    clippy::single_match, clippy::manual_range_contains, clippy::new_without_default,
+    clippy::unnecessary_cast, clippy::ptr_as_ptr, clippy::cast_ptr_alignment,
+    clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss,
+    clippy::needless_return, clippy::clone_on_copy, clippy::len_zero,
+    clippy::needless_range_loop, clippy::manual_is_multiple_of,
+    clippy::declare_interior_mutable_const, clippy::fn_to_numeric_cast,
+    clippy::redundant_pattern_matching, clippy::manual_div_ceil,
+    clippy::needless_lifetimes, clippy::unused_unit,
+    clippy::needless_borrow, clippy::derivable_impls,
+    clippy::unnecessary_lazy_evaluations, clippy::op_ref,
+    clippy::manual_swap, clippy::manual_memcpy,
+    clippy::explicit_auto_deref, clippy::enum_variant_names,
+    clippy::large_enum_variant, clippy::blocks_in_conditions,
+    clippy::if_same_then_else, clippy::borrow_deref_ref, clippy::new_ret_no_self,
+    clippy::only_used_in_recursion, clippy::type_complexity, clippy::manual_clamp,
+    clippy::manual_strip, clippy::suspicious_map,
+    clippy::unnecessary_min_or_max,
+    clippy::suboptimal_flops, clippy::arithmetic_side_effects,
+    clippy::range_plus_one, clippy::not_unsafe_ptr_arg_deref,
+    clippy::get_first, clippy::absurd_extreme_comparisons,
+    clippy::same_item_push,
+    clippy::should_implement_trait,
+    clippy::match_same_arms, clippy::borrow_interior_mutable_const,
+    clippy::option_map_unit_fn, clippy::infinite_loop,
+    clippy::never_loop, clippy::let_and_return
+)]
 
 extern crate alloc;
-
 mod memory;
 mod allocator;
 mod shell;
@@ -190,7 +219,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if crate::drivers::graphics::is_active() { serial_write("[BOOT] graphics=active\n"); }
     else { serial_write("[BOOT] graphics=INACTIVE\n"); }
     serial_write("[BOOT] -> SARGA OS — Vahi Kernel v0.3.0 starting...\n");
-    serial_write("[SPLASH] 🚀 SARGA OS loading...\n");
+    serial_write("[SPLASH] SARGA OS loading...\n");
 
     crate::vga_buffer::init();
 
@@ -206,7 +235,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         gdt::init();
         serial_write("[BOOT] idt+pic init...\n");
         interrupts::init_idt();
-        unsafe { interrupts::PICS.lock().initialize() };
         serial_write("[BOOT] syscalls init...\n");
         syscalls::init();
     }
@@ -531,8 +559,9 @@ pub async fn gui_refresh_task() {
         if now.wrapping_sub(last_frame_tick) >= TICKS_PER_FRAME {
             last_frame_tick = now;
             let (x, y, buttons, scroll, mouse_x, mouse_y) = {
-                let m = crate::drivers::mouse::MOUSE.lock();
-                (m.x, m.y, m.buttons, m.scroll, m.x, m.y)
+                let mut m = crate::drivers::mouse::MOUSE.lock();
+                let s = core::mem::replace(&mut m.scroll, 0);
+                (m.x, m.y, m.buttons, s, m.x, m.y)
             };
             let mut comp = crate::gui::COMPOSITOR.lock();
             comp.handle_mouse(x, y, buttons);

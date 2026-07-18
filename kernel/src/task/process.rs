@@ -395,7 +395,7 @@ impl Process {
                     };
 
                     let page_start = page.start_address().as_u64();
-                    let offset_in_segment = if page_start > virt_start { page_start - virt_start } else { 0 };
+                    let offset_in_segment = page_start.saturating_sub(virt_start);
                     let copy_start = virt_start + offset_in_segment;
                     let copy_end = core::cmp::min(virt_start + file_size, page_start + 4096);
                     
@@ -404,7 +404,7 @@ impl Process {
                         let src_off = offset + (copy_start - virt_start) as usize;
                         unsafe {
                             let dst_ptr = (x86_64::VirtAddr::new(*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap()) + frame.start_address().as_u64()).as_mut_ptr::<u8>();
-                            let page_offset = if page_start > virt_start { 0 } else { virt_start - page_start };
+                            let page_offset = virt_start.saturating_sub(page_start);
                             core::ptr::copy_nonoverlapping(
                                 elf_data[src_off..src_off + len as usize].as_ptr(),
                                 dst_ptr.add(page_offset as usize),

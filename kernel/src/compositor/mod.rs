@@ -5,7 +5,6 @@ pub mod shadow;
 pub mod flush;
 pub mod vsync;
 
-pub use compositor::HwCompositor;
 pub use blend::{blend_surface, BlendMode};
 pub use blur::GaussianBlur;
 pub use shadow::{render_shadow, ShadowParams};

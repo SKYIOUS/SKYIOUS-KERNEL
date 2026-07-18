@@ -580,12 +580,14 @@ impl Compositor {
     pub fn handle_keyboard(&mut self, key: pc_keyboard::DecodedKey) {
         match key {
             pc_keyboard::DecodedKey::RawKey(raw) => {
-                // Track modifier keys
+                // Track modifier keys (main.rs also tracks via raw scancodes)
                 match raw {
-                    pc_keyboard::KeyCode::AltLeft | pc_keyboard::KeyCode::AltRight => {
-                        // Alt press/release tracked via make/break codes
-                        // We detect release by checking if the key is now up
-                        // For simplicity, toggle on each Alt press
+                    pc_keyboard::KeyCode::F4 if self.alt_held => {
+                        if let Some(idx) = self.focused_window() {
+                            self.close_pending = Some(idx);
+                        }
+                        self.alt_held = false;
+                        return;
                     }
                     _ => {}
                 }
@@ -595,8 +597,8 @@ impl Compositor {
                 }
             }
             pc_keyboard::DecodedKey::Unicode(c) => {
-                // Alt+F4: close focused window
-                if self.alt_held && c == '\u{0004}' { // Ctrl+D = EOT, but Alt+F4 is special
+                // Alt+Ctrl shortcut detection
+                if self.alt_held && c == '\u{0004}' {
                     if let Some(idx) = self.focused_window() {
                         self.close_pending = Some(idx);
                     }
@@ -727,12 +729,12 @@ impl Compositor {
             if win.minimized { continue; }
             if anim.fade_out {
                 let a = (255 * anim.frame / anim.total) as u32;
-                let overlay = (a.min(255) << 24) | 0x000000;
+                let overlay = a.min(255) << 24;
                 drawing::draw_rect_alpha(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT,
                     win.x, win.y, win.width, win.height, overlay);
             } else {
                 let a = 255 - (255 * anim.frame / anim.total) as u32;
-                let overlay = (a.min(255) << 24) | 0x000000;
+                let overlay = a.min(255) << 24;
                 drawing::draw_rect_alpha(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT,
                     win.x, win.y, win.width, win.height, overlay);
             }
@@ -748,8 +750,8 @@ impl Compositor {
             let menu_h = self.context_menu.items.len() * item_h + 8;
             drawing::draw_rect(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT,
                 self.context_menu.x, self.context_menu.y, menu_w, menu_h, 0xE02D2D2D);
-            drawing::draw_rect(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT,
-                self.context_menu.x, self.context_menu.y, menu_w, menu_h, accent_color());
+            drawing::draw_line_h(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT,
+                self.context_menu.x, self.context_menu.y, menu_w, accent_color());
             for (i, (name, _action)) in self.context_menu.items.iter().enumerate() {
                 if *name == "---" {
                     let sep_y = self.context_menu.y + 4 + i * item_h + item_h / 2;
@@ -829,10 +831,12 @@ impl Compositor {
         } else {
             let mut merge = DirtyRect::from_xywh(usize::MAX, usize::MAX, 0, 0);
             for r in &rects {
+                let old_right = merge.x + merge.w;
+                let old_bottom = merge.y + merge.h;
                 merge.x = merge.x.min(r.x);
                 merge.y = merge.y.min(r.y);
-                merge.w = (r.x + r.w).max(merge.x + merge.w) - merge.x;
-                merge.h = (r.y + r.h).max(merge.y + merge.h) - merge.y;
+                merge.w = (r.x + r.w).max(old_right) - merge.x;
+                merge.h = (r.y + r.h).max(old_bottom) - merge.y;
                 if !fb_ptr.is_null() {
                     for row in r.y..r.y + r.h {
                         if row >= SCREEN_HEIGHT { break; }

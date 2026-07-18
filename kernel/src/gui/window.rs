@@ -142,7 +142,7 @@ impl Window {
     }
     
     pub fn is_within_content(&self, mx: usize, my: usize) -> bool {
-        mx >= self.x + 1 && mx < self.x + self.width - 1 && my >= self.y + 21 && my < self.y + self.height - 1
+        mx > self.x && mx < self.x + self.width - 1 && my >= self.y + 21 && my < self.y + self.height - 1
     }
 
     pub fn handle_mouse(&mut self, mx: usize, my: usize, pressed: bool) {

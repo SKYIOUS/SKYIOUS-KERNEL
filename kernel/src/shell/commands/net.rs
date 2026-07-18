@@ -56,7 +56,8 @@ pub fn ping(target: &str) {
             println!("Echo request sent. Waiting for reply...");
             
             let mut rx_buf = [0u8; 1024];
-            for _ in 0..100 { // Timeout loop
+            #[allow(clippy::never_loop)]
+            for _ in 0..100 {
                 let n = crate::syscalls::syscall_handler(45, fd, rx_buf.as_mut_ptr() as u64, 1024, 0, 0, core::ptr::null_mut()); // SYS_RECVFROM (45)
                 if n != 0 && n < 1024 {
                     println!("64 bytes from {}: icmp_seq=1", ip);

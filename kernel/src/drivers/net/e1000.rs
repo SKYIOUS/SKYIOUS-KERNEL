@@ -294,11 +294,9 @@ impl Device for E1000Device {
     type TxToken<'a> = E1000TxToken<'a> where Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if let Some(packet) = self.inner.receive_packet() {
-            Some((E1000RxToken { buffer: packet }, E1000TxToken { device: self }))
-        } else {
-            None
-        }
+        self.inner.receive_packet().map(|packet| {
+            (E1000RxToken { buffer: packet }, E1000TxToken { device: self })
+        })
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {

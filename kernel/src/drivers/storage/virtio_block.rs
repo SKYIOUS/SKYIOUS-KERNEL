@@ -115,7 +115,10 @@ impl BlockDevice for VirtIOBlock {
         self.queue.index = (self.queue.index + 3) % self.queue.size;
 
         // 6. Poll for completion
+        // ponytail: device modifies used.idx asynchronously
+        #[allow(clippy::while_immutable_condition)]
         while self.queue.last_used == self.queue.used.idx {
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
             core::hint::spin_loop();
         }
         self.queue.last_used += 1;
@@ -173,7 +176,9 @@ impl BlockDevice for VirtIOBlock {
 
         self.queue.index = (self.queue.index + 3) % self.queue.size;
 
+        #[allow(clippy::while_immutable_condition)]
         while self.queue.last_used == self.queue.used.idx {
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
             core::hint::spin_loop();
         }
         self.queue.last_used += 1;

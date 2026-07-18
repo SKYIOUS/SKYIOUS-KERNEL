@@ -37,6 +37,7 @@ pub struct PerCpuScheduler {
     /// ignoring priority order — priority is expressed via tickets.
     ready_queues: [VecDeque<Box<Thread>>; 8],
     pub current_thread: Option<Box<Thread>>,
+    pub dummy: u64,
 }
 
 impl PerCpuScheduler {
@@ -47,6 +48,7 @@ impl PerCpuScheduler {
                 VecDeque::new(), VecDeque::new(), VecDeque::new(), VecDeque::new(),
             ],
             current_thread: None,
+            dummy: 0,
         }
     }
 
@@ -122,6 +124,8 @@ impl GlobalScheduler {
     pub fn add_futex_thread(&self, thread: Thread) {
         self.futex_queue.lock().push_back(Box::new(thread));
     }
+
+
 
     /// Wake threads blocked on a pipe key.
     /// Only holds block_queue lock — does not block other queues.
@@ -225,8 +229,7 @@ impl PerCpuScheduler {
                     crate::memory::paging::AddressSpace::destroy(&proc.address_space);
                 }
                 crate::memory::stack::free_stack(&old.stack);
-                static mut EXIT_DUMMY: u64 = 0;
-                &raw mut EXIT_DUMMY
+                &raw mut self.dummy
             } else {
                 old.status = crate::task::thread::ThreadStatus::Ready;
                 let p = &mut old.stack_ptr as *mut u64;
@@ -238,8 +241,7 @@ impl PerCpuScheduler {
                 p
             }
         } else {
-            static mut DUMMY: u64 = 0;
-            &raw mut DUMMY
+            &raw mut self.dummy
         };
 
         self.current_thread = Some(next);

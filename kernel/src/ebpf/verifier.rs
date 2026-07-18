@@ -22,7 +22,6 @@ pub fn verify(insns: &[EbpfInsn]) -> bool {
                 }
             }
             BPF_LDX => {
-                if insn.code & 0x18 > 0x18 { return false; }
                 if (insn.off as i64) < -512 || (insn.off as i64) > 512 { return false; }
                 if dst == 10 { return false; }
             }
@@ -210,7 +209,7 @@ pub fn tnum_verify(insns: &[EbpfInsn]) -> bool {
                     BPF_CALL => {
                         let mut post = pre.clone();
                         match insn.imm {
-                            1 | 2 | 3 => post.regs[0].tnum = Tnum::any(),
+                            1..=3 => post.regs[0].tnum = Tnum::any(),
                             4 => post.regs[0].tnum = Tnum::exact(0),
                             _ => return false,
                         }

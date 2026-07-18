@@ -21,7 +21,7 @@ const K: [u32; 64] = [
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-fn rotr(x: u32, n: u32) -> u32 { (x >> n) | (x << (32 - n)) }
+fn rotr(x: u32, n: u32) -> u32 { x.rotate_right(n) }
 
 /// Compute SHA-256 hash. Input `data` is processed; output `out` must be 32 bytes.
 pub fn sha256(data: &[u8], out: &mut [u8]) {

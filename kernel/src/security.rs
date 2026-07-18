@@ -124,7 +124,6 @@ pub fn reload_policy() {
         if let Ok(data) = node.read(4096) {
             if let Ok(text) = core::str::from_utf8(&data) {
                 load_policy(text);
-                return;
             }
         }
     }

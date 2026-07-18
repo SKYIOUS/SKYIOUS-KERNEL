@@ -18,6 +18,7 @@ pub struct IntentEngine {
     intents: Vec<Intent>,
 }
 
+#[allow(clippy::new_without_default)]
 impl IntentEngine {
     pub fn new() -> Self {
         let mut engine = IntentEngine { intents: Vec::new() };
@@ -30,7 +31,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("file.search"),
             handler: |args| {
-                let pattern = args.get(0).unwrap_or(&"");
+                let pattern = args.first().unwrap_or(&"");
                 let results = crate::vfs::VFS.lock().search("/", pattern);
                 if results.is_empty() {
                     IntentResult::Success(String::from("No files found matching pattern."))
@@ -46,7 +47,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("file.list"),
             handler: |args| {
-                let path = args.get(0).unwrap_or(&"/");
+                let path = args.first().unwrap_or(&"/");
                 let vfs = crate::vfs::VFS.lock();
                 match vfs.resolve_path(path) {
                     Some(node) if node.is_dir() => {
@@ -98,7 +99,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("proc.info"),
             handler: |args| {
-                let pid_str = args.get(0).unwrap_or(&"");
+                let pid_str = args.first().unwrap_or(&"");
                 let pid = pid_str.parse::<u64>().unwrap_or(0);
                 let table = crate::task::process::PROCESS_TABLE.lock();
                 for (p, proc) in table.iter() {
@@ -149,7 +150,7 @@ impl IntentEngine {
                 {
                     let iface_lock = crate::net::NETWORK_INTERFACE.lock();
                     if let Some(ref iface) = *iface_lock {
-                        for addr in iface.ip_addrs() {
+                        if let Some(addr) = iface.ip_addrs().first() {
                             return IntentResult::Success(alloc::format!("Network status: UP, IP: {}", addr));
                         }
                     }
@@ -289,7 +290,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("fs.mount"),
             handler: |args| {
-                let path = args.get(0).unwrap_or(&"/");
+                let path = args.first().unwrap_or(&"/");
                 match crate::vfs::VFS.lock().resolve_path(path) {
                     Some(_) => IntentResult::Success(alloc::format!("Path '{}' is accessible", path)),
                     None => IntentResult::Error(alloc::format!("Path '{}' not found", path)),
@@ -299,7 +300,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("fs.stat"),
             handler: |args| {
-                let path = args.get(0).unwrap_or(&"/");
+                let path = args.first().unwrap_or(&"/");
                 match crate::vfs::VFS.lock().resolve_path(path) {
                     Some(node) => {
                         let is_dir = node.is_dir();
@@ -341,7 +342,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("sched.priority"),
             handler: |args| {
-                let prio = args.get(0).unwrap_or(&"4");
+                let prio = args.first().unwrap_or(&"4");
                 let _level = prio.parse::<u8>().unwrap_or(4);
                 IntentResult::Success(alloc::format!("Scheduler: priority hint set to {}", _level))
             },
@@ -387,7 +388,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("power.sleep"),
             handler: |args| {
-                let secs = args.get(0).unwrap_or(&"1").parse::<u64>().unwrap_or(1);
+                let secs = args.first().unwrap_or(&"1").parse::<u64>().unwrap_or(1);
                 IntentResult::ExecuteSyscall(35, [secs, 0, 0, 0, 0, 0])
             },
         });
@@ -448,7 +449,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("sys.hostname"),
             handler: |args| {
-                if let Some(_name) = args.get(0) {
+                if let Some(_name) = args.first() {
                     if !_name.is_empty() {
                         return IntentResult::Success(alloc::format!("Hostname set to '{}' (kernel restart required for full effect)", _name));
                     }
@@ -472,7 +473,7 @@ impl IntentEngine {
         self.intents.push(Intent {
             name: String::from("log.level"),
             handler: |args| {
-                let level = args.get(0).unwrap_or(&"info");
+                let level = args.first().unwrap_or(&"info");
                 IntentResult::Success(alloc::format!("Log level set to {}", level))
             },
         });

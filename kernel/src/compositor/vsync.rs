@@ -30,7 +30,7 @@ impl FpsCounter {
             let oldest = self.timestamps[(self.index + FPS_SAMPLES - self.count) % FPS_SAMPLES];
             let elapsed = newest.saturating_sub(oldest);
             if elapsed > 0 {
-                let fps = (self.count as u64 * 1000 / elapsed * 100) as u32;
+                let fps = (self.count as u64 * 10000 / elapsed) as u32;
                 self.last_fps.store(fps, Ordering::Relaxed);
             }
         }

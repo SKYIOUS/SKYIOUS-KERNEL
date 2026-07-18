@@ -73,14 +73,15 @@ pub fn free_stack(stack: &Stack) {
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack.bottom));
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(stack.top - 1));
 
-    let mut mapper = unsafe { 
-        if let Some(offset) = crate::memory::PHYSICAL_MEMORY_OFFSET.get() {
-            let phys_mem_offset = VirtAddr::new(*offset);
-            let level_4_table = crate::memory::active_level_4_table(phys_mem_offset);
-            x86_64::structures::paging::OffsetPageTable::new(level_4_table, phys_mem_offset)
-        } else {
-            return;
-        }
+    let offset = match crate::memory::PHYSICAL_MEMORY_OFFSET.get() {
+        Some(o) => *o,
+        None => return,
+    };
+
+    let mut mapper = unsafe {
+        let phys_mem_offset = VirtAddr::new(offset);
+        let level_4_table = crate::memory::active_level_4_table(phys_mem_offset);
+        x86_64::structures::paging::OffsetPageTable::new(level_4_table, phys_mem_offset)
     };
 
     for page in Page::range_inclusive(start_page, end_page) {

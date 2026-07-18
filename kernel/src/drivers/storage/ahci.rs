@@ -200,7 +200,8 @@ pub fn init(base_addr: usize) {
                 let (virt_clb, virt_ctba) = configure_port(&mut hba.ports[i]);
                 
                 // Initialize as a block device
-                let mut ahci_dev = AhciPort::new(unsafe { &mut *(&raw mut hba.ports[i]) }, virt_clb, virt_ctba);
+                let port_ptr: *mut HbaPort = &mut hba.ports[i];
+                let mut ahci_dev = AhciPort::new(unsafe { &mut *port_ptr }, virt_clb, virt_ctba);
                 
                 // Test Write/Read
                 crate::println!("AHCI: Testing Read/Write on Port {}...", i);
@@ -253,10 +254,10 @@ pub fn configure_port(port: &mut HbaPort) -> (*mut CommandHeader, *mut HbaCmdTab
     // For simplicity, we'll put the Command Table for slot 0 after the Command List in the same 4KB page.
     // Command List is 1KB. We have 3KB remaining.
     let cmd_headers = unsafe { core::slice::from_raw_parts_mut(cmd_list.as_mut_ptr() as *mut CommandHeader, 32) };
-    for i in 0..1 { // Just initialize slot 0 for now
-        let ctba_phys = cmd_list_phys + 1024u64 + (i as u64 * 512);
-        cmd_headers[i].ctba.write(ctba_phys.as_u64() as u32);
-        cmd_headers[i].ctbau.write((ctba_phys.as_u64() >> 32) as u32);
+    if let Some(header) = cmd_headers.first_mut() {
+        let ctba_phys = cmd_list_phys + 1024u64;
+        header.ctba.write(ctba_phys.as_u64() as u32);
+        header.ctbau.write((ctba_phys.as_u64() >> 32) as u32);
     }
 
     // Enable FIS receive and Start
@@ -318,7 +319,7 @@ impl AhciPort {
     // 0x4 (dw1) = PRDT Length (1 entry)
     // 0x5 (dw0) = FIS Length (5 dwords) | Write (0) | Prefetchable (0)
     
-    cmd_header.dw0.write( (::core::mem::size_of::<FisRegH2D>() as u32 / 4) | (0 << 6) ); // 0 = Read (Write bit clear)
+    cmd_header.dw0.write( ::core::mem::size_of::<FisRegH2D>() as u32 / 4 ); // 0 = Read (Write bit clear)
     cmd_header.dw1.write(1); // 1 PRDT Entry
 
     let ctba_virt = self.ctba_virt as u64;
@@ -396,7 +397,7 @@ impl AhciPort {
         }
     }
     
-    return true;
+    true
 }
 
     /// Sends IDENTIFY DEVICE command (0xEC) to detect drive parameters.
@@ -423,7 +424,7 @@ impl AhciPort {
         let buf_virt = x86_64::VirtAddr::from_ptr(buf.as_ptr());
         let buf_phys = crate::memory::virt_to_phys_dma(buf_virt);
 
-        cmd_header.dw0.write((core::mem::size_of::<FisRegH2D>() as u32 / 4) | (0 << 6)); // Read
+        cmd_header.dw0.write(core::mem::size_of::<FisRegH2D>() as u32 / 4); // Read
         cmd_header.dw1.write(1); // 1 PRDT entry
 
         let ctba_virt = self.ctba_virt as u64;
@@ -556,6 +557,6 @@ pub fn write(&mut self, start_lba: u64, sectors: u32, buf: &[u8]) -> bool {
         core::hint::spin_loop();
     }
     
-    return true;
+    true
     }
 }

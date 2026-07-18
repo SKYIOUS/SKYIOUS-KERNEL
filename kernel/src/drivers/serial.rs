@@ -1,4 +1,4 @@
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU16};
 use x86_64::instructions::port::Port;
 
 const COM1: u16 = 0x3F8;
@@ -11,9 +11,11 @@ const MODEM_CTRL: u16 = 4;
 const LINE_STATUS: u16 = 5;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+static SERIAL_PORT: AtomicU16 = AtomicU16::new(COM1);
 
 pub fn init(port: u16) {
     let base = port;
+    SERIAL_PORT.store(port, core::sync::atomic::Ordering::Release);
     unsafe {
         let mut intr = Port::<u8>::new(base + INTR_EN);
         let mut line = Port::<u8>::new(base + LINE_CTRL);
@@ -44,12 +46,17 @@ pub fn init(port: u16) {
     INITIALIZED.store(true, core::sync::atomic::Ordering::SeqCst);
 }
 
+fn com_port() -> u16 {
+    SERIAL_PORT.load(core::sync::atomic::Ordering::Acquire)
+}
+
 pub fn putc(c: u8) {
     if !INITIALIZED.load(core::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let mut lsr = Port::<u8>::new(COM1 + LINE_STATUS);
-    let mut data = Port::<u8>::new(COM1 + DATA);
+    let port = com_port();
+    let mut lsr = Port::<u8>::new(port + LINE_STATUS);
+    let mut data = Port::<u8>::new(port + DATA);
     unsafe {
         while lsr.read() & 0x20 == 0 {}
         data.write(c);
@@ -60,7 +67,8 @@ pub fn getc() -> Option<u8> {
     if !is_received() {
         return None;
     }
-    let mut data = Port::<u8>::new(COM1 + DATA);
+    let port = com_port();
+    let mut data = Port::<u8>::new(port + DATA);
     Some(unsafe { data.read() })
 }
 
@@ -68,7 +76,8 @@ pub fn is_received() -> bool {
     if !INITIALIZED.load(core::sync::atomic::Ordering::Relaxed) {
         return false;
     }
-    let mut lsr = Port::<u8>::new(COM1 + LINE_STATUS);
+    let port = com_port();
+    let mut lsr = Port::<u8>::new(port + LINE_STATUS);
     unsafe { lsr.read() & 1 != 0 }
 }
 

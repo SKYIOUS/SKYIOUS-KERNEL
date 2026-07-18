@@ -215,9 +215,7 @@ impl VfsManager {
 
         // Find best mount point
         let mount = self.mounts.iter().find(|m| {
-            if m.path == "/" {
-                true
-            } else if path_norm == m.path {
+            if m.path == "/" || path_norm == m.path {
                 true
             } else if path_norm.starts_with(m.path.as_str()) {
                 // Check if the next char is '/' (i.e., path is a subpath of m.path)
@@ -508,7 +506,7 @@ pub fn init() {
 
         // Scan and register partitions
         let partitions = crate::drivers::block::partition::parse_partitions(&dev);
-        for (_p_idx, part) in partitions.iter().enumerate() {
+        for part in partitions.iter() {
             let part_name = alloc::format!("{}{}", dev_name, part.index);
 
             // Register partition as a block device
@@ -556,7 +554,6 @@ pub fn _mount_fat32(_path: &str, _device: Arc<Mutex<dyn BlockDevice>>) {
 use crate::objects::{KernelObject, ObjectHeader, ObjectTypeId, security::SecurityDescriptor};
 
 #[allow(dead_code)]
-
 /// Wraps any VfsNode as a KernelObject. The ObjectHeader is populated
 /// from the node's `stat()` at construction time (mode/uid/gid) or
 /// falls back to defaults for filesystems that don't implement stat().
@@ -632,7 +629,7 @@ impl KernelObject for VfsObject {
         if self.node.is_dir() { return true; }
         // For dirs, check children; for files, try reading a byte
         if let Ok(children) = self.node.children() { return !children.is_empty(); }
-        self.node.read(1).map_or(false, |d| !d.is_empty())
+        self.node.read(1).is_ok_and(|d| !d.is_empty())
     }
 
     fn poll_writable(&self) -> bool {

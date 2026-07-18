@@ -14,7 +14,7 @@ impl Executor {
     pub fn new() -> Self {
         Executor {
             tasks: BTreeMap::new(),
-            ready_queue: Arc::new(ArrayQueue::new(100)),
+            ready_queue: Arc::new(ArrayQueue::new(1024)),
             waker_cache: BTreeMap::new(),
         }
     }
@@ -72,6 +72,7 @@ struct TaskWaker {
 }
 
 impl TaskWaker {
+    #[allow(clippy::new_ret_no_self)]
     fn new(task_id: TaskId, ready_queue: Arc<ArrayQueue<TaskId>>) -> Waker {
         Waker::from(Arc::new(TaskWaker {
             task_id,

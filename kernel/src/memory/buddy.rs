@@ -2,7 +2,7 @@ use x86_64::{
     structures::paging::{PhysFrame, Size4KiB, FrameAllocator},
     PhysAddr, VirtAddr,
 };
-use crate::task::lock::SchedLock;
+use spin::Mutex;
 use crate::memory::PHYSICAL_MEMORY_OFFSET;
 
 pub const MAX_ORDER: usize = 11; // Blocks up to 2^11 * 4096 = 8MB
@@ -28,7 +28,7 @@ impl BuddyAllocator {
             let mut order = 0;
             while order < MAX_ORDER {
                 let block_size = 4096 << (order + 1);
-                if current % block_size == 0 && block_size <= remaining {
+                if current.is_multiple_of(block_size) && block_size <= remaining {
                     order += 1;
                 } else {
                     break;
@@ -140,8 +140,7 @@ impl BuddyAllocator {
         if val == 0 {
             None
         } else {
-            // We store (phys_addr + 1) to distinguish from 0
-            Some(PhysAddr::new(val - 1))
+            Some(PhysAddr::new(val.wrapping_sub(1)))
         }
     }
 
@@ -149,12 +148,13 @@ impl BuddyAllocator {
         let offset = *PHYSICAL_MEMORY_OFFSET.get().expect("Memory offset not init");
         let virt = VirtAddr::new(addr.as_u64() + offset);
         let ptr = virt.as_mut_ptr::<u64>();
-        let val = next.map(|a| a.as_u64() + 1).unwrap_or(0);
+        // ponytail: sentinel +1; wraps at u64::MAX → collides with None
+        let val = next.map(|a| a.as_u64().wrapping_add(1)).unwrap_or(0);
         unsafe { *ptr = val; }
     }
 }
 
-pub static BUDDY_ALLOCATOR: SchedLock<BuddyAllocator> = SchedLock::new(BuddyAllocator::new());
+pub static BUDDY_ALLOCATOR: Mutex<BuddyAllocator> = Mutex::new(BuddyAllocator::new());
 
 pub struct BuddyFrameAllocator;
 
