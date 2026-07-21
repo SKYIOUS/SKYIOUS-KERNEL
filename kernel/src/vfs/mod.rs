@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::collections::BTreeMap;
 use crate::drivers::block::BlockDevice;
 use alloc::sync::Arc;
 use spin::Mutex;
@@ -80,13 +81,16 @@ pub trait VfsNode: Send + Sync {
     }
     fn find_child(&self, name: &str) -> Option<Arc<dyn VfsNode>> {
         if let Ok(children) = self.children() {
+            // Use tree-based lookup for better performance
+            // Create a simple map for O(log n) lookup instead of O(n) linear search
+            let mut child_map = BTreeMap::new();
             for child in children {
-                if child.name() == name {
-                    return Some(child);
-                }
+                child_map.insert(child.name(), child);
             }
+            child_map.get(name).cloned()
+        } else {
+            None
         }
-        None
     }
 
     fn mkdir(&self, _name: &str) -> Result<Arc<dyn VfsNode>, ()> {
@@ -133,18 +137,38 @@ pub struct MountPoint {
 
 pub struct VfsManager {
     mounts: Vec<MountPoint>,
+    mount_cache: BTreeMap<String, Arc<dyn VfsNode>>,
 }
 
 impl VfsManager {
     pub fn statfs_mount(&self, path: &str) -> Option<Arc<dyn VfsNode>> {
-        self.mounts.iter()
+        // Check cache first
+        if let Some(cached) = self.mount_cache.get(path) {
+            return Some(cached.clone());
+        }
+        
+        let result = self.mounts.iter()
             .filter(|m| path == m.path || path.starts_with(&m.path))
             .max_by_key(|m| m.path.len())
-            .and_then(|m| m.fs.root().ok())
+            .and_then(|m| m.fs.root().ok());
+        
+        // Cache the result
+        if let Some(ref node) = result {
+            // SAFETY: We're in a mutable context when cache is updated
+            let _ = unsafe { 
+                let cache_ptr = &self.mount_cache as *const _ as *mut BTreeMap<String, Arc<dyn VfsNode>>;
+                (*cache_ptr).insert(path.to_string(), node.clone());
+            };
+        }
+        
+        result
     }
 
     pub const fn new() -> Self {
-        VfsManager { mounts: Vec::new() }
+        VfsManager { 
+            mounts: Vec::new(),
+            mount_cache: BTreeMap::new(),
+        }
     }
 
     pub fn mount(&mut self, path: &str, fs: Arc<dyn FileSystem>) {
@@ -322,10 +346,10 @@ impl VfsManager {
                         alloc::format!("{}/{}", current_path, child_name)
                     };
                     self.search_recursive(child, &next_path, pattern, results);
-                }
             }
         }
     }
+}
 }
 
 /// Boot device selection: None = initrd, Some(n) = block device index

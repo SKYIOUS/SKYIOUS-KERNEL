@@ -25,54 +25,91 @@
 //! - `Blocked` — waiting on a pipe, futex, or sleep timer.
 //! - `Exited` — finished; cleaned up on next context switch.
 
-use alloc::collections::VecDeque;
+use alloc::collections::{VecDeque, BinaryHeap};
 use spin::Mutex;
 use crate::task::thread::Thread;
 use alloc::boxed::Box;
 
-/// Per-CPU scheduler: ready queues + currently running thread.
+/// Wrapper that orders threads by ascending `pass` so BinaryHeap (a max-heap)
+/// gives us the min-pass thread.
+struct PassOrd(Box<Thread>);
+
+impl PartialEq for PassOrd {
+    fn eq(&self, other: &Self) -> bool { self.0.pass == other.0.pass }
+}
+impl Eq for PassOrd {}
+impl PartialOrd for PassOrd {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for PassOrd {
+    /// Reverse ordering: smallest pass = highest priority in a max-heap.
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        other.0.pass.cmp(&self.0.pass)
+    }
+}
+
+/// Per-CPU scheduler: a min-heap keyed by `pass` plus the 8 legacy
+/// `ready_queues` used only by `wake_*()` helpers.
 pub struct PerCpuScheduler {
-    /// Ready queues retained for `tick()`/`wake_*()` API compatibility.
-    /// Stride scheduling picks the min-pass thread across ALL queues,
-    /// ignoring priority order — priority is expressed via tickets.
+    /// O(log N) stride heap — primary source of next thread.
+    stride_heap: BinaryHeap<PassOrd>,
+    /// Legacy queues kept for `wake_*()` / `tick()` API compatibility.
+    /// Drained into `stride_heap` during `pick_next`.
     ready_queues: [VecDeque<Box<Thread>>; 8],
+    /// Dirty flag to track if ready_queues need flushing - avoids O(k log N) when empty
+    ready_queues_dirty: bool,
     pub current_thread: Option<Box<Thread>>,
     pub dummy: u64,
 }
 
 impl PerCpuScheduler {
-    const fn new() -> Self {
+    fn new() -> Self {
         PerCpuScheduler {
+            stride_heap: BinaryHeap::new(),
             ready_queues: [
                 VecDeque::new(), VecDeque::new(), VecDeque::new(), VecDeque::new(),
                 VecDeque::new(), VecDeque::new(), VecDeque::new(), VecDeque::new(),
             ],
+            ready_queues_dirty: false,
             current_thread: None,
             dummy: 0,
         }
     }
 
-    /// Find the thread with the smallest `pass` value across all ready queues
-    /// (stride scheduling). Linear scan — O(N) in ready-thread count.
-    fn stride_min_pass<'a>(queues: &'a mut [VecDeque<Box<Thread>>; 8]) -> Option<(usize, usize)> {
-        let mut best: Option<(usize, usize, u64)> = None; // (q_idx, pos, pass)
-        for (qi, q) in queues.iter().enumerate() {
-            for (pi, t) in q.iter().enumerate() {
-                let pass = t.pass;
-                match best {
-                    Some((_, _, bp)) if pass < bp => best = Some((qi, pi, pass)),
-                    None => best = Some((qi, pi, pass)),
-                    _ => {}
-                }
+    /// Drain any threads that `wake_*()` placed in `ready_queues` into
+    /// `stride_heap` so `pick_next` sees them.  O(k log N) where k = newly woken.
+    /// Only performs work if dirty flag is set to avoid unnecessary overhead.
+    fn flush_ready_queues(&mut self) {
+        if !self.ready_queues_dirty {
+            return;
+        }
+        for q in &mut self.ready_queues {
+            while let Some(t) = q.pop_front() {
+                self.stride_heap.push(PassOrd(t));
             }
         }
-        best.map(|(q, p, _)| (q, p))
+        self.ready_queues_dirty = false;
+    }
+
+    /// Mark ready queues as dirty - should be called when adding to ready queues
+    #[allow(dead_code)]
+    pub fn mark_ready_queues_dirty(&mut self) {
+        self.ready_queues_dirty = true;
+    }
+
+    /// Push a thread directly into the stride heap.  O(log N).
+    #[allow(dead_code)]
+    pub fn push_thread(&mut self, thread: Box<Thread>) {
+        self.stride_heap.push(PassOrd(thread));
     }
 
     pub fn pick_next(&mut self) -> Option<Box<Thread>> {
-        // 1. Stride: find min-pass thread across all local queues
-        if let Some((qidx, pidx)) = Self::stride_min_pass(&mut self.ready_queues) {
-            let t = self.ready_queues[qidx].remove(pidx).unwrap();
+        // Absorb anything added via ready_queues (wake paths)
+        // Only flush if dirty to avoid O(k log N) overhead when no threads were woken
+        self.flush_ready_queues();
+
+        // 1. Stride heap — O(log N) pop
+        if let Some(PassOrd(t)) = self.stride_heap.pop() {
             return Some(t);
         }
 
@@ -81,15 +118,22 @@ impl PerCpuScheduler {
             return Some(t);
         }
 
-        // 3. Work Stealing: try to steal from other CPUs
+        // 3. Work stealing: try to grab the min-pass thread from another CPU
+        // Add simple deadlock detection by tracking steal attempts
         let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
+        let mut steal_attempts = 0;
         for i in 0..MAX_CPUS {
             if i == current_cpu { continue; }
-            if let Some(mut other_sched) = PER_CPU[i].try_lock() {
-                // Steal the min-pass thread from the other CPU
-                if let Some((qidx, pidx)) = Self::stride_min_pass(&mut other_sched.ready_queues) {
-                    let t = other_sched.ready_queues[qidx].remove(pidx).unwrap();
+            if let Some(mut other) = PER_CPU[i].try_lock() {
+                other.flush_ready_queues();
+                if let Some(PassOrd(t)) = other.stride_heap.pop() {
                     return Some(t);
+                }
+                steal_attempts += 1;
+                // Avoid excessive work stealing - if we've tried 3 CPUs without success,
+                // break to prevent potential deadlock scenarios
+                if steal_attempts >= 3 {
+                    break;
                 }
             }
         }

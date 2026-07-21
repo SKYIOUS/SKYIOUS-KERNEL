@@ -187,9 +187,7 @@ impl crate::hal::irq::InterruptController for X86IrqController {
     }
 
     fn controller_id(&self) -> u32 {
-        crate::apic::lapic::LOCAL_APIC.lock()
-            .as_ref()
-            .map_or(0, |l| l.id())
+        crate::apic::current_lapic_id() as u32
     }
 
     unsafe fn enable_cpu(&self) {

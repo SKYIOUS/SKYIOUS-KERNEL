@@ -15,18 +15,14 @@ pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 #[cfg(not(target_arch = "aarch64"))]
+// SAFETY: ChainedPics::new is safe when offsets are valid PIC interrupt offsets
 pub static PICS: spin::Mutex<ChainedPics> =
     spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
 pub fn get_ticks() -> u64 {
-    let hal_ticks = crate::hal::timer::get_ticks();
-    if hal_ticks > 0 {
-        hal_ticks
-    } else {
-        TICKS.load(Ordering::Acquire)
-    }
+    TICKS.load(Ordering::Acquire)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -94,6 +90,7 @@ pub fn init_idt() {
 
     let raw = Box::into_raw(idt);
     // SAFETY: table is box-leaked (into_raw never freed), lives forever
+    // load() is safe when IDT is properly configured
     unsafe { (*raw).load(); }
     *IDT.lock() = Some(IdtPtr(raw));
 
@@ -168,7 +165,11 @@ extern "x86-interrupt" fn invalid_opcode_handler(
 extern "x86-interrupt" fn device_not_available_handler(
     _stack_frame: InterruptStackFrame)
 {
-    panic!("EXCEPTION: DEVICE NOT AVAILABLE (NM)");
+    // Clear CR0.TS (Task Switched) — this fires on lazy FPU context switch.
+    // With +soft-float we don't use FPU, but some crates may emit FPU ops.
+    unsafe {
+        core::arch::asm!("clts", options(nostack, nomem));
+    }
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -183,6 +184,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(
     let ticks = TICKS.fetch_add(1, Ordering::Release) + 1;
 
     crate::drivers::watchdog::pet();
+
+    // Periodic diagnostic: print mouse state every 500 ticks (~5s)
+    if ticks % 500 == 0 {
+        let irq = crate::drivers::mouse::MOUSE_IRQ_COUNT.load(Ordering::Relaxed);
+        let bytes = crate::drivers::mouse::MOUSE_IRQ_BYTES.load(Ordering::Relaxed);
+        let cx = crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed);
+        let cy = crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed);
+        crate::serial_write(&alloc::format!("[TICK={}] mouse irq={} bytes={} pos=({},{})\n", ticks, irq, bytes, cx, cy));
+    }
 
     crate::apic::eoi();
 
@@ -273,6 +283,8 @@ extern "x86-interrupt" fn mouse_interrupt_handler(
 {
     use x86_64::instructions::port::Port;
 
+    crate::drivers::mouse::MOUSE_IRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
     loop {
         let mut status_port = Port::<u8>::new(0x64);
         let status = unsafe { status_port.read() };
@@ -290,7 +302,10 @@ extern "x86-interrupt" fn mouse_interrupt_handler(
         }
     }
 
-    crate::apic::eoi();
+    // EOI to slave PIC (IRQ12 is on slave) + master PIC
+    // ExtINT mode: LAPIC is pass-through, PIC owns the interrupt lifecycle
+    unsafe { Port::<u8>::new(0xA0).write(0x20); }
+    unsafe { Port::<u8>::new(0x20).write(0x20); }
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(
@@ -298,6 +313,12 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
 {
     use x86_64::instructions::port::Port;
 
+    // One-shot: print on first IRQ1 fire
+    static KB_FIRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !KB_FIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        crate::serial_write("[KBD] IRQ1 fired!\n");
+    }
+
     loop {
         let mut status_port = Port::<u8>::new(0x64);
         let status = unsafe { status_port.read() };
@@ -315,7 +336,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
         }
     }
 
-    crate::apic::eoi();
+    // EOI to PIC (required for PIC→LINT0 ExtINT path)
+    unsafe { Port::<u8>::new(0x20).write(0x20); }
 }
 
 extern "x86-interrupt" fn ipi_func_handler(

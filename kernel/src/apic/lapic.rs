@@ -9,6 +9,8 @@ pub struct LocalApic {
 
 impl LocalApic {
     pub unsafe fn new() -> Self {
+        // SAFETY: This function is unsafe because it reads from ACPI-provided memory addresses.
+        // The caller must ensure LAPIC_ADDR is set and points tovalid memory before calling.
         crate::serial_write("[APIC] new checking LAPIC_ADDR...\n");
         if let Some(addr) = acpi::LAPIC_ADDR.get() {
             crate::serial_write(&alloc::format!("[APIC] LAPIC base=0x{:x}\n", addr));
@@ -20,11 +22,20 @@ impl LocalApic {
     }
 
     fn read(&self, offset: u32) -> u32 {
+        // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
+        // The base address from ACPI is valid, and offset is within LAPIC register range.
         let virt = (*memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + self.base as u64) as *const Volatile<u32>;
         unsafe { (*virt.add((offset / 4) as usize)).read() }
     }
 
+    #[allow(dead_code)]
+    pub fn read_reg(&self, offset: u32) -> u32 {
+        self.read(offset)
+    }
+
     fn write(&mut self, offset: u32, value: u32) {
+        // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
+        // The base address from ACPI is valid, and offset is within LAPIC register range.
         let virt = (*memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + self.base as u64) as *mut Volatile<u32>;
         unsafe { (*virt.add((offset / 4) as usize)).write(value) }
     }
@@ -37,6 +48,7 @@ impl LocalApic {
         self.read(0x30)
     }
 
+    #[allow(dead_code)]
     pub fn eoi(&mut self) {
         self.write(0xB0, 0);
     }
@@ -45,6 +57,18 @@ impl LocalApic {
         // Spurious Interrupt Vector Register
         // Set vector 255 and bit 8 (Software Enable)
         self.write(0xF0, self.read(0xF0) | 0x100 | 0xFF);
+
+        // Ensure Task Priority Register is 0 so all interrupts are accepted
+        self.write(0x80, 0);
+
+        // Configure LVT entries for APIC mode:
+        // LINT0 (offset 0x350): ExtINT mode (delivery mode = 0b111), unmasked
+        // Bit layout: [10:8]=111 (ExtINT), [7:0]=vector 7 (matches PIC vector space)
+        self.write(0x350, 0x0707);
+        // LINT1 (offset 0x360): Masked, NMI mode
+        self.write(0x360, 0x10004);
+        // Error (offset 0x370): Masked
+        self.write(0x370, 0x10000);
     }
 
     pub fn init_timer(&mut self) {
@@ -56,6 +80,7 @@ impl LocalApic {
         self.write(0x380, 1_000_000);
     }
 
+    #[allow(dead_code)]
     pub fn send_ipi(&mut self, lapic_id: u8, vector: u8, delivery_mode: u8) {
         // ICR High: Destination LAPIC ID in top 8 bits
         self.write(0x310, (lapic_id as u32) << 24);
@@ -64,6 +89,7 @@ impl LocalApic {
     }
 
     /// Sends a fixed IPI to all CPUs except the current one.
+    #[allow(dead_code)]
     pub fn send_broadcast_ipi(&mut self, vector: u8) {
         // ICR High: Destination Shorthand (All Excluding Self) = 0x3
         // Shorthand is in bits 18-19 of ICR Low.
@@ -74,6 +100,7 @@ impl LocalApic {
         self.write(0x300, (0x3 << 18) | (1 << 14) | (vector as u32));
     }
 
+    #[allow(dead_code)]
     pub fn wait_for_ipi(&self) {
         while (self.read(0x300) & (1 << 12)) != 0 {
             core::hint::spin_loop();

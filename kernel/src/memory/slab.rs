@@ -4,7 +4,8 @@ use linked_list_allocator::LockedHeap;
 
 /// The block sizes to use.
 /// Must be powers of 2 because they are also used as alignment (except for very small ones).
-const BLOCK_SIZES: &[usize] = &[32, 64, 128, 256, 512, 1024, 2048];
+/// Extended to include smaller sizes for better memory efficiency.
+const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
 /// A node in the linked list of blocks.
 struct ListNode {
@@ -14,15 +15,28 @@ struct ListNode {
 pub struct FixedSizeBlockAllocator {
     list_heads: [Option<&'static mut ListNode>; BLOCK_SIZES.len()],
     fallback_allocator: LockedHeap,
+    poison_on_free: bool, // Configurable memory poisoning
 }
 
 impl FixedSizeBlockAllocator {
-    /// Creates an empty FixedSizeBlockAllocator.
+    /// Creates an empty FixedSizeBlockAllocator with poisoning enabled by default.
     pub const fn new() -> Self {
         const EMPTY: Option<&'static mut ListNode> = None;
         FixedSizeBlockAllocator {
             list_heads: [EMPTY; BLOCK_SIZES.len()],
             fallback_allocator: LockedHeap::empty(),
+            poison_on_free: true,
+        }
+    }
+
+    /// Creates an empty FixedSizeBlockAllocator with configurable poisoning.
+    #[allow(dead_code)]
+    pub const fn with_poisoning(poison: bool) -> Self {
+        const EMPTY: Option<&'static mut ListNode> = None;
+        FixedSizeBlockAllocator {
+            list_heads: [EMPTY; BLOCK_SIZES.len()],
+            fallback_allocator: LockedHeap::empty(),
+            poison_on_free: poison,
         }
     }
 
@@ -92,9 +106,12 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
         let mut allocator = self.lock();
         match list_index(&layout) {
             Some(index) => {
-                // Poison freed block
-                let poison = core::slice::from_raw_parts_mut(ptr, BLOCK_SIZES[index]);
-                for b in poison.iter_mut() { *b = 0xDE; }
+                // SAFETY: ptr is a valid pointer from a previous alloc() call with matching layout.
+                // BLOCK_SIZES[index] is the actual allocated size.
+                if allocator.poison_on_free {
+                    let poison = core::slice::from_raw_parts_mut(ptr, BLOCK_SIZES[index]);
+                    for b in poison.iter_mut() { *b = 0xDE; }
+                }
                 let new_node = ListNode {
                     next: allocator.list_heads[index].take(),
                 };
@@ -103,11 +120,13 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
                 allocator.list_heads[index] = Some(&mut *new_node_ptr);
             }
             None => {
-                // Poison freed large block (up to layout size)
-                let poison = core::slice::from_raw_parts_mut(ptr, layout.size());
-                for b in poison.iter_mut() { *b = 0xDE; }
+                // SAFETY: ptr is a valid pointer from a previous alloc() call with matching layout.
+                if allocator.poison_on_free {
+                    let poison = core::slice::from_raw_parts_mut(ptr, layout.size());
+                    for b in poison.iter_mut() { *b = 0xDE; }
+                }
                 allocator.fallback_allocator.lock().deallocate(
-                    NonNull::new(ptr).expect("Deallocating null pointer in slab fallback"), 
+                    NonNull::new(ptr).expect("Deallocating null pointer in slab fallback"),
                     layout
                 );
             }

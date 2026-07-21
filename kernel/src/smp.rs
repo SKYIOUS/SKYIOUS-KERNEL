@@ -21,6 +21,9 @@ pub struct SmpBootData {
     pub ap_count: AtomicU32,
 }
 
+// SAFETY: BOOT_DATA is static mut because it's shared between BSP and APs during boot.
+// Access is synchronized via atomic operations and only during the boot sequence.
+// After boot, this data is no longer accessed.
 pub static mut BOOT_DATA: SmpBootData = SmpBootData {
     stack_ptr: 0,
     code_ptr: 0,
@@ -31,7 +34,7 @@ pub static mut BOOT_DATA: SmpBootData = SmpBootData {
 /// Allocate a copy of the kernel page directory in the lower 4GB.
 /// Returns the physical frame address, or None if impossible.
 fn allocate_low_pml4() -> Option<PhysFrame> {
-    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("Memory offset not init");
 
     // Get current PML4
     let (current_frame, _) = Cr3::read();
@@ -55,6 +58,9 @@ fn allocate_low_pml4() -> Option<PhysFrame> {
     let new_pml4_virt = VirtAddr::new(offset + new_phys);
     let current_pml4_virt = VirtAddr::new(offset + current_frame_phys);
 
+    // SAFETY: Both virtual addresses are valid physical memory mappings.
+    // new_pml4 is newly allocated and writable, current_pml4 is the active kernel page table.
+    // Copying kernel entries (256..512) is safe as they're identical in both tables.
     unsafe {
         let new_pml4 = &mut *(new_pml4_virt.as_mut_ptr() as *mut PageTable);
         let current_pml4 = &*(current_pml4_virt.as_ptr() as *const PageTable);
@@ -241,23 +247,21 @@ pub fn init() {
 
         let mut booted = false;
         for attempt in 0..3 {
-            if let Some(ref mut lapic) = *crate::apic::lapic::LOCAL_APIC.lock() {
-                if attempt == 0 {
-                    // INIT IPI
-                    lapic.send_ipi(ap_id, 0, 0x05);
-                    lapic.wait_for_ipi();
-                    // Wait 10ms (spinloop approximation)
-                    for _ in 0..10_000_000 { core::hint::spin_loop(); }
-                }
+            if attempt == 0 {
+                // INIT IPI
+                crate::apic::send_ipi(ap_id, 0, 0x05);
+                crate::apic::wait_for_ipi();
+                // Wait 10ms (spinloop approximation)
+                for _ in 0..10_000_000 { core::hint::spin_loop(); }
+            }
 
-                // STARTUP IPI (send twice as per Intel spec)
-                let vector = (TRAMPOLINE_PHYS >> 12) as u8;
-                for _ in 0..2 {
-                    lapic.send_ipi(ap_id, vector, 0x06);
-                    lapic.wait_for_ipi();
-                    // Short delay between SIPIs (~200us)
-                    for _ in 0..200_000 { core::hint::spin_loop(); }
-                }
+            // STARTUP IPI (send twice as per Intel spec)
+            let vector = (TRAMPOLINE_PHYS >> 12) as u8;
+            for _ in 0..2 {
+                crate::apic::send_ipi(ap_id, vector, 0x06);
+                crate::apic::wait_for_ipi();
+                // Short delay between SIPIs (~200us)
+                for _ in 0..200_000 { core::hint::spin_loop(); }
             }
 
             // Wait with timeout
@@ -301,9 +305,7 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     }
 
     // Each AP needs its own GS base for per-CPU storage (syscalls)
-    let cpu_id = { 
-        crate::apic::lapic::LOCAL_APIC.lock().as_ref().map(|l| l.id()).unwrap_or(0) as usize
-    };
+    let cpu_id = crate::apic::current_lapic_id() as usize;
     {
         crate::syscalls::init_gs_base(cpu_id);
     }
@@ -324,7 +326,7 @@ pub extern "C" fn ap_kernel_entry() -> ! {
 }
 /// Returns the LAPIC ID of the current CPU.
 pub fn get_cpu_id() -> usize {
-    crate::apic::lapic::LOCAL_APIC.lock().as_ref().map(|l| l.id()).unwrap_or(0) as usize
+    crate::apic::current_lapic_id() as usize
 }
 
 /// Calls a function on a specific CPU core via IPI.
@@ -344,10 +346,8 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), arg: u64) {
     }
     drop(areas);
 
-    if let Some(ref mut lapic) = *crate::apic::lapic::LOCAL_APIC.lock() {
-        lapic.send_ipi(cpu_id, 251, 0); // IpiFunc vector
-        lapic.wait_for_ipi();
-    }
+    crate::apic::send_ipi(cpu_id, 251, 0); // IpiFunc vector
+    crate::apic::wait_for_ipi();
 }
 
 /// Broadcasts a function call to all CPU cores except self.
@@ -365,13 +365,11 @@ pub fn smp_broadcast(func: extern "C" fn(u64), arg: u64) {
     }
     drop(areas);
 
-    if let Some(ref mut lapic) = *crate::apic::lapic::LOCAL_APIC.lock() {
-        let current_cpu = get_cpu_id() as u8;
-        for cpu_id in 0..crate::syscalls::MAX_CPUS as u8 {
-            if cpu_id != current_cpu {
-                lapic.send_ipi(cpu_id, 251, 0);
-                lapic.wait_for_ipi();
-            }
+    let current_cpu = get_cpu_id() as u8;
+    for cpu_id in 0..crate::syscalls::MAX_CPUS as u8 {
+        if cpu_id != current_cpu {
+            crate::apic::send_ipi(cpu_id, 251, 0);
+            crate::apic::wait_for_ipi();
         }
     }
 }
@@ -393,18 +391,14 @@ pub fn smp_broadcast_func(func: extern "C" fn(u64), arg: u64) {
         }
     }
     drop(areas);
-    if let Some(ref mut lapic) = *crate::apic::lapic::LOCAL_APIC.lock() {
-        lapic.send_broadcast_ipi(251);
-    }
+    crate::apic::send_broadcast_ipi(251);
 }
 
 /// Broadcasts a TLB flush IPI to all other CPU cores.
 /// Phase H1: Ensure memory coherence during page table changes.
 pub fn broadcast_tlb_flush(addr: u64) {
-    if let Some(ref mut lapic) = *crate::apic::lapic::LOCAL_APIC.lock() {
-        // Broadcast vector 250 (TlbFlush) to all excluding self
-        lapic.send_broadcast_ipi(250);
-        lapic.wait_for_ipi();
-    }
+    // Broadcast vector 250 (TlbFlush) to all excluding self
+    crate::apic::send_broadcast_ipi(250);
+    crate::apic::wait_for_ipi();
     let _ = addr;
 }

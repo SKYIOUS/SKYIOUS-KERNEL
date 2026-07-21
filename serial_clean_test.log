@@ -11,21 +11,21 @@ TRACE: exiting boot services
 TRACE: switching to new level 4 table
 INFO : New page table at: PhysFrame[4KiB](0x101000)
 INFO : Elf file loaded at Pointer {
-    addr: 0x000000001cf3c000,
-    metadata: 21628184,
+    addr: 0x000000001cf21000,
+    metadata: 21641104,
 }
 INFO : virtual_address_offset: 0x0
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 1000, virtual_addr: ffffffff80000000, physical_addr: ffffffff80000000, file_size: 2b92e5, mem_size: 2b92e5, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 2bb000, virtual_addr: ffffffff802ba000, physical_addr: ffffffff802ba000, file_size: 43344, mem_size: 43344, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 1000, virtual_addr: ffffffff80000000, physical_addr: ffffffff80000000, file_size: 2b9f75, mem_size: 2b9f75, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 2bb000, virtual_addr: ffffffff802ba000, physical_addr: ffffffff802ba000, file_size: 4332c, mem_size: 4332c, align: 1000 })
 INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 2ff000, virtual_addr: ffffffff802fe000, physical_addr: ffffffff802fe000, file_size: 241e0, mem_size: 241e0, align: 1000 })
-INFO : Entry point at: 0xffffffff80127ea0
+INFO : Entry point at: 0xffffffff80129f30
 INFO : Creating GDT at PhysAddr(0x12c000)
 INFO : Map framebuffer
 INFO : Map physical memory
 INFO : Allocate bootinfo
 INFO : Create Memory Map
 INFO : Create bootinfo
-INFO : Jumping to kernel entry point at VirtAddr(0xffffffff80127ea0)
+INFO : Jumping to kernel entry point at VirtAddr(0xffffffff80129f30)
 [BOOT] memory::init...
 [BOOT] memory::init done
 [BOOT] fb=present
@@ -112,3 +112,4 @@ INFO : Jumping to kernel entry point at VirtAddr(0xffffffff80127ea0)
 [BOOT] RTC initialized
 [BOOT] scheduler init...
 [BOOT] GUI init...
+[DEMO] threading_demo: spawning two threads...

@@ -78,8 +78,6 @@ fn get_current_egid() -> u32 {
 fn check_file_permission(st_mode: u32, st_uid: u32, st_gid: u32, need: u32) -> bool {
     let euid = get_current_euid();
     let egid = get_current_egid();
-    // Root can access anything
-    if euid == 0 { return true; }
     // CAP_DAC_OVERRIDE: bypass DAC entirely (rwx)
     if has_capability(CAP_DAC_OVERRIDE) { return true; }
     // CAP_DAC_READ_SEARCH: bypass DAC for read/search only
@@ -99,10 +97,9 @@ fn check_node_permission(node: &Arc<dyn VfsNode>, need: u32) -> bool {
     }
 }
 
-/// Check if current process owns the given file (euid matches st_uid or is root).
+/// Check if current process owns the given file (euid matches st_uid).
 fn check_file_owner(node: &Arc<dyn VfsNode>) -> bool {
     let euid = get_current_euid();
-    if euid == 0 { return true; }
     // CAP_FOWNER: bypass ownership checks for permission-changing ops
     if has_capability(CAP_FOWNER) { return true; }
     if let Ok(stat) = node.stat() {
@@ -1895,9 +1892,7 @@ fn sys_fchmod(fd: u64, mode: u32) -> u64 {
 /// Check whether the caller may change ownership of a file to `new_uid`/`new_gid`.
 /// Returns true if allowed.
 fn check_chown_permission(current_uid: u32, current_gid: u32, new_uid: u32, new_gid: u32) -> bool {
-    let euid = get_current_euid();
     // Root can always chown
-    if euid == 0 { return true; }
     // CAP_CHOWN: arbitrary ownership changes
     if has_capability(CAP_CHOWN) { return true; }
     // Non-root: must own the file (checked by caller via check_file_owner)
@@ -3026,9 +3021,14 @@ pub(crate) fn sys_gui_map_buffer(handle: u64) -> u64 {
 
 pub(crate) fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
     use crate::gui::COMPOSITOR;
+    use core::sync::atomic::Ordering;
+    let (mx, my) = (
+        crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed) as usize,
+        crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed) as usize,
+    );
     let mut comp = COMPOSITOR.lock();
     if handle as usize >= comp.windows.len() { return errno::Errno::EBADF as u64; }
-    
+
     let win = &mut comp.windows[handle as usize];
     if win.phys_addr.is_some() {
         // Zero copy: buffer is already updated by user
@@ -3045,7 +3045,7 @@ pub(crate) fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
     } else {
         return errno::Errno::ENOSYS as u64;
     }
-    comp.render(0, 0);
+    comp.render(mx, my);
     0
 }
 
@@ -3059,16 +3059,18 @@ fn sys_gui_get_key(handle: u64) -> u64 {
 
 fn sys_gui_get_mouse(handle: u64) -> u64 {
     use crate::gui::COMPOSITOR;
-    use crate::drivers::mouse::MOUSE;
+    use core::sync::atomic::Ordering;
     let comp = COMPOSITOR.lock();
     if handle as usize >= comp.windows.len() { return 0; }
     let win = &comp.windows[handle as usize];
-    let m = MOUSE.lock();
+    let mx = crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed) as i64;
+    let my = crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed) as i64;
+    let buttons = crate::drivers::mouse::CURSOR_BUTTONS.load(Ordering::Relaxed) as u64;
+    let scroll = crate::drivers::mouse::CURSOR_SCROLL.load(Ordering::Relaxed) as i64;
     // Return mouse position relative to window content area
-    let rel_x = (m.x as i64 - win.x as i64 - 1).max(0) as u64;
-    let rel_y = (m.y as i64 - win.y as i64 - 21).max(0) as u64;
-    let buttons = m.buttons as u64;
-    let scroll = (m.scroll as i64) as u64;
+    let rel_x = (mx - win.x as i64 - 1).max(0) as u64;
+    let rel_y = (my - win.y as i64 - 21).max(0) as u64;
+    let scroll = scroll as u64;
     // Pack: low16=x, bits16-31=y, bits32-39=buttons, bits40-47=scroll
     (rel_x & 0xFFFF) | ((rel_y & 0xFFFF) << 16) | ((buttons & 0xFF) << 32) | ((scroll & 0xFF) << 40)
 }

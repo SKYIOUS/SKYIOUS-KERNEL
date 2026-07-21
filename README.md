@@ -96,30 +96,30 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                     Vahi Kernel                               │
+│                     Vahi Kernel                              │
+│                                                              │
+│  ┌───────────────────────────────────────────────────────┐   │
+│  │                  Syscall Layer                        │   │
+│  │  90+ syscalls: read/write/open/mmap/fork/execve/net/  │   │
+│  │  gui/clone/futex/io_uring/bpf/vahiai                  │   │
+│  └───────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌────────────┐ ┌──────────┐ ┌────────┐ ┌────────────────┐   │
+│  │  Scheduler │ │  Memory  │ │  VFS   │ │  Network       │   │
+│  │  Preemptive│ │  Buddy   │ │ 7 FS   │ │  smoltcp       │   │
+│  │  8 prio    │ │  Slab    │ │ mounts │ │  E1000/VirtIO  │   │
+│  └────────────┘ └──────────┘ └────────┘ └────────────────┘   │
+│                                                              │
+│  ┌────────────┐ ┌──────────┐ ┌────────┐ ┌────────────────┐   │
+│  │  Drivers   │ │  GUI     │ │ eBPF   │ │  Security      │   │
+│  │  12+ devs  │ │Compositor│ │ VM+Ver │ │  SMEP/UMIP/    │   │
+│  │  PCI/ACPI  │ │ 30 FPS   │ │ Map+Hlp│ │  ASLR/Caps     │   │
+│  └────────────┘ └──────────┘ └────────┘ └────────────────┘   │
 │                                                              │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │                  Syscall Layer                          │  │
-│  │  90+ syscalls: read/write/open/mmap/fork/execve/net/   │  │
-│  │  gui/clone/futex/io_uring/bpf/vahiai                   │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                                              │
-│  ┌────────────┐ ┌──────────┐ ┌────────┐ ┌───────────────┐   │
-│  │  Scheduler │ │  Memory  │ │  VFS   │ │  Network      │   │
-│  │  Preemptive│ │  Buddy   │ │ 7 FS   │ │  smoltcp      │   │
-│  │  8 prio    │ │  Slab    │ │ mounts │ │  E1000/VirtIO │   │
-│  └────────────┘ └──────────┘ └────────┘ └───────────────┘   │
-│                                                              │
-│  ┌────────────┐ ┌──────────┐ ┌────────┐ ┌───────────────┐   │
-│  │  Drivers   │ │  GUI     │ │ eBPF   │ │  Security     │   │
-│  │  12+ devs  │ │Compositor│ │ VM+Ver │ │  SMEP/UMIP/   │   │
-│  │  PCI/ACPI  │ │ 30 FPS   │ │ Map+Hlp│ │  ASLR/Caps    │   │
-│  └────────────┘ └──────────┘ └────────┘ └───────────────┘   │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │              Arch Abstraction (Arch trait)              │  │
+│  │              Arch Abstraction (Arch trait)             │  │
 │  │  x86_64 (SYSCALL/SYSRET, FSGSBASE)                     │  │
-│  │  aarch64 (SVC/ERET, TPIDR_EL0, GICv2/v3)              │  │
+│  │  aarch64 (SVC/ERET, TPIDR_EL0, GICv2/v3)               │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```

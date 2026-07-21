@@ -39,6 +39,12 @@ impl IoApic {
         }
     }
 
+    pub fn read_redirection_entry(&mut self, index: u8) -> (u32, u32) {
+        let low_reg = _IOREDTBL + (index as u32 * 2);
+        let high_reg = low_reg + 1;
+        (self._read(low_reg), self._read(high_reg))
+    }
+
     fn write(&mut self, reg: u32, value: u32) {
         let offset = *memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
         let ioregsel = (offset + self.base as u64 + IOREGSEL as u64) as *mut Volatile<u32>;
@@ -66,6 +72,8 @@ impl IoApic {
         crate::serial_write(&alloc::format!("[IOAPIC] set_redir idx={} vec={} dest={}\n", index, vector, dest_lapic_id));
         self.write(low_reg, low);
         self.write(high_reg, (dest_lapic_id as u32) << 24);
+        let (rlow, rhigh) = self.read_redirection_entry(index);
+        crate::serial_write(&alloc::format!("[IOAPIC] readback idx={} low=0x{:08x} high=0x{:08x} expected_low=0x{:08x}\n", index, rlow, rhigh, low));
         crate::serial_write("[IOAPIC] done\n");
     }
 }

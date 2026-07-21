@@ -4,7 +4,6 @@
 //! These functions handle SMAP (Supervisor Mode Access Prevention) by
 //! using `stac` and `clac` instructions where appropriate.
 
-use core::slice;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Whether the CPU supports SMAP. Initialized once at boot via CPUID.
@@ -103,25 +102,29 @@ pub unsafe fn copy_to_user(dst_ptr: *mut u8, src: &[u8]) -> Result<(), ()> {
 
 /// A wrapper for reading a string from userspace.
 pub unsafe fn read_user_string(ptr: *const u8, max_len: usize) -> Result<alloc::string::String, ()> {
-    let mut len = 0;
-    
+    if ptr.is_null() || max_len == 0 {
+        return Err(());
+    }
+
+    let mut buf = alloc::vec![0u8; max_len];
     do_stac();
     
-    while len < max_len {
-        if !validate_ptr(ptr.add(len), 1) {
+    let mut actual_len = 0;
+    for i in 0..max_len {
+        if !validate_ptr(ptr.add(i), 1) {
             do_clac();
             return Err(());
         }
-        if *ptr.add(len) == 0 {
+        let byte = *ptr.add(i);
+        if byte == 0 {
             break;
         }
-        len += 1;
+        buf[i] = byte;
+        actual_len += 1;
     }
-    
-    let s = slice::from_raw_parts(ptr, len);
-    let result = alloc::string::String::from_utf8(s.to_vec()).map_err(|_| ());
     
     do_clac();
     
-    result
+    buf.truncate(actual_len);
+    alloc::string::String::from_utf8(buf).map_err(|_| ())
 }

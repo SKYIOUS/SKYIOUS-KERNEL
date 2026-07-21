@@ -7,30 +7,21 @@
 //! Supports IntelliMouse/scroll wheel via 4-byte packets.
 
 use x86_64::instructions::port::Port;
+use core::sync::atomic::{AtomicIsize, AtomicU8, AtomicI8, AtomicU64, Ordering};
 use spin::Mutex;
-use lazy_static::lazy_static;
+
+/// Counts how many times the mouse IRQ handler fires. Diagnostic — read from GUI task.
+pub static MOUSE_IRQ_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static MOUSE_IRQ_BYTES: AtomicU64 = AtomicU64::new(0);
 
 const SCREEN_WIDTH: usize = 800;
 const SCREEN_HEIGHT: usize = 600;
 
-pub struct MouseState {
-    pub x: usize,
-    pub y: usize,
-    pub buttons: u8,
-    pub scroll: i8,
-}
-
-lazy_static! {
-    pub static ref MOUSE: Mutex<MouseState> = Mutex::new(MouseState {
-        x: SCREEN_WIDTH / 2,
-        y: SCREEN_HEIGHT / 2,
-        buttons: 0,
-        scroll: 0,
-    });
-}
-
-/// Whether scroll wheel was detected
-pub static HAS_WHEEL: spin::Mutex<bool> = spin::Mutex::new(false);
+/// Lock-free cursor position for ISR-safe reads from the GUI task.
+pub static CURSOR_X: AtomicIsize = AtomicIsize::new((SCREEN_WIDTH / 2) as isize);
+pub static CURSOR_Y: AtomicIsize = AtomicIsize::new((SCREEN_HEIGHT / 2) as isize);
+pub static CURSOR_BUTTONS: AtomicU8 = AtomicU8::new(0);
+pub static CURSOR_SCROLL: AtomicI8 = AtomicI8::new(0);
 
 pub fn init() {
     // Hardware init moved to drivers::ps2::init()
@@ -49,18 +40,22 @@ static MOUSE_PACKET: Mutex<MousePacket> = Mutex::new(MousePacket {
 });
 
 // Track previous button state to only push EV_KEY on changes
-static PREV_BUTTONS: Mutex<u8> = Mutex::new(0);
+static PREV_BUTTONS: AtomicU8 = AtomicU8::new(0);
 
 /// Set scroll wheel mode — called after PS/2 init sequence
 pub fn enable_wheel() {
     MOUSE_PACKET.lock().has_wheel = true;
-    *HAS_WHEEL.lock() = true;
 }
 
 /// Feed one byte from the PS/2 data port into the mouse packet state machine.
 /// Called by the interrupt dispatcher after verifying (via status bit 5) that
 /// the byte belongs to the mouse.
 pub fn feed_byte(byte: u8) {
+    MOUSE_IRQ_BYTES.fetch_add(1, Ordering::Relaxed);
+    static FIRST_CALL: AtomicU8 = AtomicU8::new(0);
+    if FIRST_CALL.swap(1, Ordering::Relaxed) == 0 {
+        crate::serial_write(&alloc::format!("[MOUSE] feed_byte first call: 0x{:02x}\n", byte));
+    }
     let mut mp = MOUSE_PACKET.lock();
     let pkt_size = if mp.has_wheel { 4 } else { 3 };
 
@@ -90,32 +85,28 @@ pub fn feed_byte(byte: u8) {
         let y_rel: i32 = if y_sign == 0 { y_raw } else { y_raw - 256 };
 
         if flags & 0xC0 == 0 {
-            let mut mouse = MOUSE.lock();
-
-            if x_rel > 0 {
-                mouse.x = (mouse.x + x_rel as usize).min(SCREEN_WIDTH - 1);
-            } else {
-                mouse.x = mouse.x.saturating_sub((-x_rel) as usize);
-            }
-
-            let y_rel = -y_rel; // Invert Y axis (PS/2 positive=down, screen positive=up)
-            if y_rel > 0 {
-                mouse.y = (mouse.y + y_rel as usize).min(SCREEN_HEIGHT - 1);
-            } else {
-                mouse.y = mouse.y.saturating_sub((-y_rel) as usize);
-            }
+            let new_x = CURSOR_X.load(Ordering::Relaxed)
+                .saturating_add(x_rel as isize)
+                .min((SCREEN_WIDTH - 1) as isize)
+                .max(0);
+            let new_y = CURSOR_Y.load(Ordering::Relaxed)
+                .saturating_sub(y_rel as isize)
+                .min((SCREEN_HEIGHT - 1) as isize)
+                .max(0);
+            CURSOR_X.store(new_x, Ordering::Relaxed);
+            CURSOR_Y.store(new_y, Ordering::Relaxed);
 
             // Scroll wheel (4th byte, signed)
             if mp.has_wheel {
                 let scroll = mp.data[3] as i8;
                 if scroll != 0 {
-                    mouse.scroll = scroll;
+                    CURSOR_SCROLL.store(scroll, Ordering::Relaxed);
                     crate::drivers::input::push_mouse_event(crate::drivers::input::REL_WHEEL, scroll as i32);
                 }
             }
 
             let new_buttons = flags & 0x07;
-            let prev = *PREV_BUTTONS.lock();
+            let prev = PREV_BUTTONS.load(Ordering::Relaxed);
             if new_buttons != prev {
                 if (new_buttons & 1) != (prev & 1) {
                     crate::drivers::input::push_mouse_button(0x110, new_buttons & 1 != 0);
@@ -126,9 +117,9 @@ pub fn feed_byte(byte: u8) {
                 if (new_buttons & 4) != (prev & 4) {
                     crate::drivers::input::push_mouse_button(0x112, new_buttons & 4 != 0);
                 }
-                *PREV_BUTTONS.lock() = new_buttons;
+                PREV_BUTTONS.store(new_buttons, Ordering::Relaxed);
             }
-            mouse.buttons = new_buttons;
+            CURSOR_BUTTONS.store(new_buttons, Ordering::Relaxed);
 
             if x_rel != 0 {
                 crate::drivers::input::push_mouse_event(crate::drivers::input::REL_X, x_rel);

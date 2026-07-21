@@ -14,9 +14,10 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static LSM_ENABLED: AtomicBool = AtomicBool::new(false);
+static LSM_VERSION: AtomicU64 = AtomicU64::new(0);
 
 struct LsmRule {
     subject: String,
@@ -28,7 +29,31 @@ struct LsmRule {
 
 static POLICY: spin::Mutex<Vec<LsmRule>> = spin::Mutex::new(Vec::new());
 
-pub fn load_policy(text: &str) {
+/// Syscall filter: bitmask of allowed syscalls per process
+/// 0 = denied, 1 = allowed. Default is all allowed (u64::MAX)
+static SYSCALL_FILTER: spin::Mutex<alloc::collections::BTreeMap<u64, u64>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+pub fn set_syscall_filter(pid: u64, filter_mask: u64) {
+    SYSCALL_FILTER.lock().insert(pid, filter_mask);
+}
+
+pub fn clear_syscall_filter(pid: u64) {
+    SYSCALL_FILTER.lock().remove(&pid);
+}
+
+pub fn check_syscall_allowed(syscall_number: u64) -> bool {
+    let lock = crate::task::process::CURRENT_PROCESS.lock();
+    if let Some(process) = lock.as_ref() {
+        let pid = process.id;
+        let filters = SYSCALL_FILTER.lock();
+        if let Some(&mask) = filters.get(&pid) {
+            return (mask & (1u64 << (syscall_number % 64))) != 0;
+        }
+    }
+    true // No filter means all syscalls allowed
+}
+
+pub fn load_policy(text: &str) -> bool {
     let mut rules = POLICY.lock();
     rules.clear();
     for line in text.lines() {
@@ -51,7 +76,11 @@ pub fn load_policy(text: &str) {
     }
     if !rules.is_empty() {
         LSM_ENABLED.store(true, Ordering::Relaxed);
-        crate::println!("LSM: {} rules loaded", rules.len());
+        LSM_VERSION.fetch_add(1, Ordering::Release);
+        crate::println!("LSM: {} rules loaded, version {}", rules.len(), LSM_VERSION.load(Ordering::Acquire));
+        true
+    } else {
+        false
     }
 }
 
@@ -117,16 +146,30 @@ pub fn current_subject() -> String {
     lock.as_ref().map_or("kernel".into(), |p| alloc::format!("pid:{}", p.id))
 }
 
-pub fn reload_policy() {
+pub fn reload_policy() -> bool {
     use crate::vfs::VFS;
     let vfs = VFS.lock();
     if let Some(node) = vfs.resolve_path("/etc/lsm_policy") {
         if let Ok(data) = node.read(4096) {
             if let Ok(text) = core::str::from_utf8(&data) {
-                load_policy(text);
+                return load_policy(text);
             }
         }
     }
+    false
+}
+
+/// Hot-reload LSM policy from file - can be called at runtime
+pub fn hot_reload_policy() -> Result<(), &'static str> {
+    if reload_policy() {
+        Ok(())
+    } else {
+        Err("Failed to reload LSM policy")
+    }
+}
+
+pub fn get_lsm_version() -> u64 {
+    LSM_VERSION.load(Ordering::Acquire)
 }
 
 pub fn init() {

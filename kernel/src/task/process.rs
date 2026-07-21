@@ -103,8 +103,8 @@ impl Default for Credentials {
         Credentials {
             uid: 0, gid: 0, euid: 0, egid: 0,
             suid: 0, sgid: 0, fsuid: 0, fsgid: 0,
-            cap_effective: !0,
-            cap_permitted: !0,
+            cap_effective: 0, // No capabilities by default
+            cap_permitted: 0, // No permitted capabilities by default
             cap_inheritable: 0,
             umask: 0o022,
         }
@@ -295,25 +295,33 @@ impl Process {
     }
 
     pub fn load_elf(elf_data: &[u8], mut address_space: AddressSpace) -> Result<Self, &'static str> {
+        crate::serial_write("[load_elf] Entering load_elf\n");
         let (mut entry, mut vmas) = Self::load_elf_static(elf_data, &mut address_space)?;
+        crate::serial_write("[load_elf] load_elf_static completed successfully\n");
 
         let elf = ElfFile::new(elf_data).map_err(|_| "Failed to re-parse ELF")?;
+        crate::serial_write("[load_elf] ELF re-parsed successfully\n");
         let has_dynamic = elf.program_iter().any(|ph| matches!(ph.get_type(), Ok(xmas_elf::program::Type::Dynamic)));
 
         if has_dynamic {
+            crate::serial_write("[load_elf] Processing dynamic binary\n");
             crate::elf_dyn::load_dynamic_binary(elf_data, &mut address_space, &mut entry, &mut vmas)?;
+            crate::serial_write("[load_elf] load_dynamic_binary completed\n");
         }
         
         let mut process = Process::new(Process::next_id(), None, address_space);
         process.entry_point = entry;
+        crate::serial_write("[load_elf] Process instance created\n");
         
         // Add VMAs via add_vma to merge adjacent/overlapping segments
         for vma in vmas {
             process.add_vma(vma);
         }
+        crate::serial_write("[load_elf] VMAs added\n");
 
         // Merge remaining after all segments added
         process.merge_all_vmas();
+        crate::serial_write("[load_elf] merge_all_vmas completed\n");
 
         let vmas = process.vmas.lock();
         let mut initial_brk = 0;
@@ -326,6 +334,7 @@ impl Process {
         // Page align the initial break
         let initial_brk = (initial_brk + 4095) & !4095;
         *process.brk.lock() = initial_brk;
+        crate::serial_write("[load_elf] initial_brk configured, returning process\n");
         Ok(process)
     }
 

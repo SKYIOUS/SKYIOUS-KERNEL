@@ -29,11 +29,13 @@ pub fn init_heap(
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        // SAFETY: mapper.map_to is safe when frame is valid and flags are appropriate
         unsafe {
             mapper.map_to(page, frame, flags, frame_allocator)?.flush()
         };
     }
 
+    // SAFETY: ALLOCATOR.init is safe when HEAP_START and HEAP_SIZE are valid and within mapped memory
     unsafe {
         ALLOCATOR.lock().init(HEAP_START, HEAP_SIZE);
     }

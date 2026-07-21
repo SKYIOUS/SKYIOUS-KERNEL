@@ -135,21 +135,24 @@ pub fn oom_kill() -> ! {
         serial_putc(b);
     }
     // Kill the last spawned userspace process (highest PID, excluding init=1 and kernel=0)
-    let table = crate::task::process::PROCESS_TABLE.lock();
-    let mut largest_pid: u64 = 0;
-    for (pid, _) in table.iter() {
-        if *pid > 1 && *pid > largest_pid {
-            largest_pid = *pid;
+    let mut target_process = None;
+    {
+        let table = crate::task::process::PROCESS_TABLE.lock();
+        let mut largest_pid: u64 = 0;
+        for (pid, proc) in table.iter() {
+            if *pid > 1 && *pid > largest_pid {
+                largest_pid = *pid;
+                target_process = Some(proc.clone());
+            }
         }
     }
-    drop(table);
-    if largest_pid > 1 {
-        let msg2 = alloc::format!("[OOM] Killing pid {}\n", largest_pid);
+
+    if let Some(proc) = target_process {
+        let msg2 = alloc::format!("[OOM] Killing pid {}\n", proc.id);
         serial_write(&msg2);
-        let table2 = crate::task::process::PROCESS_TABLE.lock();
-        if let Some(proc) = table2.get(&largest_pid) {
-            proc.signals.lock().raise(crate::syscalls::signal::Signal::_SIGKILL);
-        }
+        proc.signals.lock().raise(crate::syscalls::signal::Signal::_SIGKILL);
+    } else {
+        serial_write("[OOM] No user processes to kill!\n");
     }
     loop { crate::arch::CurrentArch::halt(); }
 }
@@ -162,7 +165,7 @@ fn init_kaslr() {
 
 pub fn init_serial() {
     #[cfg(not(target_arch = "aarch64"))]
-    crate::drivers::serial::init(0x3F8);
+    let _ = crate::drivers::serial::init(0x3F8);
 }
 
 pub fn serial_putc(c: u8) {
@@ -314,7 +317,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_write("[BOOT] -> SARGA OS: Graphical Console Mode Active!\n");
 
     serial_write("[BOOT] RTC init...\n");
-    drivers::rtc::init();
+    let _ = drivers::rtc::init();
     serial_write("[BOOT] RTC initialized\n");
 
     #[cfg(feature = "self_test")]
@@ -339,8 +342,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     gui::init();
 
     task::scheduler::spawn(run_async_tasks);
-    task::scheduler::spawn(init_os_task);
-    task::scheduler::spawn(threading_demo);
 
     #[cfg(not(target_arch = "aarch64"))]
     x86_64::instructions::interrupts::enable();
@@ -356,6 +357,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::scheduler::schedule();
 }
 
+#[allow(dead_code)]
 extern "C" fn init_os_task() -> ! {
     crate::serial_write("[INIT] searching for /bin/init...\n");
     
@@ -473,6 +475,7 @@ extern "C" fn init_os_task() -> ! {
     }
 }
 
+#[allow(dead_code)]
 extern "C" fn threading_demo() -> ! {
     crate::serial_write("[DEMO] threading_demo: spawning two threads...\n");
 
@@ -517,8 +520,8 @@ pub async fn gui_refresh_task() {
     use pc_keyboard::{Keyboard, layouts, ScancodeSet1, HandleControl};
     use crate::task::keyboard::try_pop_scancode;
 
-    const FPS: u64 = 30;
-    const TICKS_PER_FRAME: u64 = 100 / FPS; // Assumes 100Hz timer
+    // 100Hz tick / 30 FPS = 3.33, floor to 3
+    const TICKS_PER_FRAME: u64 = 3;
     let mut last_frame_tick: u64 = 0;
     let mut kbd = Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore);
 
@@ -555,13 +558,30 @@ pub async fn gui_refresh_task() {
             }
         }
 
+        // Use the 100Hz tick counter directly (not hal::timer::get_ticks which may be in microseconds)
         let now = crate::interrupts::get_ticks();
+
+        // Diagnostic: print once at ~1s after first frame, then every 500 ticks
+        if now > 100 {
+            static DIAG_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+            if !DIAG_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                let irq = crate::drivers::mouse::MOUSE_IRQ_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+                let bytes = crate::drivers::mouse::MOUSE_IRQ_BYTES.load(core::sync::atomic::Ordering::Relaxed);
+                let cx = crate::drivers::mouse::CURSOR_X.load(core::sync::atomic::Ordering::Relaxed);
+                let cy = crate::drivers::mouse::CURSOR_Y.load(core::sync::atomic::Ordering::Relaxed);
+                crate::serial_write(&alloc::format!("[MOUSE-DIAG] irq={} bytes={} pos=({},{})\n", irq, bytes, cx, cy));
+            }
+        }
+
         if now.wrapping_sub(last_frame_tick) >= TICKS_PER_FRAME {
             last_frame_tick = now;
             let (x, y, buttons, scroll, mouse_x, mouse_y) = {
-                let mut m = crate::drivers::mouse::MOUSE.lock();
-                let s = core::mem::replace(&mut m.scroll, 0);
-                (m.x, m.y, m.buttons, s, m.x, m.y)
+                use core::sync::atomic::Ordering;
+                let x = crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed) as usize;
+                let y = crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed) as usize;
+                let buttons = crate::drivers::mouse::CURSOR_BUTTONS.load(Ordering::Relaxed);
+                let scroll = crate::drivers::mouse::CURSOR_SCROLL.swap(0, Ordering::Relaxed);
+                (x, y, buttons, scroll, x, y)
             };
             let mut comp = crate::gui::COMPOSITOR.lock();
             comp.handle_mouse(x, y, buttons);

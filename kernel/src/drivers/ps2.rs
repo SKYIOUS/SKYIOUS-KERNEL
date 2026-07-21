@@ -100,6 +100,10 @@ pub fn init() {
         crate::println!("PS/2: Self-test failed!");
     }
 
+    // Re-write config byte after self-test — some 8042 implementations
+    // reset the config byte during self-test, clearing IRQ enables.
+    write_config(new_config);
+
     // 5. Enable devices
     write_command(0xAE); // Enable keyboard
     write_command(0xA8); // Enable mouse (aux)
@@ -150,6 +154,7 @@ pub fn init() {
         crate::drivers::mouse::enable_wheel();
     }
 
+    crate::serial_write("[PS2] BEFORE enable_stream\n");
     let ack = device_write_to_mouse(0xF4); // Enable streaming
     crate::serial_write(&alloc::format!("[PS2] mouse enable_stream ack=0x{:x}\n", ack));
 
@@ -166,6 +171,20 @@ pub fn init() {
                 }
             }
         }
+    }
+
+    // Enable PS/2 IRQs via legacy PIC (IOAPIC delivery broken)
+    // Directly write PIC masks using port I/O — no lock, no function call
+    unsafe {
+        // Master PIC data port 0x21: unmask IRQ1 (kbd) + IRQ2 (cascade)
+        let mut master_mask = Port::<u8>::new(0x21);
+        let m = master_mask.read() & 0xF9;
+        master_mask.write(m);
+        // Slave PIC data port 0xA1: unmask IRQ4 (= global IRQ12 mouse)
+        let mut slave_mask = Port::<u8>::new(0xA1);
+        let s = slave_mask.read() & 0xEF;
+        slave_mask.write(s);
+        crate::serial_write(&alloc::format!("[PIC] master=0x{:02x} slave=0x{:02x}\n", m, s));
     }
 
     crate::println!("PS/2 Controller and Devices Initialized");

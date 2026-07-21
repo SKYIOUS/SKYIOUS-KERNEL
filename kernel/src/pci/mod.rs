@@ -76,8 +76,7 @@ pub fn find_capability(bus: u8, slot: u8, func: u8, cap_id: u8) -> Option<u8> {
 pub fn pci_enable_msi(bus: u8, slot: u8, func: u8) -> Option<u8> {
     let cap = find_capability(bus, slot, func, 0x05)?;
     let vector = crate::apic::msi::alloc()?;
-    let lapic_id = crate::apic::lapic::LOCAL_APIC.lock()
-        .as_ref().map(|l| l.id() as u8).unwrap_or(0);
+    let lapic_id = crate::apic::current_lapic_id();
 
     let msg_ctrl = read_config_u16(bus, slot, func, cap + 2);
     let is_64bit = (msg_ctrl & (1 << 7)) != 0;

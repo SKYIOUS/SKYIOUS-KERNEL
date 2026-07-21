@@ -1,37 +1,55 @@
 use x86_64::instructions::port::Port;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-static RTC_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static RTC_EPOCH_SECS: spin::Mutex<u64> = spin::Mutex::new(0);
-
+/// CMOS register addresses
 const CMOS_ADDR: u16 = 0x70;
 const CMOS_DATA: u16 = 0x71;
 
+/// CMOS register offsets
+const REG_SECOND: u8 = 0x00;
+const REG_MINUTE: u8 = 0x02;
+const REG_HOUR: u8 = 0x04;
+const REG_DAY: u8 = 0x07;
+const REG_MONTH: u8 = 0x08;
+const REG_YEAR: u8 = 0x09;
+const REG_STATUS_A: u8 = 0x0A;
+
+/// CMOS status bits
+const STATUS_UPDATE_IN_PROGRESS: u8 = 0x80;
+const NMI_DISABLE: u8 = 0x80;
+
+static RTC_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static RTC_EPOCH_SECS: spin::Mutex<u64> = spin::Mutex::new(0);
+
+/// Read from CMOS register
 fn cmos_read(reg: u8) -> u8 {
     let mut addr: Port<u8> = Port::new(CMOS_ADDR);
     let mut data: Port<u8> = Port::new(CMOS_DATA);
     unsafe {
-        addr.write(reg | 0x80);
+        addr.write(reg | NMI_DISABLE);
         data.read()
     }
 }
 
+/// Check if RTC is updating
 fn is_updating() -> bool {
-    cmos_read(0x0A) & 0x80 != 0
+    cmos_read(REG_STATUS_A) & STATUS_UPDATE_IN_PROGRESS != 0
 }
 
+/// Convert BCD to binary
 fn bcd_to_binary(bcd: u8) -> u8 {
     (bcd & 0x0F) + ((bcd >> 4) * 10)
 }
 
+/// Read time from CMOS RTC
 fn cmos_read_time() -> (u64, u64) {
     while is_updating() {}
-    let second = bcd_to_binary(cmos_read(0x00));
-    let minute = bcd_to_binary(cmos_read(0x02));
-    let hour = bcd_to_binary(cmos_read(0x04));
-    let day = bcd_to_binary(cmos_read(0x07));
-    let month = bcd_to_binary(cmos_read(0x08));
-    let year = bcd_to_binary(cmos_read(0x09));
+    let second = bcd_to_binary(cmos_read(REG_SECOND));
+    let minute = bcd_to_binary(cmos_read(REG_MINUTE));
+    let hour = bcd_to_binary(cmos_read(REG_HOUR));
+    let day = bcd_to_binary(cmos_read(REG_DAY));
+    let month = bcd_to_binary(cmos_read(REG_MONTH));
+    let year = bcd_to_binary(cmos_read(REG_YEAR));
     while is_updating() {}
 
     let year_full = 2000u64 + year as u64;
@@ -41,6 +59,7 @@ fn cmos_read_time() -> (u64, u64) {
     (total_secs, 0)
 }
 
+/// Calculate days since epoch from year/month/day
 fn days_from_ymd(year: u64, month: u64, day: u64) -> u64 {
     let y = if month <= 2 { year - 1 } else { year };
     let m = if month <= 2 { month + 12 } else { month };
@@ -51,13 +70,23 @@ fn days_from_ymd(year: u64, month: u64, day: u64) -> u64 {
     era * 146097 + doe
 }
 
-pub fn init() {
+/// Initialize RTC with error handling
+/// Returns Ok(()) on success, Err(()) on failure
+pub fn init() -> Result<(), ()> {
     let (secs, _) = cmos_read_time();
     let mut epoch = RTC_EPOCH_SECS.lock();
     *epoch = secs;
     RTC_INITIALIZED.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
+/// Cleanup RTC state
+pub fn cleanup() {
+    RTC_INITIALIZED.store(false, Ordering::SeqCst);
+}
+
+/// Read real-time clock
+/// Returns (seconds, nanoseconds) since epoch
 pub fn read_realtime() -> (i64, i64) {
     if !RTC_INITIALIZED.load(Ordering::SeqCst) {
         return (0, 0);

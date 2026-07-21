@@ -7,14 +7,33 @@ use crate::memory::PHYSICAL_MEMORY_OFFSET;
 
 pub const MAX_ORDER: usize = 11; // Blocks up to 2^11 * 4096 = 8MB
 
+/// Fragmentation tracking for buddy allocator
+#[allow(dead_code)]
+struct FragmentationStats {
+    total_free: usize,
+    fragmented_blocks: usize,
+}
+
+impl FragmentationStats {
+    const fn new() -> Self {
+        FragmentationStats {
+            total_free: 0,
+            fragmented_blocks: 0,
+        }
+    }
+}
+
 pub struct BuddyAllocator {
     free_lists: [Option<PhysAddr>; MAX_ORDER + 1],
+    #[allow(dead_code)]
+    stats: FragmentationStats,
 }
 
 impl BuddyAllocator {
     pub const fn new() -> Self {
         BuddyAllocator {
             free_lists: [None; MAX_ORDER + 1],
+            stats: FragmentationStats::new(),
         }
     }
 
@@ -129,27 +148,46 @@ impl BuddyAllocator {
         total
     }
 
+    /// Get fragmentation ratio (0.0 = no fragmentation, 1.0 = highly fragmented)
+    #[allow(dead_code)]
+    pub fn fragmentation_ratio(&self) -> f64 {
+        let free_pages = self.count_free_pages();
+        if free_pages == 0 {
+            return 0.0;
+        }
+        // Count blocks in lower orders (indicates fragmentation)
+        let mut fragmented = 0usize;
+        for order in 0..MAX_ORDER {
+            let mut addr = self.free_lists[order];
+            while let Some(current_addr) = addr {
+                fragmented += 1;
+                addr = self.read_next_ptr(current_addr);
+            }
+        }
+        (fragmented as f64) / (free_pages as f64)
+    }
+
     fn read_next_ptr(&self, addr: PhysAddr) -> Option<PhysAddr> {
+        // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
+        // addr is a valid physical frame address from the allocator.
         let offset = *PHYSICAL_MEMORY_OFFSET.get().expect("Memory offset not init");
-        // We use a magic value to represent None because 0 might be a valid physical address
-        // But for Vahi we usually don't use address 0 for free blocks.
-        // Let's use 0 as None for now, but be careful.
         let virt = VirtAddr::new(addr.as_u64() + offset);
         let ptr = virt.as_ptr::<u64>();
         let val = unsafe { *ptr };
-        if val == 0 {
+        if val == 0xFFFF_FFFF_FFFF_FFFF {
             None
         } else {
-            Some(PhysAddr::new(val.wrapping_sub(1)))
+            Some(PhysAddr::new(val))
         }
     }
 
     fn write_next_ptr(&self, addr: PhysAddr, next: Option<PhysAddr>) {
+        // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
+        // addr is a valid physical frame address from the allocator.
         let offset = *PHYSICAL_MEMORY_OFFSET.get().expect("Memory offset not init");
         let virt = VirtAddr::new(addr.as_u64() + offset);
         let ptr = virt.as_mut_ptr::<u64>();
-        // ponytail: sentinel +1; wraps at u64::MAX → collides with None
-        let val = next.map(|a| a.as_u64().wrapping_add(1)).unwrap_or(0);
+        let val = next.map(|a| a.as_u64()).unwrap_or(0xFFFF_FFFF_FFFF_FFFF);
         unsafe { *ptr = val; }
     }
 }

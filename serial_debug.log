@@ -11,21 +11,21 @@ TRACE: exiting boot services
 TRACE: switching to new level 4 table
 INFO : New page table at: PhysFrame[4KiB](0x101000)
 INFO : Elf file loaded at Pointer {
-    addr: 0x000000001cf3c000,
-    metadata: 21628184,
+    addr: 0x000000001cf32000,
+    metadata: 21668824,
 }
 INFO : virtual_address_offset: 0x0
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 1000, virtual_addr: ffffffff80000000, physical_addr: ffffffff80000000, file_size: 2b92e5, mem_size: 2b92e5, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 2bb000, virtual_addr: ffffffff802ba000, physical_addr: ffffffff802ba000, file_size: 43344, mem_size: 43344, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 2ff000, virtual_addr: ffffffff802fe000, physical_addr: ffffffff802fe000, file_size: 241e0, mem_size: 241e0, align: 1000 })
-INFO : Entry point at: 0xffffffff80127ea0
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 1000, virtual_addr: ffffffff80000000, physical_addr: ffffffff80000000, file_size: 2bb0d5, mem_size: 2bb0d5, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 2bd000, virtual_addr: ffffffff802bc000, physical_addr: ffffffff802bc000, file_size: 43234, mem_size: 43234, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 301000, virtual_addr: ffffffff80300000, physical_addr: ffffffff80300000, file_size: 241e0, mem_size: 241e0, align: 1000 })
+INFO : Entry point at: 0xffffffff80129350
 INFO : Creating GDT at PhysAddr(0x12c000)
 INFO : Map framebuffer
 INFO : Map physical memory
 INFO : Allocate bootinfo
 INFO : Create Memory Map
 INFO : Create bootinfo
-INFO : Jumping to kernel entry point at VirtAddr(0xffffffff80127ea0)
+INFO : Jumping to kernel entry point at VirtAddr(0xffffffff80129350)
 [BOOT] memory::init...
 [BOOT] memory::init done
 [BOOT] fb=present
@@ -71,13 +71,6 @@ INFO : Jumping to kernel entry point at VirtAddr(0xffffffff80127ea0)
 [IOAPIC] set_redir idx=12 vec=44 dest=0
 [IOAPIC] done
 [BOOT] SMP init...
-[APIC] LocalApic::new...
-[APIC] new checking LAPIC_ADDR...
-[APIC] LAPIC base=0xfee00000
-[APIC] enable...
-[APIC] init_timer...
-[APIC] timer started
-[APIC] lapic stored
 [BOOT] PS/2 init...
 [PS2] kbd reset ack=0xfa
 [PS2] kbd reset OK (waiting bat...)
@@ -95,6 +88,13 @@ INFO : Jumping to kernel entry point at VirtAddr(0xffffffff80127ea0)
   PCI Device: 00:00.0 Vendor:8086 Device:1237 Class:06.00 (if:00)
   PCI Device: 00:01.0 Vendor:8086 Device:7000 Class:06.01 (if:00)
   PCI Device: 00:02.0 Vendor:1234 Device:1111 Class:03.00 (if:00)
+[APIC] LocalApic::new...
+[APIC] new checking LAPIC_ADDR...
+[APIC] LAPIC base=0xfee00000
+[APIC] enable...
+[APIC] init_timer...
+[APIC] timer started
+[APIC] lapic stored
   PCI Device: 00:03.0 Vendor:8086 Device:100e Class:02.00 (if:00)
 [IOAPIC] set_redir idx=11 vec=80 dest=0
 [IOAPIC] done
@@ -112,3 +112,7 @@ INFO : Jumping to kernel entry point at VirtAddr(0xffffffff80127ea0)
 [BOOT] RTC initialized
 [BOOT] scheduler init...
 [BOOT] GUI init...
+[DBG] mouse IRQ fired!
+[ASYNC] Async Executor Started.
+[DBG] mouse pos: x=400 y=300 buttons=0
+[DEMO] threading_demo: spawning two threads...

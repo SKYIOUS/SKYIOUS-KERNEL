@@ -127,9 +127,7 @@ pub fn current_cpu_id() -> CpuId {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        crate::apic::lapic::LOCAL_APIC.lock()
-            .as_ref()
-            .map_or(0, |l| l.id() as u64)
+        crate::apic::current_lapic_id() as u64
     }
     #[cfg(target_arch = "aarch64")]
     {
