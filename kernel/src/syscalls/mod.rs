@@ -6957,7 +6957,7 @@ fn sys_utimensat(dirfd: i64, pathname_ptr: *const u8, times_ptr: *const u8, flag
         Some(n) => n,
         None => return errno::Errno::ENOENT as u64,
     };
-    let now = crate::time::get_system_time();
+    let now = crate::drivers::rtc::read_realtime();
     if node.utimens((now.0, now.1), (now.0, now.1)).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
 }
 
