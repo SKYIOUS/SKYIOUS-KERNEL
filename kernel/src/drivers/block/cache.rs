@@ -38,16 +38,6 @@ impl BlockCache {
         }
     }
 
-    fn find_slot(&self, sector: u64) -> Option<usize> {
-        let lines = self.lines.lock();
-        for (i, line) in lines.iter().enumerate() {
-            if line.valid && line.sector == sector {
-                return Some(i);
-            }
-        }
-        None
-    }
-
     fn evict_one(&self) -> Option<usize> {
         let mut lines = self.lines.lock();
         let clock = self.access_clock.fetch_add(1, Ordering::Relaxed);
@@ -77,11 +67,13 @@ impl BlockCache {
     }
 
     pub fn read_sector_cached(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
-        if let Some(i) = self.find_slot(sector) {
-            let lines = self.lines.lock();
+        let mut lines = self.lines.lock();
+        // Check cache under lock — no TOCTOU race with eviction
+        if let Some(i) = lines.iter().position(|l| l.valid && l.sector == sector) {
             buf.copy_from_slice(&lines[i].data);
             return Ok(());
         }
+        drop(lines);
         let slot = self.evict_one().ok_or(BlockDeviceError::DeviceError)?;
         self.fetch_sector(sector, slot)?;
         let lines = self.lines.lock();
@@ -90,12 +82,14 @@ impl BlockCache {
     }
 
     pub fn write_sector_cached(&self, sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
-        if let Some(i) = self.find_slot(sector) {
-            let mut lines = self.lines.lock();
+        let mut lines = self.lines.lock();
+        // Check cache under lock — no TOCTOU race with eviction
+        if let Some(i) = lines.iter().position(|l| l.valid && l.sector == sector) {
             lines[i].data.copy_from_slice(buf);
             lines[i].dirty = true;
             return Ok(());
         }
+        drop(lines);
         let slot = self.evict_one().ok_or(BlockDeviceError::DeviceError)?;
         let mut lines = self.lines.lock();
         lines[slot].data.copy_from_slice(buf);

@@ -375,17 +375,16 @@ impl XhciController {
 
     fn poll_event(&mut self) -> Option<XhciTrb> {
         if self.event_ring_base.is_null() { return None; }
-        let trb = unsafe { &*self.event_ring_base.add(0) }; // use index 0 for simplicity
+        let trb = unsafe { core::ptr::read_volatile(self.event_ring_base.add(0) as *const XhciTrb) };
         let cycle = (trb.control & 1) != 0;
         if cycle == (self.event_ring_cycle != 0) {
-            let result = *trb;
             self.event_ring_index = (self.event_ring_index + 1) % 64;
             if self.event_ring_index == 0 { self.event_ring_cycle ^= 1; }
 
             let rt_regs = unsafe { &mut *((self.base_addr + self.rt_offset) as *mut XhciRuntimeRegisters) };
             let erdp = (self.event_ring_base as u64) + (self.event_ring_index as u64 * 16);
             rt_regs.ir[0].erdp.write(erdp | (1 << 3));
-            Some(result)
+            Some(trb)
         } else { None }
     }
 

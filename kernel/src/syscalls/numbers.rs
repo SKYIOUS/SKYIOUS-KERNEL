@@ -6,7 +6,7 @@ pub const SYS_STAT: u64 = 4;
 pub const SYS_FSTAT: u64 = 5;
 pub const SYS_LSEEK: u64 = 8;
 pub const SYS_MMAP: u64 = 9;
-pub const _SYS_MPROTECT: u64 = 10;
+pub const SYS_MPROTECT: u64 = 10;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_BRK: u64 = 12;
 pub const SYS_CLONE: u64 = 56;
@@ -35,6 +35,12 @@ pub const SYS_BIND: u64 = 49;
 pub const SYS_LISTEN: u64 = 50;
 pub const SYS_ACCEPT: u64 = 43;
 pub const SYS_SETSOCKOPT: u64 = 54;
+pub const SYS_SOCKETPAIR: u64 = 53;
+pub const SYS_GETSOCKOPT: u64 = 55;
+pub const SYS_SENDMSG: u64 = 46;
+pub const SYS_RECVMSG: u64 = 47;
+pub const SYS_GETSOCKNAME: u64 = 51;
+pub const SYS_GETPEERNAME: u64 = 52;
 
 // GUI Syscalls
 pub const SYS_GUI_CREATE_WINDOW: u64 = 100;
@@ -118,7 +124,22 @@ pub const SYS_ASH_STATS: u64 = 312;
 #[cfg_attr(not(feature = "ash"), allow(dead_code))]
 pub const SYS_ASH_CONTROL: u64 = 313;
 
-// Hypervisor syscalls
+// Filesystem completions
+pub const SYS_LSTAT: u64 = 6;
+pub const SYS_SENDFILE: u64 = 40;
+pub const SYS_LINK: u64 = 86;
+pub const SYS_UTIMENSAT: u64 = 280;
+pub const SYS_FALLOCATE: u64 = 285;
+
+// Supplementary groups
+pub const SYS_GETGROUPS: u64 = 115;
+pub const SYS_SETGROUPS: u64 = 116;
+
+// Credential syscalls (extending our 3xx range)
+pub const SYS_GETRESUID: u64 = 118;
+pub const SYS_SETRESUID: u64 = 119;
+pub const SYS_GETRESGID: u64 = 314;
+pub const SYS_SETRESGID: u64 = 315;
 #[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
 pub const SYS_VM_CREATE: u64 = 340;
 #[cfg_attr(not(feature = "hypervisor"), allow(dead_code))]
@@ -142,3 +163,54 @@ pub const SYS_VM_INJECT_IRQ: u64 = 349;
 
 pub const SYS_OBJMGR_ENUM: u64 = 380;
 pub const SYS_OBJMGR_AUDIT: u64 = 381;
+
+// *at syscall variants (Linux x86_64 numbers)
+pub const SYS_OPENAT: u64 = 257;
+pub const SYS_MKDIRAT: u64 = 258;
+pub const SYS_FSTATAT: u64 = 262;
+pub const SYS_UNLINKAT: u64 = 263;
+pub const SYS_RENAMEAT: u64 = 264;
+pub const SYS_LINKAT: u64 = 265;
+pub const SYS_SYMLINKAT: u64 = 266;
+pub const SYS_READLINKAT: u64 = 267;
+pub const SYS_FACCESSAT: u64 = 269;
+
+pub const SYS_SETPGID: u64 = 157;
+pub const SYS_GETPGID: u64 = 330;
+pub const SYS_GETPGRP: u64 = 111;
+pub const SYS_SETSID: u64 = 112;
+pub const SYS_GETSID: u64 = 331;
+pub const SYS_GETRLIMIT: u64 = 97;
+pub const SYS_SETRLIMIT: u64 = 98;
+pub const SYS_PRLIMIT64: u64 = 332;
+
+// Signal and timer syscalls
+pub const SYS_PAUSE: u64 = 34;
+pub const SYS_GETITIMER: u64 = 350;
+pub const SYS_SETITIMER: u64 = 351;
+pub const SYS_TIMES: u64 = 352;
+pub const SYS_SIGALTSTACK: u64 = 131;
+pub const SYS_SIGNALFD: u64 = 282;
+pub const SYS_SIGNALFD4: u64 = 289;
+pub const SYS_EVENTFD: u64 = 284;
+pub const SYS_EVENTFD2: u64 = 290;
+
+// POSIX timer syscalls
+pub const SYS_TIMER_CREATE: u64 = 222;
+pub const SYS_TIMER_SETTIME: u64 = 223;
+pub const SYS_TIMER_GETTIME: u64 = 224;
+pub const SYS_TIMER_GETOVERRUN: u64 = 225;
+pub const SYS_TIMER_DELETE: u64 = 226;
+
+// SysV shared memory
+pub const SYS_SHMGET: u64 = 29;
+pub const SYS_SHMAT: u64 = 30;
+pub const SYS_SHMCTL: u64 = 31;
+pub const SYS_SHMDT: u64 = 67;
+
+// memfd_create
+pub const SYS_MEMFD_CREATE: u64 = 319;
+
+// Swap syscalls
+pub const SYS_SWAPON: u64 = 326;
+pub const SYS_SWAPOFF: u64 = 327;

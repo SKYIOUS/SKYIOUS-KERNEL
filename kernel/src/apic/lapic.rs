@@ -24,7 +24,7 @@ impl LocalApic {
     fn read(&self, offset: u32) -> u32 {
         // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
         // The base address from ACPI is valid, and offset is within LAPIC register range.
-        let virt = (*memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + self.base as u64) as *const Volatile<u32>;
+        let virt = (memory::physical_memory_offset() + self.base as u64) as *const Volatile<u32>;
         unsafe { (*virt.add((offset / 4) as usize)).read() }
     }
 
@@ -36,7 +36,7 @@ impl LocalApic {
     fn write(&mut self, offset: u32, value: u32) {
         // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
         // The base address from ACPI is valid, and offset is within LAPIC register range.
-        let virt = (*memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + self.base as u64) as *mut Volatile<u32>;
+        let virt = (memory::physical_memory_offset() + self.base as u64) as *mut Volatile<u32>;
         unsafe { (*virt.add((offset / 4) as usize)).write(value) }
     }
 

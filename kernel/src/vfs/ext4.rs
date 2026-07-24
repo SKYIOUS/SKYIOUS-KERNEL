@@ -212,7 +212,7 @@ impl Ext4FileSystem {
 
         // Reject unsupported RO-compat features
         let unknown_ro = sb.s_feature_ro_compat & !SUPPORTED_RO_COMPAT;
-        if unknown_ro & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM != 0 {
+        if (unknown_ro & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM) != 0 {
             return Err(());
         }
 
@@ -269,17 +269,18 @@ impl Ext4FileSystem {
         let entry_offset = desc_in_block * self.desc_size as usize;
         let entry = unsafe { &*(buf.as_ptr().add(entry_offset) as *const GroupDesc) };
 
-        let (bitmap, itable) = if self.desc_size >= 64 {
+        let (bitmap, bmap, itable) = if self.desc_size >= 64 {
             let hi = unsafe { &*(buf.as_ptr().add(entry_offset + 32) as *const [u32; 3]) };
             (
                 entry.bg_block_bitmap as u64 | (hi[0] as u64) << 32,
+                entry.bg_inode_bitmap as u64 | (hi[1] as u64) << 32,
                 entry.bg_inode_table as u64 | (hi[2] as u64) << 32,
             )
         } else {
-            (entry.bg_block_bitmap as u64, entry.bg_inode_table as u64)
+            (entry.bg_block_bitmap as u64, entry.bg_inode_bitmap as u64, entry.bg_inode_table as u64)
         };
 
-        Ok((bitmap, entry.bg_inode_bitmap as u64, itable))
+        Ok((bitmap, bmap, itable))
     }
 
     fn read_inode_raw(&self, inode_num: u32, buf: &mut [u8]) -> Result<(), ()> {

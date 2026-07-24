@@ -273,9 +273,9 @@ impl UhciController {
         let l = if len > 0 { len } else { 1 };
         let ls = if low { TD_LS } else { 0 };
 
-        let (td0, ph0) = self.td_alloc().unwrap();
-        let (td1, ph1) = self.td_alloc().unwrap();
-        let (td2, ph2) = self.td_alloc().unwrap();
+        let (td0, ph0) = match self.td_alloc() { Some(v) => v, None => return false };
+        let (td1, ph1) = match self.td_alloc() { Some(v) => v, None => return false };
+        let (td2, ph2) = match self.td_alloc() { Some(v) => v, None => return false };
 
         unsafe {
             core::ptr::copy_nonoverlapping(setup.as_ptr(), self.data[0].virt(), 8);
@@ -320,8 +320,8 @@ impl UhciController {
         ];
         let ls = if low { TD_LS } else { 0 };
 
-        let (td0, ph0) = self.td_alloc().unwrap();
-        let (td1, ph1) = self.td_alloc().unwrap();
+        let (td0, ph0) = match self.td_alloc() { Some(v) => v, None => return false };
+        let (td1, ph1) = match self.td_alloc() { Some(v) => v, None => return false };
 
         unsafe {
             core::ptr::copy_nonoverlapping(setup.as_ptr(), self.data[0].virt(), 8);
@@ -351,6 +351,7 @@ impl UhciController {
     }
 
     fn flush(&self) {
+        // ponytail: fence ensures ordering but x86 WC memory may need clflush for DMA coherency
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 }

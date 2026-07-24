@@ -2,7 +2,6 @@ use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 #[cfg(not(target_arch = "aarch64"))]
 use crate::println;
 #[cfg(not(target_arch = "aarch64"))]
-#[cfg(not(target_arch = "aarch64"))]
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 #[cfg(not(target_arch = "aarch64"))]
 use x86_64::structures::paging::PageTableFlags;
@@ -185,6 +184,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(
 
     crate::drivers::watchdog::pet();
 
+    // Diagnostic: print first tick, then every 500
+    static TICK_DIAG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if ticks == 1 && !TICK_DIAG.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        crate::serial_write("[TICK] first timer tick!\n");
+    }
+
     // Periodic diagnostic: print mouse state every 500 ticks (~5s)
     if ticks % 500 == 0 {
         let irq = crate::drivers::mouse::MOUSE_IRQ_COUNT.load(Ordering::Relaxed);
@@ -220,7 +225,34 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let cur = crate::task::process::CURRENT_PROCESS.lock();
     if let Some(ref proc) = *cur {
+        let page_addr = fault_addr.as_u64() & !0xFFF;
         let page = x86_64::structures::paging::Page::containing_address(fault_addr);
+
+        // Check global swap map for a swapped-out page
+        let swap_entry = crate::memory::swap::SWAP_PAGE_MAP.lock().remove(&page_addr);
+
+        if let Some((_dev_idx, _slot_idx)) = swap_entry {
+            drop(cur);
+            if let Some(phys_addr) = crate::memory::swap::swap_in_page(page_addr) {
+                use crate::memory::buddy::BuddyFrameAllocator;
+                use x86_64::structures::paging::Mapper;
+                let mut fa = BuddyFrameAllocator;
+                // SAFETY: mapper through physical memory offset is valid during swap-in
+                if let Some(proc2) = crate::task::process::CURRENT_PROCESS.lock().as_ref().map(|p| p.clone()) {
+                    if let Some(mut mapper) = unsafe { proc2.address_space.mapper() } {
+                        let frame = x86_64::structures::paging::PhysFrame::containing_address(
+                            x86_64::PhysAddr::new(phys_addr)
+                        );
+                        let flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE
+                            | PageTableFlags::WRITABLE;
+                        let _ = unsafe { mapper.map_to(page, frame, flags, &mut fa).map(|f| f.flush()) };
+                        return;
+                    }
+                }
+            }
+            panic!("PAGE FAULT: swap-in failed for {:?}", fault_addr);
+        }
+
         if let Some(true) = unsafe { proc.address_space.handle_cow(page) } {
             return;
         }
@@ -241,7 +273,7 @@ extern "x86-interrupt" fn page_fault_handler(
                         crate::memory::frame_info::increment(frame.start_address());
 
                         let virt = x86_64::VirtAddr::new(
-                            *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap()
+                            crate::memory::physical_memory_offset()
                             + frame.start_address().as_u64()
                         );
                         unsafe { core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, 4096); }
@@ -260,7 +292,7 @@ extern "x86-interrupt" fn page_fault_handler(
                         let _ = unsafe { mapper.map_to(page, frame, flags, &mut fa).map(|f| f.flush()) };
                         crate::memory::frame_info::increment(frame.start_address());
                         let virt = x86_64::VirtAddr::new(
-                            *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap()
+                            crate::memory::physical_memory_offset()
                             + frame.start_address().as_u64()
                         );
                         unsafe { core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, 4096); }
@@ -344,12 +376,29 @@ extern "x86-interrupt" fn ipi_func_handler(
     _stack_frame: InterruptStackFrame)
 {
     let cpu = crate::syscalls::get_per_cpu();
-    if cpu.ipi_pending != 0 {
-        let func: extern "C" fn(u64) = unsafe { core::mem::transmute(cpu.ipi_pending) };
-        let arg = cpu.ipi_arg;
-        cpu.ipi_pending = 0;
-        cpu.ipi_arg = 0;
-        func(arg);
+    let kind = cpu.ipi_kind.swap(0, core::sync::atomic::Ordering::AcqRel);
+    match kind {
+        1 => {
+            // TlbShootdown
+            unsafe {
+                use x86_64::registers::control::Cr3;
+                let (frame, flags) = Cr3::read();
+                Cr3::write(frame, flags);
+            }
+        }
+        2 => {
+            // Reschedule
+            crate::task::scheduler::try_schedule();
+        }
+        3 => {
+            // Func — call registered function pointer
+            let func_val = cpu.ipi_arg.swap(0, core::sync::atomic::Ordering::AcqRel);
+            if func_val != 0 {
+                let func: extern "C" fn(u64) = unsafe { core::mem::transmute(func_val) };
+                func(0);
+            }
+        }
+        _ => {}
     }
     crate::apic::eoi();
 }

@@ -244,12 +244,11 @@ impl NvmeController {
 
     fn reap(cq_head: &mut u32, phase: &mut u8, cq: &RingBuf, _qid: u32) -> bool {
         let head = *cq_head % cq.num_entries;
-        let cqe = unsafe { &*(cq.entry(head) as *const NvmeCqe) };
+        let cqe = unsafe { core::ptr::read_volatile(cq.entry(head) as *const NvmeCqe) };
         let p = ((cqe.status >> 15) & 1) as u8;
         if p != *phase { return false; }
         *cq_head += 1;
         if (*cq_head).is_multiple_of(cq.num_entries) { *phase ^= 1; }
-        // ring_db is called separately
         true
     }
 

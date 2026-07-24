@@ -5,6 +5,7 @@ use volatile::Volatile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum Color {
     Black = 0,
     _Blue = 1,

@@ -15,6 +15,8 @@ const STATUS: u16 = 0x1F7;
 const CMD_IDENTIFY: u8 = 0xEC;
 const CMD_READ_SECTORS: u8 = 0x20;
 const CMD_WRITE_SECTORS: u8 = 0x30;
+const CMD_READ_SECTORS_EXT: u8 = 0x24;
+const CMD_WRITE_SECTORS_EXT: u8 = 0x34;
 
 const STATUS_BSY: u8 = 0x80;
 const STATUS_DRQ: u8 = 0x08;
@@ -84,18 +86,29 @@ impl BlockDevice for PataDevice {
     fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         self.wait_bsy()?;
         unsafe {
-            let mut drive_sel = Port::<u8>::new(DRIVE_SEL);
-            drive_sel.write(0xE0 | ((sector >> 24) as u8 & 0x0F));
-            let mut sector_count_port = Port::<u8>::new(SECTOR_COUNT);
-            sector_count_port.write(1);
-            let mut lba_lo = Port::<u8>::new(LBA_LO);
-            lba_lo.write((sector & 0xFF) as u8);
-            let mut lba_mid = Port::<u8>::new(LBA_MID);
-            lba_mid.write(((sector >> 8) & 0xFF) as u8);
-            let mut lba_hi = Port::<u8>::new(LBA_HI);
-            lba_hi.write(((sector >> 16) & 0xFF) as u8);
-            let mut cmd = Port::<u8>::new(COMMAND);
-            cmd.write(CMD_READ_SECTORS);
+            if sector > 0x0FFFFFFF {
+                let mut sc = Port::<u8>::new(SECTOR_COUNT);
+                sc.write(0);
+                let mut lba_lo = Port::<u8>::new(LBA_LO);
+                lba_lo.write(((sector >> 24) & 0xFF) as u8);
+                let mut lba_mid = Port::<u8>::new(LBA_MID);
+                lba_mid.write(((sector >> 32) & 0xFF) as u8);
+                let mut lba_hi = Port::<u8>::new(LBA_HI);
+                lba_hi.write(((sector >> 40) & 0xFF) as u8);
+                sc.write(1);
+                lba_lo.write((sector & 0xFF) as u8);
+                lba_mid.write(((sector >> 8) & 0xFF) as u8);
+                lba_hi.write(((sector >> 16) & 0xFF) as u8);
+                Port::<u8>::new(DRIVE_SEL).write(0xE0);
+                Port::<u8>::new(COMMAND).write(CMD_READ_SECTORS_EXT);
+            } else {
+                Port::<u8>::new(DRIVE_SEL).write(0xE0 | ((sector >> 24) as u8 & 0x0F));
+                Port::<u8>::new(SECTOR_COUNT).write(1);
+                Port::<u8>::new(LBA_LO).write((sector & 0xFF) as u8);
+                Port::<u8>::new(LBA_MID).write(((sector >> 8) & 0xFF) as u8);
+                Port::<u8>::new(LBA_HI).write(((sector >> 16) & 0xFF) as u8);
+                Port::<u8>::new(COMMAND).write(CMD_READ_SECTORS);
+            }
             self.poll_ready()?;
             let mut data = Port::<u16>::new(DATA);
             for word in buf.chunks_exact_mut(2) {
@@ -110,18 +123,29 @@ impl BlockDevice for PataDevice {
     fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         self.wait_bsy()?;
         unsafe {
-            let mut drive_sel = Port::<u8>::new(DRIVE_SEL);
-            drive_sel.write(0xE0 | ((sector >> 24) as u8 & 0x0F));
-            let mut sector_count_port = Port::<u8>::new(SECTOR_COUNT);
-            sector_count_port.write(1);
-            let mut lba_lo = Port::<u8>::new(LBA_LO);
-            lba_lo.write((sector & 0xFF) as u8);
-            let mut lba_mid = Port::<u8>::new(LBA_MID);
-            lba_mid.write(((sector >> 8) & 0xFF) as u8);
-            let mut lba_hi = Port::<u8>::new(LBA_HI);
-            lba_hi.write(((sector >> 16) & 0xFF) as u8);
-            let mut cmd = Port::<u8>::new(COMMAND);
-            cmd.write(CMD_WRITE_SECTORS);
+            if sector > 0x0FFFFFFF {
+                let mut sc = Port::<u8>::new(SECTOR_COUNT);
+                sc.write(0);
+                let mut lba_lo = Port::<u8>::new(LBA_LO);
+                lba_lo.write(((sector >> 24) & 0xFF) as u8);
+                let mut lba_mid = Port::<u8>::new(LBA_MID);
+                lba_mid.write(((sector >> 32) & 0xFF) as u8);
+                let mut lba_hi = Port::<u8>::new(LBA_HI);
+                lba_hi.write(((sector >> 40) & 0xFF) as u8);
+                sc.write(1);
+                lba_lo.write((sector & 0xFF) as u8);
+                lba_mid.write(((sector >> 8) & 0xFF) as u8);
+                lba_hi.write(((sector >> 16) & 0xFF) as u8);
+                Port::<u8>::new(DRIVE_SEL).write(0xE0);
+                Port::<u8>::new(COMMAND).write(CMD_WRITE_SECTORS_EXT);
+            } else {
+                Port::<u8>::new(DRIVE_SEL).write(0xE0 | ((sector >> 24) as u8 & 0x0F));
+                Port::<u8>::new(SECTOR_COUNT).write(1);
+                Port::<u8>::new(LBA_LO).write((sector & 0xFF) as u8);
+                Port::<u8>::new(LBA_MID).write(((sector >> 8) & 0xFF) as u8);
+                Port::<u8>::new(LBA_HI).write(((sector >> 16) & 0xFF) as u8);
+                Port::<u8>::new(COMMAND).write(CMD_WRITE_SECTORS);
+            }
             self.wait_drq()?;
             let mut data = Port::<u16>::new(DATA);
             for word in buf.chunks_exact(2) {

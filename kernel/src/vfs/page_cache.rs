@@ -4,6 +4,8 @@ use alloc::sync::Arc;
 use spin::Mutex;
 
 pub const PAGE_SIZE: usize = 4096;
+// ponytail: FIFO eviction, LRU if perf matters
+const MAX_CACHED_PAGES: usize = 4096;
 
 pub struct Page {
     pub data: [u8; PAGE_SIZE],
@@ -29,7 +31,13 @@ impl PageCache {
 
     pub fn insert_page(&self, ino: u64, index: u64, data: [u8; PAGE_SIZE]) -> Arc<Mutex<Page>> {
         let page = Arc::new(Mutex::new(Page { data, dirty: false }));
-        self.pages.lock().insert((ino, index), page.clone());
+        let mut pages = self.pages.lock();
+        if pages.len() >= MAX_CACHED_PAGES {
+            if let Some(key) = pages.keys().next().cloned() {
+                pages.remove(&key);
+            }
+        }
+        pages.insert((ino, index), page.clone());
         page
     }
 

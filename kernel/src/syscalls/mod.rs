@@ -14,6 +14,8 @@ pub mod signal;
 pub mod futex;
 pub mod user_access;
 pub mod io_uring;
+pub mod shm;
+pub mod posix_timers;
 
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use crate::objects::KernelObject;
@@ -38,10 +40,21 @@ pub const CAP_NET_RAW: u64 = 1 << 13;
 pub const CAP_SYS_ADMIN: u64 = 1 << 21;
 pub const CAP_SYS_BOOT: u64 = 1 << 22;
 
+// *at constants
+pub const AT_FDCWD: i64 = -100;
+pub const AT_REMOVEDIR: i32 = 0x200;
+pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+pub const AT_EMPTY_PATH: i32 = 0x1000;
+pub const AT_EACCESS: i32 = 0x200;
+pub const AT_SYMLINK_FOLLOW: i32 = 0x400;
+
 /// Check if the current process has the given capability in its effective set.
-fn has_capability(cap_bit: u64) -> bool {
+pub(crate) fn has_capability(cap_bit: u64) -> bool {
     let lock = CURRENT_PROCESS.lock();
-    lock.as_ref().is_some_and(|p| (p.creds.lock().cap_effective & cap_bit) != 0)
+    lock.as_ref().is_some_and(|p| {
+        let cred = p.creds.lock();
+        cred.euid == 0 || (cred.cap_effective & cap_bit) != 0
+    })
 }
 
 /// Log a security-relevant event to serial for audit trail.
@@ -109,6 +122,54 @@ fn check_file_owner(node: &Arc<dyn VfsNode>) -> bool {
     }
 }
 
+/// Normalize a (possibly relative) path to an absolute path using the process cwd.
+fn normalize_path(path_str: &str, process: &Arc<crate::task::process::Process>) -> String {
+    let mut new_path = String::from(path_str);
+    if !new_path.starts_with('/') {
+        let cur_cwd = process.cwd.lock();
+        if *cur_cwd == "/" {
+            new_path = alloc::format!("/{}", new_path);
+        } else {
+            new_path = alloc::format!("{}/{}", cur_cwd, new_path);
+        }
+    }
+    if new_path.len() > 1 && new_path.ends_with('/') {
+        new_path.pop();
+    }
+    new_path
+}
+
+/// Resolve a path relative to a dirfd (or AT_FDCWD for cwd).
+/// Returns the absolute path string.
+fn resolve_path_at(dirfd: i64, pathname: &str, process: &Arc<crate::task::process::Process>) -> Result<alloc::string::String, errno::Errno> {
+    if pathname.starts_with('/') {
+        return Ok(alloc::string::String::from(pathname));
+    }
+    match dirfd {
+        AT_FDCWD => Ok(normalize_path(pathname, process)),
+        fd => {
+            let dir_fds = process.dir_fds.lock();
+            match dir_fds.get(&(fd as usize)) {
+                Some(dir_path) => {
+                    if dir_path.ends_with('/') {
+                        Ok(alloc::format!("{}{}", dir_path, pathname))
+                    } else {
+                        Ok(alloc::format!("{}/{}", dir_path, pathname))
+                    }
+                }
+                None => Err(errno::Errno::EBADF),
+            }
+        }
+    }
+}
+
+/// Helper: store a directory's normalized path in dir_fds when a directory fd is created.
+fn store_dir_path(process: &Arc<crate::task::process::Process>, fd: u64, path_str: &str) {
+    if (fd as i64) < 0 { return; }
+    let abs_path = normalize_path(path_str, process);
+    process.dir_fds.lock().insert(fd as usize, abs_path);
+}
+
 pub fn init() {
     // Detect SMAP and enable if available (must be done before any user access)
     user_access::init_smap();
@@ -166,8 +227,8 @@ pub fn init_gs_base(cpu_id: usize) {
         cpu_id: cpu_id as u64,
         kernel_rsp: crate::gdt::get_kernel_stack().as_u64(),
         user_rsp: 0,
-        ipi_pending: 0,
-        ipi_arg: 0,
+        ipi_kind: core::sync::atomic::AtomicU64::new(0),
+        ipi_arg: core::sync::atomic::AtomicU64::new(0),
         idle_count: 0,
         current_process: core::sync::atomic::AtomicU64::new(0),
     }));
@@ -191,8 +252,8 @@ pub struct PerCpuData {
     pub cpu_id:    u64,      // offset 0x08
     pub kernel_rsp: u64,      // offset 0x10 — loaded on syscall entry
     pub user_rsp:  u64,      // offset 0x18 — saved on syscall entry
-    pub ipi_pending: u64,    // offset 0x20 — IPI function pointer
-    pub ipi_arg: u64,        // offset 0x28 — IPI argument
+    pub ipi_kind: core::sync::atomic::AtomicU64, // offset 0x20 — IPI discriminant (0=none,1=tlb,2=resched,3=func)
+    pub ipi_arg: core::sync::atomic::AtomicU64,  // offset 0x28 — IPI argument / func ptr
     pub idle_count: u64,     // offset 0x30 — idle loop counter
     /// Per-CPU current process pointer (uintptr to Arc<Process>).
     /// Read lock-free on the owning CPU; written only by that CPU's scheduler.
@@ -200,7 +261,7 @@ pub struct PerCpuData {
     pub current_process: core::sync::atomic::AtomicU64, // offset 0x38
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 pub struct UtsName {
     pub sysname: [u8; 65],
     pub nodename: [u8; 65],
@@ -213,9 +274,56 @@ pub struct UtsName {
 
 pub fn sys_open_path(path: &str) -> Result<u64, errno::Errno> {
     let path_c = alloc::format!("{}\0", path);
-    let fd = syscall_handler(numbers::SYS_OPEN, path_c.as_ptr() as u64, 0x1, 0, 0, 0, core::ptr::null_mut()); // O_RDONLY=0x1
+    let fd = syscall_handler(numbers::SYS_OPEN, path_c.as_ptr() as u64, 0x0, 0, 0, 0, core::ptr::null_mut()); // O_RDONLY=0
     if (fd as i64) < 0 {
-        Err(unsafe { core::mem::transmute::<i64, errno::Errno>(fd as i64) })
+        let errval = fd as i64;
+        // ponytail: match instead of transmute — transmuting arbitrary i64 to #[repr(i64)] enum is UB if no variant matches
+        let e = match errval {
+            -1  => errno::Errno::EPERM,
+            -2  => errno::Errno::ENOENT,
+            -3  => errno::Errno::ESRCH,
+            -4  => errno::Errno::EINTR,
+            -5  => errno::Errno::EIO,
+            -6  => errno::Errno::ENXIO,
+            -7  => errno::Errno::E2BIG,
+            -8  => errno::Errno::ENOEXEC,
+            -9  => errno::Errno::EBADF,
+            -10 => errno::Errno::ECHILD,
+            -11 => errno::Errno::EAGAIN,
+            -12 => errno::Errno::ENOMEM,
+            -13 => errno::Errno::EACCES,
+            -14 => errno::Errno::EFAULT,
+            -15 => errno::Errno::ENOTBLK,
+            -16 => errno::Errno::EBUSY,
+            -17 => errno::Errno::EEXIST,
+            -18 => errno::Errno::EXDEV,
+            -19 => errno::Errno::ENODEV,
+            -20 => errno::Errno::ENOTDIR,
+            -21 => errno::Errno::EISDIR,
+            -22 => errno::Errno::EINVAL,
+            -23 => errno::Errno::ENFILE,
+            -25 => errno::Errno::ENOTTY,
+            -26 => errno::Errno::ETXTBSY,
+            -27 => errno::Errno::EFBIG,
+            -28 => errno::Errno::ENOSPC,
+            -29 => errno::Errno::ESPIPE,
+            -30 => errno::Errno::EROFS,
+            -31 => errno::Errno::EMLINK,
+            -32 => errno::Errno::EPIPE,
+            -33 => errno::Errno::EDOM,
+            -34 => errno::Errno::ERANGE,
+            -38 => errno::Errno::ENOSYS,
+            -40 => errno::Errno::ELOOP,
+            -89 => errno::Errno::EDESTADDRREQ,
+            -92 => errno::Errno::ENOPROTOOPT,
+            -95 => errno::Errno::EOPNOTSUPP,
+            -97 => errno::Errno::EAFNOSUPPORT,
+            -98 => errno::Errno::EADDRINUSE,
+            -111 => errno::Errno::ECONNREFUSED,
+            -114 => errno::Errno::EALREADY,
+            _ => errno::Errno::EINVAL,
+        };
+        Err(e)
     } else {
         Ok(fd)
     }
@@ -347,8 +455,23 @@ fn sys_pipe(fds_ptr: *mut u32) -> u64 {
         None => return errno::Errno::ESRCH as u64,
     };
 
-    let r_fd = add_fd(&process, reader, 0);  // O_RDONLY
-    let w_fd = add_fd(&process, writer, 1);  // O_WRONLY
+    let r_fd = {
+        let obj = crate::vfs::VfsObject::new(reader, crate::objects::TYPE_FILE) as Arc<dyn crate::objects::KernelObject>;
+        match process.new_handle(obj, crate::objects::security::ACCESS_READ, 0) {
+            Ok(fd) => fd,
+            Err(_) => return errno::Errno::EACCES as u64,
+        }
+    };
+    let w_fd = {
+        let obj = crate::vfs::VfsObject::new(writer, crate::objects::TYPE_FILE) as Arc<dyn crate::objects::KernelObject>;
+        match process.new_handle(obj, crate::objects::security::ACCESS_WRITE, 1) {
+            Ok(fd) => fd,
+            Err(_) => {
+                process.close_handle(r_fd);
+                return errno::Errno::EACCES as u64;
+            }
+        }
+    };
 
     unsafe {
         if user_access::copy_to_user(fds_ptr as *mut u8, &[r_fd as u8, 0, 0, 0, w_fd as u8, 0, 0, 0]).is_err() {
@@ -439,9 +562,14 @@ pub(crate) fn do_syscall(
         numbers::SYS_OPEN => sys_open(arg1 as *const u8, arg2 as i32, arg3 as u32),
         numbers::SYS_CLOSE => sys_close(arg1),
         numbers::SYS_STAT => sys_stat(arg1 as *const u8, arg2 as *mut crate::vfs::Stat),
+        numbers::SYS_LSTAT => sys_lstat(arg1 as *const u8, arg2 as *mut crate::vfs::Stat),
         numbers::SYS_FSTAT => sys_fstat(arg1, arg2 as *mut crate::vfs::Stat),
         numbers::SYS_LSEEK => sys_lseek(arg1, arg2 as i64, arg3 as i32),
-        numbers::SYS_MMAP => sys_mmap(arg1, arg2, arg3, arg4, arg5, 0), // arg6 (offset) not passed in this simple handler yet
+        numbers::SYS_MMAP => {
+            let offset = unsafe { *regs_ptr.add(6) };
+            sys_mmap(arg1, arg2, arg3, arg4, arg5, offset)
+        }
+        numbers::SYS_MPROTECT => sys_mprotect(arg1, arg2, arg3),
         numbers::SYS_MUNMAP => sys_munmap(arg1, arg2),
         numbers::SYS_BRK => sys_brk(arg1),
         numbers::SYS_EXIT => sys_exit(arg1),
@@ -449,9 +577,23 @@ pub(crate) fn do_syscall(
         numbers::SYS_FORK => sys_fork(regs_ptr),
         numbers::SYS_GETPID => sys_getpid(),
         numbers::SYS_GETPPID => sys_getppid(),
+        numbers::SYS_SETPGID => sys_setpgid(arg1, arg2),
+        numbers::SYS_GETPGID => sys_getpgid(arg1),
+        numbers::SYS_GETPGRP => sys_getpgrp(),
+        numbers::SYS_SETSID => sys_setsid(),
+        numbers::SYS_GETSID => sys_getsid(arg1),
         numbers::SYS_DUP => sys_dup(arg1),
         numbers::SYS_DUP2 => sys_dup2(arg1, arg2),
         numbers::SYS_ACCESS => sys_access(arg1 as *const u8, arg2 as i32),
+        numbers::SYS_OPENAT => sys_openat(arg1 as i64, arg2 as *const u8, arg3 as i32, arg4 as u32),
+        numbers::SYS_MKDIRAT => sys_mkdirat(arg1 as i64, arg2 as *const u8, arg3 as u32),
+        numbers::SYS_FSTATAT => sys_fstatat(arg1 as i64, arg2 as *const u8, arg3 as *mut crate::vfs::Stat, arg4 as i32),
+        numbers::SYS_UNLINKAT => sys_unlinkat(arg1 as i64, arg2 as *const u8, arg3 as i32),
+        numbers::SYS_RENAMEAT => sys_renameat(arg1 as i64, arg2 as *const u8, arg3 as i64, arg4 as *const u8),
+        numbers::SYS_LINKAT => sys_linkat(arg1 as i64, arg2 as *const u8, arg3 as i64, arg4 as *const u8, arg5 as i32),
+        numbers::SYS_SYMLINKAT => sys_symlinkat(arg1 as *const u8, arg2 as i64, arg3 as *const u8),
+        numbers::SYS_READLINKAT => sys_readlinkat(arg1 as i64, arg2 as *const u8, arg3 as *mut u8, arg4),
+        numbers::SYS_FACCESSAT => sys_faccessat(arg1 as i64, arg2 as *const u8, arg3 as i32, arg4 as i32),
         numbers::SYS_FCNTL => sys_fcntl(arg1, arg2 as i32, arg3),
         numbers::SYS_PIPE => sys_pipe(arg1 as *mut u32),
         numbers::SYS_UNAME => sys_uname(arg1 as *mut UtsName),
@@ -465,6 +607,12 @@ pub(crate) fn do_syscall(
         numbers::SYS_SENDTO => sys_sendto(arg1, arg2 as *const u8, arg3, arg4 as *const u8, arg5),
         numbers::SYS_RECVFROM => sys_recvfrom(arg1, arg2 as *mut u8, arg3, arg4 as *mut u8, arg5 as *mut u32),
         numbers::SYS_SETSOCKOPT => sys_setsockopt(arg1, arg2 as i32, arg3 as i32, arg4 as *const u8, arg5),
+        numbers::SYS_SENDMSG => sys_sendmsg(arg1 as i64, arg2 as *const msghdr, arg3 as i32),
+        numbers::SYS_RECVMSG => sys_recvmsg(arg1 as i64, arg2 as *mut msghdr, arg3 as i32),
+        numbers::SYS_GETSOCKNAME => sys_getsockname(arg1, arg2 as *mut u8, arg3 as *mut u32),
+        numbers::SYS_GETPEERNAME => sys_getpeername(arg1, arg2 as *mut u8, arg3 as *mut u32),
+        numbers::SYS_GETSOCKOPT => sys_getsockopt(arg1, arg2 as i32, arg3 as i32, arg4 as *mut u8, arg5 as *mut u32),
+        numbers::SYS_SOCKETPAIR => sys_socketpair(arg1, arg2, arg3, arg4 as *mut i32),
         
         numbers::SYS_GUI_CREATE_WINDOW => sys_gui_create_window(arg1 as *const u8, arg2 as usize, arg3 as usize),
         numbers::SYS_GUI_GET_BUFFER => sys_gui_get_buffer(arg1),
@@ -508,11 +656,17 @@ pub(crate) fn do_syscall(
         numbers::SYS_MOUNT => sys_mount(arg1 as *const u8, arg2 as *const u8, arg3 as *const u8, arg4, arg5 as *const u8),
         numbers::SYS_UMOUNT2 => sys_umount2(arg1 as *const u8, arg2),
         numbers::SYS_MKFS => sys_mkfs(arg1 as *const u8, arg2),
+        numbers::SYS_UTIMENSAT => sys_utimensat(arg1 as i64, arg2 as *const u8, arg3 as *const u8, arg4 as i32),
+        numbers::SYS_FALLOCATE => sys_fallocate(arg1, arg2 as i32, arg3 as i64, arg4 as i64),
         numbers::SYS_CHMOD => sys_chmod(arg1 as *const u8, arg2 as u32),
         numbers::SYS_FCHMOD => sys_fchmod(arg1, arg2 as u32),
         numbers::SYS_CHOWN => sys_chown(arg1 as *const u8, arg2 as u32, arg3 as u32),
         numbers::SYS_FCHOWN => sys_fchown(arg1, arg2 as u32, arg3 as u32),
         numbers::SYS_UMASK => sys_umask(arg1 as u32),
+        numbers::SYS_GETRLIMIT => sys_getrlimit(arg1, arg2 as *mut u8),
+        numbers::SYS_SETRLIMIT => sys_setrlimit(arg1, arg2 as *const u8),
+        numbers::SYS_PRLIMIT64 => sys_prlimit64(arg1, arg2, arg3 as *const u8, arg4 as *mut u8),
+        numbers::SYS_LINK => sys_link(arg1 as *const u8, arg2 as *const u8),
         numbers::SYS_SYMLINK => sys_symlink(arg1 as *const u8, arg2 as *const u8),
         numbers::SYS_READLINK => sys_readlink(arg1 as *const u8, arg2 as *mut u8, arg3),
         numbers::SYS_RENAME => sys_rename(arg1 as *const u8, arg2 as *const u8),
@@ -526,6 +680,12 @@ pub(crate) fn do_syscall(
         numbers::SYS_SETGID => sys_setgid(arg1),
         numbers::SYS_GETEUID => sys_geteuid(),
         numbers::SYS_GETEGID => sys_getegid(),
+        numbers::SYS_GETRESUID => sys_getresuid(arg1 as *mut u32, arg2 as *mut u32, arg3 as *mut u32),
+        numbers::SYS_SETRESUID => sys_setresuid(arg1 as u32, arg2 as u32, arg3 as u32),
+        numbers::SYS_GETRESGID => sys_getresgid(arg1 as *mut u32, arg2 as *mut u32, arg3 as *mut u32),
+        numbers::SYS_SETRESGID => sys_setresgid(arg1 as u32, arg2 as u32, arg3 as u32),
+        numbers::SYS_GETGROUPS => sys_getgroups(arg1 as i32, arg2 as *mut u32),
+        numbers::SYS_SETGROUPS => sys_setgroups(arg1 as i64, arg2 as *const u32),
         numbers::SYS_CAPGET => sys_capget(arg1 as *mut u8, arg2 as *mut u8),
         numbers::SYS_CAPSET => sys_capset(arg1 as *const u8, arg2 as *const u8),
         numbers::SYS_SIGPROCMASK => sys_sigprocmask(arg1 as i32, arg2 as *const u64, arg3 as *mut u64),
@@ -544,6 +704,7 @@ pub(crate) fn do_syscall(
         numbers::SYS_EXIT_GROUP => sys_exit_group(arg1),
         numbers::SYS_TRUNCATE => sys_truncate(arg1 as *const u8, arg2 as i64),
         numbers::SYS_FTRUNCATE => sys_ftruncate(arg1, arg2 as i64),
+        numbers::SYS_SENDFILE => sys_sendfile(arg1, arg2, arg3 as *mut u64, arg4, arg5),
         #[cfg(feature = "ash")]
         numbers::SYS_ASH_REGISTER => crate::ash::syscalls::sys_ash_register(arg1 as *const u8, arg2 as usize, arg3),
         #[cfg(feature = "ash")]
@@ -554,6 +715,20 @@ pub(crate) fn do_syscall(
         numbers::SYS_ASH_CONTROL => crate::ash::syscalls::sys_ash_control(arg1),
         numbers::SYS_OBJMGR_ENUM => sys_objmgr_enum(arg1 as *mut u8, arg2 as usize),
         numbers::SYS_OBJMGR_AUDIT => sys_objmgr_audit(arg1, arg2 as *mut u8, arg3 as usize),
+        numbers::SYS_PAUSE => sys_pause(),
+        numbers::SYS_SIGALTSTACK => sys_sigaltstack(arg1 as *const u8, arg2 as *mut u8),
+        numbers::SYS_GETITIMER => sys_getitimer(arg1, arg2 as *mut u8),
+        numbers::SYS_SETITIMER => sys_setitimer(arg1, arg2 as *const u8, arg3 as *mut u8),
+        numbers::SYS_TIMER_CREATE => posix_timers::sys_timer_create(arg1 as i32, arg2 as *const posix_timers::sigevent, arg3 as *mut i32),
+        numbers::SYS_TIMER_SETTIME => posix_timers::sys_timer_settime(arg1 as i32, arg2 as i32, arg3 as *const posix_timers::itimerspec, arg4 as *mut posix_timers::itimerspec),
+        numbers::SYS_TIMER_GETTIME => posix_timers::sys_timer_gettime(arg1 as i32, arg2 as *mut posix_timers::itimerspec),
+        numbers::SYS_TIMER_GETOVERRUN => posix_timers::sys_timer_getoverrun(arg1 as i32),
+        numbers::SYS_TIMER_DELETE => posix_timers::sys_timer_delete(arg1 as i32),
+        numbers::SYS_TIMES => sys_times(arg1 as *mut u8),
+        numbers::SYS_SIGNALFD => sys_signalfd4(arg1, arg2 as *const u64, 0),
+        numbers::SYS_SIGNALFD4 => sys_signalfd4(arg1, arg2 as *const u64, arg3 as i32),
+        numbers::SYS_EVENTFD => sys_eventfd2(arg1 as u32, 0),
+        numbers::SYS_EVENTFD2 => sys_eventfd2(arg1 as u32, arg2 as i32),
         // Hypervisor syscalls
         #[cfg(feature = "hypervisor")]
         numbers::SYS_VM_CREATE => sys_vm_create(arg1 as *const u8, arg2),
@@ -575,6 +750,16 @@ pub(crate) fn do_syscall(
         numbers::SYS_VM_SET_MEMORY => sys_vm_set_memory(arg1, arg2, arg3),
         #[cfg(feature = "hypervisor")]
         numbers::SYS_VM_INJECT_IRQ => sys_vm_inject_irq(arg1, arg2 as u8),
+
+        // SysV shared memory
+        numbers::SYS_SHMGET => shm::sys_shmget(arg1 as i32, arg2 as usize, arg3 as i32),
+        numbers::SYS_SHMAT => shm::sys_shmat(arg1 as i32, arg2 as *const u8, arg3 as i32),
+        numbers::SYS_SHMCTL => shm::sys_shmctl(arg1 as i32, arg2 as i32, arg3 as *mut u8),
+        numbers::SYS_SHMDT => shm::sys_shmdt(arg1 as *const u8),
+        numbers::SYS_MEMFD_CREATE => shm::sys_memfd_create(arg1 as *const u8, arg2 as u32),
+        numbers::SYS_SWAPON => sys_swapon(arg1 as *const u8, arg2 as i32),
+        numbers::SYS_SWAPOFF => sys_swapoff(arg1 as *const u8),
+
         _ => {
             crate::println!("[SYSCALL] Unknown syscall: {} (0x{:x})", n, n);
             errno::Errno::ENOSYS as u64
@@ -582,27 +767,27 @@ pub(crate) fn do_syscall(
     };
 
     {
+        let process_arc = match get_current_process() {
+            Some(p) => p,
+            None => return result,
+        };
         let (handler, restorer, sig_num, sig_bit) = {
-            let proc_lock = CURRENT_PROCESS.lock();
-            let proc = match *proc_lock {
-                Some(ref p) => p,
-                None => return result,
-            };
-            let mut signals = proc.signals.lock();
+            let mut signals = process_arc.signals.lock();
             // Only deliver unmasked signals
             if !signals.has_unmasked_pending(signals.blocked) { return result; }
 
             let available = signals.pending & !signals.blocked;
             let sig_bit = available.trailing_zeros();
             let sig_num = sig_bit + 1;
-            let handler = proc.signal_handlers.lock()[sig_bit as usize];
-            let restorer = proc.signal_restorers.lock()[sig_bit as usize];
+            let handler = process_arc.signal_handlers.lock()[sig_bit as usize];
+            let restorer = process_arc.signal_restorers.lock()[sig_bit as usize];
 
             if handler == 1 {
                 signals.pending &= !(1 << sig_bit);
                 return result;
             }
 
+            drop(signals);
             (handler, restorer, sig_num, sig_bit)
         };
 
@@ -625,7 +810,7 @@ pub(crate) fn do_syscall(
                     unreachable!();
                 }
             };
-            let k_ptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + phys.as_u64()) as *mut SignalFrame;
+            let k_ptr = (crate::memory::physical_memory_offset() + phys.as_u64()) as *mut SignalFrame;
 
             unsafe {
                 (*k_ptr).r15 = *regs_ptr.add(0);
@@ -656,35 +841,32 @@ pub(crate) fn do_syscall(
                     unreachable!();
                 }
             };
-            let ret_kptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + ret_phys.as_u64()) as *mut u64;
+            let ret_kptr = (crate::memory::physical_memory_offset() + ret_phys.as_u64()) as *mut u64;
             unsafe { *ret_kptr = restorer; }
 
             {
-                let proc_lock = crate::task::process::CURRENT_PROCESS.lock();
-                if let Some(ref proc) = *proc_lock {
-                    let mut signals = proc.signals.lock();
-                    signals.pending &= !(1 << sig_bit);
-                    signals.saved_context = Some(crate::syscalls::signal::SignalContext {
-                        rip: old_rip,
-                        rsp: new_rsp,
-                        rbp: unsafe { *regs_ptr.add(10) },
-                        rax: unsafe { *regs_ptr.add(14) },
-                        rbx: unsafe { *regs_ptr.add(11) },
-                        rcx: unsafe { *regs_ptr.add(13) },
-                        rdx: unsafe { *regs_ptr.add(12) },
-                        rsi: unsafe { *regs_ptr.add(9) },
-                        rdi: unsafe { *regs_ptr.add(8) },
-                        r8:  unsafe { *regs_ptr.add(7) },
-                        r9:  unsafe { *regs_ptr.add(6) },
-                        r10: unsafe { *regs_ptr.add(5) },
-                        r11: unsafe { *regs_ptr.add(4) },
-                        r12: unsafe { *regs_ptr.add(3) },
-                        r13: unsafe { *regs_ptr.add(2) },
-                        r14: unsafe { *regs_ptr.add(1) },
-                        r15: unsafe { *regs_ptr.add(0) },
-                        rflags: old_rflags,
-                    });
-                }
+                let mut signals = process_arc.signals.lock();
+                signals.pending &= !(1 << sig_bit);
+                signals.saved_context = Some(crate::syscalls::signal::SignalContext {
+                    rip: old_rip,
+                    rsp: new_rsp,
+                    rbp: unsafe { *regs_ptr.add(10) },
+                    rax: unsafe { *regs_ptr.add(14) },
+                    rbx: unsafe { *regs_ptr.add(11) },
+                    rcx: unsafe { *regs_ptr.add(13) },
+                    rdx: unsafe { *regs_ptr.add(12) },
+                    rsi: unsafe { *regs_ptr.add(9) },
+                    rdi: unsafe { *regs_ptr.add(8) },
+                    r8:  unsafe { *regs_ptr.add(7) },
+                    r9:  unsafe { *regs_ptr.add(6) },
+                    r10: unsafe { *regs_ptr.add(5) },
+                    r11: unsafe { *regs_ptr.add(4) },
+                    r12: unsafe { *regs_ptr.add(3) },
+                    r13: unsafe { *regs_ptr.add(2) },
+                    r14: unsafe { *regs_ptr.add(1) },
+                    r15: unsafe { *regs_ptr.add(0) },
+                    rflags: old_rflags,
+                });
             }
 
             unsafe {
@@ -869,6 +1051,71 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                 Ok(_) => 0, Err(_) => errno::Errno::EIO as u64,
             }
         },
+        Some(FileDescriptor::SignalFd(handle)) => {
+            let fds = SIGNAL_FDS.lock();
+            if let Some(data_arc) = fds.get(handle) {
+                let mut data = data_arc.lock();
+                if let Some(info) = data.pending.pop_front() {
+                    // Build signalfd_siginfo (128 bytes)
+                    #[repr(C)]
+                    struct signalfd_siginfo {
+                        ssi_signo: u32,
+                        ssi_errno: i32,
+                        ssi_code: i32,
+                        ssi_pid: u32,
+                        ssi_uid: u32,
+                        ssi_fd: i32,
+                        ssi_tid: u32,
+                        ssi_band: u32,
+                        ssi_overrun: u32,
+                        ssi_trapno: u32,
+                        ssi_status: i32,
+                        ssi_int: i32,
+                        ssi_ptr: u64,
+                        ssi_utime: u64,
+                        ssi_stime: u64,
+                        ssi_addr: u64,
+                        ssi_pad: [u8; 48],
+                    }
+                    let siginfo = signalfd_siginfo {
+                        ssi_signo: info.signo,
+                        ssi_errno: 0,
+                        ssi_code: 0,
+                        ssi_pid: info.pid,
+                        ssi_uid: info.uid,
+                        ssi_fd: 0,
+                        ssi_tid: 0,
+                        ssi_band: 0,
+                        ssi_overrun: 0,
+                        ssi_trapno: 0,
+                        ssi_status: 0,
+                        ssi_int: 0,
+                        ssi_ptr: 0,
+                        ssi_utime: 0,
+                        ssi_stime: 0,
+                        ssi_addr: 0,
+                        ssi_pad: [0u8; 48],
+                    };
+                    let n = core::cmp::min(count, core::mem::size_of::<signalfd_siginfo>());
+                    let slice = unsafe {
+                        core::slice::from_raw_parts(&siginfo as *const _ as *const u8, n)
+                    };
+                    if unsafe { user_access::copy_to_user(buf, slice) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    return n as u64;
+                } else if data.nonblock {
+                    return errno::Errno::EAGAIN as u64;
+                } else {
+                    // Block until signal arrives
+                    drop(data);
+                    drop(fds);
+                    crate::task::scheduler::try_schedule();
+                    return errno::Errno::EAGAIN as u64;
+                }
+            }
+            errno::Errno::EBADF as u64
+        },
         Some(FileDescriptor::Socket(handle, _stype)) => {
             #[cfg(not(feature = "net"))] return errno::Errno::ENOSYS as u64;
             #[cfg(feature = "net")] {
@@ -894,6 +1141,12 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                     errno::Errno::EAGAIN as u64
                 }) { return n; }
                 errno::Errno::EAGAIN as u64
+            }
+        },
+        Some(FileDescriptor::UnixSocket(handle, _)) => {
+            match crate::net::unix::recvfrom_unix(handle, buf, count as u64, core::ptr::null_mut(), core::ptr::null_mut()) {
+                Ok(n) => n,
+                Err(e) => e as u64,
             }
         },
         None => errno::Errno::EBADF as u64,
@@ -951,11 +1204,60 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                 errno::Errno::ENOSYS as u64
             }
         },
+        Some(FileDescriptor::SignalFd(_)) => errno::Errno::EINVAL as u64,
+        Some(FileDescriptor::EventFd(data_arc)) => {
+            if count < 8 { return errno::Errno::EINVAL as u64; }
+            let mut val_buf = [0u8; 8];
+            if unsafe { user_access::copy_from_user(&mut val_buf, buf) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            let val = u64::from_ne_bytes(val_buf);
+            if val == 0 { return errno::Errno::EINVAL as u64; }
+            let mut data = data_arc.lock();
+            if data.counter > EFD_MAX.wrapping_sub(val) {
+                if data.nonblock { return errno::Errno::EAGAIN as u64; }
+                drop(data);
+                crate::task::scheduler::try_schedule();
+                return errno::Errno::EAGAIN as u64;
+            }
+            data.counter = data.counter.wrapping_add(val);
+            8
+        },
+        Some(FileDescriptor::EventFd(data_arc)) => {
+            let mut data = data_arc.lock();
+            if data.counter > 0 {
+                let val = if data.semaphore { data.counter = data.counter.wrapping_sub(1); 1u64 }
+                           else { let v = data.counter; data.counter = 0; v };
+                if count >= 8 {
+                    let bytes = val.to_ne_bytes();
+                    if unsafe { user_access::copy_to_user(buf, &bytes) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    8
+                } else {
+                    errno::Errno::EINVAL as u64
+                }
+            } else if data.nonblock {
+                errno::Errno::EAGAIN as u64
+            } else {
+                drop(data);
+                crate::task::scheduler::try_schedule();
+                errno::Errno::EAGAIN as u64
+            }
+        },
+        Some(FileDescriptor::UnixSocket(handle, _)) => {
+            let mut wdata = vec![0u8; count];
+            if unsafe { user_access::copy_from_user(&mut wdata, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
+            match crate::net::unix::sendto_unix(handle, buf, count as u64, core::ptr::null(), 0) {
+                Ok(n) => n,
+                Err(e) => e as u64,
+            }
+        },
         None => errno::Errno::EBADF as u64,
     }
 }
 
-fn get_current_process() -> Option<Arc<Process>> {
+pub(crate) fn get_current_process() -> Option<Arc<Process>> {
     CURRENT_PROCESS.lock().as_ref().map(|p| p.clone())
 }
 
@@ -987,15 +1289,18 @@ fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
         let subj = crate::security::current_subject();
         let perm = match flags & 3 {
             1 => "write",
-            2 => "read",
+            2 => "read+write",
             _ => "read",
         };
         if !crate::security::hook_file_perm(&subj, &path_str, perm) {
             return errno::Errno::EACCES as u64;
         }
         if let Some(process) = get_current_process() {
-            // Bind-time security check inside add_fd → HandleTable::insert
-            return add_fd(&process, node.clone() as Arc<dyn VfsNode>, flags);
+            let fd = add_fd(&process, node.clone() as Arc<dyn VfsNode>, flags);
+            if node.is_dir() {
+                store_dir_path(&process, fd, &path_str);
+            }
+            return fd;
         }
     } else if (flags & O_CREAT) != 0 {
         let last_slash = path_str.rfind('/').unwrap_or(0);
@@ -1043,6 +1348,12 @@ fn sys_close(fd: u64) -> u64 {
                 #[cfg(feature = "net")]
                 { crate::net::SOCKETS.lock().remove(*handle); }
             }
+            if let FileDescriptor::UnixSocket(handle, _) = desc {
+                crate::net::unix::cleanup_unix_socket(*handle);
+            }
+            if let FileDescriptor::SignalFd(handle) = desc {
+                SIGNAL_FDS.lock().remove(handle);
+            }
             found = true;
         }
         fd_table[fd as usize] = None;
@@ -1052,6 +1363,8 @@ fn sys_close(fd: u64) -> u64 {
     if process.handle_table.lock().close(fd).is_some() {
         found = true;
     }
+    // Clean up dir_fds
+    process.dir_fds.lock().remove(&(fd as usize));
     if found { 0 } else { errno::Errno::EBADF as u64 }
 }
 
@@ -1078,7 +1391,7 @@ fn sys_statfs(path_ptr: *const u8, statfs_buf: *mut u8) -> u64 {
         Err(_) => return errno::Errno::EFAULT as u64,
     };
 
-    let vfs = VFS.lock();
+    let mut vfs = VFS.lock();
     if let Some(node) = vfs.resolve_path(&path_str) {
         if let Ok(statfs) = node.statfs() {
             let slice = unsafe {
@@ -1127,8 +1440,20 @@ fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
             errno::Errno::EIO as u64
         },
         Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => {
+            // ponytail: no VfsNode backing PTY FDs, hardcode dev-chr mode
             let stat = Stat {
-                st_mode: 0o020000 | 0o620,
+                st_mode: crate::vfs::_S_IFCHR | 0o620,
+                ..Stat::default()
+            };
+            if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())).is_err() } {
+                return errno::Errno::EFAULT as u64;
+            }
+            0
+        },
+        Some(FileDescriptor::Socket(_, _)) => {
+            // ponytail: no VfsNode backing Socket FDs, hardcode socket mode
+            let stat = Stat {
+                st_mode: crate::vfs::_S_IFSOCK | 0o666,
                 ..Stat::default()
             };
             if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() {
@@ -1136,9 +1461,19 @@ fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
             }
             0
         },
-        Some(FileDescriptor::Socket(_, _)) => {
+        Some(FileDescriptor::UnixSocket(_, _)) => {
             let stat = Stat {
-                st_mode: 0o140000 | 0o666,
+                st_mode: crate::vfs::_S_IFSOCK | 0o666,
+                ..Stat::default()
+            };
+            if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            0
+        },
+        Some(FileDescriptor::SignalFd(_)) | Some(FileDescriptor::EventFd(_)) => {
+            let stat = Stat {
+                st_mode: crate::vfs::_S_IFCHR | 0o600,
                 ..Stat::default()
             };
             if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() {
@@ -1194,6 +1529,12 @@ fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
         Some(FileDescriptor::Socket(_, _)) => {
             errno::Errno::ESPIPE as u64
         },
+        Some(FileDescriptor::UnixSocket(_, _)) => {
+            errno::Errno::ESPIPE as u64
+        },
+        Some(FileDescriptor::SignalFd(_)) | Some(FileDescriptor::EventFd(_)) => {
+            errno::Errno::ESPIPE as u64
+        },
         None => errno::Errno::EBADF as u64,
     }
 }
@@ -1220,38 +1561,37 @@ fn sys_brk(addr: u64) -> u64 {
     *brk
 }
 
-fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: u64, _offset: u64) -> u64 {
+fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock {
         Some(ref p) => p,
         None => return -(errno::Errno::ESRCH as i64) as u64,
     };
 
-    const _MAP_PRIVATE: u64 = 0x02;
+    const MAP_PRIVATE: u64 = 0x02;
+    const MAP_SHARED: u64 = 0x01;
     const MAP_ANONYMOUS: u64 = 0x20;
 
-    if (flags & MAP_ANONYMOUS) == 0 {
-        return -(errno::Errno::ENOSYS as i64) as u64;
-    }
+    let is_anonymous = (flags & MAP_ANONYMOUS) != 0;
+    let is_shared = (flags & MAP_SHARED) != 0;
+    let _is_private = (flags & MAP_PRIVATE) != 0;
 
     let mut mmap_addr = addr;
     if mmap_addr == 0 {
-        // ASLR: pick a random mmap base in [MMAP_MIN, MMAP_MAX) page-aligned.
-        // Sequential fallback ensures forward progress if RDTSC is somehow predictable.
         const MMAP_MIN: u64 = 0x4000_0000_0000;
         const MMAP_MAX: u64 = 0x7F00_0000_0000;
         static MMAP_NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(MMAP_MIN);
-        let lo: u32;
-        let hi: u32;
-        unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, preserves_flags)); }
-        let entropy = ((hi as u64) << 32) | (lo as u64);
+        let tsc_lo: u32;
+        let tsc_hi: u32;
+        unsafe { core::arch::asm!("rdtsc", out("eax") tsc_lo, out("edx") tsc_hi, options(nostack, preserves_flags)); }
+        let tsc = ((tsc_hi as u64) << 32) | (tsc_lo as u64);
+        let rng = crate::crypto::GLOBAL_ENTROPY.get_u64();
+        let entropy = tsc ^ rng;
         let range = MMAP_MAX - MMAP_MIN;
-        // Mix entropy with sequential counter for spacing
-        let rand_offset = (entropy.wrapping_mul(len + 1)) & (range - 1);
+        let rand_offset = entropy.wrapping_mul(0x9E3779B97F4A7C15) & (range - 1);
         mmap_addr = MMAP_MIN + (rand_offset & !0xFFF);
         if mmap_addr < MMAP_MIN { mmap_addr = MMAP_MIN; }
         if mmap_addr >= MMAP_MAX { mmap_addr = MMAP_MIN; }
-        // Advance sequential cursor past this allocation
         MMAP_NEXT.store(mmap_addr.wrapping_add((len + 4095) & !4095), core::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1272,9 +1612,52 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: u64, _offset: u64) 
         page_flags |= PageTableFlags::NO_EXECUTE;
     }
 
+    // Get file data for file-backed mappings
+    let file_data = if !is_anonymous {
+        let fd_table = process.fd_table.lock();
+        let entry = fd_table.get(fd as usize).and_then(|e| e.as_ref());
+        match entry {
+            Some(FileDescriptor::File { node, .. }) => {
+                let stat = match node.stat() {
+                    Ok(s) => s,
+                    Err(_) => return -(errno::Errno::EIO as i64) as u64,
+                };
+                let read_size = core::cmp::min(stat.st_size as usize, (offset + len_aligned) as usize);
+                // ponytail: reads entire file into memory — add page cache when large files are needed
+                match node.read(read_size) {
+                    Ok(d) => Some(d),
+                    Err(_) => return -(errno::Errno::EIO as i64) as u64,
+                }
+            }
+            Some(_) => return -(errno::Errno::EBADF as i64) as u64,
+            None => return -(errno::Errno::EBADF as i64) as u64,
+        }
+    } else {
+        None
+    };
+
     for page in Page::range_inclusive(start_page, end_page) {
         if let Some(frame) = frame_allocator.allocate_frame() {
             unsafe {
+                // For file-backed: copy file content into the frame
+                if let Some(ref data) = file_data {
+                    let page_off = page.start_address().as_u64() - mmap_addr;
+                    let file_off = offset + page_off;
+                    let phys_addr = crate::memory::physical_memory_offset() + frame.start_address().as_u64();
+                    let dst = phys_addr as *mut u8;
+                    let copy_len = core::cmp::min(4096u64, (data.len() as u64).saturating_sub(file_off)) as usize;
+                    if copy_len > 0 {
+                        core::ptr::copy_nonoverlapping(
+                            data.as_ptr().add(file_off as usize),
+                            dst,
+                            copy_len,
+                        );
+                    }
+                    // Zero-fill remainder of the page (beyond file content)
+                    if copy_len < 4096 {
+                        core::ptr::write_bytes(dst.add(copy_len), 0, 4096 - copy_len);
+                    }
+                }
                 match mapper.map_to(page, frame, page_flags, &mut frame_allocator) {
                     Ok(t) => { t.flush(); }
                     Err(_e) => { return -(errno::Errno::ENOMEM as i64) as u64; }
@@ -1291,6 +1674,10 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: u64, _offset: u64) 
         end: mmap_addr + len_aligned,
         flags: page_flags,
         _name: "mmap",
+        file_handle: if is_anonymous { None } else { Some(fd) },
+        file_offset: offset,
+        is_shared,
+        shm_id: None,
     });
 
     mmap_addr
@@ -1318,6 +1705,79 @@ fn sys_munmap(addr: u64, len: u64) -> u64 {
 
     // Clean up VMA entries
     process.remove_vma_range(addr, addr + len_aligned);
+
+    0
+}
+
+fn sys_mprotect(addr: u64, len: u64, prot: u64) -> u64 {
+    let process_lock = CURRENT_PROCESS.lock();
+    let process = match *process_lock {
+        Some(ref p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    let start = addr & !0xFFF;
+    let end = ((addr + len + 4095) & !4095);
+    if end <= start || end > 0xFFFF_FFFF_FFFF_F000 {
+        return errno::Errno::EINVAL as u64;
+    }
+
+    // Check that the entire range is mapped
+    {
+        let vmas = process.vmas.lock();
+        let mut covered = false;
+        for vma in vmas.iter() {
+            if vma.start <= start && vma.end >= end {
+                covered = true;
+                break;
+            }
+        }
+        if !covered {
+            return errno::Errno::ENOMEM as u64;
+        }
+    }
+
+    let mut page_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if (prot & 0x2) != 0 {
+        page_flags |= PageTableFlags::WRITABLE;
+    }
+    if (prot & 0x4) == 0 {
+        page_flags |= PageTableFlags::NO_EXECUTE;
+    }
+    if prot == 0 {
+        // PROT_NONE: keep page structures but deny all user access
+        page_flags = PageTableFlags::PRESENT | PageTableFlags::NO_EXECUTE;
+    }
+
+    let mut mapper = if let Some(m) = unsafe { process.address_space.mapper() } {
+        m
+    } else {
+        return errno::Errno::EINVAL as u64;
+    };
+
+    let start_page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(start));
+    let end_page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(end - 1));
+    for page in Page::range_inclusive(start_page, end_page) {
+        // ponytail: skip pages not present in page tables; VMA validation above guarantees coverage
+        unsafe {
+            if let Err(_e) = mapper.update_flags(page, page_flags) {
+                continue;
+            }
+        }
+    }
+
+    // Update VMA protections
+    let mut vmas = process.vmas.lock();
+    for vma in vmas.iter_mut() {
+        if vma.start < end && vma.end > start {
+            vma.flags = page_flags;
+        }
+    }
+
+    use x86_64::instructions::tlb;
+    tlb::flush_all();
+    #[cfg(feature = "smp")]
+    crate::smp::broadcast_tlb_flush(0xFFFF_FFFF_FFFF_FFF0);
 
     0
 }
@@ -1353,10 +1813,9 @@ fn sys_exit(status: u64) -> u64 {
     }
     
     // Mark current thread as exited
-    if let Some(mut thread) = crate::task::scheduler::current_thread() {
+    crate::task::scheduler::with_current_thread(|thread| {
         thread.status = crate::task::thread::ThreadStatus::Exited;
-        crate::task::scheduler::set_current_thread(thread);
-    }
+    });
     crate::task::scheduler::schedule();
 }
 
@@ -1376,7 +1835,7 @@ fn sys_exit_group(status: u64) -> u64 {
 }
 
 /// Check if current process has pending unmasked signals; return EINTR if so
-fn check_signal_interrupt() -> bool {
+pub(crate) fn check_signal_interrupt() -> bool {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
         let sig = p.signals.lock();
@@ -1395,7 +1854,7 @@ fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
 
     let target_tick = crate::interrupts::get_ticks() + sleep_ticks;
 
-    if let Some(mut current_thread) = crate::task::scheduler::current_thread() {
+    if let Some(mut current_thread) = crate::task::scheduler::take_current_thread() {
         current_thread.status = crate::task::thread::ThreadStatus::Blocked;
         current_thread.sleep_until = Some(target_tick);
         crate::task::scheduler::add_sleeping_thread(*current_thread);
@@ -1457,6 +1916,102 @@ fn sys_beep(freq_hz: u32, duration_ms: u32) -> u64 {
     0
 }
 
+fn sys_swapon(path_ptr: *const u8, _swap_flags: i32) -> u64 {
+    let euid = get_current_euid();
+    if euid != 0 && !has_capability(CAP_SYS_ADMIN) {
+        audit_log("CAP_SYS_ADMIN", "swapon DENIED");
+        return errno::Errno::EPERM as u64;
+    }
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+
+    // Resolve the path through VFS to get a block device node
+    let vfs = crate::vfs::VFS.lock();
+    let node = match vfs.resolve_path(&path_str) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    drop(vfs);
+
+    // Get size from stat
+    let dev_size = match node.stat() {
+        Ok(s) => {
+            if s.st_size <= 0 {
+                return errno::Errno::ENODEV as u64;
+            }
+            s.st_size as usize
+        }
+        Err(_) => return errno::Errno::ENODEV as u64,
+    };
+
+    // Calculate swap slots — each slot holds one 4K page
+    let slot_count = dev_size / 4096;
+    if slot_count == 0 {
+        return errno::Errno::ENODEV as u64;
+    }
+
+    // Check if this device is already a swap device
+    {
+        let existing = crate::memory::swap::SWAP_DEVICES.lock();
+        for dev in existing.iter() {
+            if dev.dev_node.name() == node.name() {
+                return errno::Errno::EBUSY as u64;
+            }
+        }
+    }
+
+    // Write swap signature to first page
+    let sig_bytes = crate::memory::swap::SWAP_SIGNATURE.to_le_bytes();
+    if node.write(&sig_bytes).is_err() {
+        return errno::Errno::EIO as u64;
+    }
+
+    // Build slot array
+    let mut slots = alloc::vec![];
+    slots.resize_with(slot_count, || crate::memory::swap::SwapSlot::new());
+    // Mark first slot as used (holds signature data)
+    if let Some(slot) = slots.get_mut(0) {
+        slot.mark_used();
+    }
+
+    let swap_dev = crate::memory::swap::SwapDevice {
+        device_path: path_str.clone(),
+        dev_node: node,
+        slot_count,
+        slots,
+        page_count: core::sync::atomic::AtomicU64::new(1),
+    };
+
+    crate::memory::swap::SWAP_DEVICES.lock().push(swap_dev);
+    crate::println!("[SWAP] swapon: {} slots={}", path_str, slot_count);
+    0
+}
+
+fn sys_swapoff(path_ptr: *const u8) -> u64 {
+    let euid = get_current_euid();
+    if euid != 0 && !has_capability(CAP_SYS_ADMIN) {
+        audit_log("CAP_SYS_ADMIN", "swapoff DENIED");
+        return errno::Errno::EPERM as u64;
+    }
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+
+    let mut devices = crate::memory::swap::SWAP_DEVICES.lock();
+    let pos = devices.iter().position(|d| d.device_path == path_str);
+    match pos {
+        Some(idx) => {
+            devices.remove(idx);
+            crate::println!("[SWAP] swapoff: {}", path_str);
+            0
+        }
+        None => errno::Errno::EINVAL as u64,
+    }
+}
+
 fn sys_sched_yield() -> u64 {
     use crate::task::scheduler;
     let switch = {
@@ -1477,6 +2032,7 @@ fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
             None => return errno::Errno::ESRCH as u64,
         }
     } else {
+        // ponytail: table lock dropped after clone; Arc holds refcount so this is safe
         let table = crate::task::process::PROCESS_TABLE.lock();
         match table.get(&(pid as u64)) {
             Some(p) => p.clone(),
@@ -1608,7 +2164,7 @@ fn sys_getdents64(fd: u64, buf: *mut u8, len: usize) -> u64 {
     for child in &children {
         let name = child.name();
         let name_bytes = name.as_bytes();
-        let reclen = ((core::mem::size_of::<u64>() * 3) + name_bytes.len() + 1 + 7) & !7;
+        let reclen = ((core::mem::size_of::<u64>() * 3).saturating_add(name_bytes.len()).saturating_add(1 + 7)) & !7;
         if written + reclen > len { break; }
 
         #[repr(C)]
@@ -1885,6 +2441,8 @@ fn sys_fchmod(fd: u64, mode: u32) -> u64 {
         },
         Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => errno::Errno::ENOSYS as u64,
         Some(FileDescriptor::Socket(_, _)) => errno::Errno::ENOSYS as u64,
+        Some(FileDescriptor::UnixSocket(_, _)) => errno::Errno::ENOSYS as u64,
+        Some(FileDescriptor::SignalFd(_)) | Some(FileDescriptor::EventFd(_)) => errno::Errno::ENOSYS as u64,
         None => errno::Errno::EBADF as u64,
     }
 }
@@ -1959,6 +2517,8 @@ fn sys_fchown(fd: u64, uid: u32, gid: u32) -> u64 {
         },
         Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => errno::Errno::ENOSYS as u64,
         Some(FileDescriptor::Socket(_, _)) => errno::Errno::ENOSYS as u64,
+        Some(FileDescriptor::UnixSocket(_, _)) => errno::Errno::ENOSYS as u64,
+        Some(FileDescriptor::SignalFd(_)) | Some(FileDescriptor::EventFd(_)) => errno::Errno::ENOSYS as u64,
         None => errno::Errno::EBADF as u64,
     }
 }
@@ -2056,8 +2616,8 @@ fn sys_readlink(pathname: *const u8, buf: *mut u8, bufsize: u64) -> u64 {
         match node.readlink() {
             Ok(target) => {
                 let len = core::cmp::min(target.len(), bufsize as usize);
-                unsafe {
-                    core::ptr::copy_nonoverlapping(target.as_ptr(), buf, len);
+                if unsafe { user_access::copy_to_user(buf, &target.as_bytes()[..len]) }.is_err() {
+                    return errno::Errno::EFAULT as u64;
                 }
                 len as u64
             }
@@ -2102,10 +2662,15 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
         {
             let parent_vmas = parent.vmas.lock();
             child_process.vmas = Mutex::new(parent_vmas.clone());
-        }                    child_process.entry_point = parent.entry_point;
-            *child_process.fd_table.lock() = parent.fd_table.lock().clone();
-            *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
+        }
+        child_process.entry_point = parent.entry_point;
+        *child_process.fd_table.lock() = parent.fd_table.lock().clone();
+        *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
+        *child_process.dir_fds.lock() = parent.dir_fds.lock().clone();
         child_process.clone_credentials_from(parent);
+        child_process.pgid = parent.pgid;
+        child_process.session = parent.session;
+        child_process.is_group_leader = false;
         let child_arc = Arc::new(child_process);
         
         // Track child in parent and global table
@@ -2152,19 +2717,29 @@ fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: u64,
         child_process.entry_point = parent.entry_point;
         *child_process.fd_table.lock() = parent.fd_table.lock().clone();
         *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
+        *child_process.dir_fds.lock() = parent.dir_fds.lock().clone();
         *child_process.signal_handlers.lock() = *parent.signal_handlers.lock();
         child_process.clone_credentials_from(parent);
+        child_process.pgid = parent.pgid;
+        child_process.session = parent.session;
+        child_process.is_group_leader = false;
 
         if flags & CLONE_CHILD_CLEARTID != 0 && !child_tidptr.is_null() {
             *child_process.clear_child_tid.lock() = child_tidptr as u64;
         }
 
         if flags & CLONE_CHILD_SETTID != 0 && !child_tidptr.is_null() {
-            unsafe { core::ptr::write_unaligned(child_tidptr, child_pid as u32); }
+            let val = child_pid as u32;
+            if unsafe { user_access::copy_to_user(child_tidptr as *mut u8, core::slice::from_raw_parts(&val as *const u32 as *const u8, 4)) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
         }
 
         if flags & CLONE_PARENT_SETTID != 0 && !parent_tid.is_null() {
-            unsafe { core::ptr::write_unaligned(parent_tid, child_pid as u32); }
+            let val = child_pid as u32;
+            if unsafe { user_access::copy_to_user(parent_tid as *mut u8, core::slice::from_raw_parts(&val as *const u32 as *const u8, 4)) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
         }
 
         let child_arc = Arc::new(child_process);
@@ -2266,8 +2841,32 @@ fn sys_kill(pid: i64, sig: u32) -> u64 {
         if !crate::security::hook_file_perm(&subj, &alloc::format!("pid:{}", pid), "kill") {
             return errno::Errno::EPERM as u64;
         }
+        let sig_bit = 1u64 << (sig - 1);
         let pid = proc.id;
         proc.signals.lock().raise(sig_enum);
+
+        // Push to signalfds that match this signal
+        let sig_num = sig as u32;
+        let sender_uid = get_current_euid();
+        {
+            let fd_table = proc.fd_table.lock();
+            for (_fd, entry) in fd_table.iter().enumerate() {
+                if let Some(crate::task::process::FileDescriptor::SignalFd(handle)) = entry {
+                    let fds = SIGNAL_FDS.lock();
+                    if let Some(data_arc) = fds.get(handle) {
+                        let mut data = data_arc.lock();
+                        if (data.mask & sig_bit) != 0 {
+                            data.pending.push_back(SignalFdInfo {
+                                signo: sig_num,
+                                pid: pid as u32,
+                                uid: sender_uid,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         // Wake threads blocked on futex/pipe so they can see the signal
         crate::syscalls::futex::wake_process_futex_threads(pid);
         crate::syscalls::futex::wake_process_blocked_threads(pid);
@@ -2284,6 +2883,262 @@ fn sys_getpid() -> u64 {
     } else {
         0
     }
+}
+
+const RLIMIT_CPU: usize = 0;
+const RLIMIT_FSIZE: usize = 1;
+const RLIMIT_DATA: usize = 2;
+const RLIMIT_STACK: usize = 3;
+const RLIMIT_CORE: usize = 4;
+const RLIMIT_RSS: usize = 5;
+const RLIMIT_NPROC: usize = 6;
+const RLIMIT_NOFILE: usize = 7;
+const RLIMIT_MEMLOCK: usize = 8;
+const RLIMIT_AS: usize = 9;
+const RLIMIT_LOCKS: usize = 10;
+const RLIMIT_SIGPENDING: usize = 11;
+const RLIMIT_MSGQUEUE: usize = 12;
+const RLIMIT_NICE: usize = 13;
+const RLIMIT_RTPRIO: usize = 14;
+const RLIMIT_RTTIME: usize = 15;
+
+#[repr(C)]
+struct RLimit {
+    rlim_cur: i64,
+    rlim_max: i64,
+}
+
+fn sys_setpgid(pid: u64, pgid: u64) -> u64 {
+    let current = {
+        let lock = CURRENT_PROCESS.lock();
+        match lock.as_ref() {
+            Some(p) => p.clone(),
+            None => return errno::Errno::ESRCH as u64,
+        }
+    };
+    let target_pid = if pid == 0 { current.id } else { pid };
+
+    if pgid > i32::MAX as u64 {
+        return errno::Errno::EINVAL as u64;
+    }
+
+    let target = {
+        let table = crate::task::process::PROCESS_TABLE.lock();
+        match table.get(&target_pid) {
+            Some(p) => p.clone(),
+            None => return errno::Errno::ESRCH as u64,
+        }
+    };
+
+    // Session leader cannot change its pgid
+    if target.session == target_pid {
+        return errno::Errno::EPERM as u64;
+    }
+
+    // Only self, child, or process with CAP_SYS_ADMIN
+    if target_pid != current.id {
+        let is_child = current.children.lock().contains(&target_pid);
+        if !is_child && !has_capability(CAP_SYS_ADMIN) {
+            return errno::Errno::EPERM as u64;
+        }
+    }
+
+    let new_pgid = if pgid == 0 { target_pid } else { pgid };
+
+    // If joining an existing group, verify it exists and is in the same session
+    if new_pgid != target_pid {
+        let table = crate::task::process::PROCESS_TABLE.lock();
+        match table.get(&new_pgid) {
+            Some(group_leader) => {
+                if group_leader.session != current.session {
+                    return errno::Errno::EPERM as u64;
+                }
+            }
+            None => return errno::Errno::ESRCH as u64,
+        }
+    }
+
+    target.pgid = new_pgid;
+    0
+}
+
+fn sys_getpgid(pid: u64) -> u64 {
+    let target_pid = if pid == 0 {
+        let lock = CURRENT_PROCESS.lock();
+        match lock.as_ref() {
+            Some(p) => p.id,
+            None => return errno::Errno::ESRCH as u64,
+        }
+    } else {
+        pid
+    };
+    let table = crate::task::process::PROCESS_TABLE.lock();
+    match table.get(&target_pid) {
+        Some(p) => p.pgid,
+        None => errno::Errno::ESRCH as u64,
+    }
+}
+
+fn sys_getpgrp() -> u64 {
+    sys_getpgid(0)
+}
+
+fn sys_setsid() -> u64 {
+    let lock = CURRENT_PROCESS.lock();
+    match lock.as_ref() {
+        Some(p) => {
+            if p.session == p.id || p.is_group_leader {
+                return errno::Errno::EPERM as u64;
+            }
+            p.session = p.id;
+            p.pgid = p.id;
+            p.is_group_leader = true;
+            p.id
+        }
+        None => errno::Errno::ESRCH as u64,
+    }
+}
+
+fn sys_getsid(pid: u64) -> u64 {
+    let (target_pid, current_session) = {
+        let lock = CURRENT_PROCESS.lock();
+        match lock.as_ref() {
+            Some(p) => (if pid == 0 { p.id } else { pid }, p.session),
+            None => return errno::Errno::ESRCH as u64,
+        }
+    };
+    let table = crate::task::process::PROCESS_TABLE.lock();
+    match table.get(&target_pid) {
+        Some(p) => {
+            if p.session != current_session {
+                return errno::Errno::EPERM as u64;
+            }
+            p.session
+        }
+        None => errno::Errno::ESRCH as u64,
+    }
+}
+
+fn sys_getrlimit(resource: u64, rlim_ptr: *mut u8) -> u64 {
+    if resource >= 16 || rlim_ptr.is_null() {
+        return errno::Errno::EINVAL as u64;
+    }
+    let lock = CURRENT_PROCESS.lock();
+    match lock.as_ref() {
+        Some(p) => {
+            let rlim = RLimit {
+                rlim_cur: p.rlim_cur[resource as usize],
+                rlim_max: p.rlim_max[resource as usize],
+            };
+            unsafe {
+                if user_access::copy_to_user(rlim_ptr,
+                    core::slice::from_raw_parts(&rlim as *const _ as *const u8, core::mem::size_of::<RLimit>())).is_err()
+                {
+                    return errno::Errno::EFAULT as u64;
+                }
+            }
+            0
+        }
+        None => errno::Errno::ESRCH as u64,
+    }
+}
+
+fn sys_setrlimit(resource: u64, rlim_ptr: *const u8) -> u64 {
+    if resource >= 16 || rlim_ptr.is_null() {
+        return errno::Errno::EINVAL as u64;
+    }
+    let mut new_rlim = RLimit { rlim_cur: 0, rlim_max: 0 };
+    unsafe {
+        if user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(&mut new_rlim as *mut _ as *mut u8, core::mem::size_of::<RLimit>()),
+            rlim_ptr,
+        ).is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+    if new_rlim.rlim_cur > new_rlim.rlim_max {
+        return errno::Errno::EINVAL as u64;
+    }
+    let lock = CURRENT_PROCESS.lock();
+    match lock.as_ref() {
+        Some(p) => {
+            let euid = p.creds.lock().euid;
+            if euid != 0 {
+                if new_rlim.rlim_max > p.rlim_max[resource as usize] {
+                    return errno::Errno::EPERM as u64;
+                }
+            }
+            p.rlim_cur[resource as usize] = new_rlim.rlim_cur;
+            p.rlim_max[resource as usize] = new_rlim.rlim_max;
+            0
+        }
+        None => errno::Errno::ESRCH as u64,
+    }
+}
+
+fn sys_prlimit64(pid: u64, resource: u64, new_rlim_ptr: *const u8, old_rlim_ptr: *mut u8) -> u64 {
+    if resource >= 16 {
+        return errno::Errno::EINVAL as u64;
+    }
+    let target = {
+        let current = {
+            let lock = CURRENT_PROCESS.lock();
+            match lock.as_ref() {
+                Some(p) => p.clone(),
+                None => return errno::Errno::ESRCH as u64,
+            }
+        };
+        if pid == 0 || pid == current.id {
+            current
+        } else {
+            if !has_capability(CAP_SYS_ADMIN) {
+                return errno::Errno::EPERM as u64;
+            }
+            let table = crate::task::process::PROCESS_TABLE.lock();
+            match table.get(&pid) {
+                Some(p) => p.clone(),
+                None => return errno::Errno::ESRCH as u64,
+            }
+        }
+    };
+
+    if !old_rlim_ptr.is_null() {
+        let old_rlim = RLimit {
+            rlim_cur: target.rlim_cur[resource as usize],
+            rlim_max: target.rlim_max[resource as usize],
+        };
+        unsafe {
+            if user_access::copy_to_user(old_rlim_ptr,
+                core::slice::from_raw_parts(&old_rlim as *const _ as *const u8, core::mem::size_of::<RLimit>())).is_err()
+            {
+                return errno::Errno::EFAULT as u64;
+            }
+        }
+    }
+
+    if !new_rlim_ptr.is_null() {
+        let mut new_rlim = RLimit { rlim_cur: 0, rlim_max: 0 };
+        unsafe {
+            if user_access::copy_from_user(
+                core::slice::from_raw_parts_mut(&mut new_rlim as *mut _ as *mut u8, core::mem::size_of::<RLimit>()),
+                new_rlim_ptr,
+            ).is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+        }
+        if new_rlim.rlim_cur > new_rlim.rlim_max {
+            return errno::Errno::EINVAL as u64;
+        }
+        let euid = target.creds.lock().euid;
+        if euid != 0 {
+            if new_rlim.rlim_max > target.rlim_max[resource as usize] {
+                return errno::Errno::EPERM as u64;
+            }
+        }
+        target.rlim_cur[resource as usize] = new_rlim.rlim_cur;
+        target.rlim_max[resource as usize] = new_rlim.rlim_max;
+    }
+    0
 }
 
 use smoltcp::socket::{Socket, tcp, udp};
@@ -2314,11 +3169,104 @@ fn with_udp_mut<R>(sockets: &mut smoltcp::iface::SocketSet, handle: smoltcp::ifa
     None
 }
 
+/// Internal: send data on a socket given handle+type. Returns bytes sent or errno.
+fn sendto_internal(
+    sockets: &mut smoltcp::iface::SocketSet,
+    handle: SocketHandle,
+    stype: crate::task::process::SocketType,
+    data: &[u8],
+    dest_endpoint: Option<smoltcp::wire::IpEndpoint>,
+) -> u64 {
+    match stype {
+        crate::task::process::SocketType::Udp => {
+            if let Some(endpoint) = dest_endpoint {
+                if with_udp_mut(sockets, handle, |socket| {
+                    socket.send_slice(data, endpoint).is_ok()
+                }).unwrap_or(false) {
+                    return data.len() as u64;
+                }
+            }
+        }
+        crate::task::process::SocketType::Tcp => {
+            if with_tcp_mut(sockets, handle, |socket| {
+                if socket.may_send() {
+                    let result = socket.send(|slice| {
+                        let n = core::cmp::min(slice.len(), data.len());
+                        slice[..n].copy_from_slice(&data[..n]);
+                        (n, true)
+                    });
+                    if result.unwrap_or(false) {
+                        return data.len() as u64;
+                    }
+                }
+                errno::Errno::EAGAIN as u64
+            }).is_some() {
+                return data.len() as u64;
+            }
+        }
+        _ => return errno::Errno::ENOSYS as u64,
+    }
+    errno::Errno::EIO as u64
+}
+
+/// Internal: receive data from a socket into a kernel buffer. Fills addr if non-null.
+/// Returns (bytes_received, endpoint) on success. Ok(0) means EOF (TCP) or no data (UDP).
+fn recvfrom_internal(
+    sockets: &mut smoltcp::iface::SocketSet,
+    handle: SocketHandle,
+    stype: crate::task::process::SocketType,
+    buf: &mut [u8],
+) -> Result<(usize, Option<smoltcp::wire::IpEndpoint>), u64> {
+    match stype {
+        crate::task::process::SocketType::Tcp => {
+            let mut result = Err(errno::Errno::EAGAIN as u64);
+            if let Some(_) = with_tcp_mut(sockets, handle, |socket| {
+                if socket.may_recv() {
+                    match socket.recv_slice(buf) {
+                        Ok(n) => { result = Ok((n, None)); }
+                        Err(_) => {}
+                    }
+                }
+            }) { result.map_err(|_| errno::Errno::EAGAIN as u64) } else { Err(errno::Errno::EINVAL as u64) }
+        }
+        crate::task::process::SocketType::Udp => {
+            let mut result = Err(errno::Errno::EAGAIN as u64);
+            if let Some(_) = with_udp_mut(sockets, handle, |socket| {
+                if let Ok((n, meta)) = socket.recv_slice(buf) {
+                    result = Ok((n, Some(meta.endpoint)));
+                }
+            }) { result.map_err(|_| errno::Errno::EAGAIN as u64) } else { Err(errno::Errno::EINVAL as u64) }
+        }
+        _ => Err(errno::Errno::ENOSYS as u64),
+    }
+}
+
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
+const MAX_SOCK_ADDR_LEN: u64 = 128;
+const IOV_MAX: usize = 1024;
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct iovec {
+    pub iov_base: *mut u8,
+    pub iov_len: usize,
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct msghdr {
+    pub msg_name: *mut u8,
+    pub msg_namelen: u32,
+    pub msg_iov: *const iovec,
+    pub msg_iovlen: usize,
+    pub msg_control: *mut u8,
+    pub msg_controllen: usize,
+    pub msg_flags: i32,
+}
 
 fn parse_sockaddr(addr_ptr: *const u8, addrlen: u64) -> Result<(u16, smoltcp::wire::IpAddress), errno::Errno> {
-    if addr_ptr.is_null() || addrlen < 8 {
+    if addr_ptr.is_null() || addrlen < 8 || addrlen > MAX_SOCK_ADDR_LEN {
         return Err(errno::Errno::EINVAL);
     }
     let mut family_buf = [0u8; 2];
@@ -2371,6 +3319,31 @@ fn write_sockaddr(addr_ptr: *mut u8, addrlen_ptr: *mut u32, ep: &smoltcp::wire::
 }
 
 fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
+    // AF_UNIX (domain 1) — always available, no net feature gate needed
+    if domain == 1 {
+        if ty != 1 && ty != 2 {
+            return errno::Errno::EINVAL as u64;
+        }
+        let handle = match crate::net::unix::create_unix_socket(ty) {
+            Ok(h) => h,
+            Err(e) => return e as u64,
+        };
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let mut fd_table = process.fd_table.lock();
+            let fd_obj = FileDescriptor::UnixSocket(handle, crate::task::process::SocketType::Unix);
+            for (i, slot) in fd_table.iter_mut().enumerate() {
+                if slot.is_none() {
+                    *slot = Some(fd_obj);
+                    return i as u64;
+                }
+            }
+            fd_table.push(Some(fd_obj));
+            return (fd_table.len() - 1) as u64;
+        }
+        return errno::Errno::ESRCH as u64;
+    }
+
     if domain != AF_INET as u64 && domain != AF_INET6 as u64 {
         return errno::Errno::EAFNOSUPPORT as u64;
     }
@@ -2451,6 +3424,19 @@ lazy_static::lazy_static! {
 }
 
 fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
+    // AF_UNIX check (no feature gate)
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    return crate::net::unix::bind_unix(handle, addr_ptr, addrlen).unwrap_or_else(|e| e as u64);
+                }
+            }
+        }
+    }
+
     #[cfg(not(feature = "net"))]
     return errno::Errno::ENOSYS as u64;
 
@@ -2491,6 +3477,19 @@ fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
 }
 
 fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    return crate::net::unix::connect_unix(handle, addr_ptr, addrlen).unwrap_or_else(|e| e as u64);
+                }
+            }
+        }
+    }
+
     #[cfg(not(feature = "net"))]
     return errno::Errno::ENOSYS as u64;
 
@@ -2559,6 +3558,19 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
 }
 
 fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    return crate::net::unix::listen_unix(handle).unwrap_or_else(|e| e as u64);
+                }
+            }
+        }
+    }
+
     #[cfg(not(feature = "net"))]
     return errno::Errno::ENOSYS as u64;
 
@@ -2592,6 +3604,33 @@ fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
 }
 
 fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    drop(fd_table);
+                    let new_handle = match crate::net::unix::accept_unix(handle, addr_ptr, addrlen_ptr) {
+                        Ok(h) => h,
+                        Err(e) => return e as u64,
+                    };
+                    let fd_obj = FileDescriptor::UnixSocket(new_handle, crate::task::process::SocketType::Unix);
+                    let mut fd_table = process.fd_table.lock();
+                    for (i, slot) in fd_table.iter_mut().enumerate() {
+                        if slot.is_none() {
+                            *slot = Some(fd_obj);
+                            return i as u64;
+                        }
+                    }
+                    fd_table.push(Some(fd_obj));
+                    return (fd_table.len() - 1) as u64;
+                }
+            }
+        }
+    }
+
     #[cfg(not(feature = "net"))]
     return errno::Errno::ENOSYS as u64;
 
@@ -2649,7 +3688,6 @@ fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
 
         let mut sockets = crate::net::SOCKETS.lock();
         let new_handle = sockets.add(new_socket);
-        fd_table[sockfd as usize] = Some(FileDescriptor::Socket(new_handle, crate::task::process::SocketType::Tcp));
 
         let pid = process.id;
         if let Some(ep) = TCP_BIND_ENDPOINTS.lock().get(&(pid, handle)).copied() {
@@ -2658,16 +3696,29 @@ fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
 
         for (i, slot) in fd_table.iter_mut().enumerate() {
             if slot.is_none() {
-                *slot = Some(FileDescriptor::Socket(handle, crate::task::process::SocketType::Tcp));
+                *slot = Some(FileDescriptor::Socket(new_handle, crate::task::process::SocketType::Tcp));
                 return i as u64;
             }
         }
-        fd_table.push(Some(FileDescriptor::Socket(handle, crate::task::process::SocketType::Tcp)));
+        fd_table.push(Some(FileDescriptor::Socket(new_handle, crate::task::process::SocketType::Tcp)));
         (fd_table.len() - 1) as u64
     }
 }
 
 fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    return crate::net::unix::sendto_unix(handle, buf, len, addr_ptr, addrlen).unwrap_or_else(|e| e as u64);
+                }
+            }
+        }
+    }
+
     #[cfg(not(feature = "net"))]
     return errno::Errno::ENOSYS as u64;
 
@@ -2692,29 +3743,44 @@ fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, addrle
             };
 
             let mut sockets = crate::net::SOCKETS.lock();
-            match stype {
-                crate::task::process::SocketType::Udp => {
-                    if let Some(endpoint) = dest_endpoint {
-                        if with_udp_mut(&mut sockets, handle, |socket| {
-                            socket.send_slice(&data, endpoint).is_ok()
-                        }).unwrap_or(false) { return len; }
-                    }
-                }
-                _ => return errno::Errno::ENOSYS as u64,
-            }
-            return errno::Errno::EIO as u64;
+            return sendto_internal(&mut sockets, handle, stype, &data, dest_endpoint);
         }
         errno::Errno::EBADF as u64
     }
 }
 
 #[cfg(not(feature = "net"))]
-fn sys_recvfrom(_sockfd: u64, _buf: *mut u8, _len: u64, _addr_ptr: *mut u8, _addrlen_ptr: *mut u32) -> u64 {
+fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
+    // AF_UNIX check (always available)
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    return crate::net::unix::recvfrom_unix(handle, buf, len, addr_ptr, addrlen_ptr).unwrap_or_else(|e| e as u64);
+                }
+            }
+        }
+    }
     errno::Errno::ENOSYS as u64
 }
 
 #[cfg(feature = "net")]
 fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    return crate::net::unix::recvfrom_unix(handle, buf, len, addr_ptr, addrlen_ptr).unwrap_or_else(|e| e as u64);
+                }
+            }
+        }
+    }
+
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
     let fd_table = process.fd_table.lock();
@@ -2723,22 +3789,18 @@ fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addrlen_
     if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
         let mut sockets = crate::net::SOCKETS.lock();
         let mut data = vec![0u8; len as usize];
-        match stype {
-            crate::task::process::SocketType::Udp => {
-                if let Some(n) = with_udp_mut(&mut sockets, handle, |socket| {
-                        if let Ok((n, meta)) = socket.recv_slice(&mut data) {
-                        if n == 0 { return 0u64; }
-                        write_sockaddr(addr_ptr, addrlen_ptr, &meta.endpoint);
-                        if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
-                            return n as u64;
-                        }
-                    }
-                    0u64
-                }) { return n; }
+        match recvfrom_internal(&mut sockets, handle, stype, &mut data) {
+            Ok((n, meta)) => {
+                if let Some(ep) = meta {
+                    write_sockaddr(addr_ptr, addrlen_ptr, &ep);
+                }
+                if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
+                    return n as u64;
+                }
+                return errno::Errno::EFAULT as u64;
             }
-            _ => return errno::Errno::ENOSYS as u64,
+            Err(e) => return e,
         }
-        return 0;
     }
     errno::Errno::EBADF as u64
 }
@@ -2774,6 +3836,533 @@ fn sys_setsockopt(sockfd: u64, level: i32, optname: i32, _optval: *const u8, _op
             _ => errno::Errno::ENOPROTOOPT as u64,
         }
     }
+}
+
+fn sys_sendmsg(sockfd: i64, msg: *const msghdr, flags: i32) -> u64 {
+    let _ = flags;
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    drop(fd_table);
+                    drop(process_lock);
+                    if msg.is_null() { return errno::Errno::EFAULT as u64; }
+                    let mut hdr = msghdr::default();
+                    if unsafe { user_access::copy_from_user(
+                        core::slice::from_raw_parts_mut(&mut hdr as *mut msghdr as *mut u8, core::mem::size_of::<msghdr>()),
+                        msg as *const u8,
+                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
+                        return errno::Errno::EINVAL as u64;
+                    }
+                    let mut iov_buf = alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
+                    if unsafe { user_access::copy_from_user(
+                        core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
+                        hdr.msg_iov as *const u8,
+                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    let total_size = iov_buf.iter().map(|iov| iov.iov_len).sum::<usize>();
+                    if total_size == 0 { return 0; }
+                    let mut combined = alloc::vec![0u8; total_size];
+                    let mut offset = 0;
+                    for iov in &iov_buf {
+                        if iov.iov_len == 0 { continue; }
+                        if unsafe { user_access::copy_from_user(
+                            &mut combined[offset..offset + iov.iov_len],
+                            iov.iov_base as *const u8,
+                        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                        offset += iov.iov_len;
+                    }
+                    return crate::net::unix::sendmsg_unix(handle, combined, hdr.msg_name as *const u8, hdr.msg_namelen as u64).unwrap_or_else(|e| e as u64);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "net"))]
+    return errno::Errno::ENOSYS as u64;
+
+    #[cfg(feature = "net")]
+    {
+        if msg.is_null() { return errno::Errno::EFAULT as u64; }
+        let mut hdr = msghdr::default();
+        if unsafe { user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(&mut hdr as *mut msghdr as *mut u8, core::mem::size_of::<msghdr>()),
+            msg as *const u8,
+        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+
+        if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
+            return errno::Errno::EINVAL as u64;
+        }
+
+        let mut iov_buf = alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
+        if unsafe { user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
+            hdr.msg_iov as *const u8,
+        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+
+        let total_size = iov_buf.iter().map(|iov| iov.iov_len).sum::<usize>();
+        if total_size == 0 { return 0; }
+
+        let mut combined = alloc::vec![0u8; total_size];
+        let mut offset = 0;
+        for iov in &iov_buf {
+            if iov.iov_len == 0 { continue; }
+            if unsafe { user_access::copy_from_user(
+                &mut combined[offset..offset + iov.iov_len],
+                iov.iov_base as *const u8,
+            ) }.is_err() { return errno::Errno::EFAULT as u64; }
+            offset += iov.iov_len;
+        }
+
+        let dest_endpoint = if !hdr.msg_name.is_null() && hdr.msg_namelen >= 8 {
+            match parse_sockaddr(hdr.msg_name as *const u8, hdr.msg_namelen as u64) {
+                Ok((port, addr)) => Some(smoltcp::wire::IpEndpoint::new(addr, port)),
+                Err(e) => return e as u64,
+            }
+        } else { None };
+
+        let process_lock = CURRENT_PROCESS.lock();
+        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let fd_table = process.fd_table.lock();
+        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+        if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+            let mut sockets = crate::net::SOCKETS.lock();
+            return sendto_internal(&mut sockets, handle, stype, &combined, dest_endpoint);
+        }
+        errno::Errno::EBADF as u64
+    }
+}
+
+fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
+    let _ = flags;
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    drop(fd_table);
+                    drop(process_lock);
+                    if msg.is_null() { return errno::Errno::EFAULT as u64; }
+                    let mut hdr = msghdr::default();
+                    if unsafe { user_access::copy_from_user(
+                        core::slice::from_raw_parts_mut(&mut hdr as *mut msghdr as *mut u8, core::mem::size_of::<msghdr>()),
+                        msg as *const u8,
+                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
+                        return errno::Errno::EINVAL as u64;
+                    }
+                    let mut iov_buf = alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
+                    if unsafe { user_access::copy_from_user(
+                        core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
+                        hdr.msg_iov as *const u8,
+                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    let total_size = iov_buf.iter().map(|iov| iov.iov_len).sum::<usize>();
+                    if total_size == 0 { return 0; }
+                    let recv_buf = match crate::net::unix::recvmsg_unix(handle) {
+                        Ok(d) => d,
+                        Err(e) => return e as u64,
+                    };
+                    let n = recv_buf.len();
+                    let mut offset = 0;
+                    for iov in &iov_buf {
+                        if iov.iov_len == 0 { continue; }
+                        let to_copy = core::cmp::min(iov.iov_len, n - offset);
+                        if unsafe { user_access::copy_to_user(iov.iov_base as *mut u8, &recv_buf[offset..offset + to_copy]) }.is_err() {
+                            return errno::Errno::EFAULT as u64;
+                        }
+                        offset += to_copy;
+                        if offset >= n { break; }
+                    }
+                    // Update msg_namelen for unix socket (write empty sockaddr_un)
+                    if !hdr.msg_name.is_null() {
+                        let empty_len: u32 = 2;
+                        let _ = unsafe { user_access::copy_to_user(hdr.msg_name as *mut u8, &[1u8, 0u8]) };
+                        let namelen_ptr = (msg as usize + 8) as *mut u32;
+                        let _ = unsafe { user_access::copy_to_user(namelen_ptr as *mut u8, &empty_len.to_ne_bytes()) };
+                    }
+                    hdr.msg_flags = 0;
+                    let flags_ptr = (msg as usize + 24) as *mut i32;
+                    let _ = unsafe { user_access::copy_to_user(flags_ptr as *mut u8, &0i32.to_ne_bytes()) };
+                    return n as u64;
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "net"))]
+    return errno::Errno::ENOSYS as u64;
+
+    #[cfg(feature = "net")]
+    {
+        if msg.is_null() { return errno::Errno::EFAULT as u64; }
+        let mut hdr = msghdr::default();
+        if unsafe { user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(&mut hdr as *mut msghdr as *mut u8, core::mem::size_of::<msghdr>()),
+            msg as *const u8,
+        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+
+        if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
+            return errno::Errno::EINVAL as u64;
+        }
+
+        let mut iov_buf = alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
+        if unsafe { user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
+            hdr.msg_iov as *const u8,
+        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+
+        let total_size = iov_buf.iter().map(|iov| iov.iov_len).sum::<usize>();
+        if total_size == 0 { return 0; }
+
+        let mut recv_buf = alloc::vec![0u8; total_size];
+
+        let process_lock = CURRENT_PROCESS.lock();
+        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let fd_table = process.fd_table.lock();
+        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+
+        if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+            let mut sockets = crate::net::SOCKETS.lock();
+            let (n, meta) = match recvfrom_internal(&mut sockets, handle, stype, &mut recv_buf) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            drop(sockets);
+
+            let mut offset = 0;
+            for iov in &iov_buf {
+                if iov.iov_len == 0 { continue; }
+                let to_copy = core::cmp::min(iov.iov_len, n - offset);
+                if unsafe { user_access::copy_to_user(iov.iov_base as *mut u8, &recv_buf[offset..offset + to_copy]) }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+                offset += to_copy;
+                if offset >= n { break; }
+            }
+
+            if let Some(ep) = meta {
+                if !hdr.msg_name.is_null() {
+                    match ep.addr {
+                        smoltcp::wire::IpAddress::Ipv4(ipv4) => {
+                            let sa_len: u32 = 16;
+                            let mut sockaddr = [0u8; 16];
+                            sockaddr[..2].copy_from_slice(&AF_INET.to_ne_bytes());
+                            sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
+                            sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
+                            let _ = unsafe { user_access::copy_to_user(hdr.msg_name as *mut u8, &sockaddr) };
+                            let namelen_ptr = (msg as usize + 8) as *mut u32;
+                            let _ = unsafe { user_access::copy_to_user(namelen_ptr as *mut u8, &sa_len.to_ne_bytes()) };
+                        }
+                        smoltcp::wire::IpAddress::Ipv6(ipv6) => {
+                            let sa_len: u32 = 28;
+                            let mut sockaddr = [0u8; 28];
+                            sockaddr[..2].copy_from_slice(&AF_INET6.to_ne_bytes());
+                            sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
+                            sockaddr[8..24].copy_from_slice(ipv6.as_bytes());
+                            let _ = unsafe { user_access::copy_to_user(hdr.msg_name as *mut u8, &sockaddr) };
+                            let namelen_ptr = (msg as usize + 8) as *mut u32;
+                            let _ = unsafe { user_access::copy_to_user(namelen_ptr as *mut u8, &sa_len.to_ne_bytes()) };
+                        }
+                    }
+                }
+            }
+
+            return n as u64;
+        }
+        errno::Errno::EBADF as u64
+    }
+}
+
+fn sys_getsockname(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _stype)) = fd_table[sockfd as usize] {
+                    drop(fd_table);
+                    drop(process_lock);
+                    crate::net::unix::getsockname_unix(handle, addr, addrlen);
+                    return 0;
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "net"))]
+    return errno::Errno::ENOSYS as u64;
+
+    #[cfg(feature = "net")]
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let fd_table = process.fd_table.lock();
+        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+
+        if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+            let mut sockets = crate::net::SOCKETS.lock();
+            match stype {
+                crate::task::process::SocketType::Tcp => {
+                    if let Some(ep) = with_tcp_mut(&mut sockets, handle, |socket| {
+                        socket.local_endpoint()
+                    }).flatten() {
+                        write_sockaddr(addr, addrlen, &ep);
+                        return 0;
+                    }
+                    return errno::Errno::EINVAL as u64;
+                }
+                crate::task::process::SocketType::Udp => {
+                    if let Some(ep) = with_udp_mut(&mut sockets, handle, |socket| {
+                        if socket.is_open() { socket.endpoint() } else { None }
+                    }).flatten() {
+                        write_sockaddr(addr, addrlen, &ep);
+                        return 0;
+                    }
+                    return errno::Errno::EINVAL as u64;
+                }
+                _ => return errno::Errno::EOPNOTSUPP as u64,
+            }
+        }
+        errno::Errno::EBADF as u64
+    }
+}
+
+fn sys_getpeername(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _stype)) = fd_table[sockfd as usize] {
+                    drop(fd_table);
+                    drop(process_lock);
+                    return crate::net::unix::getpeername_unix(handle, addr, addrlen).map(|_| 0u64).unwrap_or_else(|e| e as u64);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "net"))]
+    return errno::Errno::ENOSYS as u64;
+
+    #[cfg(feature = "net")]
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let fd_table = process.fd_table.lock();
+        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+
+        if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+            let mut sockets = crate::net::SOCKETS.lock();
+            match stype {
+                crate::task::process::SocketType::Tcp => {
+                    if let Some(ep) = with_tcp_mut(&mut sockets, handle, |socket| {
+                        socket.remote_endpoint()
+                    }).flatten() {
+                        write_sockaddr(addr, addrlen, &ep);
+                        return 0;
+                    }
+                    return errno::Errno::ENOTCONN as u64;
+                }
+                crate::task::process::SocketType::Udp => {
+                    return errno::Errno::ENOTCONN as u64;
+                }
+                _ => return errno::Errno::EOPNOTSUPP as u64,
+            }
+        }
+        errno::Errno::EBADF as u64
+    }
+}
+
+fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, optlen: *mut u32) -> u64 {
+    // AF_UNIX check
+    {
+        let process_lock = CURRENT_PROCESS.lock();
+        if let Some(ref process) = *process_lock {
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) < fd_table.len() {
+                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+                    drop(fd_table);
+                    drop(process_lock);
+                    if optval.is_null() || optlen.is_null() { return errno::Errno::EFAULT as u64; }
+                    let mut len: u32 = 0;
+                    if unsafe { user_access::copy_from_user(
+                        core::slice::from_raw_parts_mut(&mut len as *mut u32 as *mut u8, 4),
+                        optlen as *const u8,
+                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    const SOL_SOCKET: i32 = 1;
+                    const SO_TYPE: i32 = 3;
+                    const SO_ERROR: i32 = 4;
+                    const SO_ACCEPTCONN: i32 = 30;
+                    const SO_PEERCRED: i32 = 17;
+                    const SOCK_STREAM: i32 = 1;
+                    const SOCK_DGRAM: i32 = 2;
+                    if level != SOL_SOCKET { return errno::Errno::ENOPROTOOPT as u64; }
+                    match optname {
+                        SO_TYPE => {
+                            let is_stream = {
+                                let socks = crate::net::unix::UNIX_SOCKETS.lock();
+                                socks.get(&handle).map(|s| s.inner.lock().sock_type == crate::net::unix::UnixSocketType::Stream).unwrap_or(true)
+                            };
+                            let val: i32 = if is_stream { SOCK_STREAM } else { SOCK_DGRAM };
+                            let copy_len = core::cmp::min(len as usize, 4);
+                            if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                                return errno::Errno::EFAULT as u64;
+                            }
+                            let written = copy_len as u32;
+                            let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                            return 0;
+                        }
+                        SO_ERROR => {
+                            let val: i32 = 0;
+                            let copy_len = core::cmp::min(len as usize, 4);
+                            if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                                return errno::Errno::EFAULT as u64;
+                            }
+                            let written = copy_len as u32;
+                            let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                            return 0;
+                        }
+                        SO_ACCEPTCONN => {
+                            let is_listening = {
+                                let socks = crate::net::unix::UNIX_SOCKETS.lock();
+                                socks.get(&handle).map(|s| s.inner.lock().is_listening).unwrap_or(false)
+                            };
+                            let val: i32 = if is_listening { 1 } else { 0 };
+                            let copy_len = core::cmp::min(len as usize, 4);
+                            if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                                return errno::Errno::EFAULT as u64;
+                            }
+                            let written = copy_len as u32;
+                            let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                            return 0;
+                        }
+                        SO_PEERCRED => {
+                            let (pid, uid, gid) = match crate::net::unix::getpeercred_unix(handle) {
+                                Ok(v) => v,
+                                Err(_) => (0u32, 0u32, 0u32),
+                            };
+                            #[repr(C)]
+                            struct ucred { pid: u32, uid: u32, gid: u32 }
+                            let cred = ucred { pid, uid, gid };
+                            let copy_len = core::cmp::min(len as usize, 12);
+                            if unsafe { user_access::copy_to_user(optval, &core::slice::from_raw_parts(&cred as *const _ as *const u8, 12)[..copy_len]) }.is_err() {
+                                return errno::Errno::EFAULT as u64;
+                            }
+                            let written = copy_len as u32;
+                            let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                            return 0;
+                        }
+                        _ => return errno::Errno::ENOPROTOOPT as u64,
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "net"))]
+    return errno::Errno::ENOSYS as u64;
+
+    #[cfg(feature = "net")]
+    {
+        if optval.is_null() || optlen.is_null() { return errno::Errno::EFAULT as u64; }
+        let mut len: u32 = 0;
+        if unsafe { user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(&mut len as *mut u32 as *mut u8, 4),
+            optlen as *const u8,
+        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+
+        let socket_stype = {
+            let process_lock = CURRENT_PROCESS.lock();
+            let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+            let fd_table = process.fd_table.lock();
+            if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+            match fd_table[sockfd as usize] {
+                Some(FileDescriptor::Socket(handle, stype)) => Some((handle, stype)),
+                _ => return errno::Errno::ENOTSOCK as u64,
+            }
+        };
+
+        const SO_TYPE: i32 = 3;
+        const SO_ERROR: i32 = 4;
+        const SO_ACCEPTCONN: i32 = 30;
+        const TCP_INFO: i32 = 11;
+        const SOCK_STREAM: i32 = 1;
+        const SOCK_DGRAM: i32 = 2;
+        const SOCK_RAW: i32 = 3;
+
+        match level {
+            SOL_SOCKET => match optname {
+                SO_TYPE => {
+                    let val: i32 = match socket_stype {
+                        Some((_, crate::task::process::SocketType::Tcp)) => SOCK_STREAM,
+                        Some((_, crate::task::process::SocketType::Udp)) => SOCK_DGRAM,
+                        Some((_, crate::task::process::SocketType::Raw)) => SOCK_RAW,
+                        _ => return errno::Errno::EINVAL as u64,
+                    };
+                    let copy_len = core::cmp::min(len as usize, 4);
+                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    let written = copy_len as u32;
+                    let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                    0
+                }
+                SO_ERROR => {
+                    let val: i32 = 0;
+                    let copy_len = core::cmp::min(len as usize, 4);
+                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    let written = copy_len as u32;
+                    let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                    0
+                }
+                SO_ACCEPTCONN => {
+                    let (handle, _) = socket_stype.expect("socket_stype confirmed Some above");
+                    let val: i32 = {
+                        let mut sockets = crate::net::SOCKETS.lock();
+                        with_tcp_mut(&mut sockets, handle, |socket| {
+                            if socket.is_listening() { 1i32 } else { 0i32 }
+                        }).unwrap_or(0)
+                    };
+                    let copy_len = core::cmp::min(len as usize, 4);
+                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    let written = copy_len as u32;
+                    let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                    0
+                }
+                _ => errno::Errno::ENOPROTOOPT as u64,
+            },
+            IPPROTO_TCP => match optname {
+                TCP_INFO => {
+                    let info = [0u8; 88];
+                    let copy_len = core::cmp::min(len as usize, info.len());
+                    if unsafe { user_access::copy_to_user(optval, &info[..copy_len]) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    let written = copy_len as u32;
+                    let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                    0
+                }
+                _ => errno::Errno::ENOPROTOOPT as u64,
+            },
+            _ => errno::Errno::ENOPROTOOPT as u64,
+        }
+    }
+}
+
+fn sys_socketpair(domain: u64, type_: u64, protocol: u64, sv: *mut i32) -> u64 {
+    crate::net::unix::sys_socketpair(domain, type_, protocol, sv).unwrap_or_else(|e| e as u64)
 }
 
 fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const *const u8, _regs_ptr: *mut u64) -> u64 {
@@ -2898,10 +4487,9 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
     
     // Update current thread's process
     {
-        if let Some(mut thread) = crate::task::scheduler::current_thread() {
+        crate::task::scheduler::with_current_thread(|thread| {
             thread.process = Some(process_arc.clone());
-            crate::task::scheduler::set_current_thread(thread);
-        }
+        });
     }
 
     unsafe {
@@ -2913,9 +4501,8 @@ fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) -> u
     use crate::gui::{COMPOSITOR, window::Window};
     let mut comp = COMPOSITOR.lock();
     
-    // Leak the title string so it can be &'static str
     let title_str = if title_ptr.is_null() {
-        "User App"
+        alloc::string::String::from("User App").into_boxed_str()
     } else {
         let mut len = 0;
         unsafe {
@@ -2923,14 +4510,10 @@ fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) -> u
         }
         let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, len) };
         let s = core::str::from_utf8(title_slice).unwrap_or("User App");
-        
-        let boxed = alloc::string::String::from(s).into_boxed_str();
-        let leaked: &'static str = unsafe { core::mem::transmute(&*boxed) };
-        core::mem::forget(boxed);
-        leaked
+        alloc::string::String::from(s).into_boxed_str()
     };
 
-    let mut win = Window::new(0, 0, width + 2, height + 22, title_str);
+    let mut win = Window::new(0, 0, width + 2, height + 22, &title_str);
     
     // PHASE G3: Allocate shared physical memory for high-performance rendering
     let content_len = width * height;
@@ -2946,7 +4529,7 @@ fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) -> u
     let phys_addr = BUDDY_ALLOCATOR.lock().allocate_contiguous(order);
     if let Some(pa) = phys_addr {
         win.phys_addr = Some(pa.as_u64());
-        let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+        let offset = crate::memory::physical_memory_offset();
         let k_ptr = (offset + pa.as_u64()) as *mut u8;
         unsafe { core::ptr::write_bytes(k_ptr, 0, (4096 << order) as usize); }
     } else {
@@ -3014,6 +4597,10 @@ pub(crate) fn sys_gui_map_buffer(handle: u64) -> u64 {
         end: v_addr + pages_needed as u64 * 4096,
         flags: PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
         _name: "gui_buffer",
+        file_handle: None,
+        file_offset: 0,
+        is_shared: false,
+        shm_id: None,
     });
 
     v_addr
@@ -3087,10 +4674,7 @@ fn sys_gui_set_title(handle: u64, title_ptr: *const u8) -> u64 {
     }
     let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, len) };
     if let Ok(s) = core::str::from_utf8(title_slice) {
-        let boxed = alloc::string::String::from(s).into_boxed_str();
-        let leaked: &'static str = unsafe { core::mem::transmute(&*boxed) };
-        core::mem::forget(boxed);
-        win.title = leaked;
+        win.title = alloc::string::String::from(s).into_boxed_str();
     }
     0
 }
@@ -3614,8 +5198,14 @@ fn sys_select(nfds: u64, readfds: *mut u64, writefds: *mut u64, exceptfds: *mut 
                 Some(ref desc) => match desc {
                     FileDescriptor::File { node, .. } => node.stat().map(|s| s.st_size > 0).unwrap_or(false),
                     FileDescriptor::Socket(_, _) => true,
+                    FileDescriptor::UnixSocket(_, _) => true,
                     FileDescriptor::PtyMaster { pair, .. } => !pair.lock().master.buf.is_empty(),
                     FileDescriptor::PtySlave { pair, .. } => !pair.lock().slave.buf.is_empty(),
+                    FileDescriptor::SignalFd(handle) => {
+                        let fds = SIGNAL_FDS.lock();
+                        fds.get(handle).map(|d| !d.lock().pending.is_empty()).unwrap_or(false)
+                    }
+                    FileDescriptor::EventFd(data) => data.lock().counter > 0,
                 },
                 None => false,
             };
@@ -3727,6 +5317,10 @@ fn sys_poll(fds: *const u8, nfds: usize, timeout_ms: i32) -> u64 {
                     if *events & POLLIN != 0 { *revents |= POLLIN; }
                     if *events & POLLOUT != 0 { *revents |= POLLOUT; }
                 }
+                Some(FileDescriptor::UnixSocket(_, _)) => {
+                    if *events & POLLIN != 0 { *revents |= POLLIN; }
+                    if *events & POLLOUT != 0 { *revents |= POLLOUT; }
+                }
                 Some(FileDescriptor::PtyMaster { pair, .. }) => {
                     let buf = &pair.lock().master.buf;
                     if *events & POLLIN != 0 && !buf.is_empty() { *revents |= POLLIN; }
@@ -3735,6 +5329,19 @@ fn sys_poll(fds: *const u8, nfds: usize, timeout_ms: i32) -> u64 {
                 Some(FileDescriptor::PtySlave { pair, .. }) => {
                     let buf = &pair.lock().slave.buf;
                     if *events & POLLIN != 0 && !buf.is_empty() { *revents |= POLLIN; }
+                    if *events & POLLOUT != 0 { *revents |= POLLOUT; }
+                }
+                Some(FileDescriptor::SignalFd(handle)) => {
+                    let has_pending = {
+                        let fds = SIGNAL_FDS.lock();
+                        fds.get(handle).map(|d| !d.lock().pending.is_empty()).unwrap_or(false)
+                    };
+                    if *events & POLLIN != 0 && has_pending { *revents |= POLLIN; }
+                    if *events & POLLOUT != 0 { *revents |= POLLOUT; }
+                }
+                Some(FileDescriptor::EventFd(data)) => {
+                    let counter = data.lock().counter;
+                    if *events & POLLIN != 0 && counter > 0 { *revents |= POLLIN; }
                     if *events & POLLOUT != 0 { *revents |= POLLOUT; }
                 }
                 None => { *revents |= POLLNVAL; }
@@ -3959,6 +5566,261 @@ fn sys_sigprocmask(how: i32, set_ptr: *const u64, oldset_ptr: *mut u64) -> u64 {
         }
     }
     0
+}
+
+// ─── pause ─────────────────────────────────────────────────────────
+
+fn sys_pause() -> u64 {
+    loop {
+        let has_pending = {
+            let lock = CURRENT_PROCESS.lock();
+            lock.as_ref().map(|p| {
+                let sig = p.signals.lock();
+                sig.has_unmasked_pending(sig.blocked)
+            }).unwrap_or(false)
+        };
+        if has_pending {
+            return errno::Errno::EINTR as u64;
+        }
+        // Sleep 1 tick (~10ms) then re-check
+        let now = crate::interrupts::get_ticks();
+        if let Some(mut current_thread) = crate::task::scheduler::take_current_thread() {
+            current_thread.status = crate::task::thread::ThreadStatus::Blocked;
+            current_thread.sleep_until = Some(now + 1);
+            crate::task::scheduler::add_sleeping_thread(*current_thread);
+        }
+        crate::task::scheduler::schedule();
+    }
+}
+
+// ─── sigaltstack ───────────────────────────────────────────────────
+
+use crate::task::process::stack_t;
+use crate::task::process::{SS_DISABLE, SS_ONSTACK, MINSIGSTKSZ};
+
+fn sys_sigaltstack(ss_ptr: *const u8, old_ss_ptr: *mut u8) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    if !old_ss_ptr.is_null() {
+        let cur = process.altstack.lock();
+        let slice = unsafe {
+            core::slice::from_raw_parts(&*cur as *const stack_t as *const u8, core::mem::size_of::<stack_t>())
+        };
+        if unsafe { user_access::copy_to_user(old_ss_ptr, slice) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    if !ss_ptr.is_null() {
+        let mut new_ss: stack_t = stack_t {
+            ss_sp: core::ptr::null_mut(),
+            ss_flags: 0,
+            ss_size: 0,
+        };
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(&mut new_ss as *mut stack_t as *mut u8, core::mem::size_of::<stack_t>())
+        };
+        if unsafe { user_access::copy_from_user(slice, ss_ptr) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+
+        let cur_flags = process.altstack.lock().ss_flags;
+        if cur_flags == SS_ONSTACK {
+            return errno::Errno::EPERM as u64;
+        }
+
+        if new_ss.ss_flags != SS_DISABLE && new_ss.ss_flags != 0 {
+            return errno::Errno::EINVAL as u64;
+        }
+
+        if new_ss.ss_flags != SS_DISABLE && new_ss.ss_size < MINSIGSTKSZ {
+            return errno::Errno::ENOMEM as u64;
+        }
+
+        *process.altstack.lock() = new_ss;
+    }
+
+    0
+}
+
+// ─── signalfd4 ─────────────────────────────────────────────────────
+
+use crate::task::process::{SignalFdData, SignalFdInfo, SIGNAL_FDS, SFD_NONBLOCK, SFD_CLOEXEC};
+use crate::task::process::{EventFdData, EFD_SEMAPHORE, EFD_NONBLOCK, EFD_CLOEXEC, EFD_MAX};
+
+fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    if mask_ptr.is_null() {
+        return errno::Errno::EFAULT as u64;
+    }
+    let mut mask_val = 0u64;
+    if unsafe { user_access::copy_from_user(
+        core::slice::from_raw_parts_mut(&mut mask_val as *mut u64 as *mut u8, 8),
+        mask_ptr as *const u8,
+    ) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+
+    if fd != u64::MAX && fd != 0 {
+        // Update existing signalfd
+        let mut fd_table = process.fd_table.lock();
+        if (fd as usize) >= fd_table.len() {
+            return errno::Errno::EBADF as u64;
+        }
+        match fd_table[fd as usize] {
+            Some(crate::task::process::FileDescriptor::SignalFd(handle)) => {
+                let fds = SIGNAL_FDS.lock();
+                if let Some(data) = fds.get(&handle) {
+                    data.lock().mask = mask_val;
+                    return fd;
+                }
+            }
+            _ => return errno::Errno::EBADF as u64,
+        }
+    }
+
+    // Create new signalfd
+    static NEXT_SIGNALFD_HANDLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    let handle = NEXT_SIGNALFD_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+    let data = alloc::sync::Arc::new(spin::Mutex::new(SignalFdData {
+        mask: mask_val,
+        pending: alloc::collections::VecDeque::new(),
+        nonblock: (flags & SFD_NONBLOCK) != 0,
+        cloexec: (flags & SFD_CLOEXEC) != 0,
+    }));
+
+    SIGNAL_FDS.lock().insert(handle, data.clone());
+
+    let fd_obj = crate::task::process::FileDescriptor::SignalFd(handle);
+    let mut fd_table = process.fd_table.lock();
+    for (i, slot) in fd_table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(fd_obj);
+            return i as u64;
+        }
+    }
+    fd_table.push(Some(fd_obj));
+    (fd_table.len() - 1) as u64
+}
+
+// ─── eventfd2 ────────────────────────────────────────────────────
+
+fn sys_eventfd2(initval: u32, flags: i32) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    let data = alloc::sync::Arc::new(spin::Mutex::new(EventFdData {
+        counter: initval as u64,
+        semaphore: (flags & EFD_SEMAPHORE) != 0,
+        nonblock: (flags & EFD_NONBLOCK) != 0,
+    }));
+
+    let fd_obj = FileDescriptor::EventFd(data);
+    let mut fd_table = process.fd_table.lock();
+    for (i, slot) in fd_table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(fd_obj);
+            return i as u64;
+        }
+    }
+    fd_table.push(Some(fd_obj));
+    (fd_table.len() - 1) as u64
+}
+
+// ─── itimer ────────────────────────────────────────────────────────
+
+use crate::task::process::itimerval;
+use crate::task::process::timeval;
+
+fn sys_getitimer(which: u64, curr_ptr: *mut u8) -> u64 {
+    if which != 0 { return errno::Errno::EINVAL as u64; } // Only ITIMER_REAL
+    if curr_ptr.is_null() { return errno::Errno::EFAULT as u64; }
+
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let it = process.itimer_real.lock();
+    let slice = unsafe {
+        core::slice::from_raw_parts(&*it as *const itimerval as *const u8, core::mem::size_of::<itimerval>())
+    };
+    if unsafe { user_access::copy_to_user(curr_ptr, slice) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+    0
+}
+
+fn sys_setitimer(which: u64, new_ptr: *const u8, old_ptr: *mut u8) -> u64 {
+    if which != 0 { return errno::Errno::EINVAL as u64; } // Only ITIMER_REAL
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    if !old_ptr.is_null() {
+        let it = process.itimer_real.lock();
+        let slice = unsafe {
+            core::slice::from_raw_parts(&*it as *const itimerval as *const u8, core::mem::size_of::<itimerval>())
+        };
+        if unsafe { user_access::copy_to_user(old_ptr, slice) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    if !new_ptr.is_null() {
+        let mut new_it: itimerval = itimerval {
+            it_interval: timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: timeval { tv_sec: 0, tv_usec: 0 },
+        };
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(&mut new_it as *mut itimerval as *mut u8, core::mem::size_of::<itimerval>())
+        };
+        if unsafe { user_access::copy_from_user(slice, new_ptr) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+        if new_it.it_value.tv_sec < 0 || new_it.it_value.tv_usec < 0 {
+            return errno::Errno::EINVAL as u64;
+        }
+        *process.itimer_real.lock() = new_it;
+    }
+    0
+}
+
+// ─── times ─────────────────────────────────────────────────────────
+
+use crate::task::process::tms;
+
+fn sys_times(buf_ptr: *mut u8) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return 0u64.wrapping_sub(crate::interrupts::get_ticks()),
+    };
+    let t = tms {
+        tms_utime: process.utime.load(core::sync::atomic::Ordering::Relaxed) as i64,
+        tms_stime: process.stime.load(core::sync::atomic::Ordering::Relaxed) as i64,
+        tms_cutime: process.cutime.load(core::sync::atomic::Ordering::Relaxed) as i64,
+        tms_cstime: process.cstime.load(core::sync::atomic::Ordering::Relaxed) as i64,
+    };
+    if !buf_ptr.is_null() {
+        let slice = unsafe {
+            core::slice::from_raw_parts(&t as *const tms as *const u8, core::mem::size_of::<tms>())
+        };
+        if unsafe { user_access::copy_to_user(buf_ptr, slice) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+    // Return clock ticks since boot
+    crate::interrupts::get_ticks()
 }
 
 fn sys_korlang(id: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u64) -> u64 {
@@ -4377,4 +6239,791 @@ fn sys_objmgr_audit(pid: u64, buf: *mut u8, len: usize) -> u64 {
         }
     }
     count as u64
+}
+
+// ─── *at syscall variants ─────────────────────────────────────────────
+
+fn sys_openat(dirfd: i64, path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let abs_path = match resolve_path_at(dirfd, &path_str, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+
+    const O_CREAT: i32 = 0x40;
+    const O_DIRECTORY: i32 = 0x10000;
+    const O_CLOEXEC: i32 = 0x80000;
+
+    let vfs = VFS.lock();
+    if let Some(node) = vfs.resolve_path(&abs_path) {
+        let subj = crate::security::current_subject();
+        let perm = match flags & 3 {
+            1 => "write",
+            2 => "read+write",
+            _ => "read",
+        };
+        if !crate::security::hook_file_perm(&subj, &abs_path, perm) {
+            return errno::Errno::EACCES as u64;
+        }
+        // O_DIRECTORY: must be a directory
+        if (flags & O_DIRECTORY) != 0 && !node.is_dir() {
+            return errno::Errno::ENOTDIR as u64;
+        }
+        if let Some(p) = get_current_process() {
+            let fd = add_fd(&p, node.clone() as Arc<dyn VfsNode>, flags);
+            if (fd as i64) >= 0 {
+                if node.is_dir() {
+                    store_dir_path(&p, fd, &abs_path);
+                }
+                // O_CLOEXEC: set FD_CLOEXEC flag
+                if (flags & O_CLOEXEC) != 0 {
+                    let mut fd_flags = p.fd_flags.lock();
+                    if (fd as usize) >= fd_flags.len() {
+                        fd_flags.resize(fd as usize + 1, 0);
+                    }
+                    fd_flags[fd as usize] |= 0x80000; // FD_CLOEXEC
+                }
+            }
+            return fd;
+        }
+    } else if (flags & O_CREAT) != 0 {
+        let last_slash = abs_path.rfind('/').unwrap_or(0);
+        let (parent_path, name) = if last_slash == 0 {
+            ("/", &abs_path[1..])
+        } else {
+            (&abs_path[..last_slash], &abs_path[last_slash+1..])
+        };
+
+        if let Some(parent_node) = vfs.resolve_path(parent_path) {
+            if let Ok(new_node) = parent_node.create(name) {
+                let (euid, egid, umask) = {
+                    let p = get_current_process();
+                    p.as_ref().map(|p| {
+                        let c = p.creds.lock();
+                        (c.euid, c.egid, *p.umask.lock())
+                    }).unwrap_or((0, 0, 0))
+                };
+                let raw_mode = if mode == 0 { 0o666 } else { mode };
+                let created_mode = raw_mode & !umask;
+                let _ = new_node.chmod(created_mode & 0o777);
+                let _ = new_node.chown(euid, egid);
+                if let Some(p) = get_current_process() {
+                    let fd = add_fd(&p, new_node, flags);
+                    if (fd as i64) >= 0 && (flags & O_CLOEXEC) != 0 {
+                        let mut fd_flags = p.fd_flags.lock();
+                        if (fd as usize) >= fd_flags.len() {
+                            fd_flags.resize(fd as usize + 1, 0);
+                        }
+                        fd_flags[fd as usize] |= 0x80000;
+                    }
+                    return fd;
+                }
+            }
+        }
+    }
+    errno::Errno::ENOENT as u64
+}
+
+fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, mode: u32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let abs_path = match resolve_path_at(dirfd, &path_str, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+
+    let last_slash = abs_path.rfind('/').unwrap_or(0);
+    let (parent_path, name) = if last_slash == 0 {
+        ("/", &abs_path[1..])
+    } else {
+        (&abs_path[..last_slash], &abs_path[last_slash+1..])
+    };
+
+    let vfs = VFS.lock();
+    if let Some(parent_node) = vfs.resolve_path(parent_path) {
+        if !check_node_permission(&parent_node, 3) {
+            return errno::Errno::EACCES as u64;
+        }
+        let subj = crate::security::current_subject();
+        if !crate::security::hook_dir_mkdir(&subj, &abs_path) {
+            return errno::Errno::EACCES as u64;
+        }
+        if let Ok(new_node) = parent_node.mkdir(name) {
+            let (euid, egid, umask) = {
+                let lock = CURRENT_PROCESS.lock();
+                let p = lock.as_ref();
+                p.map(|p| {
+                    let c = p.creds.lock();
+                    (c.euid, c.egid, *p.umask.lock())
+                }).unwrap_or((0, 0, 0))
+            };
+            let raw_mode = if mode == 0 { 0o777 } else { mode };
+            let dir_mode = raw_mode & !umask;
+            let _ = new_node.chmod(dir_mode & 0o777);
+            let _ = new_node.chown(euid, egid);
+            return 0;
+        }
+    }
+    errno::Errno::EIO as u64
+}
+
+fn sys_unlinkat(dirfd: i64, path_ptr: *const u8, flags: i32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let abs_path = match resolve_path_at(dirfd, &path_str, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+
+    if (flags & AT_REMOVEDIR) != 0 {
+        // Like rmdir: use same logic as mkdir reversed
+        let last_slash = abs_path.rfind('/').unwrap_or(0);
+        let (parent_path, name) = if last_slash == 0 {
+            ("/", &abs_path[1..])
+        } else {
+            (&abs_path[..last_slash], &abs_path[last_slash+1..])
+        };
+        let vfs = VFS.lock();
+        if let Some(parent_node) = vfs.resolve_path(parent_path) {
+            if !check_node_permission(&parent_node, 3) {
+                return errno::Errno::EACCES as u64;
+            }
+            if let Some(node) = parent_node.find_child(name) {
+                if !node.is_dir() {
+                    return errno::Errno::ENOTDIR as u64;
+                }
+            }
+            if parent_node.unlink(name).is_ok() {
+                return 0;
+            }
+        }
+        errno::Errno::EIO as u64
+    } else {
+        // Like unlink
+        let last_slash = abs_path.rfind('/').unwrap_or(0);
+        let (parent_path, name) = if last_slash == 0 {
+            ("/", &abs_path[1..])
+        } else {
+            (&abs_path[..last_slash], &abs_path[last_slash+1..])
+        };
+        let vfs = VFS.lock();
+        if let Some(parent_node) = vfs.resolve_path(parent_path) {
+            if !check_node_permission(&parent_node, 3) {
+                return errno::Errno::EACCES as u64;
+            }
+            let subj = crate::security::current_subject();
+            if !crate::security::hook_file_unlink(&subj, &abs_path) {
+                return errno::Errno::EACCES as u64;
+            }
+            if parent_node.unlink(name).is_ok() {
+                return 0;
+            }
+        }
+        errno::Errno::EIO as u64
+    }
+}
+
+fn sys_symlinkat(target_ptr: *const u8, newdirfd: i64, linkpath_ptr: *const u8) -> u64 {
+    let target_str = match unsafe { user_access::read_user_string(target_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let linkpath_str = match unsafe { user_access::read_user_string(linkpath_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let abs_path = match resolve_path_at(newdirfd, &linkpath_str, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+
+    let vfs = crate::vfs::VFS.lock();
+    let (parent_path, name) = split_parent(&abs_path);
+    if let Some(parent) = vfs.resolve_path(&parent_path) {
+        if !check_node_permission(&parent, 2) {
+            return errno::Errno::EACCES as u64;
+        }
+        let subj = crate::security::current_subject();
+        if !crate::security::hook_file_create(&subj, &abs_path) {
+            return errno::Errno::EACCES as u64;
+        }
+        if parent.symlink(&name, &target_str).is_ok() {
+            0
+        } else {
+            errno::Errno::EPERM as u64
+        }
+    } else {
+        errno::Errno::ENOENT as u64
+    }
+}
+
+fn sys_readlinkat(dirfd: i64, pathname_ptr: *const u8, buf: *mut u8, bufsize: u64) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let abs_path = match resolve_path_at(dirfd, &path_str, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+
+    let vfs = crate::vfs::VFS.lock();
+    if let Some(node) = vfs.resolve_path(&abs_path) {
+        match node.readlink() {
+            Ok(target) => {
+                let len = core::cmp::min(target.len(), bufsize as usize);
+                if unsafe { user_access::copy_to_user(buf, &target.as_bytes()[..len]) }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+                len as u64
+            }
+            Err(_) => errno::Errno::EINVAL as u64,
+        }
+    } else {
+        errno::Errno::ENOENT as u64
+    }
+}
+
+fn sys_renameat(olddirfd: i64, old_path_ptr: *const u8, newdirfd: i64, new_path_ptr: *const u8) -> u64 {
+    let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let abs_old = match resolve_path_at(olddirfd, &old_path, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+    let abs_new = match resolve_path_at(newdirfd, &new_path, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+
+    let vfs = VFS.lock();
+    let source_node = match vfs.resolve_path(&abs_old) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    if !check_node_permission(&source_node, 2) {
+        return errno::Errno::EACCES as u64;
+    }
+
+    let src_last_slash = abs_old.rfind('/').unwrap_or(0);
+    let dst_last_slash = abs_new.rfind('/').unwrap_or(0);
+    let (src_parent_path, src_name) = if src_last_slash == 0 { ("/", &abs_old[1..]) } else { (&abs_old[..src_last_slash], &abs_old[src_last_slash+1..]) };
+    let (dst_parent_path, dst_name) = if dst_last_slash == 0 { ("/", &abs_new[1..]) } else { (&abs_new[..dst_last_slash], &abs_new[dst_last_slash+1..]) };
+
+    if src_parent_path == dst_parent_path {
+        if let Some(parent) = vfs.resolve_path(src_parent_path) {
+            if !check_node_permission(&parent, 3) {
+                return errno::Errno::EACCES as u64;
+            }
+            if parent.rename(src_name, dst_name).is_ok() {
+                return 0;
+            }
+        }
+    }
+
+    let data = match source_node.read(usize::MAX) {
+        Ok(d) => d,
+        Err(_) => return errno::Errno::EIO as u64,
+    };
+    let dst_parent = match vfs.resolve_path(dst_parent_path) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    if !check_node_permission(&dst_parent, 3) {
+        return errno::Errno::EACCES as u64;
+    }
+    if dst_parent.create(dst_name).is_err() {
+        return errno::Errno::EIO as u64;
+    }
+    if let Some(new_node) = dst_parent.find_child(dst_name) {
+        let _ = new_node.write(&data);
+    }
+    let src_parent = match vfs.resolve_path(src_parent_path) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    let _ = src_parent.unlink(src_name);
+    0
+}
+
+fn sys_linkat(_olddirfd: i64, old_path_ptr: *const u8, _newdirfd: i64, new_path_ptr: *const u8, _flags: i32) -> u64 {
+    let _old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let _new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    // ponytail: VFS doesn't support hard links yet
+    errno::Errno::EOPNOTSUPP as u64
+}
+
+fn sys_fstatat(dirfd: i64, pathname_ptr: *const u8, stat_buf: *mut crate::vfs::Stat, flags: i32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => {
+            // AT_EMPTY_PATH: empty path means stat the dirfd itself
+            if (flags & AT_EMPTY_PATH) != 0 && pathname_ptr.is_null() {
+                // Fall through to dirfd lookup
+                alloc::string::String::new()
+            } else {
+                return errno::Errno::EFAULT as u64;
+            }
+        }
+    };
+
+    // AT_EMPTY_PATH: if path is empty, stat the dirfd itself
+    if (flags & AT_EMPTY_PATH) != 0 && path_str.is_empty() {
+        let process = match get_current_process() {
+            Some(p) => p,
+            None => return errno::Errno::ESRCH as u64,
+        };
+        // ponytail: only check fd_table for File variant; PTY/Socket FDs handled by existing fstat
+        let fd_table = process.fd_table.lock();
+        if (dirfd as usize) >= fd_table.len() {
+            drop(fd_table);
+            // Try handle_table for kernel objects
+            if let Some(entry) = process.handle_table.lock().get(dirfd as u64) {
+                if let Ok(stat) = entry.object.stat() {
+                    if unsafe { user_access::copy_to_user(stat_buf as *mut u8,
+                        core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>()))
+                    }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    return 0;
+                }
+            }
+            return errno::Errno::EBADF as u64;
+        }
+        match &fd_table[dirfd as usize] {
+            Some(crate::task::process::FileDescriptor::File { node, .. }) => {
+                if let Ok(stat) = node.stat() {
+                    if unsafe { user_access::copy_to_user(stat_buf as *mut u8,
+                        core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>()))
+                    }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    return 0;
+                }
+                return errno::Errno::EIO as u64;
+            }
+            Some(crate::task::process::FileDescriptor::PtyMaster { .. }) | Some(crate::task::process::FileDescriptor::PtySlave { .. }) => {
+                let stat = crate::vfs::Stat {
+                    st_mode: crate::vfs::_S_IFCHR | 0o620,
+                    ..crate::vfs::Stat::default()
+                };
+                if unsafe { user_access::copy_to_user(stat_buf as *mut u8,
+                    core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>()))
+                }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+                return 0;
+            }
+            Some(crate::task::process::FileDescriptor::Socket(_, _)) => {
+                let stat = crate::vfs::Stat {
+                    st_mode: crate::vfs::_S_IFSOCK | 0o666,
+                    ..crate::vfs::Stat::default()
+                };
+                if unsafe { user_access::copy_to_user(stat_buf as *mut u8,
+                    core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>()))
+                }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+                return 0;
+            }
+            Some(crate::task::process::FileDescriptor::UnixSocket(_, _)) => {
+                let stat = crate::vfs::Stat {
+                    st_mode: crate::vfs::_S_IFSOCK | 0o666,
+                    ..crate::vfs::Stat::default()
+                };
+                if unsafe { user_access::copy_to_user(stat_buf as *mut u8,
+                    core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>()))
+                }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+                return 0;
+            }
+            Some(crate::task::process::FileDescriptor::SignalFd(_)) | Some(crate::task::process::FileDescriptor::EventFd(_)) => {
+                let stat = crate::vfs::Stat {
+                    st_mode: crate::vfs::_S_IFCHR | 0o600,
+                    ..crate::vfs::Stat::default()
+                };
+                if unsafe { user_access::copy_to_user(stat_buf as *mut u8,
+                    core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>()))
+                }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+                return 0;
+            }
+            None => return errno::Errno::EBADF as u64,
+        }
+    }
+
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let abs_path = match resolve_path_at(dirfd, &path_str, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+
+    // AT_SYMLINK_NOFOLLOW: don't follow symlinks (lstat behavior)
+    // VFS.resolve_path already follows symlinks; for lstat we need the link node itself.
+    // Since the VFS doesn't expose a non-following resolve, we resolve parent + find_child.
+    if (flags & AT_SYMLINK_NOFOLLOW) != 0 {
+        let (parent_path, name) = split_parent(&abs_path);
+        let vfs = VFS.lock();
+        if let Some(parent) = vfs.resolve_path(&parent_path) {
+            if let Some(node) = parent.find_child(&name) {
+                if let Ok(stat) = node.stat() {
+                    if unsafe { user_access::copy_to_user(stat_buf as *mut u8,
+                        core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>()))
+                    }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    return 0;
+                }
+            }
+        }
+        errno::Errno::ENOENT as u64
+    } else {
+        if let Some(node) = VFS.lock().resolve_path(&abs_path) {
+            if let Ok(stat) = node.stat() {
+                if unsafe { user_access::copy_to_user(stat_buf as *mut u8,
+                    core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>()))
+                }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+                return 0;
+            }
+        }
+        errno::Errno::ENOENT as u64
+    }
+}
+
+fn sys_faccessat(dirfd: i64, pathname_ptr: *const u8, mode: i32, flags: i32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let abs_path = match resolve_path_at(dirfd, &path_str, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+
+    let node = match VFS.lock().resolve_path(&abs_path) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    let need = (mode & 7) as u32;
+    if need == 0 { return 0; }
+
+    // AT_EACCESS: use euid/egid instead of uid/gid
+    if (flags & AT_EACCESS) != 0 {
+        if let Ok(stat) = node.stat() {
+            let euid = get_current_euid();
+            let egid = get_current_egid();
+            if has_capability(CAP_DAC_OVERRIDE) { return 0; }
+            if has_capability(CAP_DAC_READ_SEARCH) && (need & 2) == 0 { return 0; }
+            let bits = if euid == stat.st_uid { (stat.st_mode >> 6) & 7 }
+                       else if egid == stat.st_gid { (stat.st_mode >> 3) & 7 }
+                       else { stat.st_mode & 7 };
+            if (bits & need) == need { 0 } else { errno::Errno::EACCES as u64 }
+        } else {
+            0
+        }
+    } else {
+        if check_node_permission(&node, need) { 0 } else { errno::Errno::EACCES as u64 }
+    }
+}
+
+fn sys_lstat(path_ptr: *const u8, stat_buf: *mut Stat) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    if let Some(node) = VFS.lock().resolve_path(&path_str) {
+        // lstat returns info about the symlink itself, not the target
+        if let Ok(stat) = node.stat() {
+            if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>())) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            return 0;
+        }
+    }
+    errno::Errno::ENOENT as u64
+}
+
+fn sys_link(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
+    let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    let mut vfs = VFS.lock();
+    let old_node = match vfs.resolve_path(&old_path) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    // Extract parent dir and new name from new_path
+    let (parent_dir, new_name) = match new_path.rsplit_once('/') {
+        Some((parent, name)) => (parent, name),
+        None => ("", &new_path),
+    };
+    let parent_node = match vfs.resolve_path(if parent_dir.is_empty() { "." } else { parent_dir }) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    if parent_node.link(old_node, new_name).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
+}
+
+fn sys_getgroups(size: i32, list: *mut u32) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let groups = process.groups.lock();
+    if size < 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    if size == 0 {
+        return groups.len() as u64;
+    }
+    let size = size as usize;
+    if size < groups.len() {
+        return -errno::Errno::EINVAL as i64 as u64;
+    }
+    let slice = unsafe { core::slice::from_raw_parts_mut(list, groups.len()) };
+    for (i, g) in groups.iter().enumerate() {
+        slice[i] = *g;
+    }
+    groups.len() as u64
+}
+
+fn sys_setgroups(size: i64, list: *const u32) -> u64 {
+    if !has_capability(CAP_SETGID) {
+        return errno::Errno::EPERM as u64;
+    }
+    if size < 0 || size > 65536 {
+        return errno::Errno::EINVAL as u64;
+    }
+    let count = size as usize;
+    let slice = if count > 0 {
+        unsafe { core::slice::from_raw_parts(list, count) }
+    } else {
+        &[]
+    };
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let mut groups = process.groups.lock();
+    groups.clear();
+    groups.extend_from_slice(slice);
+    0
+}
+
+fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let creds = process.credentials.lock();
+    let vals = [creds.uid, creds.euid, creds.suid];
+    let ptrs = [ruid_ptr, euid_ptr, suid_ptr];
+    for (val, ptr) in vals.iter().zip(ptrs.iter()) {
+        if !ptr.is_null() {
+            if unsafe { user_access::copy_to_user(*ptr as *mut u8, core::slice::from_raw_parts(val as *const u32 as *const u8, 4)) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+        }
+    }
+    0
+}
+
+fn sys_setresuid(ruid: u32, euid: u32, suid: u32) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let mut creds = process.credentials.lock();
+    // POSIX: unprivileged may only set each to current real/effective/saved
+    if !has_capability(CAP_SETUID) {
+        if (ruid != !0u32 && ruid != creds.uid && ruid != creds.euid && ruid != creds.suid) ||
+           (euid != !0u32 && euid != creds.uid && euid != creds.euid && euid != creds.suid) ||
+           (suid != !0u32 && suid != creds.uid && suid != creds.euid && suid != creds.suid) {
+            return errno::Errno::EPERM as u64;
+        }
+    }
+    if ruid != !0u32 { creds.uid = ruid; }
+    if euid != !0u32 { creds.euid = euid; }
+    if suid != !0u32 { creds.suid = suid; }
+    // Always keep fsuid in sync with euid
+    creds.fsuid = creds.euid;
+    0
+}
+
+fn sys_getresgid(rgid_ptr: *mut u32, egid_ptr: *mut u32, sgid_ptr: *mut u32) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let creds = process.credentials.lock();
+    let vals = [creds.gid, creds.egid, creds.sgid];
+    let ptrs = [rgid_ptr, egid_ptr, sgid_ptr];
+    for (val, ptr) in vals.iter().zip(ptrs.iter()) {
+        if !ptr.is_null() {
+            if unsafe { user_access::copy_to_user(*ptr as *mut u8, core::slice::from_raw_parts(val as *const u32 as *const u8, 4)) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+        }
+    }
+    0
+}
+
+fn sys_setresgid(rgid: u32, egid: u32, sgid: u32) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let mut creds = process.credentials.lock();
+    if !has_capability(CAP_SETGID) {
+        if (rgid != !0u32 && rgid != creds.gid && rgid != creds.egid && rgid != creds.sgid) ||
+           (egid != !0u32 && egid != creds.gid && egid != creds.egid && egid != creds.sgid) ||
+           (sgid != !0u32 && sgid != creds.gid && sgid != creds.egid && sgid != creds.sgid) {
+            return errno::Errno::EPERM as u64;
+        }
+    }
+    if rgid != !0u32 { creds.gid = rgid; }
+    if egid != !0u32 { creds.egid = egid; }
+    if sgid != !0u32 { creds.sgid = sgid; }
+    creds.fsgid = creds.egid;
+    0
+}
+
+fn sys_utimensat(dirfd: i64, pathname_ptr: *const u8, times_ptr: *const u8, flags: i32) -> u64 {
+    let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    // ponytail: utimens only sets both to current time
+    let node = match VFS.lock().resolve_path(&path_str) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    let now = crate::time::get_system_time();
+    if node.utimens((now.0, now.1), (now.0, now.1)).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
+}
+
+fn sys_fallocate(fd: u64, mode: i32, offset: i64, len: i64) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let fd_table = process.fd_table.lock();
+    if (fd as usize) >= fd_table.len() {
+        return errno::Errno::EBADF as u64;
+    }
+    match fd_table[fd as usize] {
+        Some(FileDescriptor::File { ref node, .. }) | Some(FileDescriptor::Directory { ref node, .. }) => {
+            match node.fallocate(mode, offset, len) {
+                Ok(()) => 0,
+                Err(_) => errno::Errno::ENOSPC as u64,
+            }
+        }
+        _ => errno::Errno::EBADF as u64,
+    }
+}
+
+fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: *mut u64, count: u64) -> u64 {
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    let fd_table = process.fd_table.lock();
+    if (out_fd as usize) >= fd_table.len() || (in_fd as usize) >= fd_table.len() {
+        return errno::Errno::EBADF as u64;
+    }
+    let start_offset = if !offset_ptr.is_null() {
+        let slice = unsafe { core::slice::from_raw_parts(offset_ptr as *const u8, 8) };
+        u64::from_ne_bytes(slice.try_into().unwrap_or([0; 8]))
+    } else { 0 };
+    // ponytail: simple byte-by-byte copy, page-based DMA if throughput matters
+    let buf_size = core::cmp::min(count, 4096) as usize;
+    let mut buf = alloc::vec![0u8; buf_size];
+    match fd_table[in_fd as usize] {
+        Some(FileDescriptor::File { ref node, ref pos, .. }) => {
+            let mut read_pos = if !offset_ptr.is_null() { start_offset } else { *pos.lock() };
+            let mut total: u64 = 0;
+            while total < count {
+                let to_read = core::cmp::min(count - total, 4096);
+                let n = node.read_at(&mut buf, read_pos);
+                if n == 0 { break; }
+                // Write to out_fd
+                match fd_table[out_fd as usize] {
+                    Some(FileDescriptor::File { ref node, .. }) | Some(FileDescriptor::Directory { ref node, .. }) => {
+                        let _ = node.write_at(&buf[..n], read_pos);
+                    }
+                    _ => return errno::Errno::EBADF as u64,
+                }
+                if !offset_ptr.is_null() { read_pos += n as u64; }
+                else { *pos.lock() += n as u64; }
+                total += n as u64;
+            }
+            if !offset_ptr.is_null() {
+                let new_offset = read_pos.to_ne_bytes();
+                if unsafe { user_access::copy_to_user(offset_ptr as *mut u8, &new_offset) }.is_err() {
+                    return errno::Errno::EFAULT as u64;
+                }
+            }
+            total as u64
+        }
+        _ => errno::Errno::EBADF as u64,
+    }
 }

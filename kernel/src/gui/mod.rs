@@ -231,7 +231,7 @@ impl Compositor {
         self.windows.push(term_win);
     }
 
-    fn create_info_window(&mut self, title: &'static str, body: &str) {
+    fn create_info_window(&mut self, title: &str, body: &str) {
         let w = 340;
         let h = 200;
         let mut info_win = window::Window::new(120, 80, w, h, title);
@@ -703,7 +703,7 @@ impl Compositor {
             if is_active {
                 drawing::draw_line_h(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx, taskbar_y + 5, 115, crate::gui::accent_color());
             }
-            let display = if win.title.len() > 13 { &win.title[..13] } else { win.title };
+            let display = if win.title.len() > 13 { &win.title[..13] } else { &*win.title };
             drawing::draw_string(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx + 5, taskbar_y + 10, display, 0xFFFFFFFF);
         }
 
@@ -794,7 +794,7 @@ impl Compositor {
                 let by = overlay_y as usize + 10;
                 let bg = if i == self.alt_tab_index { 0xFF0078D4 } else { 0xFF3A3A3A };
                 drawing::draw_rect(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx, by, 120, 40, bg);
-                let display = if win.title.len() > 14 { &win.title[..14] } else { win.title };
+                let display = if win.title.len() > 14 { &win.title[..14] } else { &*win.title };
                 drawing::draw_string(&mut self.backbuffer, SCREEN_WIDTH, SCREEN_HEIGHT, bx + 4, by + 14, display, 0xFFFFFFFF);
             }
         }

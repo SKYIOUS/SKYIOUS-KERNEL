@@ -224,7 +224,12 @@ impl VfsNode for DevNode {
                         Ok(0)
                     }
                     BLKRD_SEC => {
-                        let op: BlkIoctlOp = unsafe { core::ptr::read_unaligned(argp as *const BlkIoctlOp) };
+                        let mut op_buf = [0u8; core::mem::size_of::<BlkIoctlOp>()];
+                        if unsafe { user_access::copy_from_user(&mut op_buf, argp) }.is_err() {
+                            return Err(());
+                        }
+                        let op: BlkIoctlOp = unsafe { core::ptr::read_unaligned(op_buf.as_ptr() as *const BlkIoctlOp) };
+                        if op.count > 1024 { return Err(()); }
                         let data_size = (op.count * 512) as usize;
                         let mut buf = alloc::vec![0u8; data_size];
                         for j in 0..op.count {
@@ -239,7 +244,12 @@ impl VfsNode for DevNode {
                         Ok(0)
                     }
                     BLKWR_SEC => {
-                        let op: BlkIoctlOp = unsafe { core::ptr::read_unaligned(argp as *const BlkIoctlOp) };
+                        let mut op_buf = [0u8; core::mem::size_of::<BlkIoctlOp>()];
+                        if unsafe { user_access::copy_from_user(&mut op_buf, argp) }.is_err() {
+                            return Err(());
+                        }
+                        let op: BlkIoctlOp = unsafe { core::ptr::read_unaligned(op_buf.as_ptr() as *const BlkIoctlOp) };
+                        if op.count > 1024 { return Err(()); }
                         let data_size = (op.count * 512) as usize;
                         let mut buf = alloc::vec![0u8; data_size];
                         if unsafe { user_access::copy_from_user(&mut buf, op.buf as *const u8) }.is_err() {

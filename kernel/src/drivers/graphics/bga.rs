@@ -64,7 +64,7 @@ impl Bga {
         Self::write_reg(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
         
         // Map and Clear the frame buffer
-        let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap_or(&0);
+        let offset = crate::memory::physical_memory_offset();
         let virt_fb = (offset as usize + self.frame_buffer_phys) as *mut u32;
         
         crate::println!("BGA: Framebuffer at virt 0x{:x}", virt_fb as usize);

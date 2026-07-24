@@ -31,17 +31,33 @@ impl EntropyHarvester {
         let tsc = ((hi as u64) << 32) | (lo as u64);
         self.add_entropy(tsc);
 
-        // 2. RDRAND (If supported)
+        // 2. RDRAND (If supported — CPUID leaf 01h, ECX bit 30)
         let mut rdrand_val: u64 = 0;
         let success: u8;
         unsafe {
+            let mut ecx: u32;
             core::arch::asm!(
-                "rdrand {0}",
-                "setc {1}",
-                out(reg) rdrand_val,
-                out(reg_byte) success,
+                "push rbx",
+                "mov eax, 1",
+                "xor ecx, ecx",
+                "cpuid",
+                "mov {0:e}, ecx",
+                "pop rbx",
+                out(reg) ecx,
+                out("eax") _, out("edx") _,
                 options(nostack, preserves_flags)
             );
+            if (ecx & (1 << 30)) != 0 {
+                core::arch::asm!(
+                    "rdrand {0}",
+                    "setc {1}",
+                    out(reg) rdrand_val,
+                    out(reg_byte) success,
+                    options(nostack, preserves_flags)
+                );
+            } else {
+                success = 0;
+            }
         }
         if success != 0 {
             self.add_entropy(rdrand_val);

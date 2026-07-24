@@ -2,6 +2,7 @@ use xmas_elf::ElfFile;
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::collections::BTreeMap;
 use spin::Mutex;
 use crate::memory::paging::AddressSpace;
 use x86_64::structures::paging::PageTableFlags;
@@ -29,20 +30,27 @@ pub struct Vma {
     pub end: u64,
     pub flags: PageTableFlags,
         pub _name: &'static str,
+    pub file_handle: Option<u64>,
+    pub file_offset: u64,
+    pub is_shared: bool,
+    pub shm_id: Option<u32>,  // None for normal mappings
 }
 
 use smoltcp::iface::SocketHandle;
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum SocketType { Tcp, Udp, Raw }
+pub enum SocketType { Tcp, Udp, Raw, Unix }
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub enum FileDescriptor {
     File { node: Arc<dyn VfsNode>, offset: usize },
     Socket(SocketHandle, SocketType),
+    UnixSocket(u64, SocketType),
     PtyMaster { _idx: usize, pair: alloc::sync::Arc<spin::Mutex<crate::pty::PtyPair>> },
     PtySlave { _idx: usize, pair: alloc::sync::Arc<spin::Mutex<crate::pty::PtyPair>> },
+    SignalFd(u64),
+    EventFd(alloc::sync::Arc<spin::Mutex<EventFdData>>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +76,8 @@ pub struct Process {
     pub children: Mutex<Vec<u64>>,
     pub brk: Mutex<u64>,
     pub cwd: Mutex<String>,
+    /// Map from directory fd to its normalized absolute path (for *at syscalls)
+    pub dir_fds: Mutex<BTreeMap<usize, String>>,
     pub signals: Mutex<crate::syscalls::signal::SignalState>,
     pub signal_handlers: Mutex<[u64; 32]>,
     pub signal_restorers: Mutex<[u64; 32]>,
@@ -77,6 +87,86 @@ pub struct Process {
     pub clear_child_tid: Mutex<u64>,
     pub emulation: Mutex<EmulationMode>,
     pub umask: Mutex<u32>,
+    pub pgid: u64,
+    pub session: u64,
+    pub is_group_leader: bool,
+    pub rlim_cur: [i64; 16],
+    pub rlim_max: [i64; 16],
+    pub altstack: spin::Mutex<stack_t>,
+    pub itimer_real: spin::Mutex<itimerval>,
+    pub utime: core::sync::atomic::AtomicU64,
+    pub stime: core::sync::atomic::AtomicU64,
+    pub cutime: core::sync::atomic::AtomicU64,
+    pub cstime: core::sync::atomic::AtomicU64,
+    pub boot_ticks: u64,
+    pub groups: spin::Mutex<alloc::vec::Vec<u32>>,
+    /// virt_page_addr → (device_idx, slot_idx) for swapped-out pages
+    pub swap_map: spin::Mutex<alloc::collections::BTreeMap<u64, (usize, usize)>>,
+}
+
+// ─── sigaltstack / itimerval / tms types ─────────────────────────
+
+pub const SS_DISABLE: i32 = 2;
+pub const SS_ONSTACK: i32 = 1;
+pub const SIGSTKSZ: usize = 8192;
+pub const MINSIGSTKSZ: usize = 2048;
+
+#[repr(C)]
+pub struct stack_t {
+    pub ss_sp: *mut u8,
+    pub ss_flags: i32,
+    pub ss_size: usize,
+}
+
+#[repr(C)]
+pub struct timeval {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+#[repr(C)]
+pub struct itimerval {
+    pub it_interval: timeval,
+    pub it_value: timeval,
+}
+
+#[repr(C)]
+pub struct tms {
+    pub tms_utime: i64,
+    pub tms_stime: i64,
+    pub tms_cutime: i64,
+    pub tms_cstime: i64,
+}
+
+// ─── signalfd types ──────────────────────────────────────────────
+
+pub const SFD_NONBLOCK: i32 = 0x800;
+pub const SFD_CLOEXEC: i32 = 0x80000;
+
+pub struct SignalFdData {
+    pub mask: u64,
+    pub pending: alloc::collections::VecDeque<SignalFdInfo>,
+    pub nonblock: bool,
+    pub cloexec: bool,
+}
+
+pub struct SignalFdInfo {
+    pub signo: u32,
+    pub pid: u32,
+    pub uid: u32,
+}
+
+// ─── eventfd types ──────────────────────────────────────────────
+
+pub const EFD_SEMAPHORE: i32 = 1;
+pub const EFD_NONBLOCK: i32 = 0x800;
+pub const EFD_CLOEXEC: i32 = 0x40000;
+pub const EFD_MAX: u64 = 0xFFFF_FFFF_FFFF_FFFE;
+
+pub struct EventFdData {
+    pub counter: u64,
+    pub semaphore: bool,
+    pub nonblock: bool,
 }
 
 /// All POSIX credentials in one struct — single-lock snapshot.
@@ -142,11 +232,18 @@ impl Process {
         c.cap_permitted = pc.cap_permitted;
         c.cap_inheritable = pc.cap_inheritable;
         *self.umask.lock() = *parent.umask.lock();
+        *self.groups.lock() = parent.groups.lock().clone();
     }
 }
 
 use crate::vfs::VfsNode;
 use crate::objects::KernelObject;
+
+lazy_static::lazy_static! {
+    /// Global signalfd registry: fd_handle → SignalFdData.
+    pub static ref SIGNAL_FDS: spin::Mutex<alloc::collections::BTreeMap<u64, alloc::sync::Arc<spin::Mutex<SignalFdData>>>> =
+        spin::Mutex::new(alloc::collections::BTreeMap::new());
+}
 
 impl Process {
     /// Execute a closure with mutable access to a handle entry.
@@ -212,6 +309,7 @@ impl Process {
             children: Mutex::new(Vec::new()),
             brk: Mutex::new(0),
             cwd: Mutex::new(String::from("/")),
+            dir_fds: Mutex::new(BTreeMap::new()),
             signals: Mutex::new(crate::syscalls::signal::SignalState::new()),
             signal_handlers: Mutex::new([0; 32]),
             signal_restorers: Mutex::new([0; 32]),
@@ -220,6 +318,27 @@ impl Process {
             clear_child_tid: Mutex::new(0),
             emulation: Mutex::new(EmulationMode::Native),
             umask: Mutex::new(0o022),
+            pgid: id,
+            session: id,
+            is_group_leader: true,
+            rlim_cur: [i64::MAX; 16],
+            rlim_max: [i64::MAX; 16],
+            altstack: spin::Mutex::new(stack_t {
+                ss_sp: core::ptr::null_mut(),
+                ss_flags: SS_DISABLE,
+                ss_size: 0,
+            }),
+            itimer_real: spin::Mutex::new(itimerval {
+                it_interval: timeval { tv_sec: 0, tv_usec: 0 },
+                it_value: timeval { tv_sec: 0, tv_usec: 0 },
+            }),
+            utime: core::sync::atomic::AtomicU64::new(0),
+            stime: core::sync::atomic::AtomicU64::new(0),
+            cutime: core::sync::atomic::AtomicU64::new(0),
+            cstime: core::sync::atomic::AtomicU64::new(0),
+            boot_ticks: crate::interrupts::get_ticks(),
+            groups: spin::Mutex::new(alloc::vec::Vec::new()),
+            swap_map: spin::Mutex::new(alloc::collections::BTreeMap::new()),
         }
     }
 
@@ -230,11 +349,14 @@ impl Process {
         self.merge_vmas_inner(&mut vmas);
     }
 
-    /// Merge overlapping and adjacent VMAs with compatible flags.
+    /// Merge overlapping and adjacent VMAs with compatible flags and file backing.
     fn merge_vmas_inner(&self, vmas: &mut Vec<Vma>) {
         let mut i = 0;
         while i + 1 < vmas.len() {
-            let can_merge = vmas[i].flags == vmas[i + 1].flags;
+            let same_backing = vmas[i].file_handle == vmas[i + 1].file_handle
+                && vmas[i].is_shared == vmas[i + 1].is_shared
+                && vmas[i].shm_id == vmas[i + 1].shm_id;
+            let can_merge = vmas[i].flags == vmas[i + 1].flags && same_backing;
             let overlaps_or_adjacent = vmas[i].end >= vmas[i + 1].start;
             if can_merge && overlaps_or_adjacent {
                 vmas[i].end = vmas[i].end.max(vmas[i + 1].end);
@@ -259,7 +381,7 @@ impl Process {
             // v overlaps [start, end)
             if v.start < start && v.end > end {
                 // Middle section removed — split into two
-                let right = Vma { start: end, end: v.end, flags: v.flags, _name: v._name };
+                let right = Vma { start: end, end: v.end, flags: v.flags, _name: v._name, file_handle: v.file_handle, file_offset: v.file_offset, is_shared: v.is_shared, shm_id: v.shm_id };
                 vmas[i].end = start;
                 vmas.insert(i + 1, right);
                 return; // no further overlap possible with this VMA after split
@@ -368,6 +490,10 @@ impl Process {
                     end: virt_start + mem_size,
                     flags,
                     _name: "elf_phdr",
+                    file_handle: None,
+                    file_offset: 0,
+                    is_shared: false,
+                    shm_id: None,
                 });
 
                 // Map and Copy
@@ -412,7 +538,7 @@ impl Process {
                         let len = copy_end - copy_start;
                         let src_off = offset + (copy_start - virt_start) as usize;
                         unsafe {
-                            let dst_ptr = (x86_64::VirtAddr::new(*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap()) + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+                            let dst_ptr = (x86_64::VirtAddr::new(crate::memory::physical_memory_offset()) + frame.start_address().as_u64()).as_mut_ptr::<u8>();
                             let page_offset = virt_start.saturating_sub(page_start);
                             core::ptr::copy_nonoverlapping(
                                 elf_data[src_off..src_off + len as usize].as_ptr(),
@@ -484,7 +610,7 @@ impl Process {
                                     if let TranslateResult::Mapped { frame, offset, .. } = mapper.translate(target_va) {
                                         let phys_addr = frame.start_address() + offset;
                                         let kaddr = x86_64::VirtAddr::new(
-                                            *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + phys_addr.as_u64()
+                                            crate::memory::physical_memory_offset() + phys_addr.as_u64()
                                         );
                                         *(kaddr.as_mut_ptr::<u64>()) = r_addend as u64;
                                     }
@@ -559,6 +685,10 @@ impl Process {
             end: stack_top_addr,
             flags,
             _name: "user_stack",
+            file_handle: None,
+            file_offset: 0,
+            is_shared: false,
+            shm_id: None,
         });
 
         // Copy strings to the top of the stack
@@ -571,8 +701,8 @@ impl Process {
             let virt = x86_64::VirtAddr::new(current_rsp);
             
             // Map virtual to physical for direct writing
-            let phys = crate::memory::virt_to_phys(virt).expect("Failed to translate user stack address");
-            let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+            let phys = crate::memory::virt_to_phys(virt).ok_or(())?;
+            let offset = crate::memory::physical_memory_offset();
             let k_ptr = (offset + phys.as_u64()) as *mut u8;
             
             unsafe {
@@ -591,8 +721,8 @@ impl Process {
         for ptr in arg_ptrs {
             current_rsp -= 8;
             let virt = x86_64::VirtAddr::new(current_rsp);
-            let phys = crate::memory::virt_to_phys(virt).expect("Failed to translate user stack address for ptr");
-            let k_ptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + phys.as_u64()) as *mut u64;
+            let phys = crate::memory::virt_to_phys(virt).ok_or(())?;
+            let k_ptr = (crate::memory::physical_memory_offset() + phys.as_u64()) as *mut u64;
             unsafe { *k_ptr = ptr; }
         }
         
@@ -601,8 +731,8 @@ impl Process {
         // Push argc
         current_rsp -= 8;
         let virt = x86_64::VirtAddr::new(current_rsp);
-        let phys = crate::memory::virt_to_phys(virt).expect("Failed to translate user stack address for argc");
-        let k_ptr = (*crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap() + phys.as_u64()) as *mut u64;
+        let phys = crate::memory::virt_to_phys(virt).ok_or(())?;
+        let k_ptr = (crate::memory::physical_memory_offset() + phys.as_u64()) as *mut u64;
         unsafe { *k_ptr = argv.len() as u64; }
 
         Ok(current_rsp)
@@ -612,22 +742,13 @@ impl Process {
 /// Kill a process by PID — marks all its threads as exited and sends SIGCHLD to parent.
 #[allow(dead_code)]
 pub fn kill_process(pid: u64) {
-    let parent_pid = {
-        let table = PROCESS_TABLE.lock();
-        if let Some(proc) = table.get(&pid) {
-            *proc.exit_code.lock() = Some(-1);
-            crate::println!("[OOM] Killed process pid={}", pid);
-            proc.parent_id
-        } else {
-            None
-        }
-    };
-    if let Some(ppid) = parent_pid {
-        let table = PROCESS_TABLE.lock();
-        if let Some(parent) = table.get(&ppid) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get(&pid) {
+        *proc.exit_code.lock() = Some(-1);
+        crate::println!("[OOM] Killed process pid={}", pid);
+        if let Some(parent) = proc.parent_id.and_then(|ppid| table.get(&ppid)) {
             parent.signals.lock().raise(crate::syscalls::signal::Signal::SIGCHLD);
         }
+        table.remove(&pid);
     }
-    // Remove from process table so it won't be scheduled
-    PROCESS_TABLE.lock().remove(&pid);
 }

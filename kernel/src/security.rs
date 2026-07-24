@@ -10,8 +10,6 @@
 //!   class:   "file", "dir", "process", "capability", "mount"
 //!   perm:    "read", "write", "exec", "kill", "mount", "cap_sys_admin", ...
 
-#![allow(dead_code)]
-
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -54,8 +52,7 @@ pub fn check_syscall_allowed(syscall_number: u64) -> bool {
 }
 
 pub fn load_policy(text: &str) -> bool {
-    let mut rules = POLICY.lock();
-    rules.clear();
+    let mut new_rules = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') { continue; }
@@ -66,7 +63,7 @@ pub fn load_policy(text: &str) -> bool {
             "deny" => false,
             _ => continue,
         };
-        rules.push(LsmRule {
+        new_rules.push(LsmRule {
             subject: parts[0].into(),
             object: parts[1].into(),
             class: parts[2].into(),
@@ -74,7 +71,9 @@ pub fn load_policy(text: &str) -> bool {
             allow,
         });
     }
-    if !rules.is_empty() {
+    if !new_rules.is_empty() {
+        let mut rules = POLICY.lock();
+        *rules = new_rules;
         LSM_ENABLED.store(true, Ordering::Relaxed);
         LSM_VERSION.fetch_add(1, Ordering::Release);
         crate::println!("LSM: {} rules loaded, version {}", rules.len(), LSM_VERSION.load(Ordering::Acquire));
@@ -115,10 +114,6 @@ pub fn hook_dir_mkdir(subject: &str, path: &str) -> bool {
     check(subject, path, "dir", "create")
 }
 
-pub fn hook_execve(subject: &str, path: &str) -> bool {
-    check(subject, path, "file", "exec")
-}
-
 pub fn hook_setuid_exec(subject: &str, path: &str) -> bool {
     // Allow setuid only if LSM doesn't explicitly deny it
     check(subject, path, "process", "setuid_exec")
@@ -131,14 +126,6 @@ pub fn hook_socket_create(subject: &str, family: u64) -> bool {
 
 pub fn hook_socket_connect(subject: &str, addr: &str) -> bool {
     check(subject, addr, "socket", "connect")
-}
-
-pub fn hook_capable(subject: &str, cap: &str) -> bool {
-    check(subject, "*", "capability", cap)
-}
-
-pub fn hook_mount_perm(subject: &str, path: &str) -> bool {
-    check(subject, path, "mount", "mount")
 }
 
 pub fn current_subject() -> String {
@@ -157,19 +144,6 @@ pub fn reload_policy() -> bool {
         }
     }
     false
-}
-
-/// Hot-reload LSM policy from file - can be called at runtime
-pub fn hot_reload_policy() -> Result<(), &'static str> {
-    if reload_policy() {
-        Ok(())
-    } else {
-        Err("Failed to reload LSM policy")
-    }
-}
-
-pub fn get_lsm_version() -> u64 {
-    LSM_VERSION.load(Ordering::Acquire)
 }
 
 pub fn init() {

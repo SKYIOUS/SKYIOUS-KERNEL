@@ -59,7 +59,17 @@ impl BuddyAllocator {
     }
 
     pub fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        self.allocate_contiguous(0).map(PhysFrame::containing_address)
+        // Try normal allocation first
+        if let Some(addr) = self.allocate_contiguous(0) {
+            return Some(PhysFrame::containing_address(addr));
+        }
+        // If swap devices exist, try evicting a page and retry
+        if !crate::memory::swap::SWAP_DEVICES.lock().is_empty() {
+            if crate::memory::swap::try_evict_one_page() {
+                return self.allocate_contiguous(0).map(PhysFrame::containing_address);
+            }
+        }
+        None
     }
 
     pub fn allocate_contiguous(&mut self, order: usize) -> Option<PhysAddr> {
@@ -170,7 +180,7 @@ impl BuddyAllocator {
     fn read_next_ptr(&self, addr: PhysAddr) -> Option<PhysAddr> {
         // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
         // addr is a valid physical frame address from the allocator.
-        let offset = *PHYSICAL_MEMORY_OFFSET.get().expect("Memory offset not init");
+        let offset = *crate::memory::physical_memory_offset();
         let virt = VirtAddr::new(addr.as_u64() + offset);
         let ptr = virt.as_ptr::<u64>();
         let val = unsafe { *ptr };
@@ -184,7 +194,7 @@ impl BuddyAllocator {
     fn write_next_ptr(&self, addr: PhysAddr, next: Option<PhysAddr>) {
         // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
         // addr is a valid physical frame address from the allocator.
-        let offset = *PHYSICAL_MEMORY_OFFSET.get().expect("Memory offset not init");
+        let offset = *crate::memory::physical_memory_offset();
         let virt = VirtAddr::new(addr.as_u64() + offset);
         let ptr = virt.as_mut_ptr::<u64>();
         let val = next.map(|a| a.as_u64()).unwrap_or(0xFFFF_FFFF_FFFF_FFFF);

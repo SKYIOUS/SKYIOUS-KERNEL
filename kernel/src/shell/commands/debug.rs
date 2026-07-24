@@ -45,6 +45,10 @@ pub fn test_pf() {
         end: test_addr + 4096,
         flags: PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
         _name: "Test Demand Paging",
+        file_handle: None,
+        file_offset: 0,
+        is_shared: false,
+        shm_id: None,
     });
 
     let process_arc = Arc::new(process);
@@ -95,6 +99,10 @@ pub fn test_cow() {
         end: test_addr + 4096,
         flags: PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
         _name: "COW Test Region",
+        file_handle: None,
+        file_offset: 0,
+        is_shared: false,
+        shm_id: None,
     });
 
     {

@@ -123,7 +123,7 @@ impl VmxHandler {
         let revision = basic as u32;
         // SAFETY: vmcs_pa is mapped, write revision at offset 0.
         unsafe {
-            let vmcs_ptr = (vmcs_pa + *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap()) as *mut u32;
+            let vmcs_ptr = (vmcs_pa + crate::memory::physical_memory_offset()) as *mut u32;
             vmcs_ptr.write_volatile(revision);
         }
 

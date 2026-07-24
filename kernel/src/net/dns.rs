@@ -75,31 +75,42 @@ fn do_query(
         let s = sockets.get_mut::<udp::Socket>(handle);
         if s.can_recv() {
             let mut buf = [0u8; 512];
-            if let Ok((n, _)) = s.recv_slice(&mut buf) {
-                if n < 12 { continue; }
-                let rh: DnsHeader = unsafe { core::ptr::read(buf.as_ptr() as *const DnsHeader) };
-                let ancount = u16::from_be(rh.ancount);
-                if ancount > 0 {
-                    let mut pos = 12;
-                    while buf[pos] != 0 { pos += (buf[pos] as usize) + 1; }
-                    pos += 5;
-                    if buf[pos] & 0xC0 == 0xC0 { pos += 2; } else { while buf[pos] != 0 { pos += (buf[pos] as usize) + 1; } pos += 1; }
-                    let atype = u16::from_be_bytes([buf[pos], buf[pos+1]]);
-                    pos += 2; pos += 2; pos += 4;
-                    let rdlen = u16::from_be_bytes([buf[pos], buf[pos+1]]);
-                    pos += 2;
-                    if atype == 28 && rdlen == 16 {
-                        let mut bytes = [0u8; 16];
-                        bytes.copy_from_slice(&buf[pos..pos+16]);
-                        let ip = Ipv6Address::from_bytes(&bytes);
-                        sockets.remove(handle);
-                        return Some(IpAddress::Ipv6(ip));
-                    }
-                    if atype == 1 && rdlen == 4 {
-                        let ip = Ipv4Address::new(buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]);
-                        sockets.remove(handle);
-                        return Some(IpAddress::Ipv4(ip));
-                    }
+            let n = s.recv_slice(&mut buf).ok()?.0;
+            if n < 12 || n > 512 { continue; }
+            let rh: DnsHeader = unsafe { core::ptr::read(buf.as_ptr() as *const DnsHeader) };
+            let ancount = u16::from_be(rh.ancount);
+            if ancount > 0 {
+                let mut pos = 12usize;
+                loop {
+                    if pos >= n { break; }
+                    if buf[pos] == 0 { pos += 1; break; }
+                    let label_len = buf[pos] as usize;
+                    if pos + 1 + label_len > n { break; }
+                    if buf[pos] & 0xC0 == 0xC0 { pos += 2; break; }
+                    pos += 1 + label_len;
+                }
+                if pos + 10 > n { continue; }
+                let atype = u16::from_be_bytes([buf[pos], buf[pos+1]]);
+                pos += 2;
+                let _aclass = u16::from_be_bytes([buf[pos], buf[pos+1]]);
+                pos += 2;
+                let _ttl_b = [buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]];
+                pos += 4;
+                if pos + 2 > n { continue; }
+                let rdlen = u16::from_be_bytes([buf[pos], buf[pos+1]]);
+                pos += 2;
+                if pos + rdlen as usize > n { continue; }
+                if atype == 28 && rdlen == 16 {
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(&buf[pos..pos+16]);
+                    let ip = Ipv6Address::from_bytes(&bytes);
+                    sockets.remove(handle);
+                    return Some(IpAddress::Ipv6(ip));
+                }
+                if atype == 1 && rdlen == 4 {
+                    let ip = Ipv4Address::new(buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]);
+                    sockets.remove(handle);
+                    return Some(IpAddress::Ipv4(ip));
                 }
             }
         }

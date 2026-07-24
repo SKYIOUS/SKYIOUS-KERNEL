@@ -198,13 +198,15 @@ impl VirtioGpu {
         let mut notify = Port::<u16>::new(self.io_base + REG_QUEUE_NOTIFY);
         unsafe { notify.write(0); }
 
-        for _ in 0..2_000_000 {
-            if self.used.idx != self.last_used {
-                self.last_used = self.last_used.wrapping_add(1);
-                break;
-            }
+        // Spin until device consumes our descriptor chain
+        // ponytail: spin-wait, no timeout — the device is always expected to respond.
+        // A timeout could let the stack frame pop while DMA is still in-flight (stack
+        // buffer corruption). If the device is genuinely stuck the kernel hangs, which
+        // is safer than silent memory corruption.
+        while self.used.idx == self.last_used {
             core::hint::spin_loop();
         }
+        self.last_used = self.last_used.wrapping_add(1);
 
         self.next_desc = (self.next_desc + 2) % QSIZE;
     }

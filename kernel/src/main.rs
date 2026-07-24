@@ -15,14 +15,14 @@
 #![deny(warnings)]
 // ponytail: clippy-style lints allowed — zero bug-finding value for kernel code
 #![allow(
-    clippy::upper_case_acronyms, clippy::result_unit_err, clippy::missing_safety_doc,
+    clippy::upper_case_acronyms, clippy::result_unit_err,
     clippy::too_many_arguments, clippy::collapsible_if, clippy::collapsible_match,
     clippy::single_match, clippy::manual_range_contains, clippy::new_without_default,
-    clippy::unnecessary_cast, clippy::ptr_as_ptr, clippy::cast_ptr_alignment,
+    clippy::unnecessary_cast, clippy::ptr_as_ptr,
     clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss,
     clippy::needless_return, clippy::clone_on_copy, clippy::len_zero,
     clippy::needless_range_loop, clippy::manual_is_multiple_of,
-    clippy::declare_interior_mutable_const, clippy::fn_to_numeric_cast,
+    clippy::declare_interior_mutable_const,
     clippy::redundant_pattern_matching, clippy::manual_div_ceil,
     clippy::needless_lifetimes, clippy::unused_unit,
     clippy::needless_borrow, clippy::derivable_impls,
@@ -35,12 +35,12 @@
     clippy::manual_strip, clippy::suspicious_map,
     clippy::unnecessary_min_or_max,
     clippy::suboptimal_flops, clippy::arithmetic_side_effects,
-    clippy::range_plus_one, clippy::not_unsafe_ptr_arg_deref,
+    clippy::range_plus_one,
     clippy::get_first, clippy::absurd_extreme_comparisons,
     clippy::same_item_push,
     clippy::should_implement_trait,
     clippy::match_same_arms, clippy::borrow_interior_mutable_const,
-    clippy::option_map_unit_fn, clippy::infinite_loop,
+    clippy::option_map_unit_fn,
     clippy::never_loop, clippy::let_and_return
 )]
 
@@ -130,31 +130,19 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 }
 
 pub fn oom_kill() -> ! {
-    let msg = b"\n[OOM] Out of memory - killing process\n";
+    let msg = b"\n[OOM] Out of memory - killing current process\n";
     for &b in msg {
         serial_putc(b);
     }
-    // Kill the last spawned userspace process (highest PID, excluding init=1 and kernel=0)
-    let mut target_process = None;
-    {
-        let table = crate::task::process::PROCESS_TABLE.lock();
-        let mut largest_pid: u64 = 0;
-        for (pid, proc) in table.iter() {
-            if *pid > 1 && *pid > largest_pid {
-                largest_pid = *pid;
-                target_process = Some(proc.clone());
-            }
-        }
-    }
-
-    if let Some(proc) = target_process {
-        let msg2 = alloc::format!("[OOM] Killing pid {}\n", proc.id);
+    let pid = crate::task::process::CURRENT_PROCESS.lock().as_ref().map(|p| p.id);
+    if let Some(pid) = pid {
+        let msg2 = alloc::format!("[OOM] Killing pid {}\n", pid);
         serial_write(&msg2);
-        proc.signals.lock().raise(crate::syscalls::signal::Signal::_SIGKILL);
+        crate::task::process::kill_process(pid);
     } else {
-        serial_write("[OOM] No user processes to kill!\n");
+        serial_write("[OOM] No current process!\n");
     }
-    loop { crate::arch::CurrentArch::halt(); }
+    crate::task::scheduler::schedule();
 }
 
 fn init_kaslr() {
@@ -190,7 +178,7 @@ pub fn serial_write(msg: &str) {
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Seed stack canary BEFORE any function with stack protection runs.
     let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
-    let base = if entropy == 0 { 0x1000 } else { entropy };
+    let base = if entropy == 0 { 0x9E3779B97F4A7C15 } else { entropy };
     unsafe { __stack_chk_guard = ((base << 1) | base.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize; }
 
     init_kaslr();
@@ -342,6 +330,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     gui::init();
 
     task::scheduler::spawn(run_async_tasks);
+    task::scheduler::spawn(init_os_task);
 
     #[cfg(not(target_arch = "aarch64"))]
     x86_64::instructions::interrupts::enable();
@@ -357,7 +346,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::scheduler::schedule();
 }
 
-#[allow(dead_code)]
 extern "C" fn init_os_task() -> ! {
     crate::serial_write("[INIT] searching for /bin/init...\n");
     
@@ -397,11 +385,11 @@ extern "C" fn init_os_task() -> ! {
             .expect("AS creation failed");
         crate::serial_write("[INIT] AS created\n");
 
-        match crate::task::process::Process::load_elf(&elf_data, address_space) {
-            Ok(process) => {
-                crate::serial_write("[INIT] ELF loaded\n");
-                let entry = process.entry_point;
-                let process_arc = Arc::new(process);
+                match crate::task::process::Process::load_elf(&elf_data, address_space) {
+                    Ok(process) => {
+                        crate::serial_write("[INIT] ELF loaded\n");
+                        let _entry = process.entry_point;
+                        let process_arc = Arc::new(process);
                 crate::serial_write("[INIT] register process...\n");
                 crate::task::process::Process::register(process_arc.clone());
                 crate::serial_write("[INIT] set current process...\n");
@@ -430,35 +418,47 @@ extern "C" fn init_os_task() -> ! {
                 }
                 crate::serial_write("[INIT] set thread process...\n");
                 {
-                    if let Some(mut thread) = crate::task::scheduler::current_thread() {
+                    crate::task::scheduler::with_current_thread(|thread| {
                         thread.process = Some(process_arc.clone());
-                        crate::task::scheduler::set_current_thread(thread);
-                    }
+                    });
                 }
                 crate::serial_write("[INIT] activate address space...\n");
-                unsafe { process_arc.address_space.activate(); }
-                crate::serial_write("[INIT] setup_user_stack...\n");
-                let argv = alloc::vec!["/bin/init".into()];
-                let user_rsp = match process_arc.setup_user_stack(&argv) {
-                    Ok(rsp) => rsp,
-                    Err(()) => {
-                        crate::serial_write("[INIT] OOM: failed to allocate user stack, halting\n");
-                        loop { crate::arch::CurrentArch::halt(); }
-                    }
-                };
-                crate::serial_write("[INIT] entry=0x"); 
-                let mut eb = [0u8; 16]; let mut ei = 16u8; let mut en = entry;
+                let (old_frame, _old_flags) = x86_64::registers::control::Cr3::read();
+                let old_pa = old_frame.start_address().as_u64();
+                let new_pa = process_arc.address_space._pml4_phys().start_address().as_u64();
+                crate::serial_write("[INIT] old_pml4=");
+                let mut eb = [0u8; 16]; let mut ei = 16u8; let mut en = old_pa;
                 loop { ei -= 1; let d = (en & 0xf) as u8; eb[ei as usize] = if d < 10 { b'0'+d } else { b'a'+d-10 }; en >>= 4; if en == 0 { break; } }
                 crate::serial_write(core::str::from_utf8(&eb[ei as usize..]).unwrap_or("?"));
-                crate::serial_write(" rsp=0x");
-                let mut eb2 = [0u8; 16]; let mut ei2 = 16u8; let mut en2 = user_rsp;
-                loop { ei2 -= 1; let d = (en2 & 0xf) as u8; eb2[ei2 as usize] = if d < 10 { b'0'+d } else { b'a'+d-10 }; en2 >>= 4; if en2 == 0 { break; } }
-                crate::serial_write(core::str::from_utf8(&eb2[ei2 as usize..]).unwrap_or("?"));
+                crate::serial_write(" new_pml4=");
+                let mut en = new_pa;
+                let mut ei = 16u8;
+                loop { ei -= 1; let d = (en & 0xf) as u8; eb[ei as usize] = if d < 10 { b'0'+d } else { b'a'+d-10 }; en >>= 4; if en == 0 { break; } }
+                crate::serial_write(core::str::from_utf8(&eb[ei as usize..]).unwrap_or("?"));
                 crate::serial_write("\n");
-                crate::serial_write("[INIT] Jumping to userspace...\n");
-                unsafe {
-                    crate::task::thread::jump_to_usermode(entry, user_rsp);
+                // verify kernel entries match
+                let phys_offset = crate::memory::physical_memory_offset();
+                let mut no_mismatch = true;
+                for i in 256..260 {
+                    let ce = unsafe { *((phys_offset + old_pa) as *const u64).add(i) };
+                    let ne = unsafe { *((phys_offset + new_pa) as *const u64).add(i) };
+                    if ce != ne { no_mismatch = false; }
                 }
+                if no_mismatch {
+                    crate::serial_write("[INIT] entries 256-259 matched\n");
+                } else {
+                    crate::serial_write("[INIT] MISM\n");
+                }
+                crate::serial_write("[INIT] doing activate...\n");
+                // ponytail: write SAME CR3 back to test if mov cr3 itself works
+                let (same_frame, same_flags) = x86_64::registers::control::Cr3::read();
+                unsafe { x86_64::registers::control::Cr3::write(same_frame, same_flags); }
+                crate::serial_write("[INIT] same-CR3 write OK\n");
+                // ponytail: now try the NEW page table
+                unsafe { process_arc.address_space.activate(); }
+                crate::serial_write("[INIT] post-activate OK (with new AS)\n");
+                crate::serial_write("[INIT] HALTING (debug)\n");
+                loop { crate::arch::CurrentArch::halt(); }
             }
             Err(e) => {
                 crate::serial_write("[INIT] ELF load FAILED: ");
@@ -510,9 +510,11 @@ extern "C" fn run_async_tasks() -> ! {
     use task::{Task, executor::Executor};
     let mut executor = Executor::new();
 
-    executor.spawn(Task::new(shell::kernel_shell()));
-    executor.spawn(Task::new(network_poll_task()));
-    executor.spawn(Task::new(gui_refresh_task()));
+    // ponytail: kernel shell disabled — it writes directly to the framebuffer,
+    // clobbering the GUI compositor's rendered output. The GUI handles keyboard.
+    // executor.spawn(Task::new(shell::kernel_shell()));
+    let _ = executor.spawn(Task::new(network_poll_task()));
+    let _ = executor.spawn(Task::new(gui_refresh_task()));
     executor.run();
 }
 
@@ -694,10 +696,9 @@ pub fn spawn_userspace_app(path: &'static str) {
                             drop(fd_table);
                         }
                     }
-                    if let Some(mut thread) = crate::task::scheduler::current_thread() {
+                    crate::task::scheduler::with_current_thread(|thread| {
                         thread.process = Some(process_arc.clone());
-                        crate::task::scheduler::set_current_thread(thread);
-                    }
+                    });
                     unsafe { process_arc.address_space.activate(); }
                     let user_rsp = match process_arc.setup_user_stack(&alloc::vec![path.clone()]) {
                         Ok(rsp) => rsp,

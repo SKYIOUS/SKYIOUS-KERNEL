@@ -142,9 +142,9 @@ impl VfsNode for FatNode {
         }
         let fs = self.fs.lock();
         let mut file = fs.root_dir().open_file(&self.path).map_err(|_| ())?;
-        file.truncate().map_err(|_| ())?;
         file.seek(SeekFrom::Start(0)).map_err(|_| ())?;
         file.write_all(data).map_err(|_| ())?;
+        file.truncate().map_err(|_| ())?;
         Ok(())
     }
 

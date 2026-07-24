@@ -1,5 +1,6 @@
 use spin::Mutex;
 use crate::println;
+use crate::serial_write;
 use crate::interrupts;
 
 const WATCHDOG_TIMEOUT_TICKS: u64 = 500; // ~5 seconds at 100Hz
@@ -43,7 +44,8 @@ pub fn check() {
             let elapsed = ticks.saturating_sub(watchdog.last_tick);
             
             if elapsed > WATCHDOG_TIMEOUT_TICKS {
-                panic!("WATCHDOG: CPU {} is stuck! Last seen {} ticks ago.", i, elapsed);
+                serial_write(&alloc::format!("WATCHDOG: CPU {} is stuck! Last seen {} ticks ago.\n", i, elapsed));
+                loop { unsafe { core::arch::asm!("hlt"); } }
             } else if elapsed > WATCHDOG_TIMEOUT_TICKS / 2 && !watchdog.warned {
                 println!("WATCHDOG WARNING: CPU {} has not responded for {} ticks.", i, elapsed);
                 watchdog.warned = true;

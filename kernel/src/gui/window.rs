@@ -15,7 +15,7 @@ pub struct Window {
     pub y: usize,
     pub width: usize,
     pub height: usize,
-    pub title: &'static str,
+    pub title: alloc::boxed::Box<str>,
     pub content: Option<alloc::boxed::Box<[u32]>>,
     pub phys_addr: Option<u64>, // Physical address for shared memory buffer
     pub widgets: alloc::vec::Vec<crate::gui::widgets::Widget>,
@@ -28,8 +28,8 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(x: usize, y: usize, width: usize, height: usize, title: &'static str) -> Self {
-        Window { x, y, width, height, title, content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None, file_manager: None, key_events: VecDeque::new(), dirty: true }
+    pub fn new(x: usize, y: usize, width: usize, height: usize, title: &str) -> Self {
+        Window { x, y, width, height, title: title.into(), content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None, file_manager: None, key_events: VecDeque::new(), dirty: true }
     }
 
     pub fn render(&self, buffer: &mut [u32], mouse_x: usize, mouse_y: usize) {
@@ -42,7 +42,7 @@ impl Window {
         drawing::draw_line_h(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x, self.y + title_bar_height - 1, self.width, crate::gui::accent_color());
 
         // Draw Title Text
-        drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + 5, self.y + 4, self.title, 0xFFFFFFFF);
+        drawing::draw_string(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, self.x + 5, self.y + 4, &self.title, 0xFFFFFFFF);
 
         // Draw Minimize Button (dark with accent underscore)
         let mbx = self.x + self.width - 2 * (Self::BTN_SIZE + 2);
@@ -94,7 +94,7 @@ impl Window {
                 }
             }
         } else if let Some(phys) = self.phys_addr {
-            let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("phys offset not init");
+            let offset = crate::memory::physical_memory_offset();
             let k_ptr = (offset + phys) as *const u32;
             for row in 0..content_h {
                 for col in 0..content_w {

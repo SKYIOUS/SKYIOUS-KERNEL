@@ -8,8 +8,7 @@ pub struct SkyAcpiHandler;
 
 impl AcpiHandler for SkyAcpiHandler {
     unsafe fn map_physical_region<T>(&self, physical_address: usize, size: usize) -> PhysicalMapping<Self, T> {
-        let offset = *memory::PHYSICAL_MEMORY_OFFSET.get()
-            .expect("PHYSICAL_MEMORY_OFFSET must be initialized before ACPI");
+        let offset = memory::physical_memory_offset();
         let virtual_address = offset + physical_address as u64;
         PhysicalMapping::new(
             physical_address,
@@ -203,10 +202,13 @@ pub fn acpi_shutdown() {
         _ => return,
     };
 
-    // SLP_TYP for S5 = 0, SLP_EN = bit 13 (0x2000)
-    let slp_typa: u16 = 0x0000; // SLP_TYP = 0 for S5
-    let slp_en: u16 = 0x2000;   // SLP_EN
-    let pm1a_val = slp_typa | slp_en;
+    // SLP_TYP for S5, SLP_EN = bit 13 (0x2000)
+    // ponytail: SLP_TYP = 0 is a best-effort default. The actual value
+    // should come from \_S5 in the DSDT. If the board uses a different
+    // SLP_TYP, this won't shut down. Parse \_S5 if this fails on real HW.
+    const SLP_TYP_S5: u16 = 0x0000;
+    const SLP_EN: u16 = 0x2000;
+    let pm1a_val = SLP_TYP_S5 | SLP_EN;
 
     if let Some(Some(pm1b_port)) = PM1B_CNT_PORT.get() {
         let mut pm1b_port = x86_64::instructions::port::Port::<u16>::new(*pm1b_port);
@@ -238,7 +240,7 @@ pub fn acpi_reboot() {
 }
 
 fn find_rsdp() -> Option<usize> {
-    let offset = *memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+    let offset = memory::physical_memory_offset();
     let ebda_ptr_virt = offset + 0x40E;
     let ebda_base = unsafe { (*(ebda_ptr_virt as *const u16) as u64) << 4 };
 

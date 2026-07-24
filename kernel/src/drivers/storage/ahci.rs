@@ -266,7 +266,7 @@ pub fn configure_port(port: &mut HbaPort) -> (*mut CommandHeader, *mut HbaCmdTab
     cmd |= 1;      // ST
     port.cmd.write(cmd);
     
-    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+    let offset = crate::memory::physical_memory_offset();
     let virt_clb = (offset + cmd_list_phys.as_u64()) as *mut CommandHeader;
     let virt_ctba = (offset + (cmd_list_phys.as_u64() + 1024)) as *mut HbaCmdTable;
 
@@ -294,7 +294,7 @@ pub fn stop_cmd(port: &mut HbaPort) {
 impl AhciPort {
     pub fn read(&mut self, start_lba: u64, sectors: u32, buf: &mut [u8]) -> bool {
         let port = unsafe { &mut *self.port };
-    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("Physical memory offset not initialized");
+    let offset = crate::memory::physical_memory_offset();
     port.is.write(0xFFFFFFFF); // Clear pending ints
     
     // Limited to 1 sector read for simplicity in this phase of PoC
@@ -342,30 +342,41 @@ impl AhciPort {
     let buf_phys = crate::memory::virt_to_phys_dma(buf_virt_addr);
     
     if buf_phys.as_u64() == 0 {
-         // Should propagate error
          crate::println!("AHCI Error: Buf Phys Translation Failed");
          return false;
     }
     
-    cmd_tbl.prdt_entry[0].dba = buf_phys.as_u64() as u32;
-    cmd_tbl.prdt_entry[0].dbau = (buf_phys.as_u64() >> 32) as u32;
-    cmd_tbl.prdt_entry[0].dbc = (sectors * 512) - 1; // 512 bytes per sector usually
-    cmd_tbl.prdt_entry[0].rsv0 = 1; // Interrupt on completion
+    let buf_phys_addr = buf_phys.as_u64();
+    let total_len = (sectors * 512) as usize;
+    let crosses = (buf_phys_addr & 0xFFF) != ((buf_phys_addr + total_len as u64 - 1) & 0xFFF);
+    let (dma_virt, dma_phys) = if crosses {
+        let layout = alloc::alloc::Layout::from_size_align(total_len, 4096).unwrap();
+        let bounce = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        let bounce_phys = crate::memory::virt_to_phys_dma(VirtAddr::from_ptr(bounce)).as_u64();
+        (bounce, bounce_phys)
+    } else {
+        (buf.as_mut_ptr(), buf_phys_addr)
+    };
+    
+    cmd_tbl.prdt_entry[0].dba = dma_phys as u32;
+    cmd_tbl.prdt_entry[0].dbau = (dma_phys >> 32) as u32;
+    cmd_tbl.prdt_entry[0].dbc = (total_len - 1) as u32;
+    cmd_tbl.prdt_entry[0].rsv0 = 1;
     
     // Setup Command FIS
     let fis = unsafe { &mut *(cmd_tbl.cfis.as_mut_ptr() as *mut FisRegH2D) };
-    fis.fis_type = 0x27; // H2D
-    fis.command = 0x25; // READ_DMA_EXT
-    fis.control = 1;    // Command
+    fis.fis_type = 0x27;
+    fis.command = 0x25;
+    fis.control = 1;
     
     fis.lba0 = start_lba as u8;
     fis.lba1 = (start_lba >> 8) as u8;
     fis.lba2 = (start_lba >> 16) as u8;
-    fis.device = 1 << 6; // LBA mode
+    fis.device = 1 << 6;
     
-    fis.lba3 = (start_lba >> 24) as u8;
-    fis.lba4 = (start_lba >> 32) as u8;
-    fis.lba5 = (start_lba >> 40) as u8;
+    fis.lba3 = (start_lba >> 32) as u8;
+    fis.lba4 = (start_lba >> 40) as u8;
+    fis.lba5 = (start_lba >> 48) as u8;
     
     fis.count_l = sectors as u8;
     fis.count_h = (sectors >> 8) as u8;
@@ -382,21 +393,24 @@ impl AhciPort {
     
     // Wait for completion
     loop {
-        // Check for error
         if (port.is.read() & (1 << 30)) != 0 {
              return false;
         }
         
         if (port.ci.read() & (1 << slot)) == 0 {
-            break; // Done
+            break;
         }
         
         if (port.is.read() & (1 << 26)) != 0 {
-             // Task file error
               return false;
         }
     }
     
+    if crosses {
+        unsafe { core::ptr::copy_nonoverlapping(dma_virt, buf.as_mut_ptr(), total_len); }
+        let layout = alloc::alloc::Layout::from_size_align(total_len, 4096).unwrap();
+        unsafe { alloc::alloc::dealloc(dma_virt, layout); }
+    }
     true
 }
 
@@ -404,7 +418,7 @@ impl AhciPort {
     /// Parses LBA48 sector count from words 100-103 and caches it.
     pub fn identify_device(&mut self) -> bool {
         let port = unsafe { &mut *self.port };
-        let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("phys offset");
+        let offset = crate::memory::physical_memory_offset();
 
         port.is.write(0xFFFFFFFF);
 
@@ -487,7 +501,7 @@ impl AhciPort {
 
 pub fn write(&mut self, start_lba: u64, sectors: u32, buf: &[u8]) -> bool {
     let port = unsafe { &mut *self.port };
-    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("Physical memory offset not initialized");
+    let offset = crate::memory::physical_memory_offset();
     port.is.write(0xFFFFFFFF); // Clear pending ints
     
     let mut slot = 0xFF;
@@ -520,14 +534,27 @@ pub fn write(&mut self, start_lba: u64, sectors: u32, buf: &[u8]) -> bool {
     
     if buf_phys.as_u64() == 0 { return false; }
     
-    cmd_tbl.prdt_entry[0].dba = buf_phys.as_u64() as u32;
-    cmd_tbl.prdt_entry[0].dbau = (buf_phys.as_u64() >> 32) as u32;
-    cmd_tbl.prdt_entry[0].dbc = (sectors * 512) - 1;
+    let buf_phys_addr = buf_phys.as_u64();
+    let total_len = (sectors * 512) as usize;
+    let crosses = (buf_phys_addr & 0xFFF) != ((buf_phys_addr + total_len as u64 - 1) & 0xFFF);
+    let (dma_virt, dma_phys) = if crosses {
+        let layout = alloc::alloc::Layout::from_size_align(total_len, 4096).unwrap();
+        let bounce = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), bounce, total_len); }
+        let bounce_phys = crate::memory::virt_to_phys_dma(VirtAddr::from_ptr(bounce)).as_u64();
+        (bounce, bounce_phys)
+    } else {
+        (buf.as_ptr() as *mut u8, buf_phys_addr)
+    };
+    
+    cmd_tbl.prdt_entry[0].dba = dma_phys as u32;
+    cmd_tbl.prdt_entry[0].dbau = (dma_phys >> 32) as u32;
+    cmd_tbl.prdt_entry[0].dbc = (total_len - 1) as u32;
     cmd_tbl.prdt_entry[0].rsv0 = 1;
     
     let fis = unsafe { &mut *(cmd_tbl.cfis.as_mut_ptr() as *mut FisRegH2D) };
-    fis.fis_type = 0x27; // H2D
-    fis.command = 0x35; // WRITE_DMA_EXT
+    fis.fis_type = 0x27;
+    fis.command = 0x35;
     fis.control = 1;
     
     fis.lba0 = start_lba as u8;
@@ -557,6 +584,10 @@ pub fn write(&mut self, start_lba: u64, sectors: u32, buf: &[u8]) -> bool {
         core::hint::spin_loop();
     }
     
+    if crosses {
+        let layout = alloc::alloc::Layout::from_size_align(total_len, 4096).unwrap();
+        unsafe { alloc::alloc::dealloc(dma_virt, layout); }
+    }
     true
     }
 }

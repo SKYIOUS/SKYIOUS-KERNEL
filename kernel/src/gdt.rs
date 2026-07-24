@@ -3,6 +3,7 @@ use x86_64::structures::tss::TaskStateSegment;
 use x86_64::structures::gdt::{GlobalDescriptorTable, Descriptor, SegmentSelector};
 use lazy_static::lazy_static;
 use alloc::boxed::Box;
+use core::sync::atomic::Ordering;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
@@ -81,8 +82,9 @@ pub fn init() {
     
     unsafe {
         // Store user CS/SS for fork_child_return assembly to read
-        crate::task::thread::FORK_CHILD_CS = selectors.user_code_selector.0 as u64 | 3;
-        crate::task::thread::FORK_CHILD_SS = selectors.user_data_selector.0 as u64 | 3;
+        // Written once before APs start, read-only afterwards (Relaxed ordering ok)
+        crate::task::thread::FORK_CHILD_CS.store(selectors.user_code_selector.0 as u64 | 3, Ordering::Relaxed);
+        crate::task::thread::FORK_CHILD_SS.store(selectors.user_data_selector.0 as u64 | 3, Ordering::Relaxed);
         
         CS::set_reg(selectors.code_selector);
         load_tss(tss_selector);

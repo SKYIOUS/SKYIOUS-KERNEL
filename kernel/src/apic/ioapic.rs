@@ -29,7 +29,7 @@ impl IoApic {
     }
 
         fn _read(&self, reg: u32) -> u32 {
-        let offset = *memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+        let offset = memory::physical_memory_offset();
         let ioregsel = (offset + self.base as u64 + IOREGSEL as u64) as *mut Volatile<u32>;
         let iowin = (offset + self.base as u64 + IOWIN as u64) as *mut Volatile<u32>;
 
@@ -46,7 +46,7 @@ impl IoApic {
     }
 
     fn write(&mut self, reg: u32, value: u32) {
-        let offset = *memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+        let offset = memory::physical_memory_offset();
         let ioregsel = (offset + self.base as u64 + IOREGSEL as u64) as *mut Volatile<u32>;
         let iowin = (offset + self.base as u64 + IOWIN as u64) as *mut Volatile<u32>;
 

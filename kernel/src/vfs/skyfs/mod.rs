@@ -165,8 +165,8 @@ impl SkyFS {
         let dot_dot = DirEntry { inode: 1, rec_len: 12, name_len: 2, file_type: 0 };
         let mut root_data = [0u8; MAX_INLINE_DATA];
         let mut off = 0usize;
-        write_dirent(&mut root_data, &mut off, &dot, b".");
-        write_dirent(&mut root_data, &mut off, &dot_dot, b"..");
+        write_dirent(&mut root_data, &mut off, &dot, b".")?;
+        write_dirent(&mut root_data, &mut off, &dot_dot, b"..")?;
         // Update root inode data with dir entries
         let mut buf = [0u8; BLOCK_SIZE];
         SkyFS::read_block(&mut *dev, root_block, &mut buf)?;
@@ -345,8 +345,8 @@ fn read_file_data(fs: &Arc<Mutex<SkyFS>>, inode: &SkyfsInode) -> Result<Vec<u8>,
     if size <= MAX_INLINE_DATA {
         return Ok(inode.data[..size].to_vec());
     }
-    let fs_lock = fs.lock();
-    let mut dev = fs_lock.device.lock();
+    let dev_arc = fs.lock().device.clone();
+    let mut dev = dev_arc.lock();
     if inode.extent_count == BTREE_MODE {
         let root_block = u64::from_le_bytes(inode.data[..8].try_into().unwrap());
         let mut data = Vec::with_capacity(size);
@@ -405,8 +405,8 @@ fn store_data_blocks(fs: &Arc<Mutex<SkyFS>>, inode: &mut SkyfsInode,
     let blocks_needed = (data_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
     let mut extents: Vec<Extent> = crate::alloc::vec![];
     let mut offset = 0;
-    let fs_lock = fs.lock();
-    let mut dev = fs_lock.device.lock();
+    let dev_arc = fs.lock().device.clone();
+    let mut dev = dev_arc.lock();
     for _ in 0..blocks_needed {
         let block = alloc::allocate_block_inner(fs, &mut *dev)?;
         let mut block_buf = [0u8; BLOCK_SIZE];
@@ -423,7 +423,6 @@ fn store_data_blocks(fs: &Arc<Mutex<SkyFS>>, inode: &mut SkyfsInode,
         extents.push(Extent { start_block: block, block_count: 1 });
     }
     drop(dev);
-    drop(fs_lock);
 
     let extent_count = extents.len();
     let extent_bytes = unsafe {
@@ -442,15 +441,13 @@ fn store_data_blocks(fs: &Arc<Mutex<SkyFS>>, inode: &mut SkyfsInode,
     } else {
         // Switch to btree mode
         let mut root_block = if inode.extent_count == BTREE_MODE {
-            u64::from_le_bytes(inode.data[..8].try_into().unwrap())
+            u64::from_le_bytes(inode.data[..8].try_into().map_err(|_| ())?)
         } else { 0 };
+        inode.data.fill(0);
         for (i, ext) in extents.iter().enumerate() {
             btree::insert_extent(fs, &mut root_block, i as u64, *ext)?;
         }
         inode.data[..8].copy_from_slice(&root_block.to_le_bytes());
-        if 8 < MAX_INLINE_DATA {
-            inode.data[8..].fill(0);
-        }
         inode.extent_count = BTREE_MODE;
     }
     inode.size = data_len as u64;
@@ -493,7 +490,7 @@ impl SkyfsNode {
         let mut blocks_read = 0;
 
         if inode.extent_count == BTREE_MODE {
-            let root_block = u64::from_le_bytes(inode.data[..8].try_into().unwrap());
+        let root_block = u64::from_le_bytes(inode.data[..8].try_into().map_err(|_| ())?);
             let mut logical_idx = start_block_idx;
 
             while blocks_read < blocks_to_read {
@@ -666,8 +663,8 @@ impl VfsNode for SkyfsNode {
         let dot_dot = DirEntry { inode: self.ino, rec_len: 12, name_len: 2, file_type: 0 };
         let mut buf = [0u8; MAX_INLINE_DATA];
         let mut off = 0usize;
-        write_dirent(&mut buf, &mut off, &dot, b".");
-        write_dirent(&mut buf, &mut off, &dot_dot, b"..");
+        write_dirent(&mut buf, &mut off, &dot, b".")?;
+        write_dirent(&mut buf, &mut off, &dot_dot, b"..")?;
         let mut new_inode = read_inode_inner(&self.fs, new_ino)?;
         new_inode.data[..off].copy_from_slice(&buf[..off]);
         new_inode.size = off as u64;
@@ -703,13 +700,18 @@ fn write_dirent_append(buf: &mut Vec<u8>, entry: &DirEntry, name: &[u8]) {
     while buf.len() % 4 != 0 { buf.push(0); }
 }
 
-fn write_dirent(buf: &mut [u8], off: &mut usize, entry: &DirEntry, name: &[u8]) {
+fn write_dirent(buf: &mut [u8], off: &mut usize, entry: &DirEntry, name: &[u8]) -> Result<(), ()> {
     let entry_bytes = unsafe {
         core::slice::from_raw_parts(entry as *const DirEntry as *const u8, core::mem::size_of::<DirEntry>())
     };
+    let end = *off + entry_bytes.len() + name.len();
+    let padding = (4 - (end % 4)) % 4;
+    let total = end + padding;
+    if total > buf.len() { return Err(()); }
     buf[*off..*off + entry_bytes.len()].copy_from_slice(entry_bytes);
     *off += entry_bytes.len();
     buf[*off..*off + name.len()].copy_from_slice(name);
     *off += name.len();
     while *off % 4 != 0 { *off += 1; }
+    Ok(())
 }

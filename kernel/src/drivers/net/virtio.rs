@@ -116,6 +116,7 @@ pub struct VirtIONet {
     pub rx_queue: VirtIOQueue,
     pub tx_queue: VirtIOQueue,
     pub mac_addr: [u8; 6],
+    tx_bufs: Vec<&'static mut [u8]>,
 }
 
 impl VirtIONet {
@@ -160,6 +161,7 @@ impl VirtIONet {
             rx_queue,
             tx_queue,
             mac_addr: mac,
+            tx_bufs: Vec::new(),
         };
 
         nic.populate_rx();
@@ -185,10 +187,27 @@ impl VirtIONet {
         use x86_64::instructions::port::Port;
         use alloc::boxed::Box;
 
-        let mut packet = vec![0u8; 10 + data.len()];
-        packet[10..].copy_from_slice(data);
-        
-        let leaked_pkt: &'static mut [u8] = Box::leak(packet.into_boxed_slice());
+        let pkt_len = 10 + data.len();
+        let leaked_pkt = match self.tx_bufs.iter().position(|b| b.len() >= pkt_len) {
+            Some(i) => {
+                let pkt = &mut self.tx_bufs[i];
+                pkt[..pkt_len].copy_from_slice(&[0u8; 10]);
+                pkt[10..pkt_len].copy_from_slice(data);
+                let ptr = pkt.as_mut_ptr();
+                let len = pkt.len();
+                unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+            }
+            None => {
+                let mut packet = vec![0u8; pkt_len];
+                packet[10..].copy_from_slice(data);
+                let leaked: &'static mut [u8] = Box::leak(packet.into_boxed_slice());
+                let ptr = leaked.as_mut_ptr();
+                let len = leaked.len();
+                self.tx_bufs.push(unsafe { core::mem::transmute::<&'static mut [u8], &'static mut [u8]>(leaked) });
+                unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+            }
+        };
+
         let phys = crate::memory::virt_to_phys(VirtAddr::from_ptr(leaked_pkt.as_ptr())).unwrap();
 
         let head = self.tx_queue.index % self.tx_queue.size;
@@ -197,7 +216,7 @@ impl VirtIONet {
         self.tx_queue.descriptors[head as usize].flags = 0;
 
         self.tx_queue.available.ring[self.tx_queue.available.idx as usize % self.tx_queue.size as usize] = head;
-        self.tx_queue.available.idx += 1;
+        self.tx_queue.available.idx = self.tx_queue.available.idx.wrapping_add(1);
 
         let mut notify_port = Port::<u16>::new(self.base_addr + REG_QUEUE_NOTIFY as u16);
         unsafe { notify_port.write(1); }
@@ -215,7 +234,7 @@ impl VirtIONet {
             let len = elem.len as usize;
 
             let desc = &self.rx_queue.descriptors[desc_idx];
-            let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+            let offset = crate::memory::physical_memory_offset();
             let virt_addr = offset + desc.addr;
             
             let result_len = len.saturating_sub(10);
@@ -225,7 +244,7 @@ impl VirtIONet {
             }
 
             self.rx_queue.available.ring[self.rx_queue.available.idx as usize % self.rx_queue.size as usize] = desc_idx as u16;
-            self.rx_queue.available.idx += 1;
+            self.rx_queue.available.idx = self.rx_queue.available.idx.wrapping_add(1);
             self.rx_queue.last_used = last_used.wrapping_add(1);
 
             return Some(data);

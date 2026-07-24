@@ -127,19 +127,19 @@ impl HdaController {
     const RIRBSTS: usize = 0x5C;
     const RIRBSIZE: usize = 0x5D;
 
-    fn corb_buf_mut(&mut self) -> &mut [u32] {
-        let (ptr, _) = self.corb_buf.unwrap();
-        unsafe { core::slice::from_raw_parts_mut(ptr, CORB_SIZE) }
+    fn corb_buf_mut(&mut self) -> Result<&mut [u32], ()> {
+        let (ptr, _) = self.corb_buf.as_ref().ok_or(())?;
+        unsafe { Ok(core::slice::from_raw_parts_mut(*ptr, CORB_SIZE)) }
     }
 
-    fn rirb_buf(&self) -> &[u32] {
-        let (ptr, _) = self.rirb_buf.unwrap();
-        unsafe { core::slice::from_raw_parts(ptr, RIRB_SIZE) }
+    fn rirb_buf(&self) -> Result<&[u32], ()> {
+        let (ptr, _) = self.rirb_buf.as_ref().ok_or(())?;
+        unsafe { Ok(core::slice::from_raw_parts(*ptr, RIRB_SIZE)) }
     }
 
-    fn rirb_buf_mut(&mut self) -> &mut [u32] {
-        let (ptr, _) = self.rirb_buf.unwrap();
-        unsafe { core::slice::from_raw_parts_mut(ptr, RIRB_SIZE) }
+    fn rirb_buf_mut(&mut self) -> Result<&mut [u32], ()> {
+        let (ptr, _) = self.rirb_buf.as_ref().ok_or(())?;
+        unsafe { Ok(core::slice::from_raw_parts_mut(*ptr, RIRB_SIZE)) }
     }
 
     fn send_verb(&mut self, codec_addr: u8, nid: u8, verb: u16, param: u16) -> u32 {
@@ -159,14 +159,21 @@ impl HdaController {
             hda_println!("HDA: CORBWP out of range: {}", wp);
             return 0;
         }
-        self.corb_buf_mut()[wp] = verb_data;
+        if let Ok(buf) = self.corb_buf_mut() {
+            buf[wp] = verb_data;
+        } else {
+            hda_println!("HDA: corb_buf not initialized");
+            return 0;
+        }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // Flush cache line containing verb data so DMA engine sees it
-        unsafe {
-            core::arch::x86_64::_mm_clflush(
-                (self.corb_buf.as_ref().unwrap().0.add(wp) as *const u32) as *const u8
-            );
+        if let Some((ptr, _)) = self.corb_buf.as_ref() {
+            unsafe {
+                core::arch::x86_64::_mm_clflush(
+                    (ptr.add(wp) as *const u32) as *const u8
+                );
+            }
         }
 
         let new_wp = wp.wrapping_add(1) as u8;
@@ -184,14 +191,21 @@ impl HdaController {
             if rirbwp != start_rp {
                 // Response written at old RIRBWP, then incremented
                 let rp = (rirbwp + 255) & 0xFF; // (rirbwp - 1) mod 256
-                let response = self.rirb_buf()[rp * 2]; // entry = 2 u32, response at offset 0
+                let response = match self.rirb_buf() {
+                    Ok(buf) => buf[rp * 2],
+                    Err(_) => return 0,
+                }; // entry = 2 u32, response at offset 0
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                unsafe {
-                    core::arch::x86_64::_mm_clflush(
-                        ((self.rirb_buf.as_ref().unwrap().0.add(rp * 2) as *const u32).add(1)) as *const u8
-                    );
+                if let Some((ptr, _)) = self.rirb_buf.as_ref() {
+                    unsafe {
+                        core::arch::x86_64::_mm_clflush(
+                            ((ptr.add(rp * 2) as *const u32).add(1)) as *const u8
+                        );
+                    }
                 }
-                self.rirb_buf_mut()[rp * 2 + 1] = 0; // mark consumed
+                if let Ok(buf_mut) = self.rirb_buf_mut() {
+                    buf_mut[rp * 2 + 1] = 0; // mark consumed
+                }
                 self.write_reg8(Self::RIRBSTS, 1);
                 return response;
             }

@@ -73,7 +73,7 @@ impl GuestMemory {
                     return false;
                 }
                 let phys = region.host_phys + offset as u64;
-                let virt = phys + *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+                let virt = phys + crate::memory::physical_memory_offset();
                 // SAFETY: guest memory is allocated and writable.
                 unsafe {
                     core::ptr::copy_nonoverlapping(data.as_ptr(), virt as *mut u8, data.len());
@@ -116,7 +116,7 @@ impl GuestMemory {
                         let offset = (bss_addr - region.guest_phys) as usize;
                         if offset + bss_size <= region.size {
                             let phys = region.host_phys + offset as u64;
-                            let virt = phys + *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+                            let virt = phys + crate::memory::physical_memory_offset();
                             unsafe {
                                 core::ptr::write_bytes(virt as *mut u8, 0, bss_size);
                             }

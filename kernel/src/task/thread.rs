@@ -4,11 +4,12 @@ use crate::task::process::Process;
 use crate::memory::stack::{Stack, alloc_stack};
 
 /// User-mode CS/SS selectors (with RPL 3). Initialized by gdt::init().
-/// Read from assembly in fork_child_return — must be plain `mut u64` for asm access.
+/// Read from assembly in fork_child_return — AtomicU64 stores a plain u64 at offset 0
+/// so the asm `mov r9, qword ptr [rip + ...]` reads the value correctly.
 #[no_mangle]
-pub static mut FORK_CHILD_CS: u64 = 0x23;
+pub static FORK_CHILD_CS: AtomicU64 = AtomicU64::new(0x23);
 #[no_mangle]
-pub static mut FORK_CHILD_SS: u64 = 0x1B;
+pub static FORK_CHILD_SS: AtomicU64 = AtomicU64::new(0x1B);
 
 pub static HAS_FSGSBASE: AtomicBool = AtomicBool::new(false);
 
@@ -57,7 +58,7 @@ pub enum ThreadStatus {
         Exited,
 }
 
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TaskContext {
     pub r15: u64,
@@ -369,6 +370,7 @@ core::arch::global_asm!(
         pop rcx
         pop rax
         popfq
+        sti
         ret
     "#
 );
@@ -386,6 +388,9 @@ core::arch::global_asm!(
         mov r9, qword ptr [rip + FORK_CHILD_CS]
         push r9                 # CS  = user code selector | RPL 3 (dynamic)
         push rdi                # RIP = user_rip
+        xor esi, esi
+        xor r8d, r8d
+        xor edi, edi
         iretq
     "#
 );

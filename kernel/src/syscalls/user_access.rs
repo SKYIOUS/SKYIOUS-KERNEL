@@ -106,25 +106,16 @@ pub unsafe fn read_user_string(ptr: *const u8, max_len: usize) -> Result<alloc::
         return Err(());
     }
 
+    if !validate_ptr(ptr, max_len) {
+        return Err(());
+    }
+
     let mut buf = alloc::vec![0u8; max_len];
     do_stac();
-    
-    let mut actual_len = 0;
-    for i in 0..max_len {
-        if !validate_ptr(ptr.add(i), 1) {
-            do_clac();
-            return Err(());
-        }
-        let byte = *ptr.add(i);
-        if byte == 0 {
-            break;
-        }
-        buf[i] = byte;
-        actual_len += 1;
-    }
-    
+    core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), max_len);
     do_clac();
-    
+
+    let actual_len = buf.iter().position(|&b| b == 0).unwrap_or(max_len);
     buf.truncate(actual_len);
     alloc::string::String::from_utf8(buf).map_err(|_| ())
 }

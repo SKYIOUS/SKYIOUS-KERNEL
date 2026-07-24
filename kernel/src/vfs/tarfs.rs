@@ -87,15 +87,22 @@ fn parse_tar(data: &[u8]) -> Arc<TarNode> {
         let header = &data[offset..offset + 512];
         if header[0] == 0 { break; }
 
-        let name = core::str::from_utf8(&header[0..100]).unwrap_or("").trim_matches('\0');
-        let size_str = core::str::from_utf8(&header[124..136]).unwrap_or("").trim().trim_matches('\0');
+        let name = {
+            let end = header[..100].iter().position(|&b| b == 0).unwrap_or(100);
+            core::str::from_utf8(&header[..end]).unwrap_or("").trim_matches('\0')
+        };
+        let size_str = {
+            let end = header[124..136].iter().position(|&b| b == 0).unwrap_or(12);
+            core::str::from_utf8(&header[124..124 + end]).unwrap_or("").trim().trim_matches('\0')
+        };
         let size = usize::from_str_radix(size_str, 8).unwrap_or(0);
         let type_flag = header[156];
         let is_dir = type_flag == b'5' || name.ends_with('/');
         let is_symlink = type_flag == b'2';
 
         let link_target = if is_symlink {
-            Some(core::str::from_utf8(&header[157..317]).unwrap_or("").trim_matches('\0').to_string())
+            let end = header[157..317].iter().position(|&b| b == 0).unwrap_or(160);
+            Some(core::str::from_utf8(&header[157..157 + end]).unwrap_or("").trim_matches('\0').to_string())
         } else {
             None
         };

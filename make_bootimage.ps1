@@ -15,7 +15,7 @@ if (!(Test-Path "kernel")) {
 $arch = if ($env:VAHI_ARCH) { $env:VAHI_ARCH } else { "x86_64" }
 $target = if ($arch -eq "aarch64") { "aarch64-unknown-none" } else { "x86_64-unknown-none" }
 
-Write-Host "--- SARGA OS Bootimage Builder (arch=$arch) ---" -ForegroundColor Cyan
+Write-Host "--- Vahi OS Bootimage Builder (arch=$arch) ---" -ForegroundColor Cyan
 
 # 0. Build userspace first (init, sargash, etc.)
 Write-Host "Step 0: Building userspace..." -ForegroundColor Gray
@@ -29,9 +29,9 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Step 1: Building kernel (target=$target)..." -ForegroundColor Gray
 Set-Location kernel
 if ($arch -eq "aarch64") {
-    cargo build --target aarch64-unknown-none
+    cargo build -Zbuild-std=core,alloc --target aarch64-unknown-none
 } else {
-    cargo build --target x86_64-unknown-none
+    cargo build -Zbuild-std=core,alloc --target x86_64-unknown-none
 }
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Kernel build failed!" -ForegroundColor Red

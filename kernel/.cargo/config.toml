@@ -15,8 +15,8 @@ rustflags = [
     "-C", "relocation-model=static",
 ]
 
-[target.'cfg(target_os = "none")']
-runner = "bootimage run"
+# [target.'cfg(target_os = "none")']
+# runner = "bootimage run"     # unused since bootloader crate v0.11 migration
 
 [env]
 SMOLTCP_IFACE_MAX_ADDR_COUNT = "4"

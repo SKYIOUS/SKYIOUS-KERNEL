@@ -119,11 +119,11 @@ pub fn parse_gpt(device: &Arc<Mutex<dyn BlockDevice>>) -> Result<Vec<Partition>,
         return Err(());
     }
 
-    let _revision = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    let header_size = u32::from_le_bytes(header[12..16].try_into().unwrap());
-    let entry_lba = u64::from_le_bytes(header[72..80].try_into().unwrap());
-    let num_entries = u32::from_le_bytes(header[80..84].try_into().unwrap());
-    let entry_size = u32::from_le_bytes(header[84..88].try_into().unwrap());
+    let _revision = u32::from_le_bytes(header[8..12].try_into().expect("GPT header revision should be 4 bytes"));
+    let header_size = u32::from_le_bytes(header[12..16].try_into().expect("GPT header size should be 4 bytes"));
+    let entry_lba = u64::from_le_bytes(header[72..80].try_into().expect("GPT entry LBA should be 8 bytes"));
+    let num_entries = u32::from_le_bytes(header[80..84].try_into().expect("GPT num entries should be 4 bytes"));
+    let entry_size = u32::from_le_bytes(header[84..88].try_into().expect("GPT entry size should be 4 bytes"));
 
     if header_size < 92 || entry_size < 128 {
         return Err(());

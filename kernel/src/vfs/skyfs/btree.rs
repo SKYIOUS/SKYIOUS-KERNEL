@@ -205,7 +205,10 @@ fn alloc_node_block(fs: &Arc<Mutex<SkyFS>>, dev: &mut dyn BlockDevice) -> Result
 
 fn read_node(fs: &Arc<Mutex<SkyFS>>, block: u64) -> Option<BTreeNode> {
     let mut buf = [0u8; BLOCK_SIZE];
-    let dev_arc = fs.lock().device.clone();
+    let dev_arc = {
+        let guard = fs.lock();
+        guard.device.clone()
+    };
     let mut dev = dev_arc.lock();
     SkyFS::read_block(&mut *dev, block, &mut buf).ok()?;
     Some(unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const BTreeNode) })

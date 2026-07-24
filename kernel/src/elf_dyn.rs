@@ -52,7 +52,7 @@ unsafe impl Send for LibInfo {}
 unsafe impl Sync for LibInfo {}
 
 fn phys_to_virt(phys: u64) -> u64 {
-    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+    let offset = crate::memory::physical_memory_offset();
     offset + phys
 }
 
@@ -78,7 +78,7 @@ fn map_lib_segments(
             if ph.flags().is_write() { flags |= PageTableFlags::WRITABLE; }
             if !ph.flags().is_execute() { flags |= PageTableFlags::NO_EXECUTE; }
 
-            vmas.push(Vma { start: virt_start, end, flags, _name: "shared_lib" });
+            vmas.push(Vma { start: virt_start, end, flags, _name: "shared_lib", file_handle: None, file_offset: 0, is_shared: false, shm_id: None });
 
             let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_start));
             let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end - 1));
@@ -237,7 +237,7 @@ fn apply_rela(
     base: u64,
     mapper: &impl Translate,
 ) -> Result<(), &'static str> {
-    let phys_off = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+    let phys_off = crate::memory::physical_memory_offset();
     let entries = parse_dt_entries(dyn_vaddr, mapper);
 
     let rela_addr = get_dt(&entries, DT_RELA);

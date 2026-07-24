@@ -139,6 +139,7 @@ impl CtlFs {
                         let pct = if ticks > 0 { (active * 100) / ticks } else { 0 };
                         alloc::format!("{}% ({} active ticks)\n", pct, active).into_bytes()
                     }));
+                    // ponytail: try_lock can show "idle" for a running task if lock contended; no great fix
                     add_child(&dir, "current_task", file_fn(move || {
                         if let Some(sched) = crate::task::scheduler::cpu_sched(cid) {
                             if let Some(ref s) = sched.try_lock() {

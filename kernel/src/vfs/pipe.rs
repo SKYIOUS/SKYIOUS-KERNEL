@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use crate::vfs::{VfsNode, Stat};
 use alloc::collections::VecDeque;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Generates a unique key for each Pipe instance for wake-on-write matching.
 static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
@@ -13,6 +13,8 @@ pub struct Pipe {
     buffer: Mutex<VecDeque<u8>>,
     capacity: usize,
     id: u64,
+    eof: AtomicBool,
+    writers: AtomicU64,
 }
 
 pub const PIPE_DEFAULT_CAPACITY: usize = 65536;
@@ -29,6 +31,8 @@ impl Pipe {
             buffer: Mutex::new(VecDeque::with_capacity(cap)),
             capacity: cap,
             id,
+            eof: AtomicBool::new(false),
+            writers: AtomicU64::new(1),
         });
         (
             Arc::new(PipeReader { pipe: pipe.clone() }),
@@ -52,6 +56,9 @@ impl VfsNode for PipeReader {
                 let n = buffer.len().min(max_len);
                 let data: Vec<u8> = buffer.drain(..n).collect();
                 return Ok(data);
+            }
+            if self.pipe.eof.load(Ordering::Relaxed) {
+                return Ok(Vec::new());
             }
             drop(buffer);
             if crate::syscalls::signal::has_pending_signal() {
@@ -83,10 +90,10 @@ impl VfsNode for PipeWriter {
         {
             let mut buffer = self.pipe.buffer.lock();
             let available = self.pipe.capacity - buffer.len();
+            if available == 0 { return Err(()); }
             let to_write = core::cmp::min(available, data.len());
             buffer.extend(&data[..to_write]);
         }
-        // Wake any readers blocked on this pipe
         crate::task::scheduler::wake_pipe(self.pipe.id);
         Ok(())
     }
@@ -97,6 +104,15 @@ impl VfsNode for PipeWriter {
             st_size: self.pipe.buffer.lock().len() as i64,
             ..Default::default()
         })
+    }
+}
+
+impl Drop for PipeWriter {
+    fn drop(&mut self) {
+        if self.pipe.writers.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.pipe.eof.store(true, Ordering::Relaxed);
+            crate::task::scheduler::wake_pipe(self.pipe.id);
+        }
     }
 }
 

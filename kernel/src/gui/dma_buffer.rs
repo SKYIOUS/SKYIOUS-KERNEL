@@ -21,7 +21,7 @@ impl DmaBuf {
         }
         let phys = crate::memory::buddy::BUDDY_ALLOCATOR.lock().allocate_contiguous(order)?;
         let page_count = 1 << order;
-        let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()?;
+        let offset = crate::memory::physical_memory_offset();
         let virt = (offset + phys.as_u64()) as *mut u32;
         unsafe { core::ptr::write_bytes(virt, 0, page_count * 1024); }
         Some(Box::pin(Self {

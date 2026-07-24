@@ -36,7 +36,13 @@ impl SecurityDescriptor {
 
 impl Default for SecurityDescriptor {
     fn default() -> Self {
-        SecurityDescriptor { uid: 0, gid: 0, mode: 0o777, acl: Vec::new() }
+        SecurityDescriptor { uid: 0, gid: 0, mode: 0o644, acl: Vec::new() }
+    }
+}
+
+impl SecurityDescriptor {
+    pub fn default_socket() -> Self {
+        SecurityDescriptor { uid: 0, gid: 0, mode: 0o600, acl: Vec::new() }
     }
 }
 

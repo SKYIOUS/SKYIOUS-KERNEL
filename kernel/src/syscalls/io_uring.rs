@@ -3,6 +3,7 @@ use alloc::boxed::Box;
 use core::slice;
 use spin::Mutex;
 use crate::syscalls::errno::Errno;
+use crate::syscalls::user_access;
 
 // ── io_uring opcodes ─────────────────────────────────────────────────
 pub const IORING_OP_NOP: u8 = 0;
@@ -138,6 +139,7 @@ fn process_sqe(sqe: &IoUringSqe) -> IoUringCqe {
 
 fn do_readv(fd: i32, addr: u64, len: usize, _offset: u64) -> i32 {
     if len == 0 || addr == 0 { return Errno::EINVAL as i32; }
+    if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
     let buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
     let ret = crate::syscalls::sys_read(fd as u64, buf.as_mut_ptr() as *mut u8, len);
     ret as i32
@@ -145,6 +147,7 @@ fn do_readv(fd: i32, addr: u64, len: usize, _offset: u64) -> i32 {
 
 fn do_writev(fd: i32, addr: u64, len: usize, _offset: u64) -> i32 {
     if len == 0 || addr == 0 { return Errno::EINVAL as i32; }
+    if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
     let buf = unsafe { slice::from_raw_parts(addr as *const u8, len) };
     let ret = crate::syscalls::sys_write(fd as u64, buf.as_ptr() as *const u8, len);
     ret as i32
@@ -168,12 +171,14 @@ fn do_connect(fd: i32, addr: u64, addrlen: usize) -> i32 {
 }
 
 fn do_send(fd: i32, addr: u64, len: usize) -> i32 {
+    if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
     let buf = unsafe { slice::from_raw_parts(addr as *const u8, len) };
     let ret = crate::syscalls::sys_sendto(fd as u64, buf.as_ptr() as *const u8, len as u64, core::ptr::null(), 0);
     if (ret as i64) < 0 { ret as i32 } else { ret as i32 }
 }
 
 fn do_recv(fd: i32, addr: u64, len: usize) -> i32 {
+    if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
     let buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
     let ret = crate::syscalls::sys_recvfrom(fd as u64, buf.as_mut_ptr() as *mut u8, len as u64, core::ptr::null_mut(), core::ptr::null_mut());
     if (ret as i64) < 0 { ret as i32 } else { ret as i32 }

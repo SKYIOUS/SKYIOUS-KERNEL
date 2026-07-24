@@ -41,9 +41,13 @@ pub enum Errno {
     EADDRINUSE = -98,   /* Address already in use */
     EOPNOTSUPP = -95,   /* Operation not supported on transport endpoint */
     ECONNREFUSED = -111,/* Connection refused */
+    ECONNRESET = -104,  /* Connection reset by peer */
     EALREADY = -114,    /* Operation already in progress */
     EDESTADDRREQ = -89, /* Destination address required */
     ENOPROTOOPT = -92,  /* Protocol not available */
+    ENOTSOCK = -88,     /* Socket operation on non-socket */
+    ENOTCONN = -107,    /* Transport endpoint is not connected */
+    EIDRM = -43,        /* Identifier removed */
 }
 
 impl From<Errno> for u64 {

@@ -267,8 +267,9 @@ impl E1000 {
         }
         
         if status & 1 != 0 {
-            let mut buf = vec![0u8; pkt_len as usize];
-            let src = &self.rx_bufs[cur][..pkt_len as usize];
+            let pkt_len = pkt_len.min(2048) as usize;
+            let mut buf = vec![0u8; pkt_len];
+            let src = &self.rx_bufs[cur][..pkt_len];
             buf.copy_from_slice(src);
             
             unsafe {

@@ -34,7 +34,7 @@ pub static mut BOOT_DATA: SmpBootData = SmpBootData {
 /// Allocate a copy of the kernel page directory in the lower 4GB.
 /// Returns the physical frame address, or None if impossible.
 fn allocate_low_pml4() -> Option<PhysFrame> {
-    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("Memory offset not init");
+    let offset = crate::memory::physical_memory_offset();
 
     // Get current PML4
     let (current_frame, _) = Cr3::read();
@@ -182,7 +182,7 @@ pub fn init() {
         return;
     }
 
-    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap();
+    let offset = crate::memory::physical_memory_offset();
 
     // Identity-map trampoline region (0x7000-0x9000) so AP can access it in long mode.
     {
@@ -310,6 +310,13 @@ pub extern "C" fn ap_kernel_entry() -> ! {
         crate::syscalls::init_gs_base(cpu_id);
     }
 
+    // Enable EFER.SCE on this AP so `syscall` doesn't raise #UD.
+    // We do NOT call syscalls::init() because it also sets GS base to CPU 0.
+    unsafe {
+        use x86_64::registers::model_specific::Efer;
+        Efer::update(|efer| efer.insert(x86_64::registers::model_specific::EferFlags::SYSTEM_CALL_EXTENSIONS));
+    }
+
     // Each AP needs its own GDT and IDT
     crate::gdt::init_ap();
     crate::interrupts::init_ap();
@@ -339,8 +346,8 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), arg: u64) {
         let raw = ptr.0;
         if !raw.is_null() {
             unsafe {
-                (*raw).ipi_pending = func as u64;
-                (*raw).ipi_arg = arg;
+                (*raw).ipi_kind.store(3, core::sync::atomic::Ordering::Release); // Func
+                (*raw).ipi_arg.store(func as u64, core::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -358,8 +365,8 @@ pub fn smp_broadcast(func: extern "C" fn(u64), arg: u64) {
         let raw = ptr.0;
         if !raw.is_null() {
             unsafe {
-                (*raw).ipi_pending = func as u64;
-                (*raw).ipi_arg = arg;
+                (*raw).ipi_kind.store(3, core::sync::atomic::Ordering::Release); // Func
+                (*raw).ipi_arg.store(func as u64, core::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -377,7 +384,7 @@ pub fn smp_broadcast(func: extern "C" fn(u64), arg: u64) {
 /// Fire-and-forget broadcast: set func+arg on every other CPU's PerCpuData
 /// and send a single broadcast IPI.  Unlike `smp_broadcast` this does NOT
 /// wait for each IPI to finish, making it suitable for reschedule hints.
-pub fn smp_broadcast_func(func: extern "C" fn(u64), arg: u64) {
+pub fn smp_broadcast_func(kind: u64, arg: u64) {
     let current = get_cpu_id();
     let areas = crate::syscalls::PER_CPU_AREAS.lock();
     for (cpu_id, ptr) in areas.iter().enumerate() {
@@ -385,8 +392,8 @@ pub fn smp_broadcast_func(func: extern "C" fn(u64), arg: u64) {
         let raw = ptr.0;
         if !raw.is_null() {
             unsafe {
-                (*raw).ipi_pending = func as u64;
-                (*raw).ipi_arg = arg;
+                (*raw).ipi_kind.store(kind, core::sync::atomic::Ordering::Release);
+                (*raw).ipi_arg.store(arg, core::sync::atomic::Ordering::Release);
             }
         }
     }

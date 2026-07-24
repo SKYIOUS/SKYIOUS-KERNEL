@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use core::{pin::Pin, task::{Context, Poll}};
 use futures_util::stream::Stream;
 use crossbeam_queue::ArrayQueue;

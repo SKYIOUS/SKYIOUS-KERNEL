@@ -13,12 +13,17 @@ pub mod paging;
 pub mod frame_info;
 pub mod stack;
 pub mod phys;
+pub mod swap;
 #[cfg(not(target_arch = "aarch64"))]
 pub mod virt;
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
 
 pub static PHYSICAL_MEMORY_OFFSET: Once<u64> = Once::new();
+
+pub fn physical_memory_offset() -> u64 {
+    *PHYSICAL_MEMORY_OFFSET.get().expect("PHYSICAL_MEMORY_OFFSET not initialized")
+}
 
 /// Initialize a new OffsetPageTable (x86_64 only).
 #[cfg(not(target_arch = "aarch64"))]
@@ -81,6 +86,7 @@ pub unsafe fn _copy_from_user(kernel_buf: &mut [u8], user_ptr: *const u8, len: u
 }
 
 /// Copies bytes from a kernel buffer to user space.
+#[allow(dead_code)]
 pub unsafe fn copy_to_user(user_ptr: *mut u8, kernel_buf: &[u8], len: usize) {
     #[cfg(not(target_arch = "aarch64"))]
     core::arch::asm!("stac", options(nostack, preserves_flags));

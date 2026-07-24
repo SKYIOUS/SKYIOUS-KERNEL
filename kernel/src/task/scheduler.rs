@@ -60,6 +60,10 @@ pub struct PerCpuScheduler {
     ready_queues_dirty: bool,
     pub current_thread: Option<Box<Thread>>,
     pub dummy: u64,
+    /// Thread currently being switched away from — not yet in any ready queue
+    /// so other CPUs can't steal it. Pushed to ready_queues after the context
+    /// switch completes (in schedule()/try_schedule()).
+    switching_old: Option<Box<Thread>>,
 }
 
 impl PerCpuScheduler {
@@ -73,6 +77,7 @@ impl PerCpuScheduler {
             ready_queues_dirty: false,
             current_thread: None,
             dummy: 0,
+            switching_old: None,
         }
     }
 
@@ -273,18 +278,19 @@ impl PerCpuScheduler {
                     crate::memory::paging::AddressSpace::destroy(&proc.address_space);
                 }
                 crate::memory::stack::free_stack(&old.stack);
+                self.switching_old = None;
                 &raw mut self.dummy
             } else {
-                old.status = crate::task::thread::ThreadStatus::Ready;
                 let p = &mut old.stack_ptr as *mut u64;
                 // Advance pass by stride (virtual time accounting)
                 old.pass = old.pass.wrapping_add(old.stride);
-                let p_idx = old.priority as usize;
-                let p_idx = if p_idx > 7 { 7 } else { p_idx };
-                self.ready_queues[p_idx].push_back(old);
+                // Store in switching_old instead of ready_queues — the thread is still
+                // executing on this CPU until switch_context saves its registers.
+                self.switching_old = Some(old);
                 p
             }
         } else {
+            self.switching_old = None;
             &raw mut self.dummy
         };
 
@@ -312,6 +318,17 @@ pub fn schedule() -> ! {
 
         if !old_ptr.is_null() {
             crate::task::thread::switch_thread(old_ptr, new_sp, new_fs);
+
+            // Context switch completed — old thread's registers are saved on its
+            // stack. Push it to the ready queue so other CPUs can pick it up.
+            let mut s = this_cpu_sched().lock();
+            if let Some(mut switching) = s.switching_old.take() {
+                switching.status = crate::task::thread::ThreadStatus::Ready;
+                let p_idx = (switching.priority as usize).min(7);
+                s.ready_queues[p_idx].push_back(switching);
+                s.mark_ready_queues_dirty();
+            }
+            drop(s);
         }
 
         watchdog_counter = watchdog_counter.wrapping_add(1);
@@ -345,6 +362,17 @@ pub fn try_schedule() {
 
     if let Some((old_ptr, next_ptr, new_fs)) = switch {
         crate::task::thread::switch_thread(old_ptr, next_ptr, new_fs);
+
+        // Context switch completed — push the thread we switched away from
+        // into the ready queue now that its registers are saved.
+        if let Some(mut sched) = this_cpu_sched().try_lock() {
+            if let Some(mut switching) = sched.switching_old.take() {
+                switching.status = crate::task::thread::ThreadStatus::Ready;
+                let p_idx = (switching.priority as usize).min(7);
+                sched.ready_queues[p_idx].push_back(switching);
+                sched.mark_ready_queues_dirty();
+            }
+        }
     }
 }
 
@@ -379,15 +407,10 @@ pub fn wake_pipe(key: u64) {
 }
 
 /// IPI handler: trigger `try_schedule()` on the receiving CPU.
-/// Called from interrupt context (IpiFunc vector 251).
-extern "C" fn ipi_reschedule_handler(_arg: u64) {
-    try_schedule();
-}
-
 /// Broadcast a reschedule IPI to all other CPUs so they pick up
 /// newly-ready threads (e.g. after `wake_futex`).
 pub fn broadcast_reschedule_ipi() {
-    crate::smp::smp_broadcast_func(ipi_reschedule_handler as extern "C" fn(u64), 0);
+    crate::smp::smp_broadcast_func(2, 0); // IpiKind::Reschedule = 2
 }
 
 /// Move current thread to sleep queue.
@@ -464,42 +487,105 @@ pub fn boost_thread_priority(_pid: u64, _target_priority: u8) -> bool {
     false
 }
 
-/// Process timer tick: wake sleeping threads. Non-blocking for interrupt context.
+/// Process timer tick: wake sleeping threads, tick POSIX timers, ITIMER_REAL, accumulate CPU time.
 pub fn tick(current_ticks: u64) {
-    if let Some(mut sched) = this_cpu_sched().try_lock() {
-        if let Some(mut sleep) = GLOBAL.sleep_queue.try_lock() {
-            let mut still_sleeping = VecDeque::new();
-            while let Some(mut thread) = sleep.pop_front() {
-                let mut wake = false;
-                if let Some(wake_time) = thread.sleep_until {
-                    if current_ticks >= wake_time { wake = true; }
-                }
-                if !wake {
-                    if let Some(ref proc) = thread.process {
-                        let sig = proc.signals.lock();
-                        if sig.has_unmasked_pending(sig.blocked) { wake = true; }
-                    }
-                }
-                if wake {
-                    thread.status = crate::task::thread::ThreadStatus::Ready;
-                    thread.sleep_until = None;
-                    let p = (thread.priority as usize).min(7);
-                    sched.ready_queues[p].push_back(thread);
+    crate::syscalls::posix_timers::check_posix_timers();
+    let mut sched = this_cpu_sched().lock();
+    let mut sleep = GLOBAL.sleep_queue.lock();
+    let mut still_sleeping = VecDeque::new();
+    while let Some(mut thread) = sleep.pop_front() {
+        let mut wake = false;
+        if let Some(wake_time) = thread.sleep_until {
+            if current_ticks >= wake_time { wake = true; }
+        }
+        if !wake {
+            if let Some(ref proc) = thread.process {
+                let sig = proc.signals.lock();
+                if sig.has_unmasked_pending(sig.blocked) { wake = true; }
+            }
+        }
+        if wake {
+            thread.status = crate::task::thread::ThreadStatus::Ready;
+            thread.sleep_until = None;
+            let p = (thread.priority as usize).min(7);
+            sched.ready_queues[p].push_back(thread);
+        } else {
+            still_sleeping.push_back(thread);
+        }
+    }
+    *sleep = still_sleeping;
+    drop(sleep);
+
+    // Accumulate CPU time for current thread's process
+    if let Some(ref cur) = sched.current_thread {
+        if let Some(ref proc) = cur.process {
+            proc.utime.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // Decrement ITIMER_REAL for every process — ponytail: scans full table, O(n) per tick
+    let itimer_pids: alloc::vec::Vec<u64> = {
+        let table = crate::task::process::PROCESS_TABLE.lock();
+        table.keys().copied().collect()
+    };
+    for pid in itimer_pids {
+        let proc = crate::task::process::PROCESS_TABLE.lock().get(&pid).map(|p| p.clone());
+        if let Some(proc) = proc {
+            let mut it = proc.itimer_real.lock();
+            if it.it_value.tv_sec > 0 || it.it_value.tv_usec > 0 {
+                let tick_usec = 10_000u64; // 10ms per tick
+                let remaining_usec = (it.it_value.tv_sec as u64) * 1_000_000 + it.it_value.tv_usec as u64;
+                if remaining_usec <= tick_usec {
+                    // Timer expired
+                    it.it_value = it.it_interval; // reload
+                    proc.signals.lock().raise(crate::syscalls::signal::Signal::_SIGALRM);
+                    // Wake process if blocked
+                    crate::syscalls::futex::wake_process_futex_threads(proc.id);
+                    crate::syscalls::futex::wake_process_blocked_threads(proc.id);
                 } else {
-                    still_sleeping.push_back(thread);
+                    let new_usec = remaining_usec - tick_usec;
+                    it.it_value.tv_sec = (new_usec / 1_000_000) as i64;
+                    it.it_value.tv_usec = (new_usec % 1_000_000) as i64;
                 }
             }
-            *sleep = still_sleeping;
         }
     }
 }
 
-/// Get the current thread on this CPU (for execve/init updates).
-pub fn current_thread() -> Option<Box<Thread>> {
-    this_cpu_sched().lock().current_thread.take()
+/// Perform an operation on the current thread without removing it from the
+/// scheduler. Interrupts are disabled for the duration so a timer handler
+/// never sees `current_thread == None`.
+pub fn with_current_thread<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut Thread) -> R,
+{
+    let saved: u64;
+    unsafe { core::arch::asm!("pushfq; pop {0}; cli", out(reg) saved, options(att_syntax)) };
+    let mut sched = this_cpu_sched().lock();
+    let result = sched.current_thread.as_mut().map(|t| f(&mut *t));
+    drop(sched);
+    if saved & 0x200 != 0 {
+        unsafe { core::arch::asm!("sti") };
+    }
+    result
+}
+
+/// Take ownership of the current thread (removes it from `current_thread`).
+/// Used when moving the thread to a sleep/block/futex queue.
+/// Disables interrupts for the duration to prevent the timer handler
+/// from seeing `current_thread == None`.
+pub fn take_current_thread() -> Option<Box<Thread>> {
+    let saved: u64;
+    unsafe { core::arch::asm!("pushfq; pop {0}; cli", out(reg) saved, options(att_syntax)) };
+    let result = this_cpu_sched().lock().current_thread.take();
+    if saved & 0x200 != 0 {
+        unsafe { core::arch::asm!("sti") };
+    }
+    result
 }
 
 /// Set the current thread on this CPU (for execve/init updates).
+#[allow(dead_code)]
 pub fn set_current_thread(thread: Box<Thread>) {
     this_cpu_sched().lock().current_thread = Some(thread);
 }

@@ -36,6 +36,9 @@ pub struct Stat {
     pub st_atime: i64,
     pub st_mtime: i64,
     pub st_ctime: i64,
+    pub st_atime_nsec: i64,
+    pub st_mtime_nsec: i64,
+    pub st_ctime_nsec: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,13 +84,7 @@ pub trait VfsNode: Send + Sync {
     }
     fn find_child(&self, name: &str) -> Option<Arc<dyn VfsNode>> {
         if let Ok(children) = self.children() {
-            // Use tree-based lookup for better performance
-            // Create a simple map for O(log n) lookup instead of O(n) linear search
-            let mut child_map = BTreeMap::new();
-            for child in children {
-                child_map.insert(child.name(), child);
-            }
-            child_map.get(name).cloned()
+            children.into_iter().find(|c| c.name() == name)
         } else {
             None
         }
@@ -128,6 +125,18 @@ pub trait VfsNode: Send + Sync {
     fn truncate(&self, _len: i64) -> Result<(), ()> {
         Err(())
     }
+
+    fn link(&self, _existing: alloc::sync::Arc<dyn VfsNode>, _name: &str) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn utimens(&self, _atime: (i64, i64), _mtime: (i64, i64)) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn fallocate(&self, _mode: i32, _offset: i64, _len: i64) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 pub struct MountPoint {
@@ -141,26 +150,20 @@ pub struct VfsManager {
 }
 
 impl VfsManager {
-    pub fn statfs_mount(&self, path: &str) -> Option<Arc<dyn VfsNode>> {
-        // Check cache first
+    pub fn statfs_mount(&mut self, path: &str) -> Option<Arc<dyn VfsNode>> {
         if let Some(cached) = self.mount_cache.get(path) {
             return Some(cached.clone());
         }
-        
+
         let result = self.mounts.iter()
             .filter(|m| path == m.path || path.starts_with(&m.path))
             .max_by_key(|m| m.path.len())
             .and_then(|m| m.fs.root().ok());
-        
-        // Cache the result
+
         if let Some(ref node) = result {
-            // SAFETY: We're in a mutable context when cache is updated
-            let _ = unsafe { 
-                let cache_ptr = &self.mount_cache as *const _ as *mut BTreeMap<String, Arc<dyn VfsNode>>;
-                (*cache_ptr).insert(path.to_string(), node.clone());
-            };
+            self.mount_cache.insert(path.to_string(), node.clone());
         }
-        
+
         result
     }
 
@@ -261,8 +264,18 @@ impl VfsManager {
 
         let components: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
 
+        // Normalize `..` components before traversal — pop the last real component
+        let mut normalized = Vec::with_capacity(components.len());
+        for comp in &components {
+            if *comp == ".." {
+                normalized.pop();
+            } else if *comp != "." {
+                normalized.push(*comp);
+            }
+        }
+
         {
-            let mut comps = components.as_slice();
+            let mut comps = normalized.as_slice();
             while let Some((&comp, rest)) = comps.split_first() {
                 if !current.is_dir() {
                     return None;
@@ -313,6 +326,7 @@ impl VfsManager {
             path_fixed.pop();
         }
 
+        self.mount_cache.remove(&path_fixed);
         let pos = self.mounts.iter().position(|m| m.path == path_fixed).ok_or(())?;
         self.mounts.remove(pos);
         Ok(())
@@ -458,7 +472,7 @@ pub fn init() {
 
     if !root_mounted {
         // Fall back to bootloader-provided ramdisk
-        if let Some(ramdisk) = *RAMDISK.lock() {
+        if let Some(ramdisk) = RAMDISK.lock().take() {
             let initrd_fs = Arc::new(tarfs::TarfsMemory::new(ramdisk));
             vfs.mount("/", initrd_fs);
             crate::println!("VFS: Mounted bootloader-provided initrd ({} bytes) as root.", ramdisk.len());

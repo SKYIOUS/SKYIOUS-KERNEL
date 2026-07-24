@@ -3,7 +3,14 @@ use x86_64::instructions::port::Port;
 const PIT_FREQUENCY: u32 = 1193182;
 
 pub fn beep(freq_hz: u32, duration_ms: u32) {
+    let mut speaker: Port<u8> = Port::new(0x61);
+
     if freq_hz == 0 {
+        // Disable speaker only
+        unsafe {
+            let tmp = speaker.read();
+            speaker.write(tmp & !0x03);
+        }
         return;
     }
 
@@ -23,7 +30,6 @@ pub fn beep(freq_hz: u32, duration_ms: u32) {
     }
 
     // Enable speaker (set bits 0 and 1 of port 0x61)
-    let mut speaker: Port<u8> = Port::new(0x61);
     unsafe {
         let tmp = speaker.read();
         speaker.write(tmp | 0x03);

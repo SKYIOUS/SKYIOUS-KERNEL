@@ -34,13 +34,13 @@ pub fn allocate_block_inner(fs: &Arc<Mutex<SkyFS>>, dev: &mut dyn BlockDevice) -
 
 #[allow(dead_code)]
 pub fn free_block(fs: &Arc<Mutex<SkyFS>>, block: u64) -> Result<(), ()> {
-    let sb = &fs.lock().sb;
+    let binding = fs.lock();
+    let sb = &binding.sb;
     let bit_index = block;
     let bitmap_block = sb.bitmap_start + bit_index / (BLOCK_SIZE as u64 * 8);
     let byte_index = (bit_index / 8) as usize % BLOCK_SIZE;
     let bit_offset = (bit_index % 8) as u8;
 
-    let binding = fs.lock();
     let mut dev = binding.device.lock();
     let mut buf = [0u8; BLOCK_SIZE];
     SkyFS::read_block(&mut *dev, bitmap_block, &mut buf)?;

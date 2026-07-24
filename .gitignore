@@ -11,6 +11,10 @@ OVMF.fd
 
 # QEMU logs and captures
 qemu_*.log
+serial.log
+
+# Build output directory
+SkyOS/
 qemu_*.txt
 qemu_*.png
 qemu_*.ppm

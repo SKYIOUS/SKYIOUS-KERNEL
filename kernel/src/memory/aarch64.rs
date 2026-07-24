@@ -313,6 +313,7 @@ pub unsafe fn _copy_from_user(kernel_buf: &mut [u8], user_ptr: *const u8, len: u
 }
 
 /// Copy data from kernel to user space.
+#[allow(dead_code)]
 pub unsafe fn copy_to_user(user_ptr: *mut u8, kernel_buf: &[u8], len: usize) {
     core::ptr::copy_nonoverlapping(kernel_buf.as_ptr(), user_ptr, len);
 }

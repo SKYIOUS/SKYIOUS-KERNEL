@@ -28,8 +28,7 @@ pub fn current_lapic_id() -> u8 {
 
 /// Read a 32-bit LAPIC register of the current CPU.
 pub fn lapic_read32(offset: u32) -> u32 {
-    let pmo = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()
-        .expect("PHYSICAL_MEMORY_OFFSET not initialized");
+    let pmo = crate::memory::physical_memory_offset();
     let ptr = (pmo + 0xfee00000 + offset as u64) as *const u32;
     // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot; LAPIC base is fixed.
     unsafe { core::ptr::read_volatile(ptr) }
@@ -37,8 +36,7 @@ pub fn lapic_read32(offset: u32) -> u32 {
 
 /// Write a 32-bit LAPIC register of the current CPU.
 unsafe fn lapic_write32(offset: u32, value: u32) {
-    let pmo = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()
-        .expect("PHYSICAL_MEMORY_OFFSET not initialized");
+    let pmo = crate::memory::physical_memory_offset();
     let ptr = (pmo + 0xfee00000 + offset as u64) as *mut u32;
     unsafe { core::ptr::write_volatile(ptr, value); }
 }
@@ -74,8 +72,7 @@ pub fn eoi() {
     // the physical memory mapping.  Each CPU's access to this address targets
     // its own LAPIC, so this is inherently per-CPU and does NOT need the
     // shared global LOCAL_APIC (which the AP overwrites on SMP).
-    let pmo = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()
-        .expect("PHYSICAL_MEMORY_OFFSET not initialized");
+    let pmo = crate::memory::physical_memory_offset();
     let eoi = (pmo + 0xfee00000 + 0xb0) as *mut u32;
     // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and the LAPIC is at
     // a fixed physical address.  Write 0 to the EOI register of *this* CPU.

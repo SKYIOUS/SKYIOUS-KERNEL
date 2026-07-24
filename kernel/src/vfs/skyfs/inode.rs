@@ -4,11 +4,11 @@ use crate::alloc::sync::Arc;
 use spin::Mutex;
 
 pub fn alloc_inode_inner(fs: &Arc<Mutex<SkyFS>>) -> Result<u64, ()> {
-    let sb = &fs.lock().sb;
+    let binding = fs.lock();
+    let sb = &binding.sb;
     let total_inodes = sb.inode_count;
     let inodes_per_block = BLOCK_SIZE as u64 / INODE_SIZE as u64;
 
-    let binding = fs.lock();
     let mut dev = binding.device.lock();
     let mut buf = [0u8; BLOCK_SIZE];
 
@@ -42,12 +42,12 @@ pub fn init_inode_inner(fs: &Arc<Mutex<SkyFS>>, ino: u64, mode: u32) -> Result<(
         data: [0u8; 256],
     };
 
-    let sb = &fs.lock().sb;
+    let binding = fs.lock();
+    let sb = &binding.sb;
     let inodes_per_block = BLOCK_SIZE as u64 / INODE_SIZE as u64;
     let block = sb.inode_start + ino / inodes_per_block;
     let offset = ((ino % inodes_per_block) * INODE_SIZE as u64) as usize;
 
-    let binding = fs.lock();
     let mut dev = binding.device.lock();
     let mut buf = [0u8; BLOCK_SIZE];
     SkyFS::read_block(&mut *dev, block, &mut buf)?;

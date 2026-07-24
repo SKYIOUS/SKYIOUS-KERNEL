@@ -16,7 +16,7 @@ use core::cell::UnsafeCell;
 #[allow(dead_code)]
 pub struct SchedLock<T> {
     held: AtomicU64,       // 0 = free, 1 = held
-    key: u64,              // unique pipe-block key
+    key: AtomicU64,        // unique pipe-block key
     data: UnsafeCell<T>,
 }
 
@@ -31,7 +31,7 @@ impl<T> SchedLock<T> {
     pub const fn new(val: T) -> Self {
         SchedLock {
             held: AtomicU64::new(0),
-            key: 0, // set dynamically on first use via get_or_init
+            key: AtomicU64::new(0),
             data: UnsafeCell::new(val),
         }
     }
@@ -39,17 +39,21 @@ impl<T> SchedLock<T> {
     pub fn new_named(val: T) -> Self {
         SchedLock {
             held: AtomicU64::new(0),
-            key: NEXT_LOCK_KEY.fetch_add(1, Relaxed),
+            key: AtomicU64::new(NEXT_LOCK_KEY.fetch_add(1, Relaxed)),
             data: UnsafeCell::new(val),
         }
     }
 
     fn key(&self) -> u64 {
-        if self.key == 0 {
-            // self-referential pointer as unique key (safe because key never freed)
-            &self.key as *const _ as u64
+        let k = self.key.load(Relaxed);
+        if k == 0 {
+            let new = NEXT_LOCK_KEY.fetch_add(1, Relaxed);
+            match self.key.compare_exchange(0, new, Relaxed, Relaxed) {
+                Ok(_) => new,
+                Err(actual) => actual,
+            }
         } else {
-            self.key
+            k
         }
     }
 

@@ -1,5 +1,6 @@
 pub mod dns;
 pub mod dhcp;
+pub mod unix;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
@@ -63,7 +64,7 @@ pub fn init() {
                 (eui64[4] as u16) << 8 | eui64[5] as u16,
                 (eui64[6] as u16) << 8 | eui64[7] as u16,
             );
-            addrs.push(IpCidr::new(IpAddress::Ipv6(ll), 64)).unwrap();
+            addrs.push(IpCidr::new(IpAddress::Ipv6(ll), 128)).ok();
         });
         
         // Fallback default routes
@@ -83,9 +84,9 @@ pub fn init() {
 }
 
 pub fn poll() {
+    let mut sockets = SOCKETS.lock();
     let mut iface_lock = NETWORK_INTERFACE.lock();
     if let Some(ref mut iface) = *iface_lock {
-        let mut sockets = SOCKETS.lock();
         let nic_lock = NIC.lock();
         let now = Instant::from_millis((crate::interrupts::get_ticks() * 10) as i64);
 
@@ -172,7 +173,7 @@ pub struct SocketObject {
 impl SocketObject {
     pub fn new(handle: SocketHandle, socket_type: crate::task::process::SocketType) -> Arc<Self> {
         Arc::new(SocketObject {
-            header: ObjectHeader::new(ObjectTypeId(6), SecurityDescriptor::default()),
+            header: ObjectHeader::new(ObjectTypeId(6), SecurityDescriptor::default_socket()),
             handle,
             socket_type,
         })

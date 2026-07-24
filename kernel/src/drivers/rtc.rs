@@ -43,14 +43,19 @@ fn bcd_to_binary(bcd: u8) -> u8 {
 
 /// Read time from CMOS RTC
 fn cmos_read_time() -> (u64, u64) {
-    while is_updating() {}
-    let second = bcd_to_binary(cmos_read(REG_SECOND));
-    let minute = bcd_to_binary(cmos_read(REG_MINUTE));
-    let hour = bcd_to_binary(cmos_read(REG_HOUR));
-    let day = bcd_to_binary(cmos_read(REG_DAY));
-    let month = bcd_to_binary(cmos_read(REG_MONTH));
-    let year = bcd_to_binary(cmos_read(REG_YEAR));
-    while is_updating() {}
+    let (second, minute, hour, day, month, year);
+    loop {
+        while is_updating() {}
+        second = bcd_to_binary(cmos_read(REG_SECOND));
+        minute = bcd_to_binary(cmos_read(REG_MINUTE));
+        hour = bcd_to_binary(cmos_read(REG_HOUR));
+        day = bcd_to_binary(cmos_read(REG_DAY));
+        month = bcd_to_binary(cmos_read(REG_MONTH));
+        year = bcd_to_binary(cmos_read(REG_YEAR));
+        while is_updating() {}
+        let second2 = bcd_to_binary(cmos_read(REG_SECOND));
+        if second == second2 { break; }
+    }
 
     let year_full = 2000u64 + year as u64;
 

@@ -76,20 +76,22 @@ fn linux_uname(buf: *mut u8) -> u64 {
 fn linux_arch_prctl(code: u32, addr: u64) -> u64 {
     match code {
         0x1002 => { // ARCH_SET_FS
-            if let Some(mut thread) = crate::task::scheduler::current_thread() {
-                thread.fs_base = addr;
-                crate::task::scheduler::set_current_thread(thread);
-                // Write the FS base immediately so it's active
-                crate::task::thread::write_fs_base(addr);
-                0
-            } else {
-                -(errno::Errno::ESRCH as i64) as u64
+            {
+                let found = crate::task::scheduler::with_current_thread(|thread| {
+                    thread.fs_base = addr;
+                });
+                if found.is_none() {
+                    return -(errno::Errno::ESRCH as i64) as u64;
+                }
             }
+            // Write the FS base immediately so it's active
+            crate::task::thread::write_fs_base(addr);
+            0
         }
         0x1003 => { // ARCH_GET_FS
-            let fs_base = crate::task::scheduler::current_thread()
-                .map(|t| t.fs_base)
-                .unwrap_or(0);
+            let fs_base = crate::task::scheduler::with_current_thread(|thread| {
+                thread.fs_base
+            }).unwrap_or(0);
             let out_ptr = addr as *mut u64;
             if unsafe { user_access::copy_to_user(out_ptr as *mut u8, core::slice::from_raw_parts(&fs_base as *const _ as *const u8, 8)) }.is_err() {
                 return -(errno::Errno::EFAULT as i64) as u64;

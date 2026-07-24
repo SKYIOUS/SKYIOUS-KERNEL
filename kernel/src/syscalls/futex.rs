@@ -66,7 +66,7 @@ fn futex_wait(uaddr: *mut u32, expected: u32) -> u64 {
         return errno::Errno::EINTR as u64;
     }
 
-    if let Some(mut current_thread) = scheduler::current_thread() {
+    if let Some(mut current_thread) = scheduler::take_current_thread() {
         current_thread.status = crate::task::thread::ThreadStatus::Blocked;
         current_thread.futex_wake_addr = Some(uaddr as u64);
         scheduler::add_futex_thread(*current_thread);
@@ -122,7 +122,7 @@ fn futex_lock_pi(uaddr: *mut u32) -> u64 {
 
     if signal_pending() { return errno::Errno::EINTR as u64; }
 
-    if let Some(mut current_thread) = scheduler::current_thread() {
+    if let Some(mut current_thread) = scheduler::take_current_thread() {
         current_thread.status = crate::task::thread::ThreadStatus::Blocked;
         current_thread.futex_wake_addr = Some(uaddr as u64);
         scheduler::add_futex_thread(*current_thread);

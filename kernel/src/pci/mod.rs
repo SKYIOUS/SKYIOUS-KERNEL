@@ -52,7 +52,7 @@ pub fn read_bar64(bus: u8, slot: u8, func: u8, bar_offset: u8) -> u64 {
 }
 
 fn bar_to_virt(bar_val: u64) -> usize {
-    let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().unwrap_or(&0);
+    let offset = crate::memory::physical_memory_offset();
     (offset + bar_val) as usize
 }
 

@@ -129,7 +129,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 [[package]]
 name = "fatfs"
 version = "0.4.0"
-source = "git+https://github.com/rafalh/rust-fatfs#c4b88477b22ca7e5131fbd8891f62a5deaa88e6e"
+source = "git+https://github.com/rafalh/rust-fatfs?rev=c4b88477b22ca7e5131fbd8891f62a5deaa88e6e#c4b88477b22ca7e5131fbd8891f62a5deaa88e6e"
 dependencies = [
  "bitflags 2.10.0",
  "log",

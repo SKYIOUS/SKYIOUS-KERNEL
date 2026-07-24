@@ -332,12 +332,24 @@ impl Ext2FileSystem {
     fn read_all_block_indices(&self, inode: &Inode) -> Result<Vec<u32>, ()> {
         let mut blocks = Vec::new();
         for i in 0..12 {
-            if inode.i_block[i] == 0 { return Ok(blocks); }
             blocks.push(inode.i_block[i]);
         }
-        if inode.i_block[12] != 0 { blocks.append(&mut self.read_indirect(inode.i_block[12], 1)?); }
-        if inode.i_block[13] != 0 { blocks.append(&mut self.read_indirect(inode.i_block[13], 2)?); }
-        if inode.i_block[14] != 0 { blocks.append(&mut self.read_indirect(inode.i_block[14], 3)?); }
+        let entries = self.block_size / 4;
+        if inode.i_block[12] != 0 {
+            blocks.append(&mut self.read_indirect(inode.i_block[12], 1)?);
+        } else {
+            blocks.extend(core::iter::repeat(0).take(entries));
+        }
+        if inode.i_block[13] != 0 {
+            blocks.append(&mut self.read_indirect(inode.i_block[13], 2)?);
+        } else {
+            blocks.extend(core::iter::repeat(0).take(entries * entries));
+        }
+        if inode.i_block[14] != 0 {
+            blocks.append(&mut self.read_indirect(inode.i_block[14], 3)?);
+        } else {
+            blocks.extend(core::iter::repeat(0).take(entries * entries * entries));
+        }
         Ok(blocks)
     }
 
@@ -347,9 +359,18 @@ impl Ext2FileSystem {
         let ptrs = unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u32, entries) };
         let mut out = Vec::new();
         if level == 1 {
-            for &p in ptrs { if p == 0 { break; } out.push(p); }
+            for &p in ptrs {
+                out.push(p);
+            }
         } else {
-            for &p in ptrs { if p == 0 { break; } out.append(&mut self.read_indirect(p, level - 1)?); }
+            for &p in ptrs {
+                if p == 0 {
+                    let sub_entries = entries.pow(level - 1);
+                    out.extend(core::iter::repeat(0).take(sub_entries));
+                } else {
+                    out.append(&mut self.read_indirect(p, level - 1)?);
+                }
+            }
         }
         Ok(out)
     }
@@ -384,7 +405,7 @@ impl Ext2FileSystem {
             let len = core::cmp::min(bs, data.len() - off);
             let mut block_data = vec![0u8; bs];
             if len > 0 { block_data[..len].copy_from_slice(&data[off..off + len]); }
-            let bnum = if i < old_blocks.len() {
+            let bnum = if i < old_blocks.len() && old_blocks[i] != 0 {
                 old_blocks[i]
             } else if i < 12 {
                 let nb = self.allocate_block()?;
@@ -413,7 +434,7 @@ impl Ext2FileSystem {
         // Free excess blocks if data shrank
         if needed < old_blocks.len() {
             for &b in &old_blocks[needed..] {
-                self.free_block(b)?;
+                if b != 0 { self.free_block(b)?; }
             }
             // Zero out now-unused inode block pointers
             for i in needed..12 {
@@ -427,7 +448,7 @@ impl Ext2FileSystem {
     }
 
     fn free_all_blocks(&self, inode: &Inode) -> Result<(), ()> {
-        for &b in &self.read_all_block_indices(inode)? { self.free_block(b)?; }
+        for &b in &self.read_all_block_indices(inode)? { if b != 0 { self.free_block(b)?; } }
         if inode.i_block[12] != 0 { self.free_indirect(inode.i_block[12], 1)?; }
         if inode.i_block[13] != 0 { self.free_indirect(inode.i_block[13], 2)?; }
         if inode.i_block[14] != 0 { self.free_indirect(inode.i_block[14], 3)?; }
@@ -439,7 +460,7 @@ impl Ext2FileSystem {
         let buf = self.read_block(block_num)?;
         let ptrs = unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u32, epb) };
         if level > 1 {
-            for &p in ptrs { if p == 0 { break; } self.free_indirect(p, level - 1)?; }
+            for &p in ptrs { if p != 0 { self.free_indirect(p, level - 1)?; } }
         }
         self.free_block(block_num)
     }
@@ -447,6 +468,7 @@ impl Ext2FileSystem {
     fn find_dentry(&self, dir_inode: &Inode, name: &str) -> Result<Option<(u32, u32, u32)>, ()> {
         let blocks = self.read_all_block_indices(dir_inode)?;
         for &bnum in &blocks {
+            if bnum == 0 { continue; }
             let data = self.read_block(bnum)?;
             let mut off = 0usize;
             while off < self.block_size {
@@ -454,7 +476,7 @@ impl Ext2FileSystem {
                 if e.inode == 0 { break; }
                 let enm = core::str::from_utf8(
                     unsafe { core::slice::from_raw_parts(data.as_ptr().add(off + 8), e.name_len as usize) }
-                ).unwrap_or("");
+                ).map_err(|_| ())?;
                 if enm == name {
                     return Ok(Some((e.inode, bnum, off as u32)));
                 }
@@ -469,6 +491,7 @@ impl Ext2FileSystem {
         let dir_inode = self.read_inode(dir_inode_num)?;
         let blocks = self.read_all_block_indices(&dir_inode)?;
         for &bnum in &blocks {
+            if bnum == 0 { continue; }
             let mut data = self.read_block(bnum)?;
             let mut off = 0usize;
             let mut prev = 0usize;
@@ -477,7 +500,7 @@ impl Ext2FileSystem {
                 if e.inode == 0 { break; }
                 let enm = core::str::from_utf8(
                     unsafe { core::slice::from_raw_parts(data.as_ptr().add(off + 8), e.name_len as usize) }
-                ).unwrap_or("");
+                ).map_err(|_| ())?;
                 if enm == name {
                     if off == prev {
                         unsafe { *(data.as_mut_ptr().add(off) as *mut u32) = 0; }
@@ -501,6 +524,7 @@ impl Ext2FileSystem {
     fn shrink_dir_blocks(&self, dir_inode_num: u32, all_blocks: &[u32]) -> Result<(), ()> {
         // Free trailing blocks that contain only zeroed entries
         for &bnum in all_blocks.iter().rev() {
+            if bnum == 0 { continue; }
             let data = self.read_block(bnum)?;
             let first_entry = unsafe { &*(data.as_ptr() as *const DirectoryEntry) };
             if first_entry.inode == 0 {
@@ -530,6 +554,7 @@ impl Ext2FileSystem {
         let new_len = (8 + name.len() + 3) & !3;
 
         for &bnum in &blocks {
+            if bnum == 0 { continue; }
             let mut data = self.read_block(bnum)?;
             let mut off = 0;
             while off < self.block_size {
@@ -558,7 +583,9 @@ impl Ext2FileSystem {
             }
         }
 
-        // Need a new block
+        // Need a new block — check for a free slot before allocating
+        let mut upd = parent_inode;
+        let slot = (0..12).find(|&i| upd.i_block[i] == 0).ok_or(())?;
         let nb = self.allocate_block()?;
         let mut new_data = vec![0u8; self.block_size];
         let e = unsafe { &mut *(new_data.as_mut_ptr() as *mut DirectoryEntry) };
@@ -566,8 +593,6 @@ impl Ext2FileSystem {
         e.name_len = name.len() as u8; e.file_type = file_type;
         unsafe { core::ptr::copy_nonoverlapping(name.as_ptr(), new_data.as_mut_ptr().add(8), name.len()); }
         self.write_block(nb, &new_data)?;
-        let mut upd = parent_inode;
-        let slot = (0..12).find(|&i| upd.i_block[i] == 0).ok_or(())?;
         upd.i_block[slot] = nb;
         upd.i_size_lo += self.block_size as u32;
         upd.i_blocks_lo += (self.block_size / 512) as u32;
@@ -580,7 +605,7 @@ pub fn mount(device: Arc<Mutex<dyn BlockDevice>>) -> Result<Arc<Ext2FileSystemHa
     {
         let l = fs.lock();
         if let Ok(mut sb) = l.read_raw_sb() {
-            sb.s_state = 2; // EXT2_ERROR_FS — dirty
+            sb.s_state = 0; // clear valid flag — filesystem in use
             sb.s_mnt_count = sb.s_mnt_count.wrapping_add(1);
             let _ = l.write_raw_sb(&sb);
         }
@@ -617,14 +642,15 @@ impl VfsNode for Ext2Node {
         let fs = self.fs.lock();
         let mut out = Vec::new();
         for &b in &fs.read_all_block_indices(&self.inode)? {
+            if b == 0 { continue; }
             let data = fs.read_block(b)?;
             let mut off = 0;
             while off < fs.block_size {
                 let e = unsafe { &*(data.as_ptr().add(off) as *const DirectoryEntry) };
                 if e.inode == 0 { break; }
-                let nm = String::from_utf8_lossy(
+                let nm = core::str::from_utf8(
                     unsafe { core::slice::from_raw_parts(data.as_ptr().add(off + 8), e.name_len as usize) }
-                ).into_owned();
+                ).map_err(|_| ())?;
                 if nm != "." && nm != ".." {
                     if let Ok(ci) = fs.read_inode(e.inode) {
                         out.push(Arc::new(Ext2Node { fs: self.fs.clone(), name: nm, inode_num: e.inode, inode: ci }) as Arc<dyn VfsNode>);
@@ -642,6 +668,7 @@ impl VfsNode for Ext2Node {
         let fs = self.fs.lock();
         let blocks = fs.read_all_block_indices(&self.inode).ok()?;
         for &b in &blocks {
+            if b == 0 { continue; }
             let data = fs.read_block(b).ok()?;
             let mut off = 0;
             while off < fs.block_size {
@@ -649,7 +676,7 @@ impl VfsNode for Ext2Node {
                 if e.inode == 0 { break; }
                 let enm = core::str::from_utf8(
                     unsafe { core::slice::from_raw_parts(data.as_ptr().add(off + 8), e.name_len as usize) }
-                ).unwrap_or("");
+                ).ok()?;
                 if enm == name {
                     let ci = fs.read_inode(e.inode).ok()?;
                     return Some(Arc::new(Ext2Node { fs: self.fs.clone(), name: String::from(enm), inode_num: e.inode, inode: ci }));
@@ -667,7 +694,11 @@ impl VfsNode for Ext2Node {
         let size = self.inode.i_size_lo as usize;
         let mut data = Vec::with_capacity(size);
         for &b in &fs.read_all_block_indices(&self.inode)? {
-            let buf = fs.read_block(b)?;
+            let buf = if b == 0 {
+                vec![0u8; fs.block_size]
+            } else {
+                fs.read_block(b)?
+            };
             let rem = size - data.len();
             let cp = core::cmp::min(rem, fs.block_size);
             data.extend_from_slice(&buf[..cp]);
@@ -764,6 +795,7 @@ impl VfsNode for Ext2Node {
             let blocks = fs.read_all_block_indices(&child)?;
             let mut count = 0;
             for &b in &blocks {
+                if b == 0 { continue; }
                 let data = fs.read_block(b)?;
                 let mut off = 0;
                 while off < fs.block_size {
@@ -894,23 +926,28 @@ impl VfsNode for Ext2Node {
         // Free excess blocks if shrinking
         if new_blocks_needed < old_blocks.len() {
             for &b in &old_blocks[new_blocks_needed..] {
-                fs.free_block(b)?;
+                if b != 0 { fs.free_block(b)?; }
             }
             // Zero out freed block pointers
             for i in new_blocks_needed..12 {
                 if i < old_blocks.len() { inode.i_block[i] = 0; }
+            }
+            // Free indirect/double/triple index blocks and zero their inode entries
+            if new_blocks_needed <= 12 {
+                if inode.i_block[12] != 0 { fs.free_indirect(inode.i_block[12], 1)?; inode.i_block[12] = 0; }
+                if inode.i_block[13] != 0 { fs.free_indirect(inode.i_block[13], 2)?; inode.i_block[13] = 0; }
+                if inode.i_block[14] != 0 { fs.free_indirect(inode.i_block[14], 3)?; inode.i_block[14] = 0; }
             }
         }
 
         // Zero-fill the last partial block beyond new_len
         if new_len > 0 && new_len % bs != 0 {
             let last_block_idx = new_blocks_needed - 1;
-            if last_block_idx < old_blocks.len() {
-                let last_block = old_blocks[last_block_idx];
-                let mut buf = fs.read_block(last_block)?;
+            if last_block_idx < old_blocks.len() && old_blocks[last_block_idx] != 0 {
+                let mut buf = fs.read_block(old_blocks[last_block_idx])?;
                 let zero_start = new_len % bs;
                 for byte in buf[zero_start..].iter_mut() { *byte = 0; }
-                fs.write_block(last_block, &buf)?;
+                fs.write_block(old_blocks[last_block_idx], &buf)?;
             }
         }
 
