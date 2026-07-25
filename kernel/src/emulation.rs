@@ -206,7 +206,7 @@ fn map_linux_to_vahi(linux_n: u64) -> u64 {
         5 => numbers::SYS_FSTAT,
         8 => numbers::SYS_LSEEK,
         9 => numbers::SYS_MMAP,
-        10 => numbers::_SYS_MPROTECT,
+        10 => numbers::SYS_MPROTECT,
         11 => numbers::SYS_MUNMAP,
         12 => numbers::SYS_BRK,
         16 => numbers::SYS_IOCTL,

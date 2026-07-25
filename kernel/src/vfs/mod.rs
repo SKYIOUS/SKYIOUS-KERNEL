@@ -22,7 +22,7 @@ pub trait FileSystem: Send + Sync {
     fn root(&self) -> Result<Arc<dyn VfsNode>, ()>;
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct Stat {
     pub st_dev: u64,
@@ -67,6 +67,12 @@ pub trait VfsNode: Send + Sync {
     fn name(&self) -> String;
     fn is_dir(&self) -> bool;
     fn read(&self, max_len: usize) -> Result<Vec<u8>, ()>;
+    
+    /// Get inode number for hard link operations (filesystem-specific)
+    fn inode_num(&self) -> Option<u64> {
+        None
+    }
+
     fn stat(&self) -> Result<Stat, ()> {
         Err(()) // Default implementation, override in specific filesystems
     }

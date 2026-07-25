@@ -598,6 +598,8 @@ impl VfsNode for SkyfsNode {
             st_rdev: 0, st_size: inode.size as i64,
             st_atime: inode.atime as i64, st_mtime: inode.mtime as i64,
             st_ctime: inode.ctime as i64,
+        
+            ..Default::default()
         })
     }
 

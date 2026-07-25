@@ -133,6 +133,8 @@ impl VfsNode for FatNode {
             st_atime: 0,
             st_mtime: 0,
             st_ctime: 0,
+        
+            ..Default::default()
         })
     }
 

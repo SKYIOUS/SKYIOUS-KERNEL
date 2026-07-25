@@ -41,16 +41,29 @@ use smoltcp::iface::SocketHandle;
 #[derive(Clone, Copy, PartialEq)]
 pub enum SocketType { Tcp, Udp, Raw, Unix }
 
-#[derive(Clone)]
 #[allow(dead_code)]
 pub enum FileDescriptor {
-    File { node: Arc<dyn VfsNode>, offset: usize },
+    File { node: Arc<dyn VfsNode>, offset: spin::Mutex<usize> },
     Socket(SocketHandle, SocketType),
     UnixSocket(u64, SocketType),
     PtyMaster { _idx: usize, pair: alloc::sync::Arc<spin::Mutex<crate::pty::PtyPair>> },
     PtySlave { _idx: usize, pair: alloc::sync::Arc<spin::Mutex<crate::pty::PtyPair>> },
     SignalFd(u64),
     EventFd(alloc::sync::Arc<spin::Mutex<EventFdData>>),
+}
+
+impl Clone for FileDescriptor {
+    fn clone(&self) -> Self {
+        match self {
+            FileDescriptor::File { node, offset } => FileDescriptor::File { node: node.clone(), offset: spin::Mutex::new(*offset.lock()) },
+            FileDescriptor::Socket(h, t) => FileDescriptor::Socket(*h, *t),
+            FileDescriptor::UnixSocket(h, t) => FileDescriptor::UnixSocket(*h, *t),
+            FileDescriptor::PtyMaster { _idx, pair } => FileDescriptor::PtyMaster { _idx: *_idx, pair: pair.clone() },
+            FileDescriptor::PtySlave { _idx, pair } => FileDescriptor::PtySlave { _idx: *_idx, pair: pair.clone() },
+            FileDescriptor::SignalFd(h) => FileDescriptor::SignalFd(*h),
+            FileDescriptor::EventFd(d) => FileDescriptor::EventFd(d.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +100,11 @@ pub struct Process {
     pub clear_child_tid: Mutex<u64>,
     pub emulation: Mutex<EmulationMode>,
     pub umask: Mutex<u32>,
-    pub pgid: u64,
-    pub session: u64,
-    pub is_group_leader: bool,
-    pub rlim_cur: [i64; 16],
-    pub rlim_max: [i64; 16],
+    pub pgid: spin::Mutex<u64>,
+    pub session: spin::Mutex<u64>,
+    pub is_group_leader: spin::Mutex<bool>,
+    pub rlim_cur: spin::Mutex<[i64; 16]>,
+    pub rlim_max: spin::Mutex<[i64; 16]>,
     pub altstack: spin::Mutex<stack_t>,
     pub itimer_real: spin::Mutex<itimerval>,
     pub utime: core::sync::atomic::AtomicU64,
@@ -118,6 +131,11 @@ pub struct stack_t {
     pub ss_size: usize,
 }
 
+// ponytail: stack_t holds a raw pointer used only for signal altstack storage,
+// never dereferenced from another thread. Marking Send is safe here.
+unsafe impl Send for stack_t {}
+
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct timeval {
     pub tv_sec: i64,
@@ -318,11 +336,11 @@ impl Process {
             clear_child_tid: Mutex::new(0),
             emulation: Mutex::new(EmulationMode::Native),
             umask: Mutex::new(0o022),
-            pgid: id,
-            session: id,
-            is_group_leader: true,
-            rlim_cur: [i64::MAX; 16],
-            rlim_max: [i64::MAX; 16],
+            pgid: spin::Mutex::new(id),
+            session: spin::Mutex::new(id),
+            is_group_leader: spin::Mutex::new(true),
+            rlim_cur: spin::Mutex::new([i64::MAX; 16]),
+            rlim_max: spin::Mutex::new([i64::MAX; 16]),
             altstack: spin::Mutex::new(stack_t {
                 ss_sp: core::ptr::null_mut(),
                 ss_flags: SS_DISABLE,

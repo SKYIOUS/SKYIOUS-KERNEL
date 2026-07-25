@@ -43,7 +43,7 @@ fn bcd_to_binary(bcd: u8) -> u8 {
 
 /// Read time from CMOS RTC
 fn cmos_read_time() -> (u64, u64) {
-    let (second, minute, hour, day, month, year);
+    let (mut second, mut minute, mut hour, mut day, mut month, mut year);
     loop {
         while is_updating() {}
         second = bcd_to_binary(cmos_read(REG_SECOND));

@@ -143,36 +143,50 @@ impl VfsNode for DevNode {
                 st_dev: 0, st_ino: 0, st_mode: 0o040755, st_nlink: 2,
                 st_uid: 0, st_gid: 0, st_rdev: 0, st_size: 0,
                 st_atime: 0, st_mtime: 0, st_ctime: 0,
+            
+            ..Default::default()
             }),
             DevNodeInner::Null => Ok(Stat {
                 st_dev: 0, st_ino: 1, st_mode: 0o020666, st_nlink: 1,
                 st_uid: 0, st_gid: 0, st_rdev: 0x0103, st_size: 0,
                 st_atime: 0, st_mtime: 0, st_ctime: 0,
+            
+            ..Default::default()
             }),
             DevNodeInner::Zero => Ok(Stat {
                 st_dev: 0, st_ino: 2, st_mode: 0o020666, st_nlink: 1,
                 st_uid: 0, st_gid: 0, st_rdev: 0x0105, st_size: 0,
                 st_atime: 0, st_mtime: 0, st_ctime: 0,
+            
+            ..Default::default()
             }),
             DevNodeInner::Framebuffer => Ok(Stat {
                 st_dev: 0, st_ino: 6, st_mode: 0o020666, st_nlink: 1,
                 st_uid: 0, st_gid: 0, st_rdev: 0x001e, st_size: 0,
                 st_atime: 0, st_mtime: 0, st_ctime: 0,
+            
+            ..Default::default()
             }),
             DevNodeInner::Tty0 => Ok(Stat {
                 st_dev: 0, st_ino: 3, st_mode: 0o020666, st_nlink: 1,
                 st_uid: 0, st_gid: 0, st_rdev: 0x0400, st_size: 0,
                 st_atime: 0, st_mtime: 0, st_ctime: 0,
+            
+            ..Default::default()
             }),
             DevNodeInner::InputEvent(_) => Ok(Stat {
                 st_dev: 0, st_ino: 0, st_mode: 0o020440, st_nlink: 1,
                 st_uid: 0, st_gid: 0, st_rdev: 0, st_size: 0,
                 st_atime: 0, st_mtime: 0, st_ctime: 0,
+            
+            ..Default::default()
             }),
             DevNodeInner::Speaker => Ok(Stat {
                 st_dev: 0, st_ino: 7, st_mode: 0o020666, st_nlink: 1,
                 st_uid: 0, st_gid: 0, st_rdev: 0x0106, st_size: 0,
                 st_atime: 0, st_mtime: 0, st_ctime: 0,
+            
+            ..Default::default()
             }),
             DevNodeInner::BlockDevice(idx) => {
                 let size = {
@@ -185,6 +199,8 @@ impl VfsNode for DevNode {
                     st_dev: 0, st_ino: 10 + *idx as u64, st_mode: 0o060660, st_nlink: 1,
                     st_uid: 0, st_gid: 0, st_rdev: 0, st_size: size as i64,
                     st_atime: 0, st_mtime: 0, st_ctime: 0,
+                
+            ..Default::default()
                 })
             }
         }

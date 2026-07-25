@@ -370,6 +370,8 @@ impl TerminalWidget {
                     st_dev: 0, st_ino: 0, st_mode: 0, st_nlink: 0,
                     st_uid: 0, st_gid: 0, st_rdev: 0, st_size: 0,
                     st_atime: 0, st_mtime: 0, st_ctime: 0,
+                
+            ..Default::default()
                 };
                 let res = crate::syscalls::syscall_handler(4, p.as_ptr() as u64, &mut sb as *mut _ as u64, 0, 0, 0, core::ptr::null_mut());
                 if res == 0 {

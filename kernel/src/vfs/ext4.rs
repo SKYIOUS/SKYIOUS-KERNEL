@@ -662,6 +662,8 @@ impl VfsNode for Ext4Node {
             st_atime: atime,
             st_mtime: mtime,
             st_ctime: ctime,
+        
+            ..Default::default()
         })
     }
 }

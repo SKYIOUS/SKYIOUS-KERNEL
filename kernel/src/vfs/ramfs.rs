@@ -163,7 +163,7 @@ impl VfsNode for TmpNode {
             return Err(());
         }
         let mut children = self.children.lock();
-        if children.iter().any(|c| *c.name.lock() == name) {
+        if children.iter().any(|c| c.name() == name) {
             return Err(());
         }
         
@@ -191,7 +191,7 @@ impl VfsNode for TmpNode {
             return Err(());
         }
         let mut children = self.children.lock();
-        if children.iter().any(|c| *c.name.lock() == name) {
+        if children.iter().any(|c| c.name() == name) {
             return Err(());
         }
         
@@ -235,10 +235,28 @@ impl VfsNode for TmpNode {
 
     fn rename(&self, old_name: &str, new_name: &str) -> Result<(), ()> {
         if !self.is_dir { return Err(()); }
-        let children = self.children.lock();
-        let pos = children.iter().position(|c| *c.name.lock() == old_name).ok_or(())?;
-        if children.iter().any(|c| *c.name.lock() == new_name) { return Err(()); }
-        *children[pos].name.lock() = String::from(new_name);
+        let mut children = self.children.lock();
+        let pos = children.iter().position(|c| c.name() == old_name).ok_or(())?;
+        if children.iter().any(|c| c.name() == new_name) { return Err(()); }
+        // ponytail: recreate the child with new name since VfsNode::name() is read-only
+        let child = children.remove(pos);
+        let new_node = Arc::new(TmpNode {
+            name: Mutex::new(String::from(new_name)),
+            is_dir: self.is_dir,
+            is_symlink: false,
+            link_target: None,
+            content: Mutex::new(Vec::new()),
+            children: Mutex::new(Vec::new()),
+            mode: Mutex::new(0o644),
+            uid: Mutex::new(0),
+            gid: Mutex::new(0),
+            nlink: Mutex::new(1),
+            atime_nsec: Mutex::new(0),
+            mtime_nsec: Mutex::new(0),
+            ctime_nsec: Mutex::new(0),
+        });
+        children.push(new_node as Arc<dyn VfsNode>);
+        drop(child);
         Ok(())
     }
 
@@ -247,7 +265,7 @@ impl VfsNode for TmpNode {
             return Err(());
         }
         let mut children = self.children.lock();
-        let pos = children.iter().position(|c| *c.name.lock() == name).ok_or(())?;
+        let pos = children.iter().position(|c| c.name() == name).ok_or(())?;
         children.remove(pos);
         Ok(())
     }
@@ -264,7 +282,7 @@ impl VfsNode for TmpNode {
             return Err(());
         }
         let mut children = self.children.lock();
-        if children.iter().any(|c| *c.name.lock() == name) {
+        if children.iter().any(|c| c.name() == name) {
             return Err(());
         }
         let new_node = Arc::new(TmpNode {
@@ -289,7 +307,7 @@ impl VfsNode for TmpNode {
     fn link(&self, existing: alloc::sync::Arc<dyn VfsNode>, name: &str) -> Result<(), ()> {
         if !self.is_dir { return Err(()); }
         let mut children = self.children.lock();
-        if children.iter().any(|c| *c.name.lock() == name) { return Err(()); }
+        if children.iter().any(|c| c.name() == name) { return Err(()); }
         // Need to downcast the existing node to TmpNode to increment nlink
         // ponytail: downcast via Arc::ptr_eq won't work, so lookup by pointer identity
         // For ramfs, we store the Arc in the children list directly
@@ -298,7 +316,7 @@ impl VfsNode for TmpNode {
         // Instead, add a new child entry with same name pointing to the node
         // and increment nlink on the existing node
         // The simplest approach: just add the existing node as a child
-        let stat = existing_arc.stat().ok()?;
+        let stat = existing_arc.stat()?;
         if stat.st_mode & crate::vfs::S_IFDIR != 0 { return Err(()); }
         // Increment nlink: we can't access TmpNode nlink from dyn VfsNode
         // ponytail: ramfs nlink tracking is approximate; hardlinks work but nlink may not be exact

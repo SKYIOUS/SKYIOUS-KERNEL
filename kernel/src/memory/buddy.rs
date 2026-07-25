@@ -3,7 +3,6 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 use spin::Mutex;
-use crate::memory::PHYSICAL_MEMORY_OFFSET;
 
 pub const MAX_ORDER: usize = 11; // Blocks up to 2^11 * 4096 = 8MB
 
@@ -180,7 +179,7 @@ impl BuddyAllocator {
     fn read_next_ptr(&self, addr: PhysAddr) -> Option<PhysAddr> {
         // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
         // addr is a valid physical frame address from the allocator.
-        let offset = *crate::memory::physical_memory_offset();
+        let offset = crate::memory::physical_memory_offset();
         let virt = VirtAddr::new(addr.as_u64() + offset);
         let ptr = virt.as_ptr::<u64>();
         let val = unsafe { *ptr };
@@ -194,7 +193,7 @@ impl BuddyAllocator {
     fn write_next_ptr(&self, addr: PhysAddr, next: Option<PhysAddr>) {
         // SAFETY: PHYSICAL_MEMORY_OFFSET is set during boot and points to valid physical memory mapping.
         // addr is a valid physical frame address from the allocator.
-        let offset = *crate::memory::physical_memory_offset();
+        let offset = crate::memory::physical_memory_offset();
         let virt = VirtAddr::new(addr.as_u64() + offset);
         let ptr = virt.as_mut_ptr::<u64>();
         let val = next.map(|a| a.as_u64()).unwrap_or(0xFFFF_FFFF_FFFF_FFFF);

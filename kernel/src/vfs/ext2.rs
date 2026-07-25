@@ -636,6 +636,10 @@ impl Ext2Node {
 impl VfsNode for Ext2Node {
     fn name(&self) -> String { self.name.clone() }
     fn is_dir(&self) -> bool { Self::inode_type(&self.inode) == 0x4000 }
+    
+    fn inode_num(&self) -> Option<u64> {
+        Some(self.inode_num as u64)
+    }
 
     fn children(&self) -> Result<Vec<Arc<dyn VfsNode>>, ()> {
         if !self.is_dir() { return Err(()); }
@@ -653,7 +657,7 @@ impl VfsNode for Ext2Node {
                 ).map_err(|_| ())?;
                 if nm != "." && nm != ".." {
                     if let Ok(ci) = fs.read_inode(e.inode) {
-                        out.push(Arc::new(Ext2Node { fs: self.fs.clone(), name: nm, inode_num: e.inode, inode: ci }) as Arc<dyn VfsNode>);
+                        out.push(Arc::new(Ext2Node { fs: self.fs.clone(), name: alloc::string::String::from(nm), inode_num: e.inode, inode: ci }) as Arc<dyn VfsNode>);
                     }
                 }
                 if e.rec_len == 0 { break; }
@@ -715,6 +719,8 @@ impl VfsNode for Ext2Node {
             st_rdev: 0, st_size: self.inode.i_size_lo as i64,
             st_atime: self.inode.i_atime as i64, st_mtime: self.inode.i_mtime as i64,
             st_ctime: self.inode.i_ctime as i64,
+        
+            ..Default::default()
         })
     }
 
@@ -872,6 +878,40 @@ impl VfsNode for Ext2Node {
         }
         fs.write_inode(num, &inode)?;
         fs.add_dentry(self.inode_num, num, name, 7)?;
+        Ok(())
+    }
+
+    fn link(&self, existing: Arc<dyn VfsNode>, name: &str) -> Result<(), ()> {
+        if !self.is_dir() { return Err(()); }
+        if name == "." || name == ".." { return Err(()); }
+        
+        // Get inode number from existing node
+        let existing_inum = existing.inode_num().ok_or(())? as u32;
+        
+        // ext2 doesn't allow hard links to directories
+        if existing.is_dir() { return Err(()); }
+        
+        // Check if name already exists in target directory
+        let fs = self.fs.lock();
+        let dir_inode = fs.read_inode(self.inode_num)?;
+        if fs.find_dentry(&dir_inode, name)?.is_some() {
+            return Err(());
+        }
+        let _ = dir_inode;
+        
+        // Determine file type from existing node's stat
+        let stat = existing.stat()?;
+        let ftype = if (stat.st_mode & 0xF000) == 0x4000 { 2u8 } else { 1u8 };
+        
+        // Add dentry pointing to existing inode
+        fs.add_dentry(self.inode_num, existing_inum, name, ftype)?;
+        
+        // Increment link count on the existing inode
+        let mut target_inode = fs.read_inode(existing_inum)?;
+        target_inode.i_links_count += 1;
+        target_inode.i_ctime = fs.now();
+        fs.write_inode(existing_inum, &target_inode)?;
+        
         Ok(())
     }
 

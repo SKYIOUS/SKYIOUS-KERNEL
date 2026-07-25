@@ -251,6 +251,9 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             let virt_base = bar_to_virt(bar0);
             let mut xhci = crate::drivers::usb::xhci::XhciController::new(virt_base);
             xhci.init();
+            // Hand the controller to the USB subsystem so it survives boot and
+            // the HID poller thread can reach it.
+            crate::drivers::usb::register_xhci(xhci);
         }
 
         // UHCI (USB 1.x) — I/O BAR, bit 0 = 1

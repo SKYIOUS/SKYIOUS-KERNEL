@@ -1,16 +1,15 @@
 use spin::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::syscalls::errno;
-use crate::syscalls::numbers;
+use crate::vfs::FileSystem;
 use crate::syscalls::user_access;
 use crate::syscalls::get_current_process;
 use crate::syscalls::get_current_euid;
 use crate::syscalls::has_capability;
 use crate::syscalls::CAP_SYS_ADMIN;
-use crate::task::process::{Process, CURRENT_PROCESS, Vma, FileDescriptor};
+use crate::task::process::{CURRENT_PROCESS, Vma, FileDescriptor};
 use crate::memory::buddy::BuddyFrameAllocator;
 use x86_64::structures::paging::{Page, Size4KiB, Mapper, FrameAllocator, PageTableFlags, PhysFrame};
 use x86_64::PhysAddr;
@@ -153,7 +152,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> u64 {
         let key_map = SHM_KEY_MAP.lock();
         if let Some(&shmid) = key_map.get(&key) {
             let segments = SHM_SEGMENTS.lock();
-            if let Some(seg) = segments.get(&shmid) {
+            if let Some(_seg) = segments.get(&shmid) {
                 if (shmflg & IPC_EXCL) != 0 && (shmflg & IPC_CREAT) != 0 {
                     return errno::Errno::EEXIST as u64;
                 }
@@ -254,9 +253,9 @@ pub fn sys_shmat(shmid: i32, shmaddr: *const u8, shmflg: i32) -> u64 {
         const SHM_MIN: u64 = 0x4000_0000_0000;
         const SHM_MAX: u64 = 0x7F00_0000_0000;
         static SHM_NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(SHM_MIN);
-        let addr = SHM_NEXT.fetch_add(len_aligned, Ordering::Relaxed);
+        let addr = SHM_NEXT.fetch_add(len_aligned as u64, Ordering::Relaxed);
         let addr_aligned = addr & !0xFFF;
-        if addr_aligned + len_aligned > SHM_MAX {
+        if addr_aligned + len_aligned as u64 > SHM_MAX {
             SHM_NEXT.store(SHM_MIN, Ordering::Relaxed);
             SHM_MIN
         } else {
@@ -305,7 +304,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: *const u8, shmflg: i32) -> u64 {
     // Add VMA
     process.add_vma(Vma {
         start: mmap_addr,
-        end: mmap_addr + len_aligned,
+        end: mmap_addr + len_aligned as u64,
         flags: page_flags,
         _name: "shmat",
         file_handle: None,
@@ -384,7 +383,7 @@ pub fn sys_shmdt(shmaddr: *const u8) -> u64 {
             // ponytail: free segment pages eagerly
             let key = seg.key;
             let pages = core::mem::take(&mut seg.pages);
-            drop(seg);
+            let _ = seg;
             SHM_KEY_MAP.lock().remove(&key);
             free_segment_pages(&pages);
             segments.remove(&shm_id);
@@ -501,7 +500,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: *mut u8) -> u64 {
             if seg.nattch == 0 {
                 let key = seg.key;
                 let pages = core::mem::take(&mut seg.pages);
-                drop(seg);
+                let _ = seg;
                 SHM_KEY_MAP.lock().remove(&key);
                 free_segment_pages(&pages);
                 segments.remove(&(shmid as u32));
@@ -543,13 +542,13 @@ pub fn sys_memfd_create(name_ptr: *const u8, flags: u32) -> u64 {
         None => return errno::Errno::ESRCH as u64,
     };
 
-    let fd_obj = FileDescriptor::File { node, offset: 0 };
+    let fd_obj = FileDescriptor::File { node, offset: spin::Mutex::new(0) };
     let mut fd_table = process.fd_table.lock();
     let fd = {
         let mut slot = None;
         for (i, s) in fd_table.iter_mut().enumerate() {
             if s.is_none() {
-                *s = Some(fd_obj);
+                *s = Some(fd_obj.clone());
                 slot = Some(i);
                 break;
             }

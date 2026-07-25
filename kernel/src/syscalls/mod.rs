@@ -704,7 +704,7 @@ pub(crate) fn do_syscall(
         numbers::SYS_EXIT_GROUP => sys_exit_group(arg1),
         numbers::SYS_TRUNCATE => sys_truncate(arg1 as *const u8, arg2 as i64),
         numbers::SYS_FTRUNCATE => sys_ftruncate(arg1, arg2 as i64),
-        numbers::SYS_SENDFILE => sys_sendfile(arg1, arg2, arg3 as *mut u64, arg4, arg5),
+        numbers::SYS_SENDFILE => sys_sendfile(arg1, arg2, arg3 as *mut u64, arg4),
         #[cfg(feature = "ash")]
         numbers::SYS_ASH_REGISTER => crate::ash::syscalls::sys_ash_register(arg1 as *const u8, arg2 as usize, arg3),
         #[cfg(feature = "ash")]
@@ -1000,7 +1000,7 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
         let process_lock = CURRENT_PROCESS.lock();
         match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
     };
-    let mut fd_table = process.fd_table.lock();
+    let fd_table = process.fd_table.lock();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     {
         let fdfl = process.fd_flags.lock();
@@ -1008,21 +1008,22 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             return errno::Errno::EBADF as u64;
         }
     }
-    match fd_table[fd as usize] {
-        Some(FileDescriptor::File { ref node, ref mut offset }) => {
+    match &fd_table[fd as usize] {
+        Some(FileDescriptor::File { ref node, ref offset }) => {
             if let Ok(stat) = node.stat() {
-                if (stat.st_mode & 0o170000) != 0o100000 { *offset = 0; }
+                if (stat.st_mode & 0o170000) != 0o100000 { *offset.lock() = 0; }
             }
             match node.read(count) {
                 Ok(data) => {
-                    if *offset >= data.len() { 0 }
+                    if *offset.lock() >= data.len() { 0 }
                     else {
-                        let available = data.len() - *offset;
+                        let off = *offset.lock();
+                        let available = data.len() - off;
                         let len = core::cmp::min(available, count);
-                        if unsafe { user_access::copy_to_user(buf, &data[*offset..*offset + len]) }.is_err() {
+                        if unsafe { user_access::copy_to_user(buf, &data[off..off + len]) }.is_err() {
                             return errno::Errno::EFAULT as u64;
                         }
-                        *offset += len; len as u64
+                        *offset.lock() += len; len as u64
                     }
                 }
                 Err(_) => {
@@ -1120,7 +1121,7 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             #[cfg(not(feature = "net"))] return errno::Errno::ENOSYS as u64;
             #[cfg(feature = "net")] {
                 let mut sockets = crate::net::SOCKETS.lock();
-                if let Some(n) = with_tcp_mut(&mut sockets, handle, |socket| {
+                if let Some(n) = with_tcp_mut(&mut sockets, *handle, |socket| {
                     if socket.may_recv() {
                         let mut n = 0usize;
                         let result = socket.recv(|slice| {
@@ -1132,7 +1133,7 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                     }
                     0u64
                 }) { return n; }
-                if let Some(n) = with_udp_mut(&mut sockets, handle, |socket| {
+                if let Some(n) = with_udp_mut(&mut sockets, *handle, |socket| {
                     let mut d = vec![0u8; count];
                     if let Ok((n, _meta)) = socket.recv_slice(&mut d) {
                         if unsafe { user_access::copy_to_user(buf, &d[..n]) }.is_ok() { return n as u64; }
@@ -1144,9 +1145,31 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::UnixSocket(handle, _)) => {
-            match crate::net::unix::recvfrom_unix(handle, buf, count as u64, core::ptr::null_mut(), core::ptr::null_mut()) {
+            match crate::net::unix::recvfrom_unix(*handle, buf, count as u64, core::ptr::null_mut(), core::ptr::null_mut()) {
                 Ok(n) => n,
                 Err(e) => e as u64,
+            }
+        },
+        Some(FileDescriptor::EventFd(ref data_arc)) => {
+            let mut data = data_arc.lock();
+            if data.counter > 0 {
+                let val = if data.semaphore { data.counter = data.counter.wrapping_sub(1); 1u64 }
+                           else { let v = data.counter; data.counter = 0; v };
+                if count >= 8 {
+                    let bytes = val.to_ne_bytes();
+                    if unsafe { user_access::copy_to_user(buf as *mut u8, &bytes) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    8
+                } else {
+                    errno::Errno::EINVAL as u64
+                }
+            } else if data.nonblock {
+                errno::Errno::EAGAIN as u64
+            } else {
+                drop(data);
+                crate::task::scheduler::try_schedule();
+                errno::Errno::EAGAIN as u64
             }
         },
         None => errno::Errno::EBADF as u64,
@@ -1158,7 +1181,7 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
         let process_lock = CURRENT_PROCESS.lock();
         match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
     };
-    let mut fd_table = process.fd_table.lock();
+    let fd_table = process.fd_table.lock();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     {
         let fdfl = process.fd_flags.lock();
@@ -1166,12 +1189,12 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             return errno::Errno::EBADF as u64;
         }
     }
-    match fd_table[fd as usize] {
-        Some(FileDescriptor::File { ref node, ref mut offset }) => {
+    match &fd_table[fd as usize] {
+        Some(FileDescriptor::File { ref node, ref offset }) => {
             let mut data = vec![0u8; count];
             if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
             match node.write(&data) {
-                Ok(_) => { *offset += count; count as u64 },
+                Ok(_) => { *offset.lock() += count; count as u64 },
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
@@ -1191,7 +1214,7 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
                 let mut wdata = vec![0u8; count];
                 if unsafe { user_access::copy_from_user(&mut wdata, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
                 let mut sockets = crate::net::SOCKETS.lock();
-                if let Some(v) = with_tcp_mut(&mut sockets, handle, |socket| {
+                if let Some(v) = with_tcp_mut(&mut sockets, *handle, |socket| {
                     if socket.may_send() {
                         let result = socket.send(|slice| {
                             let n = core::cmp::min(slice.len(), wdata.len());
@@ -1205,7 +1228,7 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::SignalFd(_)) => errno::Errno::EINVAL as u64,
-        Some(FileDescriptor::EventFd(data_arc)) => {
+        Some(FileDescriptor::EventFd(ref data_arc)) => {
             if count < 8 { return errno::Errno::EINVAL as u64; }
             let mut val_buf = [0u8; 8];
             if unsafe { user_access::copy_from_user(&mut val_buf, buf) }.is_err() {
@@ -1223,32 +1246,10 @@ fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             data.counter = data.counter.wrapping_add(val);
             8
         },
-        Some(FileDescriptor::EventFd(data_arc)) => {
-            let mut data = data_arc.lock();
-            if data.counter > 0 {
-                let val = if data.semaphore { data.counter = data.counter.wrapping_sub(1); 1u64 }
-                           else { let v = data.counter; data.counter = 0; v };
-                if count >= 8 {
-                    let bytes = val.to_ne_bytes();
-                    if unsafe { user_access::copy_to_user(buf, &bytes) }.is_err() {
-                        return errno::Errno::EFAULT as u64;
-                    }
-                    8
-                } else {
-                    errno::Errno::EINVAL as u64
-                }
-            } else if data.nonblock {
-                errno::Errno::EAGAIN as u64
-            } else {
-                drop(data);
-                crate::task::scheduler::try_schedule();
-                errno::Errno::EAGAIN as u64
-            }
-        },
         Some(FileDescriptor::UnixSocket(handle, _)) => {
             let mut wdata = vec![0u8; count];
             if unsafe { user_access::copy_from_user(&mut wdata, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
-            match crate::net::unix::sendto_unix(handle, buf, count as u64, core::ptr::null(), 0) {
+            match crate::net::unix::sendto_unix(*handle, buf, count as u64, core::ptr::null(), 0) {
                 Ok(n) => n,
                 Err(e) => e as u64,
             }
@@ -1511,7 +1512,7 @@ fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
 
             let new_offset = match whence {
                 SEEK_SET => offset,
-                SEEK_CUR => (*fd_offset as i64) + offset,
+                SEEK_CUR => (*fd_offset.lock() as i64) + offset,
                 SEEK_END => file_size + offset,
                 _ => return errno::Errno::EINVAL as u64,
             };
@@ -1520,8 +1521,8 @@ fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
                 return errno::Errno::EINVAL as u64;
             }
 
-            *fd_offset = new_offset as usize;
-            *fd_offset as u64
+            *fd_offset.lock() = new_offset as usize;
+            *fd_offset.lock() as u64
         },
         Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => {
             errno::Errno::ESPIPE as u64
@@ -1717,7 +1718,7 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> u64 {
     };
 
     let start = addr & !0xFFF;
-    let end = ((addr + len + 4095) & !4095);
+    let end = (addr + len + 4095) & !4095;
     if end <= start || end > 0xFFFF_FFFF_FFFF_F000 {
         return errno::Errno::EINVAL as u64;
     }
@@ -2668,9 +2669,9 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
         *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
         *child_process.dir_fds.lock() = parent.dir_fds.lock().clone();
         child_process.clone_credentials_from(parent);
-        child_process.pgid = parent.pgid;
-        child_process.session = parent.session;
-        child_process.is_group_leader = false;
+        *child_process.pgid.lock() = *parent.pgid.lock();
+        *child_process.session.lock() = *parent.session.lock();
+        *child_process.is_group_leader.lock() = false;
         let child_arc = Arc::new(child_process);
         
         // Track child in parent and global table
@@ -2720,9 +2721,9 @@ fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: u64,
         *child_process.dir_fds.lock() = parent.dir_fds.lock().clone();
         *child_process.signal_handlers.lock() = *parent.signal_handlers.lock();
         child_process.clone_credentials_from(parent);
-        child_process.pgid = parent.pgid;
-        child_process.session = parent.session;
-        child_process.is_group_leader = false;
+        *child_process.pgid.lock() = *parent.pgid.lock();
+        *child_process.session.lock() = *parent.session.lock();
+        *child_process.is_group_leader.lock() = false;
 
         if flags & CLONE_CHILD_CLEARTID != 0 && !child_tidptr.is_null() {
             *child_process.clear_child_tid.lock() = child_tidptr as u64;
@@ -2853,7 +2854,7 @@ fn sys_kill(pid: i64, sig: u32) -> u64 {
             for (_fd, entry) in fd_table.iter().enumerate() {
                 if let Some(crate::task::process::FileDescriptor::SignalFd(handle)) = entry {
                     let fds = SIGNAL_FDS.lock();
-                    if let Some(data_arc) = fds.get(handle) {
+            if let Some(data_arc) = fds.get(&handle) {
                         let mut data = data_arc.lock();
                         if (data.mask & sig_bit) != 0 {
                             data.pending.push_back(SignalFdInfo {
@@ -2931,7 +2932,7 @@ fn sys_setpgid(pid: u64, pgid: u64) -> u64 {
     };
 
     // Session leader cannot change its pgid
-    if target.session == target_pid {
+    if *target.session.lock() == target_pid {
         return errno::Errno::EPERM as u64;
     }
 
@@ -2950,7 +2951,7 @@ fn sys_setpgid(pid: u64, pgid: u64) -> u64 {
         let table = crate::task::process::PROCESS_TABLE.lock();
         match table.get(&new_pgid) {
             Some(group_leader) => {
-                if group_leader.session != current.session {
+                if *group_leader.session.lock() != *current.session.lock() {
                     return errno::Errno::EPERM as u64;
                 }
             }
@@ -2958,7 +2959,7 @@ fn sys_setpgid(pid: u64, pgid: u64) -> u64 {
         }
     }
 
-    target.pgid = new_pgid;
+    *target.pgid.lock() = new_pgid;
     0
 }
 
@@ -2974,7 +2975,7 @@ fn sys_getpgid(pid: u64) -> u64 {
     };
     let table = crate::task::process::PROCESS_TABLE.lock();
     match table.get(&target_pid) {
-        Some(p) => p.pgid,
+        Some(p) => *p.pgid.lock(),
         None => errno::Errno::ESRCH as u64,
     }
 }
@@ -2987,12 +2988,12 @@ fn sys_setsid() -> u64 {
     let lock = CURRENT_PROCESS.lock();
     match lock.as_ref() {
         Some(p) => {
-            if p.session == p.id || p.is_group_leader {
+            if *p.session.lock() == p.id || *p.is_group_leader.lock() {
                 return errno::Errno::EPERM as u64;
             }
-            p.session = p.id;
-            p.pgid = p.id;
-            p.is_group_leader = true;
+            *p.session.lock() = p.id;
+            *p.pgid.lock() = p.id;
+            *p.is_group_leader.lock() = true;
             p.id
         }
         None => errno::Errno::ESRCH as u64,
@@ -3003,17 +3004,17 @@ fn sys_getsid(pid: u64) -> u64 {
     let (target_pid, current_session) = {
         let lock = CURRENT_PROCESS.lock();
         match lock.as_ref() {
-            Some(p) => (if pid == 0 { p.id } else { pid }, p.session),
+            Some(p) => (if pid == 0 { p.id } else { pid }, *p.session.lock()),
             None => return errno::Errno::ESRCH as u64,
         }
     };
     let table = crate::task::process::PROCESS_TABLE.lock();
     match table.get(&target_pid) {
         Some(p) => {
-            if p.session != current_session {
+            if *p.session.lock() != current_session {
                 return errno::Errno::EPERM as u64;
             }
-            p.session
+            *p.session.lock()
         }
         None => errno::Errno::ESRCH as u64,
     }
@@ -3027,8 +3028,8 @@ fn sys_getrlimit(resource: u64, rlim_ptr: *mut u8) -> u64 {
     match lock.as_ref() {
         Some(p) => {
             let rlim = RLimit {
-                rlim_cur: p.rlim_cur[resource as usize],
-                rlim_max: p.rlim_max[resource as usize],
+                rlim_cur: p.rlim_cur.lock()[resource as usize],
+                rlim_max: p.rlim_max.lock()[resource as usize],
             };
             unsafe {
                 if user_access::copy_to_user(rlim_ptr,
@@ -3064,12 +3065,12 @@ fn sys_setrlimit(resource: u64, rlim_ptr: *const u8) -> u64 {
         Some(p) => {
             let euid = p.creds.lock().euid;
             if euid != 0 {
-                if new_rlim.rlim_max > p.rlim_max[resource as usize] {
+                if new_rlim.rlim_max > p.rlim_max.lock()[resource as usize] {
                     return errno::Errno::EPERM as u64;
                 }
             }
-            p.rlim_cur[resource as usize] = new_rlim.rlim_cur;
-            p.rlim_max[resource as usize] = new_rlim.rlim_max;
+            p.rlim_cur.lock()[resource as usize] = new_rlim.rlim_cur;
+            p.rlim_max.lock()[resource as usize] = new_rlim.rlim_max;
             0
         }
         None => errno::Errno::ESRCH as u64,
@@ -3104,8 +3105,8 @@ fn sys_prlimit64(pid: u64, resource: u64, new_rlim_ptr: *const u8, old_rlim_ptr:
 
     if !old_rlim_ptr.is_null() {
         let old_rlim = RLimit {
-            rlim_cur: target.rlim_cur[resource as usize],
-            rlim_max: target.rlim_max[resource as usize],
+            rlim_cur: target.rlim_cur.lock()[resource as usize],
+            rlim_max: target.rlim_max.lock()[resource as usize],
         };
         unsafe {
             if user_access::copy_to_user(old_rlim_ptr,
@@ -3131,12 +3132,12 @@ fn sys_prlimit64(pid: u64, resource: u64, new_rlim_ptr: *const u8, old_rlim_ptr:
         }
         let euid = target.creds.lock().euid;
         if euid != 0 {
-            if new_rlim.rlim_max > target.rlim_max[resource as usize] {
+            if new_rlim.rlim_max > target.rlim_max.lock()[resource as usize] {
                 return errno::Errno::EPERM as u64;
             }
         }
-        target.rlim_cur[resource as usize] = new_rlim.rlim_cur;
-        target.rlim_max[resource as usize] = new_rlim.rlim_max;
+        target.rlim_cur.lock()[resource as usize] = new_rlim.rlim_cur;
+        target.rlim_max.lock()[resource as usize] = new_rlim.rlim_max;
     }
     0
 }
@@ -3431,7 +3432,10 @@ fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
             let fd_table = process.fd_table.lock();
             if (sockfd as usize) < fd_table.len() {
                 if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
-                    return crate::net::unix::bind_unix(handle, addr_ptr, addrlen).unwrap_or_else(|e| e as u64);
+                    return match crate::net::unix::bind_unix(handle, addr_ptr, addrlen) {
+                        Ok(()) => 0,
+                        Err(e) => e as u64,
+                    };
                 }
             }
         }
@@ -3465,8 +3469,9 @@ fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
                     crate::task::process::SocketType::Tcp => {
                         TCP_BIND_ENDPOINTS.lock().insert((pid, handle), endpoint);
                     }
-                    crate::task::process::SocketType::Raw => {
-                        // ponytail: raw sockets don't need explicit bind
+                    crate::task::process::SocketType::Raw |
+                    crate::task::process::SocketType::Unix => {
+                        // ponytail: raw/unix sockets handled above before net feature gate
                     }
                 }
                 return 0;
@@ -3484,7 +3489,10 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
             let fd_table = process.fd_table.lock();
             if (sockfd as usize) < fd_table.len() {
                 if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
-                    return crate::net::unix::connect_unix(handle, addr_ptr, addrlen).unwrap_or_else(|e| e as u64);
+                    return match crate::net::unix::connect_unix(handle, addr_ptr, addrlen) {
+                        Ok(()) => 0,
+                        Err(e) => e as u64,
+                    };
                 }
             }
         }
@@ -3546,8 +3554,9 @@ fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
                     crate::task::process::SocketType::Udp => {
                         return 0;
                     }
-                    crate::task::process::SocketType::Raw => {
-                        // ponytail: raw sockets are connectionless
+                    crate::task::process::SocketType::Raw |
+                    crate::task::process::SocketType::Unix => {
+                        // ponytail: raw/unix sockets are connectionless
                         return 0;
                     }
                 }
@@ -3565,7 +3574,10 @@ fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
             let fd_table = process.fd_table.lock();
             if (sockfd as usize) < fd_table.len() {
                 if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
-                    return crate::net::unix::listen_unix(handle).unwrap_or_else(|e| e as u64);
+                    return match crate::net::unix::listen_unix(handle) {
+                        Ok(()) => 0,
+                        Err(e) => e as u64,
+                    };
                 }
             }
         }
@@ -3985,7 +3997,6 @@ fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                         let namelen_ptr = (msg as usize + 8) as *mut u32;
                         let _ = unsafe { user_access::copy_to_user(namelen_ptr as *mut u8, &empty_len.to_ne_bytes()) };
                     }
-                    hdr.msg_flags = 0;
                     let flags_ptr = (msg as usize + 24) as *mut i32;
                     let _ = unsafe { user_access::copy_to_user(flags_ptr as *mut u8, &0i32.to_ne_bytes()) };
                     return n as u64;
@@ -4111,7 +4122,7 @@ fn sys_getsockname(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
                 crate::task::process::SocketType::Tcp => {
                     if let Some(ep) = with_tcp_mut(&mut sockets, handle, |socket| {
                         socket.local_endpoint()
-                    }).flatten() {
+                    }).flatten().map(|le| smoltcp::wire::IpEndpoint { addr: le.addr, port: le.port }) {
                         write_sockaddr(addr, addrlen, &ep);
                         return 0;
                     }
@@ -4119,8 +4130,10 @@ fn sys_getsockname(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
                 }
                 crate::task::process::SocketType::Udp => {
                     if let Some(ep) = with_udp_mut(&mut sockets, handle, |socket| {
-                        if socket.is_open() { socket.endpoint() } else { None }
-                    }).flatten() {
+                        if socket.is_open() { 
+                            Some(socket.endpoint())
+                        } else { None }
+                    }).flatten().map(|le| smoltcp::wire::IpEndpoint { addr: le.addr.unwrap_or(smoltcp::wire::IpAddress::v4(0,0,0,0)), port: le.port }) {
                         write_sockaddr(addr, addrlen, &ep);
                         return 0;
                     }
@@ -5649,7 +5662,7 @@ fn sys_sigaltstack(ss_ptr: *const u8, old_ss_ptr: *mut u8) -> u64 {
 // ─── signalfd4 ─────────────────────────────────────────────────────
 
 use crate::task::process::{SignalFdData, SignalFdInfo, SIGNAL_FDS, SFD_NONBLOCK, SFD_CLOEXEC};
-use crate::task::process::{EventFdData, EFD_SEMAPHORE, EFD_NONBLOCK, EFD_CLOEXEC, EFD_MAX};
+use crate::task::process::{EventFdData, EFD_SEMAPHORE, EFD_NONBLOCK, EFD_MAX};
 
 fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
     let process = match get_current_process() {
@@ -5670,7 +5683,7 @@ fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
 
     if fd != u64::MAX && fd != 0 {
         // Update existing signalfd
-        let mut fd_table = process.fd_table.lock();
+        let fd_table = process.fd_table.lock();
         if (fd as usize) >= fd_table.len() {
             return errno::Errno::EBADF as u64;
         }
@@ -6583,17 +6596,65 @@ fn sys_renameat(olddirfd: i64, old_path_ptr: *const u8, newdirfd: i64, new_path_
     0
 }
 
-fn sys_linkat(_olddirfd: i64, old_path_ptr: *const u8, _newdirfd: i64, new_path_ptr: *const u8, _flags: i32) -> u64 {
-    let _old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
+fn sys_linkat(olddirfd: i64, old_path_ptr: *const u8, newdirfd: i64, new_path_ptr: *const u8, _flags: i32) -> u64 {
+    let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
-    let _new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
+    let new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
-    // ponytail: VFS doesn't support hard links yet
-    errno::Errno::EOPNOTSUPP as u64
+    
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+    
+    // Resolve the existing file path
+    let old_abs_path = match resolve_path_at(olddirfd, &old_path, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+    
+    // Resolve the new path (parent directory + new name)
+    let new_abs_path = match resolve_path_at(newdirfd, &new_path, &process) {
+        Ok(p) => p,
+        Err(e) => return e as u64,
+    };
+    
+    // Split new path into parent and name
+    let last_slash = new_abs_path.rfind('/').unwrap_or(0);
+    let (parent_path, name) = if last_slash == 0 {
+        ("/", &new_abs_path[1..])
+    } else {
+        (&new_abs_path[..last_slash], &new_abs_path[last_slash+1..])
+    };
+    
+    let vfs = VFS.lock();
+    
+    // Get the existing file node
+    let existing_node = match vfs.resolve_path(&old_abs_path) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    
+    // Get the target parent directory
+    let parent_node = match vfs.resolve_path(parent_path) {
+        Some(n) => n,
+        None => return errno::Errno::ENOENT as u64,
+    };
+    
+    // Check write permission on parent directory
+    if !check_node_permission(&parent_node, 3) {
+        return errno::Errno::EACCES as u64;
+    }
+    
+    // Call the link operation
+    match parent_node.link(existing_node, name) {
+        Ok(()) => 0,
+        Err(()) => errno::Errno::EIO as u64,
+    }
 }
 
 fn sys_fstatat(dirfd: i64, pathname_ptr: *const u8, stat_buf: *mut crate::vfs::Stat, flags: i32) -> u64 {
@@ -6806,7 +6867,7 @@ fn sys_link(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
-    let mut vfs = VFS.lock();
+    let vfs = VFS.lock();
     let old_node = match vfs.resolve_path(&old_path) {
         Some(n) => n,
         None => return errno::Errno::ENOENT as u64,
@@ -6814,7 +6875,7 @@ fn sys_link(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
     // Extract parent dir and new name from new_path
     let (parent_dir, new_name) = match new_path.rsplit_once('/') {
         Some((parent, name)) => (parent, name),
-        None => ("", &new_path),
+        None => ("", new_path.as_str()),
     };
     let parent_node = match vfs.resolve_path(if parent_dir.is_empty() { "." } else { parent_dir }) {
         Some(n) => n,
@@ -6837,7 +6898,7 @@ fn sys_getgroups(size: i32, list: *mut u32) -> u64 {
     }
     let size = size as usize;
     if size < groups.len() {
-        return -errno::Errno::EINVAL as i64 as u64;
+        return errno::Errno::EINVAL as u64;
     }
     let slice = unsafe { core::slice::from_raw_parts_mut(list, groups.len()) };
     for (i, g) in groups.iter().enumerate() {
@@ -6874,7 +6935,7 @@ fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32) -> 
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
-    let creds = process.credentials.lock();
+    let creds = process.creds.lock();
     let vals = [creds.uid, creds.euid, creds.suid];
     let ptrs = [ruid_ptr, euid_ptr, suid_ptr];
     for (val, ptr) in vals.iter().zip(ptrs.iter()) {
@@ -6892,7 +6953,7 @@ fn sys_setresuid(ruid: u32, euid: u32, suid: u32) -> u64 {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
-    let mut creds = process.credentials.lock();
+    let mut creds = process.creds.lock();
     // POSIX: unprivileged may only set each to current real/effective/saved
     if !has_capability(CAP_SETUID) {
         if (ruid != !0u32 && ruid != creds.uid && ruid != creds.euid && ruid != creds.suid) ||
@@ -6914,7 +6975,7 @@ fn sys_getresgid(rgid_ptr: *mut u32, egid_ptr: *mut u32, sgid_ptr: *mut u32) -> 
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
-    let creds = process.credentials.lock();
+    let creds = process.creds.lock();
     let vals = [creds.gid, creds.egid, creds.sgid];
     let ptrs = [rgid_ptr, egid_ptr, sgid_ptr];
     for (val, ptr) in vals.iter().zip(ptrs.iter()) {
@@ -6932,7 +6993,7 @@ fn sys_setresgid(rgid: u32, egid: u32, sgid: u32) -> u64 {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
-    let mut creds = process.credentials.lock();
+    let mut creds = process.creds.lock();
     if !has_capability(CAP_SETGID) {
         if (rgid != !0u32 && rgid != creds.gid && rgid != creds.egid && rgid != creds.sgid) ||
            (egid != !0u32 && egid != creds.gid && egid != creds.egid && egid != creds.sgid) ||
@@ -6947,7 +7008,7 @@ fn sys_setresgid(rgid: u32, egid: u32, sgid: u32) -> u64 {
     0
 }
 
-fn sys_utimensat(dirfd: i64, pathname_ptr: *const u8, times_ptr: *const u8, flags: i32) -> u64 {
+fn sys_utimensat(_dirfd: i64, pathname_ptr: *const u8, _times_ptr: *const u8, _flags: i32) -> u64 {
     let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
@@ -6971,7 +7032,7 @@ fn sys_fallocate(fd: u64, mode: i32, offset: i64, len: i64) -> u64 {
         return errno::Errno::EBADF as u64;
     }
     match fd_table[fd as usize] {
-        Some(FileDescriptor::File { ref node, .. }) | Some(FileDescriptor::Directory { ref node, .. }) => {
+        Some(FileDescriptor::File { ref node, .. }) => {
             match node.fallocate(mode, offset, len) {
                 Ok(()) => 0,
                 Err(_) => errno::Errno::ENOSPC as u64,
@@ -6998,22 +7059,23 @@ fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: *mut u64, count: u64) -> u6
     let buf_size = core::cmp::min(count, 4096) as usize;
     let mut buf = alloc::vec![0u8; buf_size];
     match fd_table[in_fd as usize] {
-        Some(FileDescriptor::File { ref node, ref pos, .. }) => {
-            let mut read_pos = if !offset_ptr.is_null() { start_offset } else { *pos.lock() };
+        Some(FileDescriptor::File { ref node, ref offset, .. }) => {
+            let mut read_pos = if !offset_ptr.is_null() { start_offset } else { *offset.lock() as u64 };
             let mut total: u64 = 0;
             while total < count {
-                let to_read = core::cmp::min(count - total, 4096);
-                let n = node.read_at(&mut buf, read_pos);
+                let n = match node.read(buf.len()) {
+                    Ok(bytes) => { let l = bytes.len(); buf[..l].copy_from_slice(&bytes); l }
+                    Err(_) => break,
+                };
                 if n == 0 { break; }
-                // Write to out_fd
                 match fd_table[out_fd as usize] {
-                    Some(FileDescriptor::File { ref node, .. }) | Some(FileDescriptor::Directory { ref node, .. }) => {
-                        let _ = node.write_at(&buf[..n], read_pos);
+                    Some(FileDescriptor::File { ref node, .. }) => {
+                        let _ = node.write(&buf[..n]);
                     }
                     _ => return errno::Errno::EBADF as u64,
                 }
                 if !offset_ptr.is_null() { read_pos += n as u64; }
-                else { *pos.lock() += n as u64; }
+                else { *offset.lock() += n as usize; }
                 total += n as u64;
             }
             if !offset_ptr.is_null() {

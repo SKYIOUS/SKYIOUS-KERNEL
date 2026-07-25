@@ -67,7 +67,7 @@ impl BlockCache {
     }
 
     pub fn read_sector_cached(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
-        let mut lines = self.lines.lock();
+        let lines = self.lines.lock();
         // Check cache under lock — no TOCTOU race with eviction
         if let Some(i) = lines.iter().position(|l| l.valid && l.sector == sector) {
             buf.copy_from_slice(&lines[i].data);

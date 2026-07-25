@@ -50,6 +50,8 @@ impl VfsNode for TarNode {
             st_nlink: 1, st_uid: 0, st_gid: 0, st_rdev: 0,
             st_size,
             st_atime: 0, st_mtime: 0, st_ctime: 0,
+        
+            ..Default::default()
         })
     }
     fn statfs(&self) -> Result<crate::vfs::StatFs, ()> {

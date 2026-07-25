@@ -15,6 +15,7 @@
 #![deny(warnings)]
 // ponytail: clippy-style lints allowed — zero bug-finding value for kernel code
 #![allow(
+    dead_code,
     clippy::upper_case_acronyms, clippy::result_unit_err,
     clippy::too_many_arguments, clippy::collapsible_if, clippy::collapsible_match,
     clippy::single_match, clippy::manual_range_contains, clippy::new_without_default,
@@ -264,6 +265,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         drivers::ps2::init();
         serial_write("[BOOT] PCI enumerate...\n");
         pci::enumerate_pci();
+        serial_write("[BOOT] USB init...\n");
+        drivers::usb::init();
     }
     #[cfg(target_arch = "aarch64")]
     {
@@ -330,6 +333,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     gui::init();
 
     task::scheduler::spawn(run_async_tasks);
+    task::scheduler::spawn(drivers::usb::usb_hid_poller);
     task::scheduler::spawn(init_os_task);
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -407,9 +411,9 @@ extern "C" fn init_os_task() -> ! {
                         use crate::task::process::FileDescriptor;
                         let mut fd_table = process_arc.fd_table.lock();
                         fd_table.resize(3, None);
-                        fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: 0 });
-                        fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: 0 });
-                        fd_table[2] = Some(FileDescriptor::File { node: tty, offset: 0 });
+                        fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
+                        fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
+                        fd_table[2] = Some(FileDescriptor::File { node: tty, offset: spin::Mutex::new(0) });
                         drop(fd_table);
                         crate::serial_write("[INIT] opened /dev/tty0 as stdin/stdout/stderr\n");
                     } else {
@@ -690,9 +694,9 @@ pub fn spawn_userspace_app(path: &'static str) {
                             use crate::task::process::FileDescriptor;
                             let mut fd_table = process_arc.fd_table.lock();
                             fd_table.resize(3, None);
-                            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: 0 });
-                            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: 0 });
-                            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: 0 });
+                            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
+                            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
+                            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: spin::Mutex::new(0) });
                             drop(fd_table);
                         }
                     }

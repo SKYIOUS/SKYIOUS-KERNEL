@@ -364,10 +364,53 @@ fn test_ext2_permissions() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn test_ext2_hardlink() -> Result<(), &'static str> {
+    let dev = ram_disk(16384);
+    format_ext2(&dev, 8192, 256)?;
+    let fs = crate::vfs::ext2::mount(dev).map_err(|_| "ext2 mount failed")?;
+    let root = fs.root().map_err(|_| "root failed")?;
+    
+    // Create a file to link to
+    let file = root.create("link_target.txt").map_err(|_| "create failed")?;
+    let content = b"Hard link test content";
+    file.write(content).map_err(|_| "write failed")?;
+    
+    // Get initial stat
+    let stat_before = file.stat().map_err(|_| "stat failed")?;
+    if stat_before.st_nlink != 1 {
+        return Err("initial link count should be 1");
+    }
+    
+    // Create hard link
+    root.link(file.clone(), "link_alias.txt").map_err(|_| "link failed")?;
+    
+    // Verify link count increased
+    let stat_after = file.stat().map_err(|_| "stat after link failed")?;
+    if stat_after.st_nlink != 2 {
+        return Err("link count should be 2 after link");
+    }
+    
+    // Verify both paths point to same inode
+    let alias = root.find_child("link_alias.txt").ok_or("alias not found")?;
+    let alias_stat = alias.stat().map_err(|_| "alias stat failed")?;
+    if alias_stat.st_ino != stat_after.st_ino {
+        return Err("alias should have same inode number");
+    }
+    
+    // Verify content is identical
+    let alias_data = alias.read(512).map_err(|_| "alias read failed")?;
+    if alias_data.as_slice() != content {
+        return Err("alias content mismatch");
+    }
+    
+    Ok(())
+}
+
 pub fn register() {
     crate::selftest::register("ext2_format_mount", test_ext2_format_mount);
     crate::selftest::register("ext2_read_file", test_ext2_read_file);
     crate::selftest::register("ext2_write_file", test_ext2_write_file);
     crate::selftest::register("ext2_mkdir_and_stat", test_ext2_mkdir_and_stat);
     crate::selftest::register("ext2_permissions", test_ext2_permissions);
+    crate::selftest::register("ext2_hardlink", test_ext2_hardlink);
 }
