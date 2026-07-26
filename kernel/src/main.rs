@@ -98,6 +98,7 @@ mod selftest;
 mod tests;
 #[cfg(feature = "hypervisor")]
 pub mod hypervisor;
+pub mod boot;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig, config::Mapping};
