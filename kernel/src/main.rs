@@ -352,132 +352,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 }
 
 extern "C" fn init_os_task() -> ! {
-    crate::serial_write("[INIT] searching for /bin/init...\n");
-    
-    // Give VFS/Disk/PCI a moment to settle and discover devices
-    for _ in 0..1_000_000 { core::hint::spin_loop(); }
-
-    crate::serial_write("[INIT] spin done, locking VFS...\n");
-    let init_data = {
-        let search_paths = [
-            "/bin/init",
-            "/init",
-            "/sbin/init",
-        ];
-        let mut data = None;
-        let vfs_mgr = crate::vfs::VFS.lock();
-        crate::serial_write("[INIT] VFS locked, resolving...\n");
-        for path in search_paths {
-            crate::serial_write("[INIT] checking: ");
-            crate::serial_write(path);
-            crate::serial_write("\n");
-            if let Some(node) = vfs_mgr.resolve_path(path) {
-                crate::serial_write("[INIT] FOUND!\n");
-                data = node.read(usize::MAX).ok();
-                break;
-            }
-        }
-        drop(vfs_mgr);
-        crate::serial_write("[INIT] VFS unlocked\n");
-        data
-    };
-
-    if let Some(elf_data) = init_data {
-        crate::serial_write("[INIT] Loading ELF...\n");
-        use alloc::sync::Arc;
-        let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
-        let address_space = crate::memory::paging::AddressSpace::new(&mut frame_allocator)
-            .expect("AS creation failed");
-        crate::serial_write("[INIT] AS created\n");
-
-                match crate::task::process::Process::load_elf(&elf_data, address_space) {
-                    Ok(process) => {
-                        crate::serial_write("[INIT] ELF loaded\n");
-                        let _entry = process.entry_point;
-                        let process_arc = Arc::new(process);
-                crate::serial_write("[INIT] register process...\n");
-                crate::task::process::Process::register(process_arc.clone());
-                crate::serial_write("[INIT] set current process...\n");
-                {
-                    let mut cur = crate::task::process::CURRENT_PROCESS.lock();
-                    *cur = Some(process_arc.clone());
-                }
-                // NOTE: thread.process is set AFTER tty setup, to prevent timer ISR
-                // from activating the user address space via prepare_switch before we
-                // finish kernel-side initialization.
-                // Open stdin/stdout/stderr as /dev/tty0
-                {
-                    let tty_node = crate::vfs::VFS.lock().resolve_path("/dev/tty0");
-                    if let Some(tty) = tty_node {
-                        use crate::task::process::FileDescriptor;
-                        let mut fd_table = process_arc.fd_table.lock();
-                        fd_table.resize(3, None);
-                        fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
-                        fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
-                        fd_table[2] = Some(FileDescriptor::File { node: tty, offset: spin::Mutex::new(0) });
-                        drop(fd_table);
-                        crate::serial_write("[INIT] opened /dev/tty0 as stdin/stdout/stderr\n");
-                    } else {
-                        crate::serial_write("[INIT] WARNING: /dev/tty0 not found!\n");
-                    }
-                }
-                crate::serial_write("[INIT] set thread process...\n");
-                {
-                    crate::task::scheduler::with_current_thread(|thread| {
-                        thread.process = Some(process_arc.clone());
-                    });
-                }
-                crate::serial_write("[INIT] activate address space...\n");
-                let (old_frame, _old_flags) = x86_64::registers::control::Cr3::read();
-                let old_pa = old_frame.start_address().as_u64();
-                let new_pa = process_arc.address_space._pml4_phys().start_address().as_u64();
-                crate::serial_write("[INIT] old_pml4=");
-                let mut eb = [0u8; 16]; let mut ei = 16u8; let mut en = old_pa;
-                loop { ei -= 1; let d = (en & 0xf) as u8; eb[ei as usize] = if d < 10 { b'0'+d } else { b'a'+d-10 }; en >>= 4; if en == 0 { break; } }
-                crate::serial_write(core::str::from_utf8(&eb[ei as usize..]).unwrap_or("?"));
-                crate::serial_write(" new_pml4=");
-                let mut en = new_pa;
-                let mut ei = 16u8;
-                loop { ei -= 1; let d = (en & 0xf) as u8; eb[ei as usize] = if d < 10 { b'0'+d } else { b'a'+d-10 }; en >>= 4; if en == 0 { break; } }
-                crate::serial_write(core::str::from_utf8(&eb[ei as usize..]).unwrap_or("?"));
-                crate::serial_write("\n");
-                // verify kernel entries match
-                let phys_offset = crate::memory::physical_memory_offset();
-                let mut no_mismatch = true;
-                for i in 256..260 {
-                    let ce = unsafe { *((phys_offset + old_pa) as *const u64).add(i) };
-                    let ne = unsafe { *((phys_offset + new_pa) as *const u64).add(i) };
-                    if ce != ne { no_mismatch = false; }
-                }
-                if no_mismatch {
-                    crate::serial_write("[INIT] entries 256-259 matched\n");
-                } else {
-                    crate::serial_write("[INIT] MISM\n");
-                }
-                crate::serial_write("[INIT] doing activate...\n");
-                // ponytail: write SAME CR3 back to test if mov cr3 itself works
-                let (same_frame, same_flags) = x86_64::registers::control::Cr3::read();
-                unsafe { x86_64::registers::control::Cr3::write(same_frame, same_flags); }
-                crate::serial_write("[INIT] same-CR3 write OK\n");
-                // ponytail: now try the NEW page table
-                unsafe { process_arc.address_space.activate(); }
-                crate::serial_write("[INIT] post-activate OK (with new AS)\n");
-                crate::serial_write("[INIT] HALTING (debug)\n");
-                loop { crate::arch::CurrentArch::halt(); }
-            }
-            Err(e) => {
-                crate::serial_write("[INIT] ELF load FAILED: ");
-                crate::serial_write(e);
-                crate::serial_write("\n");
-            }
-        }
-    } else {
-        crate::serial_write("[INIT] /bin/init not found.\n");
-    }
-
-    loop {
-        core::hint::spin_loop();
-    }
+    crate::boot::state::run_boot()
 }
 
 #[allow(dead_code)]
@@ -731,7 +606,6 @@ lazy_static::lazy_static! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    // Serial-only panic output (avoid VGA text mode which may not be mapped on GOP-only UEFI)
     crate::serial_write("\n=== KERNEL PANIC ===\n");
     crate::serial_write("[PANIC] ");
     let msg = info.message();
@@ -746,6 +620,18 @@ fn panic(info: &PanicInfo) -> ! {
         crate::serial_write(&line_str);
         crate::serial_write("\n");
     }
+    // Dump boot trace if available
+    crate::serial_write("[PANIC] Boot trace:\n");
     crate::debug::print_stack_trace();
+
+    // Dump key registers
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: Reading CR2 in panic context to log page-fault address; no side effects.
+    unsafe {
+        let cr2: u64;
+        core::arch::asm!("mov {}, cr2", out(reg) cr2);
+        crate::serial_write(&alloc::format!("[PANIC] CR2 (page fault addr): 0x{:x}\n", cr2));
+    }
+
     loop { crate::arch::CurrentArch::halt(); }
 }
