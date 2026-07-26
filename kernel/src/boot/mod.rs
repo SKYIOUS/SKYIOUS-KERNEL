@@ -1,5 +1,8 @@
 //! Boot state machine types and transition validation.
 
+pub mod logger;
+pub mod state;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
