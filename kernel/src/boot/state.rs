@@ -5,7 +5,7 @@
 //! and logs every state change.
 
 use crate::boot::{
-    BootState, BootError, BootEvent, BootContext, BootSession, logger::BootLogger,
+    BootState, BootError, BootEvent, BootWarning, BootContext, BootSession, logger::BootLogger,
 };
 
 /// Run the boot state machine to completion.
@@ -163,6 +163,7 @@ fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<
             BootLogger::info(ctx, "stdin/stdout/stderr -> /dev/tty0");
         }
         None => {
+            ctx.trace.push(BootEvent::Warning(BootWarning::ConsoleUnavailable));
             BootLogger::warn(ctx, "/dev/tty0 not found — init runs with no stdin/stdout/stderr");
         }
     }
@@ -178,8 +179,13 @@ fn state_enter_userspace(ctx: &BootContext, session: &BootSession) -> Result<Boo
     let process = process_guard.as_ref().ok_or(BootError::UserspaceEntryFailed)?;
     *crate::task::process::CURRENT_PROCESS.lock() = Some(process.clone());
     BootLogger::info(ctx, "Activating address space");
+    // SAFETY: The address space was fully set up by Process::load_elf() in state CreateAddressSpace
+    // and contains the init binary with proper page tables. No other CPU is using it.
     unsafe { process.address_space.activate(); }
     BootLogger::info(ctx, &alloc::format!("Jumping to userspace entry=0x{:x} rsp=0x{:x}", session.entry_point, session.user_rsp));
+    // SAFETY: All prerequisite setup is complete — valid ELF loaded into the address space,
+    // user stack mapped with argv, PID 1 registered in the process table, and the address
+    // space activated. This function diverges (never returns).
     unsafe {
         crate::task::thread::jump_to_usermode(session.entry_point, session.user_rsp);
     }
