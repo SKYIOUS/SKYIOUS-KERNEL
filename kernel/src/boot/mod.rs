@@ -70,6 +70,7 @@ pub enum BootEvent {
 pub struct BootContext {
     pub trace: Vec<BootEvent>,
     pub init_paths_tried: Vec<String>,
+    pub elf_data: Option<Vec<u8>>,
     pub boot_start_tick: u64,
 }
 
@@ -78,14 +79,14 @@ impl BootContext {
         BootContext {
             trace: Vec::new(),
             init_paths_tried: Vec::new(),
+            elf_data: None,
             boot_start_tick,
         }
     }
 }
 
 /// Transient objects only needed while launching PID 1.
-pub struct BootSession<'a> {
-    pub elf_data: Option<&'a [u8]>,
+pub struct BootSession {
     pub entry_point: u64,
     pub user_rsp: u64,
 }

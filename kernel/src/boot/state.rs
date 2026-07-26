@@ -14,7 +14,6 @@ pub fn run_boot() -> ! {
     use crate::interrupts::get_ticks;
     let mut ctx = BootContext::new(get_ticks());
     let mut session = BootSession {
-        elf_data: None,
         entry_point: 0,
         user_rsp: 0,
     };
@@ -74,28 +73,114 @@ pub fn run_boot() -> ! {
     }
 }
 
-// ponytail: Stub implementations — replaced by Task 3
+use alloc::sync::Arc;
+use spin::Mutex;
+use crate::task::process::Process;
+
+static BOOT_PROCESS: Mutex<Option<Arc<Process>>> = Mutex::new(None);
+
 fn state_init_kernel(_ctx: &BootContext) -> Result<BootState, BootError> {
-    todo!()
+    Ok(BootState::LocateInit)
 }
-fn state_locate_init(_ctx: &mut BootContext) -> Result<BootState, BootError> {
-    todo!()
+
+fn state_locate_init(ctx: &mut BootContext) -> Result<BootState, BootError> {
+    let search_paths = ["/bin/init", "/init", "/sbin/init"];
+    let vfs_mgr = crate::vfs::VFS.lock();
+    for path in &search_paths {
+        ctx.init_paths_tried.push(alloc::string::String::from(*path));
+        BootLogger::info(ctx, &alloc::format!("Looking for {}", path));
+        if let Some(node) = vfs_mgr.resolve_path(path) {
+            if let Ok(data) = node.read(usize::MAX) {
+                ctx.elf_data = Some(data);
+                drop(vfs_mgr);
+                BootLogger::info(ctx, &alloc::format!("Found init at {}", path));
+                return Ok(BootState::ParseElf);
+            }
+        }
+    }
+    drop(vfs_mgr);
+    Err(BootError::InitNotFound)
 }
-fn state_parse_elf(_ctx: &mut BootContext, _session: &mut BootSession) -> Result<BootState, BootError> {
-    todo!()
+
+fn state_parse_elf(ctx: &mut BootContext, _session: &mut BootSession) -> Result<BootState, BootError> {
+    let elf_data = ctx.elf_data.as_ref().ok_or(BootError::InitNotFound)?;
+    if elf_data.len() < 64 || &elf_data[..4] != b"\x7fELF" {
+        return Err(BootError::InvalidElf);
+    }
+    BootLogger::info(ctx, "ELF header valid");
+    Ok(BootState::CreateAddressSpace)
 }
-fn state_create_address_space(_ctx: &mut BootContext, _session: &mut BootSession) -> Result<BootState, BootError> {
-    todo!()
+
+fn state_create_address_space(ctx: &mut BootContext, session: &mut BootSession) -> Result<BootState, BootError> {
+    use crate::memory::buddy::BuddyFrameAllocator;
+    let mut frame_allocator = BuddyFrameAllocator;
+    let elf_data = ctx.elf_data.as_ref().ok_or(BootError::InitNotFound)?;
+    let address_space = crate::memory::paging::AddressSpace::new(&mut frame_allocator)
+        .ok_or(BootError::AddressSpaceCreationFailed)?;
+    let process = Process::load_elf(elf_data, address_space)
+        .map_err(|_| BootError::InvalidElf)?;
+    session.entry_point = process.entry_point;
+    *BOOT_PROCESS.lock() = Some(Arc::new(process));
+    BootLogger::info(ctx, &alloc::format!("PID 1 ELF loaded, entry=0x{:x}", session.entry_point));
+    Ok(BootState::MapStack)
 }
-fn state_map_stack(_ctx: &mut BootContext, _session: &mut BootSession) -> Result<BootState, BootError> {
-    todo!()
+
+fn state_map_stack(ctx: &mut BootContext, session: &mut BootSession) -> Result<BootState, BootError> {
+    let process_guard = BOOT_PROCESS.lock();
+    let process = process_guard.as_ref().ok_or(BootError::StackAllocationFailed)?;
+    let argv = alloc::vec![alloc::string::String::from("/bin/init")];
+    let user_rsp = process.setup_user_stack(&argv)
+        .map_err(|_| BootError::StackAllocationFailed)?;
+    session.user_rsp = user_rsp;
+    BootLogger::info(ctx, &alloc::format!("User stack at 0x{:x}", user_rsp));
+    Ok(BootState::CreatePid1)
 }
-fn state_create_pid1(_ctx: &mut BootContext, _session: &mut BootSession) -> Result<BootState, BootError> {
-    todo!()
+
+fn state_create_pid1(ctx: &mut BootContext, _session: &BootSession) -> Result<BootState, BootError> {
+    let mut process_guard = BOOT_PROCESS.lock();
+    let process = process_guard.take().ok_or(BootError::StackAllocationFailed)?;
+    let pid = process.id;
+    Process::register(process.clone());
+    *process_guard = Some(process);
+    drop(process_guard);
+    BootLogger::info(ctx, &alloc::format!("PID 1 registered (pid={})", pid));
+    Ok(BootState::SetupConsole)
 }
-fn state_setup_console(_ctx: &mut BootContext, _session: &mut BootSession) -> Result<BootState, BootError> {
-    todo!()
+
+fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<BootState, BootError> {
+    let process_guard = BOOT_PROCESS.lock();
+    let process = process_guard.as_ref().ok_or(BootError::ConsoleUnavailable)?;
+    let tty_node = crate::vfs::VFS.lock().resolve_path("/dev/tty0");
+    match tty_node {
+        Some(tty) => {
+            use crate::task::process::FileDescriptor;
+            let mut fd_table = process.fd_table.lock();
+            fd_table.resize(3, None);
+            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
+            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
+            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: spin::Mutex::new(0) });
+            drop(fd_table);
+            BootLogger::info(ctx, "stdin/stdout/stderr -> /dev/tty0");
+        }
+        None => {
+            BootLogger::warn(ctx, "/dev/tty0 not found — init runs with no stdin/stdout/stderr");
+        }
+    }
+    crate::task::scheduler::with_current_thread(|thread| {
+        thread.process = Some(process.clone());
+    });
+    BootLogger::info(ctx, "Thread process assigned");
+    Ok(BootState::EnterUserspace)
 }
-fn state_enter_userspace(_ctx: &BootContext, _session: &BootSession) -> Result<BootState, BootError> {
-    todo!()
+
+fn state_enter_userspace(ctx: &BootContext, session: &BootSession) -> Result<BootState, BootError> {
+    let process_guard = BOOT_PROCESS.lock();
+    let process = process_guard.as_ref().ok_or(BootError::UserspaceEntryFailed)?;
+    *crate::task::process::CURRENT_PROCESS.lock() = Some(process.clone());
+    BootLogger::info(ctx, "Activating address space");
+    unsafe { process.address_space.activate(); }
+    BootLogger::info(ctx, &alloc::format!("Jumping to userspace entry=0x{:x} rsp=0x{:x}", session.entry_point, session.user_rsp));
+    unsafe {
+        crate::task::thread::jump_to_usermode(session.entry_point, session.user_rsp);
+    }
 }
