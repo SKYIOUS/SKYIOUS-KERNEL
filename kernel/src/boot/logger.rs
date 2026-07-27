@@ -5,12 +5,14 @@ use crate::boot::BootContext;
 pub struct BootLogger;
 
 impl BootLogger {
-    fn timestamp_ms(context: &BootContext) -> u64 {
-        // Use the 100Hz tick counter; divide by 10 for approximate ms
-        // ponytail: Ticks at 100Hz = 10ms granularity, good enough for boot diag
-        let ticks = crate::interrupts::get_ticks();
-        let elapsed = ticks.wrapping_sub(context.boot_start_tick);
-        elapsed * 10
+    fn timestamp_ms(context: &BootContext) -> alloc::string::String {
+        let tick = crate::interrupts::get_ticks();
+        if tick == 0 && context.boot_start_tick == 0 {
+            alloc::string::String::from("?")
+        } else {
+            let elapsed = tick.wrapping_sub(context.boot_start_tick);
+            alloc::format!("{}", elapsed * 10)
+        }
     }
 
     pub fn info(context: &BootContext, msg: &str) {
