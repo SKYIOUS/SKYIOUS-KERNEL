@@ -388,6 +388,19 @@ pub fn getpeercred_unix(handle: u64) -> Result<(u32, u32, u32), Errno> {
     Ok((pid, uid, gid))
 }
 
+/// Reports whether the peer socket has queued data or is closed. Used by
+/// sys_poll so POLLIN is only asserted when a non-blocking read will return.
+pub fn socket_has_data(handle: u64) -> bool {
+    let socks = UNIX_SOCKETS.lock();
+    match socks.get(&handle) {
+        Some(sock) => {
+            let inner = sock.inner.lock();
+            !inner.recv_queue.is_empty() || inner.closed
+        }
+        None => false,
+    }
+}
+
 pub fn cleanup_unix_socket(handle: u64) {
     let mut socks = UNIX_SOCKETS.lock();
     if let Some(sock) = socks.remove(&handle) {

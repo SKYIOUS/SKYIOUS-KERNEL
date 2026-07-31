@@ -5330,8 +5330,10 @@ fn sys_poll(fds: *const u8, nfds: usize, timeout_ms: i32) -> u64 {
                     if *events & POLLIN != 0 { *revents |= POLLIN; }
                     if *events & POLLOUT != 0 { *revents |= POLLOUT; }
                 }
-                Some(FileDescriptor::UnixSocket(_, _)) => {
-                    if *events & POLLIN != 0 { *revents |= POLLIN; }
+                Some(FileDescriptor::UnixSocket(handle, _)) => {
+                    if *events & POLLIN != 0 && crate::net::unix::socket_has_data(*handle) {
+                        *revents |= POLLIN;
+                    }
                     if *events & POLLOUT != 0 { *revents |= POLLOUT; }
                 }
                 Some(FileDescriptor::PtyMaster { pair, .. }) => {
