@@ -2,7 +2,7 @@ use xmas_elf::ElfFile;
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use spin::Mutex;
 use crate::memory::paging::AddressSpace;
 use x86_64::structures::paging::PageTableFlags;
@@ -90,7 +90,7 @@ pub struct Process {
     pub brk: Mutex<u64>,
     pub cwd: Mutex<String>,
     /// Map from directory fd to its normalized absolute path (for *at syscalls)
-    pub dir_fds: Mutex<BTreeMap<usize, String>>,
+    pub dir_fds: Mutex<HashMap<usize, String>>,
     pub signals: Mutex<crate::syscalls::signal::SignalState>,
     pub signal_handlers: Mutex<[u64; 32]>,
     pub signal_restorers: Mutex<[u64; 32]>,
@@ -114,7 +114,7 @@ pub struct Process {
     pub boot_ticks: u64,
     pub groups: spin::Mutex<alloc::vec::Vec<u32>>,
     /// virt_page_addr → (device_idx, slot_idx) for swapped-out pages
-    pub swap_map: spin::Mutex<alloc::collections::BTreeMap<u64, (usize, usize)>>,
+    pub swap_map: spin::Mutex<hashbrown::HashMap<u64, (usize, usize)>>,
 }
 
 // ─── sigaltstack / itimerval / tms types ─────────────────────────
@@ -259,8 +259,8 @@ use crate::objects::KernelObject;
 
 lazy_static::lazy_static! {
     /// Global signalfd registry: fd_handle → SignalFdData.
-    pub static ref SIGNAL_FDS: spin::Mutex<alloc::collections::BTreeMap<u64, alloc::sync::Arc<spin::Mutex<SignalFdData>>>> =
-        spin::Mutex::new(alloc::collections::BTreeMap::new());
+    pub static ref SIGNAL_FDS: spin::Mutex<hashbrown::HashMap<u64, alloc::sync::Arc<spin::Mutex<SignalFdData>>>> =
+        spin::Mutex::new(hashbrown::HashMap::new());
 }
 
 impl Process {
@@ -327,7 +327,7 @@ impl Process {
             children: Mutex::new(Vec::new()),
             brk: Mutex::new(0),
             cwd: Mutex::new(String::from("/")),
-            dir_fds: Mutex::new(BTreeMap::new()),
+            dir_fds: Mutex::new(hashbrown::HashMap::new()),
             signals: Mutex::new(crate::syscalls::signal::SignalState::new()),
             signal_handlers: Mutex::new([0; 32]),
             signal_restorers: Mutex::new([0; 32]),
@@ -356,7 +356,7 @@ impl Process {
             cstime: core::sync::atomic::AtomicU64::new(0),
             boot_ticks: crate::interrupts::get_ticks(),
             groups: spin::Mutex::new(alloc::vec::Vec::new()),
-            swap_map: spin::Mutex::new(alloc::collections::BTreeMap::new()),
+            swap_map: spin::Mutex::new(hashbrown::HashMap::new()),
         }
     }
 

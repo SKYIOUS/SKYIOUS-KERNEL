@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            kernel/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('kernel/Cargo.lock') }}
+
+      - name: Build (default features)
+        run: cargo build
+
+      - name: Build (default + smp + net)
+        run: cargo build --features "smp,net"
+
+      - name: Build (all features, no default)
+        run: cargo build --no-default-features --features "smp,net,ai_rule,ai_llm,ext4,ash,gpu,hypervisor,objects_v2"
+
+      - name: Check (self_test feature compiles in bin mode)
+        run: cargo check --features self_test
+
+  build-bootimage:
+    runs-on: ubuntu-latest
+    needs: build-kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Build kernel
+        run: cargo build
+        working-directory: kernel
+
+      - name: Build bootimage
+        run: cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
+        working-directory: builder
+
+  clippy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            kernel/target/
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('kernel/Cargo.lock') }}
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings

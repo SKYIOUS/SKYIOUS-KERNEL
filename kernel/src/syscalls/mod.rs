@@ -2852,9 +2852,9 @@ fn sys_kill(pid: i64, sig: u32) -> u64 {
         {
             let fd_table = proc.fd_table.lock();
             for (_fd, entry) in fd_table.iter().enumerate() {
-                if let Some(crate::task::process::FileDescriptor::SignalFd(handle)) = entry {
+                if let Some(crate::task::process::FileDescriptor::SignalFd(ref handle)) = entry {
                     let fds = SIGNAL_FDS.lock();
-            if let Some(data_arc) = fds.get(&handle) {
+            if let Some(data_arc) = fds.get(handle) {
                         let mut data = data_arc.lock();
                         if (data.mask & sig_bit) != 0 {
                             data.pending.push_back(SignalFdInfo {
@@ -3415,13 +3415,13 @@ fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
     }
 }
 
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use smoltcp::wire::IpEndpoint;
 use smoltcp::iface::SocketHandle;
 
 lazy_static::lazy_static! {
-    static ref TCP_BIND_ENDPOINTS: spin::Mutex<BTreeMap<(u64, SocketHandle), IpEndpoint>> =
-        spin::Mutex::new(BTreeMap::new());
+    static ref TCP_BIND_ENDPOINTS: spin::Mutex<HashMap<(u64, SocketHandle), IpEndpoint>> =
+        spin::Mutex::new(HashMap::new());
 }
 
 fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {

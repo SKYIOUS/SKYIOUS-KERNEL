@@ -1,7 +1,8 @@
 use spin::Mutex;
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI32, Ordering};
+use lazy_static::lazy_static;
 
 pub struct PosixTimer {
     pub tid: i32,
@@ -16,7 +17,9 @@ pub struct PosixTimer {
     pub active: bool,
 }
 
-pub static POSIX_TIMERS: Mutex<BTreeMap<i32, PosixTimer>> = Mutex::new(BTreeMap::new());
+lazy_static! {
+    pub static ref POSIX_TIMERS: Mutex<HashMap<i32, PosixTimer>> = Mutex::new(HashMap::new());
+}
 pub static NEXT_TIMER_ID: AtomicI32 = AtomicI32::new(1);
 
 pub const SIGEV_SIGNAL: i32 = 0;

@@ -621,7 +621,20 @@ fn panic(info: &PanicInfo) -> ! {
         crate::serial_write("\n");
     }
     // Dump boot trace if available
-    crate::serial_write("[PANIC] Boot trace:\n");
+    crate::boot::with_trace(|trace, paths| {
+        if let Some(events) = trace {
+            crate::serial_write("[PANIC] Boot trace:\n");
+            for event in events {
+                crate::serial_write(&alloc::format!("  {:?}\n", event));
+            }
+        }
+        if let Some(paths) = paths {
+            crate::serial_write("[PANIC] Init paths searched:\n");
+            for p in paths {
+                crate::serial_write(&alloc::format!("  {}\n", p));
+            }
+        }
+    });
     crate::debug::print_stack_trace();
 
     // Dump key registers

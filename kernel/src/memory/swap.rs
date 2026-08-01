@@ -1,8 +1,9 @@
 use spin::Mutex;
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use lazy_static::lazy_static;
 
 pub const SWAP_SIGNATURE: u32 = 0x534B5953;
 const SECTOR_SIZE: usize = 512;
@@ -31,9 +32,11 @@ pub struct SwapDevice {
 
 pub static SWAP_DEVICES: Mutex<Vec<SwapDevice>> = Mutex::new(Vec::new());
 
-/// virt_page_addr → (device_idx, slot_idx)
-/// virt_page_addr is the page-aligned virtual address
-pub static SWAP_PAGE_MAP: Mutex<BTreeMap<u64, (usize, usize)>> = Mutex::new(BTreeMap::new());
+// virt_page_addr → (device_idx, slot_idx)
+// virt_page_addr is the page-aligned virtual address
+lazy_static! {
+    pub static ref SWAP_PAGE_MAP: Mutex<HashMap<u64, (usize, usize)>> = Mutex::new(HashMap::new());
+}
 
 fn swap_read(device: &SwapDevice, _slot: usize, buffer: &mut [u8; 4096]) -> Result<(), ()> {
     // ponytail: sequential VFS read — real swap needs seekable block I/O

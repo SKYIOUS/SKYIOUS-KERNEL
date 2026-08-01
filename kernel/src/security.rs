@@ -13,6 +13,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use lazy_static::lazy_static;
 
 static LSM_ENABLED: AtomicBool = AtomicBool::new(false);
 static LSM_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -27,9 +28,11 @@ struct LsmRule {
 
 static POLICY: spin::Mutex<Vec<LsmRule>> = spin::Mutex::new(Vec::new());
 
-/// Syscall filter: bitmask of allowed syscalls per process
-/// 0 = denied, 1 = allowed. Default is all allowed (u64::MAX)
-static SYSCALL_FILTER: spin::Mutex<alloc::collections::BTreeMap<u64, u64>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+// Syscall filter: bitmask of allowed syscalls per process
+// 0 = denied, 1 = allowed. Default is all allowed (u64::MAX)
+lazy_static! {
+    static ref SYSCALL_FILTER: spin::Mutex<hashbrown::HashMap<u64, u64>> = spin::Mutex::new(hashbrown::HashMap::new());
+}
 
 pub fn set_syscall_filter(pid: u64, filter_mask: u64) {
     SYSCALL_FILTER.lock().insert(pid, filter_mask);

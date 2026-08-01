@@ -9,7 +9,7 @@ pub mod thread;
 pub mod process;
 pub mod lock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct TaskId(u64);
 
 impl TaskId {

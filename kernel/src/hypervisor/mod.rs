@@ -15,7 +15,7 @@ pub mod boot;
 
 use core::sync::atomic::AtomicBool;
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -54,7 +54,7 @@ pub static HYPERVISOR: Mutex<Option<Hypervisor>> = Mutex::new(None);
 pub struct Hypervisor {
     pub enabled: bool,
     pub vcpu_count: u32,
-    pub guests: BTreeMap<u64, GuestVm>,
+    pub guests: HashMap<u64, GuestVm>,
     pub hardware_cap: HwCapabilities,
 }
 
@@ -265,7 +265,7 @@ pub fn init() -> bool {
     *HYPERVISOR.lock() = Some(Hypervisor {
         enabled: true,
         vcpu_count: 0,
-        guests: BTreeMap::new(),
+        guests: HashMap::new(),
         hardware_cap: caps,
     });
 

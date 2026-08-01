@@ -175,6 +175,7 @@ fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<
 }
 
 fn state_enter_userspace(ctx: &BootContext, session: &BootSession) -> Result<BootState, BootError> {
+    crate::boot::store_trace(ctx.trace.clone(), ctx.init_paths_tried.clone());
     let process_guard = BOOT_PROCESS.lock();
     let process = process_guard.as_ref().ok_or(BootError::UserspaceEntryFailed)?;
     *crate::task::process::CURRENT_PROCESS.lock() = Some(process.clone());

@@ -1,0 +1,26 @@
+# Default owners for everything
+* @SKYIOUS
+
+# Kernel core
+/kernel/src/main.rs @SKYIOUS
+/kernel/src/boot/ @SKYIOUS
+/kernel/src/arch/ @SKYIOUS
+/kernel/src/task/ @SKYIOUS
+/kernel/src/memory/ @SKYIOUS
+
+# Syscalls
+/kernel/src/syscalls/ @SKYIOUS
+
+# VFS & Filesystems
+/kernel/src/vfs/ @SKYIOUS
+/kernel/src/drivers/ @SKYIOUS
+
+# Networking
+/kernel/src/net/ @SKYIOUS
+
+# Build system
+/kernel/Cargo.toml @SKYIOUS
+/builder/ @SKYIOUS
+
+# CI & Automation
+/.github/ @SKYIOUS

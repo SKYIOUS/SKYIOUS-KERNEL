@@ -1,10 +1,11 @@
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use crate::drivers::block::BlockDevice;
 use alloc::sync::Arc;
 use spin::Mutex;
 use crate::task::lock::SchedLock;
+use lazy_static::lazy_static;
 
 pub mod ramfs;
 pub mod fat;
@@ -152,7 +153,7 @@ pub struct MountPoint {
 
 pub struct VfsManager {
     mounts: Vec<MountPoint>,
-    mount_cache: BTreeMap<String, Arc<dyn VfsNode>>,
+    mount_cache: HashMap<String, Arc<dyn VfsNode>>,
 }
 
 impl VfsManager {
@@ -173,10 +174,10 @@ impl VfsManager {
         result
     }
 
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         VfsManager { 
             mounts: Vec::new(),
-            mount_cache: BTreeMap::new(),
+            mount_cache: HashMap::new(),
         }
     }
 
@@ -385,7 +386,9 @@ pub fn set_boot_device(index: usize) {
     crate::println!("VFS: boot device set to block device {}", index);
 }
 
-pub static VFS: SchedLock<VfsManager> = SchedLock::new(VfsManager::new());
+lazy_static! {
+    pub static ref VFS: SchedLock<VfsManager> = SchedLock::new_named(VfsManager::new());
+}
 
 // ─── Ext4 mount helpers (cfg-gated for build-flag fallback) ─────────────────
 

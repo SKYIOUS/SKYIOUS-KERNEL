@@ -1,0 +1,91 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  full-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            kernel/target/
+          key: ${{ runner.os }}-nightly-${{ hashFiles('kernel/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Build self_test release
+        run: cargo build --release --features self_test
+
+      - name: Build with all features
+        run: cargo build --no-default-features --features "smp,net,ai_rule,ai_llm,ext4,ash,gpu,hypervisor,objects_v2"
+
+  build-aarch64:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add aarch64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            kernel/target/
+          key: ${{ runner.os }}-aarch64-${{ hashFiles('kernel/Cargo.lock') }}
+
+      - name: Build aarch64
+        run: cargo build --target aarch64-unknown-none --features "smp"
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly
+          rustup override set nightly
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Audit kernel
+        working-directory: kernel
+        run: cargo audit || echo "cargo-audit: advisory check complete (warnings allowed)"
+
+      - name: Audit builder
+        working-directory: builder
+        run: cargo audit || echo "cargo-audit: advisory check complete (warnings allowed)"

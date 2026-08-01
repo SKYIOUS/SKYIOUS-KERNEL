@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use spin::Mutex;
 use lazy_static::lazy_static;
 use crate::task::process::CURRENT_PROCESS;
@@ -7,7 +7,7 @@ use crate::syscalls::errno;
 
 lazy_static! {
     /// Tracks PI futex ownership: uaddr -> (owner_pid, original_priority)
-    static ref PI_OWNERS: Mutex<BTreeMap<u64, (u64, u8)>> = Mutex::new(BTreeMap::new());
+    static ref PI_OWNERS: Mutex<HashMap<u64, (u64, u8)>> = Mutex::new(HashMap::new());
 }
 
 /// Wake all threads blocked on any futex belonging to a given process.

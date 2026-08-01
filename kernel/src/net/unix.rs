@@ -1,12 +1,13 @@
 extern crate alloc;
 use alloc::collections::VecDeque;
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::vec;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
+use lazy_static::lazy_static;
 
 use crate::syscalls::errno::Errno;
 use crate::syscalls::user_access;
@@ -36,8 +37,10 @@ pub struct UnixSocketInner {
     pub sock_type: UnixSocketType,
 }
 
-pub static UNIX_BOUND: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
-pub static UNIX_SOCKETS: Mutex<BTreeMap<u64, UnixSocket>> = Mutex::new(BTreeMap::new());
+lazy_static! {
+    pub static ref UNIX_BOUND: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
+    pub static ref UNIX_SOCKETS: Mutex<HashMap<u64, UnixSocket>> = Mutex::new(HashMap::new());
+}
 pub static NEXT_UNIX_HANDLE: AtomicU64 = AtomicU64::new(1000);
 
 // Lock ordering: UNIX_BOUND -> UNIX_SOCKETS -> individual socket inner.

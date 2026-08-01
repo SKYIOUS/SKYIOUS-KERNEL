@@ -5,6 +5,24 @@ pub mod state;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use spin::Mutex;
+
+static BOOT_TRACE: Mutex<Option<Vec<BootEvent>>> = Mutex::new(None);
+static BOOT_INIT_PATHS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+pub fn store_trace(trace: Vec<BootEvent>, init_paths: Vec<String>) {
+    *BOOT_TRACE.lock() = Some(trace);
+    *BOOT_INIT_PATHS.lock() = Some(init_paths);
+}
+
+pub fn with_trace<F, R>(f: F) -> R
+where
+    F: FnOnce(Option<&Vec<BootEvent>>, Option<&Vec<String>>) -> R,
+{
+    let trace = BOOT_TRACE.lock();
+    let paths = BOOT_INIT_PATHS.lock();
+    f(trace.as_ref(), paths.as_ref())
+}
 
 /// Phases of the boot state machine.
 #[derive(Debug, Clone, Copy, PartialEq)]

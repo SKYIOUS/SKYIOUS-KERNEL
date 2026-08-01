@@ -4,9 +4,10 @@ pub mod loader;
 pub mod isolation;
 
 use alloc::string::String;
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::vec::Vec;
 use spin::Mutex;
+use lazy_static::lazy_static;
 
 /// Unique identifier for a loaded kernel extension.
 pub type KextId = u64;
@@ -24,7 +25,9 @@ pub struct KextInfo {
 }
 
 /// Global registry of loaded KEXTs.
-static KEXT_REGISTRY: Mutex<BTreeMap<KextId, KextInfo>> = Mutex::new(BTreeMap::new());
+lazy_static! {
+    static ref KEXT_REGISTRY: Mutex<HashMap<KextId, KextInfo>> = Mutex::new(HashMap::new());
+}
 static NEXT_KEXT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 pub fn register_kext(name: &str, version: (u16, u16, u16), vendor: &str, description: &str) -> KextId {

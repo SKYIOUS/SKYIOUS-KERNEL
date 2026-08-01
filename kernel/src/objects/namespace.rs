@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
@@ -8,13 +8,13 @@ use lazy_static::lazy_static;
 
 /// A directory in the global object namespace.
 pub struct ObjectDirectory {
-    entries: BTreeMap<String, Arc<dyn KernelObject>>,
-    subdirs: BTreeMap<String, ObjectDirectory>,
+    entries: HashMap<String, Arc<dyn KernelObject>>,
+    subdirs: HashMap<String, ObjectDirectory>,
 }
 
 impl ObjectDirectory {
     pub fn new() -> Self {
-        ObjectDirectory { entries: BTreeMap::new(), subdirs: BTreeMap::new() }
+        ObjectDirectory { entries: HashMap::new(), subdirs: HashMap::new() }
     }
 
     pub fn insert(&mut self, name: &str, obj: Arc<dyn KernelObject>) {

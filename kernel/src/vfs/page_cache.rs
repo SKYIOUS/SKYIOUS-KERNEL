@@ -1,7 +1,8 @@
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use spin::Mutex;
+use lazy_static::lazy_static;
 
 pub const PAGE_SIZE: usize = 4096;
 // ponytail: FIFO eviction, LRU if perf matters
@@ -15,13 +16,13 @@ pub struct Page {
 
 pub struct PageCache {
     /// Maps (inode_id, page_index) to Page
-    pages: Mutex<BTreeMap<(u64, u64), Arc<Mutex<Page>>>>,
+    pages: Mutex<HashMap<(u64, u64), Arc<Mutex<Page>>>>,
 }
 
 impl PageCache {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         PageCache {
-            pages: Mutex::new(BTreeMap::new()),
+            pages: Mutex::new(HashMap::new()),
         }
     }
 
@@ -58,4 +59,6 @@ impl PageCache {
     }
 }
 
-pub static GLOBAL_PAGE_CACHE: PageCache = PageCache::new();
+lazy_static! {
+    pub static ref GLOBAL_PAGE_CACHE: PageCache = PageCache::new();
+}

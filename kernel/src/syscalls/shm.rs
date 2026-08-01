@@ -1,5 +1,5 @@
 use spin::Mutex;
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::syscalls::errno;
@@ -60,8 +60,8 @@ pub struct IpcPerm {
 }
 
 lazy_static::lazy_static! {
-    pub static ref SHM_SEGMENTS: Mutex<BTreeMap<u32, ShmSegment>> = Mutex::new(BTreeMap::new());
-    pub static ref SHM_KEY_MAP: Mutex<BTreeMap<i32, u32>> = Mutex::new(BTreeMap::new());
+    pub static ref SHM_SEGMENTS: Mutex<HashMap<u32, ShmSegment>> = Mutex::new(HashMap::new());
+    pub static ref SHM_KEY_MAP: Mutex<HashMap<i32, u32>> = Mutex::new(HashMap::new());
 }
 
 pub static NEXT_SHM_ID: AtomicU32 = AtomicU32::new(1);

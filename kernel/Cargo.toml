@@ -20,6 +20,10 @@ fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "c4b88477b22ca7e51
 embedded-io = "0.6.1"
 mbr-nostd = "0.1.0"
 
+# Enhanced data structures
+hashbrown = { version = "0.14", default-features = false, features = ["alloc", "ahash"] }
+heapless = { version = "0.8", default-features = false }
+
 # x86_64-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = "0.14.2"
