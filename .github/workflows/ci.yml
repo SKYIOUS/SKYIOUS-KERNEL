@@ -67,6 +67,47 @@ jobs:
         run: cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
         working-directory: builder
 
+  selftest:
+    name: Selftest (QEMU)
+    runs-on: ubuntu-latest
+    needs: build-bootimage
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf
+
+      - name: Build kernel (self_test)
+        working-directory: kernel
+        run: cargo build --features net,smp,ai_rule,self_test
+
+      - name: Build bootimage
+        working-directory: builder
+        run: cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
+
+      - name: Boot + verify selftest TAP
+        run: |
+          IMG=$(find . -name "bootimage-vahi_kernel.bin" | head -1)
+          [ -n "$IMG" ] || { echo "FAIL: no bootimage produced"; exit 1; }
+          timeout 300 qemu-system-x86_64 \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+            -drive format=raw,file="$IMG" \
+            -m 512M -smp 1 -nographic -no-reboot \
+            -serial file:serial.log 2>/dev/null || true
+          grep -q "TAP version 13" serial.log || { echo "FAIL: no TAP output"; tail -20 serial.log; exit 1; }
+          grep -q "# .* passed, 0 failed" serial.log || { echo "FAIL: suite incomplete/failed"; grep -E "not ok|# [0-9]" serial.log; tail -20 serial.log; exit 1; }
+          grep -q "not ok" serial.log && { echo "FAIL: TAP failures"; grep "not ok" serial.log; exit 1; }
+          echo "SELFTEST PASS"
+
   clippy:
     runs-on: ubuntu-latest
     defaults:
