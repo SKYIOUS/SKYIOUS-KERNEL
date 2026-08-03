@@ -1,4 +1,4 @@
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 const FIXED: &[u8] = &[32, 33, 44, 43, 250, 251];
 const MSI_START: u8 = 0x50;

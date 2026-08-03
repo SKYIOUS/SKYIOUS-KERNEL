@@ -5,7 +5,7 @@ use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 use alloc::vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 use crate::drivers::net::{NIC, NicDevice};
 use smoltcp::iface::SocketHandle;

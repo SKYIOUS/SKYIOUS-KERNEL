@@ -1,4 +1,4 @@
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use hashbrown::HashMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -542,7 +542,7 @@ pub fn sys_memfd_create(name_ptr: *const u8, flags: u32) -> u64 {
         None => return errno::Errno::ESRCH as u64,
     };
 
-    let fd_obj = FileDescriptor::File { node, offset: spin::Mutex::new(0) };
+    let fd_obj = FileDescriptor::File { node, offset: crate::sync::IrqSafeMutex::new(0) };
     let mut fd_table = process.fd_table.lock();
     let fd = {
         let mut slot = None;

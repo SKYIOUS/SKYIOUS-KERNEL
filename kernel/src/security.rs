@@ -26,12 +26,12 @@ struct LsmRule {
     allow: bool,
 }
 
-static POLICY: spin::Mutex<Vec<LsmRule>> = spin::Mutex::new(Vec::new());
+static POLICY: crate::sync::IrqSafeMutex<Vec<LsmRule>> = crate::sync::IrqSafeMutex::new(Vec::new());
 
 // Syscall filter: bitmask of allowed syscalls per process
 // 0 = denied, 1 = allowed. Default is all allowed (u64::MAX)
 lazy_static! {
-    static ref SYSCALL_FILTER: spin::Mutex<hashbrown::HashMap<u64, u64>> = spin::Mutex::new(hashbrown::HashMap::new());
+    static ref SYSCALL_FILTER: crate::sync::IrqSafeMutex<hashbrown::HashMap<u64, u64>> = crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new());
 }
 
 pub fn set_syscall_filter(pid: u64, filter_mask: u64) {

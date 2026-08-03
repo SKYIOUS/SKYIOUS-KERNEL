@@ -1,6 +1,6 @@
 use alloc::string::String;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 #[cfg(target_arch = "x86_64")]
 use crate::hypervisor::vmx::VmcsRegion;
 #[cfg(target_arch = "x86_64")]

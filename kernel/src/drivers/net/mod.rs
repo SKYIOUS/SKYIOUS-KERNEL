@@ -2,7 +2,7 @@ pub mod e1000;
 pub mod virtio;
 
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use e1000::E1000Device;
 use virtio::VirtIONetDevice;
 

@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::vfs::{FileSystem, VfsNode, Stat, S_IFDIR, S_IFREG};
 use crate::drivers::block::BlockDevice;
 use fatfs::{Read, Write, Seek, SeekFrom};

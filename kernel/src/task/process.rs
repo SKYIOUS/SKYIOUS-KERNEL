@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use hashbrown::HashMap;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::memory::paging::AddressSpace;
 use x86_64::structures::paging::PageTableFlags;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -43,19 +43,19 @@ pub enum SocketType { Tcp, Udp, Raw, Unix }
 
 #[allow(dead_code)]
 pub enum FileDescriptor {
-    File { node: Arc<dyn VfsNode>, offset: spin::Mutex<usize> },
+    File { node: Arc<dyn VfsNode>, offset: crate::sync::IrqSafeMutex<usize> },
     Socket(SocketHandle, SocketType),
     UnixSocket(u64, SocketType),
-    PtyMaster { _idx: usize, pair: alloc::sync::Arc<spin::Mutex<crate::pty::PtyPair>> },
-    PtySlave { _idx: usize, pair: alloc::sync::Arc<spin::Mutex<crate::pty::PtyPair>> },
+    PtyMaster { _idx: usize, pair: alloc::sync::Arc<crate::sync::IrqSafeMutex<crate::pty::PtyPair>> },
+    PtySlave { _idx: usize, pair: alloc::sync::Arc<crate::sync::IrqSafeMutex<crate::pty::PtyPair>> },
     SignalFd(u64),
-    EventFd(alloc::sync::Arc<spin::Mutex<EventFdData>>),
+    EventFd(alloc::sync::Arc<crate::sync::IrqSafeMutex<EventFdData>>),
 }
 
 impl Clone for FileDescriptor {
     fn clone(&self) -> Self {
         match self {
-            FileDescriptor::File { node, offset } => FileDescriptor::File { node: node.clone(), offset: spin::Mutex::new(*offset.lock()) },
+            FileDescriptor::File { node, offset } => FileDescriptor::File { node: node.clone(), offset: crate::sync::IrqSafeMutex::new(*offset.lock()) },
             FileDescriptor::Socket(h, t) => FileDescriptor::Socket(*h, *t),
             FileDescriptor::UnixSocket(h, t) => FileDescriptor::UnixSocket(*h, *t),
             FileDescriptor::PtyMaster { _idx, pair } => FileDescriptor::PtyMaster { _idx: *_idx, pair: pair.clone() },
@@ -95,26 +95,26 @@ pub struct Process {
     pub signal_handlers: Mutex<[u64; 32]>,
     pub signal_restorers: Mutex<[u64; 32]>,
     /// All POSIX credentials in one struct — single-lock atomic read.
-    pub creds: spin::Mutex<Credentials>,
+    pub creds: crate::sync::IrqSafeMutex<Credentials>,
     pub io_rings: Mutex<Vec<(u64, usize)>>,
     pub clear_child_tid: Mutex<u64>,
     pub emulation: Mutex<EmulationMode>,
     pub umask: Mutex<u32>,
-    pub pgid: spin::Mutex<u64>,
-    pub session: spin::Mutex<u64>,
-    pub is_group_leader: spin::Mutex<bool>,
-    pub rlim_cur: spin::Mutex<[i64; 16]>,
-    pub rlim_max: spin::Mutex<[i64; 16]>,
-    pub altstack: spin::Mutex<stack_t>,
-    pub itimer_real: spin::Mutex<itimerval>,
+    pub pgid: crate::sync::IrqSafeMutex<u64>,
+    pub session: crate::sync::IrqSafeMutex<u64>,
+    pub is_group_leader: crate::sync::IrqSafeMutex<bool>,
+    pub rlim_cur: crate::sync::IrqSafeMutex<[i64; 16]>,
+    pub rlim_max: crate::sync::IrqSafeMutex<[i64; 16]>,
+    pub altstack: crate::sync::IrqSafeMutex<stack_t>,
+    pub itimer_real: crate::sync::IrqSafeMutex<itimerval>,
     pub utime: core::sync::atomic::AtomicU64,
     pub stime: core::sync::atomic::AtomicU64,
     pub cutime: core::sync::atomic::AtomicU64,
     pub cstime: core::sync::atomic::AtomicU64,
     pub boot_ticks: u64,
-    pub groups: spin::Mutex<alloc::vec::Vec<u32>>,
+    pub groups: crate::sync::IrqSafeMutex<alloc::vec::Vec<u32>>,
     /// virt_page_addr → (device_idx, slot_idx) for swapped-out pages
-    pub swap_map: spin::Mutex<hashbrown::HashMap<u64, (usize, usize)>>,
+    pub swap_map: crate::sync::IrqSafeMutex<hashbrown::HashMap<u64, (usize, usize)>>,
 }
 
 // ─── sigaltstack / itimerval / tms types ─────────────────────────
@@ -259,8 +259,8 @@ use crate::objects::KernelObject;
 
 lazy_static::lazy_static! {
     /// Global signalfd registry: fd_handle → SignalFdData.
-    pub static ref SIGNAL_FDS: spin::Mutex<hashbrown::HashMap<u64, alloc::sync::Arc<spin::Mutex<SignalFdData>>>> =
-        spin::Mutex::new(hashbrown::HashMap::new());
+    pub static ref SIGNAL_FDS: crate::sync::IrqSafeMutex<hashbrown::HashMap<u64, alloc::sync::Arc<crate::sync::IrqSafeMutex<SignalFdData>>>> =
+        crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new());
 }
 
 impl Process {
@@ -331,22 +331,22 @@ impl Process {
             signals: Mutex::new(crate::syscalls::signal::SignalState::new()),
             signal_handlers: Mutex::new([0; 32]),
             signal_restorers: Mutex::new([0; 32]),
-            creds: spin::Mutex::new(Credentials::default()),
+            creds: crate::sync::IrqSafeMutex::new(Credentials::default()),
             io_rings: Mutex::new(Vec::new()),
             clear_child_tid: Mutex::new(0),
             emulation: Mutex::new(EmulationMode::Native),
             umask: Mutex::new(0o022),
-            pgid: spin::Mutex::new(id),
-            session: spin::Mutex::new(id),
-            is_group_leader: spin::Mutex::new(true),
-            rlim_cur: spin::Mutex::new([i64::MAX; 16]),
-            rlim_max: spin::Mutex::new([i64::MAX; 16]),
-            altstack: spin::Mutex::new(stack_t {
+            pgid: crate::sync::IrqSafeMutex::new(id),
+            session: crate::sync::IrqSafeMutex::new(id),
+            is_group_leader: crate::sync::IrqSafeMutex::new(true),
+            rlim_cur: crate::sync::IrqSafeMutex::new([i64::MAX; 16]),
+            rlim_max: crate::sync::IrqSafeMutex::new([i64::MAX; 16]),
+            altstack: crate::sync::IrqSafeMutex::new(stack_t {
                 ss_sp: core::ptr::null_mut(),
                 ss_flags: SS_DISABLE,
                 ss_size: 0,
             }),
-            itimer_real: spin::Mutex::new(itimerval {
+            itimer_real: crate::sync::IrqSafeMutex::new(itimerval {
                 it_interval: timeval { tv_sec: 0, tv_usec: 0 },
                 it_value: timeval { tv_sec: 0, tv_usec: 0 },
             }),
@@ -355,8 +355,8 @@ impl Process {
             cutime: core::sync::atomic::AtomicU64::new(0),
             cstime: core::sync::atomic::AtomicU64::new(0),
             boot_ticks: crate::interrupts::get_ticks(),
-            groups: spin::Mutex::new(alloc::vec::Vec::new()),
-            swap_map: spin::Mutex::new(hashbrown::HashMap::new()),
+            groups: crate::sync::IrqSafeMutex::new(alloc::vec::Vec::new()),
+            swap_map: crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new()),
         }
     }
 

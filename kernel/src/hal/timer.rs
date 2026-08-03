@@ -1,5 +1,5 @@
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use alloc::sync::Arc;
 
 pub trait Timer: Send + Sync {

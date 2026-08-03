@@ -83,7 +83,7 @@ pub fn test_cow() {
     use crate::memory::paging::AddressSpace;
     use x86_64::structures::paging::{PageTableFlags, Page, Size4KiB, Mapper, FrameAllocator};
     use alloc::sync::Arc;
-    use spin::Mutex;
+    use crate::sync::IrqSafeMutex as Mutex;
     use crate::memory::buddy::BuddyFrameAllocator;
 
     println!("[TEST] Copy-on-Write...");

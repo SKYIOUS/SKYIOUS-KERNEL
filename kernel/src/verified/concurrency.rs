@@ -6,7 +6,7 @@
 //!
 //! The Vahi kernel uses two kinds of locks:
 //!
-//! - **`spin::Mutex`** — spinlock, used in interrupt handlers and hot
+//! - **`crate::sync::IrqSafeMutex`** — spinlock, used in interrupt handlers and hot
 //!   paths where blocking is unsafe (e.g. `PerCpuScheduler`).
 //! - **`SchedLock`** (`task::lock`) — sleep-wake lock that yields the
 //!   scheduler on contention, used in VFS, compositor, and long-lived
@@ -15,7 +15,7 @@
 //! ## Proof obligations
 //!
 //! 1. **Mutual exclusion** — At most one thread holds a lock at any time.
-//!    Enforced by hardware (atomic swap) for `spin::Mutex` and by the
+//!    Enforced by hardware (atomic swap) for `crate::sync::IrqSafeMutex` and by the
 //!    scheduler's pipe-block mechanism for `SchedLock`.
 //!
 //! 2. **No deadlock** — Lock acquisitions follow a global partial order.
@@ -25,7 +25,7 @@
 //! 3. **Progress** — Every thread waiting for a lock eventually acquires
 //!    it (no livelock, no unbounded priority inversion).
 //!
-//! 4. **Interrupt safety** — `spin::Mutex` is never held across a
+//! 4. **Interrupt safety** — `crate::sync::IrqSafeMutex` is never held across a
 //!    scheduling point in interrupt context (checked by the caller
 //!    discipline: `try_lock` in timer/IRQ handlers).
 
@@ -268,7 +268,7 @@ impl LockOrderVerifier {
 
     /// Progress: every thread waiting for a lock eventually acquires it.
     ///
-    /// This is trivially true for `spin::Mutex` (the thread spins until
+    /// This is trivially true for `crate::sync::IrqSafeMutex` (the thread spins until
     /// it wins the compare-and-swap) and relies on FIFO wakeup for
     /// `SchedLock` (wake_pipe wakes in insertion order).
     pub fn progress(waiting: &[ThreadId], block_reason: &[BlockReason]) -> bool {

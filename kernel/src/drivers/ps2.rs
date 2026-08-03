@@ -1,5 +1,5 @@
 use x86_64::instructions::port::Port;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 static PS2_LOCK: Mutex<()> = Mutex::new(());
 

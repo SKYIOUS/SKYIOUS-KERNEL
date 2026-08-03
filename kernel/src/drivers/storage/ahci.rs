@@ -124,7 +124,7 @@ pub fn check_port_type(port: &HbaPort) -> PortType {
 
 use crate::drivers::block::{BlockDevice, BlockDeviceError, register_block_device};
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub struct AhciPort {
     pub port: *mut HbaPort,

@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 use super::nub::Nub;
 use super::family::DriverFamily;

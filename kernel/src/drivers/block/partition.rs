@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::drivers::block::{BlockDevice, BlockDeviceError};
 
 #[derive(Debug, Clone, Copy)]

@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use super::{BlockDevice, BlockDeviceError};
 
 const CACHE_SIZE: usize = 256;

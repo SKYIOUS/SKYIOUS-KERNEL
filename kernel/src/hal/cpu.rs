@@ -17,7 +17,7 @@ pub trait CpuContext: Send + Sync {
     fn cpu_count(&self) -> usize;
 }
 
-static CPU_CONTEXT: spin::Mutex<Option<&'static dyn CpuContext>> = spin::Mutex::new(None);
+static CPU_CONTEXT: crate::sync::IrqSafeMutex<Option<&'static dyn CpuContext>> = crate::sync::IrqSafeMutex::new(None);
 pub(crate) static CPU_COUNT: AtomicU64 = AtomicU64::new(1);
 
 pub fn register_cpu_context(ctx: &'static dyn CpuContext) {

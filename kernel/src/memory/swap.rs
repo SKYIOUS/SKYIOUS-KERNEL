@@ -1,4 +1,4 @@
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use hashbrown::HashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

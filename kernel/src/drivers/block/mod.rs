@@ -9,7 +9,7 @@
 pub mod partition;
 pub mod cache;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 

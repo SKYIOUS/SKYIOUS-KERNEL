@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::vfs::{VfsNode, Stat};
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};

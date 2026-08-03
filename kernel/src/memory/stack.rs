@@ -4,7 +4,7 @@ use x86_64::structures::paging::{
 use x86_64::VirtAddr;
 use crate::memory::buddy::BuddyFrameAllocator;
 use alloc::collections::VecDeque;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub struct Stack {
     pub top: u64,

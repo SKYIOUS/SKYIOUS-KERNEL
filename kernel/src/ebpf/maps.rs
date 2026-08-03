@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 
 pub const BPF_MAP_TYPE_HASH: u32 = 1;

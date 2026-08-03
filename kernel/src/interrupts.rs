@@ -15,8 +15,8 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 #[cfg(not(target_arch = "aarch64"))]
 // SAFETY: ChainedPics::new is safe when offsets are valid PIC interrupt offsets
-pub static PICS: spin::Mutex<ChainedPics> =
-    spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+pub static PICS: crate::sync::IrqSafeMutex<ChainedPics> =
+    crate::sync::IrqSafeMutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
@@ -57,7 +57,7 @@ unsafe impl Send for IdtPtr {}
 unsafe impl Sync for IdtPtr {}
 
 #[cfg(not(target_arch = "aarch64"))]
-static IDT: spin::Mutex<Option<IdtPtr>> = spin::Mutex::new(None);
+static IDT: crate::sync::IrqSafeMutex<Option<IdtPtr>> = crate::sync::IrqSafeMutex::new(None);
 
 #[cfg(not(target_arch = "aarch64"))]
 pub fn init_idt() {
@@ -177,6 +177,26 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
+/// Stack-buffer fmt writer: lets IRQ handlers format diagnostics without
+/// touching the heap allocator (allocating there can deadlock on the
+/// global ALLOCATOR spinlock — see scheduler::tick docs).
+#[cfg(not(target_arch = "aarch64"))]
+struct IrqFmtBuf<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+impl<'a> core::fmt::Write for IrqFmtBuf<'a> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let room = self.buf.len().saturating_sub(self.len);
+        let n = room.min(s.len());
+        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        Ok(())
+    }
+}
+
 extern "x86-interrupt" fn timer_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
@@ -190,13 +210,24 @@ extern "x86-interrupt" fn timer_interrupt_handler(
         crate::serial_write("[TICK] first timer tick!\n");
     }
 
-    // Periodic diagnostic: print mouse state every 500 ticks (~5s)
+    // Periodic diagnostic: print mouse state every 500 ticks (~5s).
+    // Formatted into a stack buffer — no allocation in IRQ context.
     if ticks % 500 == 0 {
         let irq = crate::drivers::mouse::MOUSE_IRQ_COUNT.load(Ordering::Relaxed);
         let bytes = crate::drivers::mouse::MOUSE_IRQ_BYTES.load(Ordering::Relaxed);
         let cx = crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed);
         let cy = crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed);
-        crate::serial_write(&alloc::format!("[TICK={}] mouse irq={} bytes={} pos=({},{})\n", ticks, irq, bytes, cx, cy));
+        let mut scratch = [0u8; 128];
+        let len;
+        {
+            let mut w = IrqFmtBuf { buf: &mut scratch, len: 0 };
+            let _ = core::fmt::write(&mut w, format_args!(
+                "[TICK={}] mouse irq={} bytes={} pos=({},{})\n",
+                ticks, irq, bytes, cx, cy
+            ));
+            len = w.len;
+        }
+        crate::serial_write(core::str::from_utf8(&scratch[..len]).unwrap_or(""));
     }
 
     crate::apic::eoi();
@@ -334,10 +365,10 @@ extern "x86-interrupt" fn mouse_interrupt_handler(
         }
     }
 
-    // EOI to slave PIC (IRQ12 is on slave) + master PIC
-    // ExtINT mode: LAPIC is pass-through, PIC owns the interrupt lifecycle
-    unsafe { Port::<u8>::new(0xA0).write(0x20); }
-    unsafe { Port::<u8>::new(0x20).write(0x20); }
+    // IRQ12 arrives via IOAPIC->LAPIC (vec 44); the PIC is masked, so only the
+    // LAPIC EOI clears ISR44. Without it the LAPIC suppresses all class-2
+    // vectors (32-47) on this CPU, including the timer (vec 32).
+    crate::apic::eoi();
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(
@@ -368,8 +399,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
         }
     }
 
-    // EOI to PIC (required for PIC→LINT0 ExtINT path)
-    unsafe { Port::<u8>::new(0x20).write(0x20); }
+    // IRQ1 arrives via IOAPIC->LAPIC (vec 33); PIC is masked, so only the
+    // LAPIC EOI clears ISR33 (same class-2 reasoning as the mouse handler).
+    crate::apic::eoi();
 }
 
 extern "x86-interrupt" fn ipi_func_handler(

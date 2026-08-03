@@ -19,7 +19,7 @@ use hashbrown::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 /// Check if virtualization is supported on this CPU.
 pub fn is_virtualization_available() -> bool {

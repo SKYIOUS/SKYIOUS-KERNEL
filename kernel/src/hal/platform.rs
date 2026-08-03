@@ -1,4 +1,4 @@
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformArch {

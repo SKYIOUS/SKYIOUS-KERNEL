@@ -173,14 +173,17 @@ extern "C" {
 }
 
 pub fn init() {
+    crate::serial_write("[SMP] init enter\n");
     let ap_ids: &alloc::vec::Vec<u8> = match crate::acpi::AP_LAPIC_IDS.get() {
         Some(ids) => ids,
-        None => { return; },
+        None => { crate::serial_write("[SMP] no ap_ids, return\n"); return; },
     };
 
     if ap_ids.is_empty() {
+        crate::serial_write("[SMP] ap_ids empty, return\n");
         return;
     }
+    crate::serial_write(&alloc::format!("[SMP] {} APs: {:?}\n", ap_ids.len(), ap_ids));
 
     let offset = crate::memory::physical_memory_offset();
 
@@ -209,6 +212,7 @@ pub fn init() {
     }
 
     // 1. Copy Trampoline to 0x8000
+    crate::serial_write("[SMP] copying trampoline\n");
     let trampoline_src = unsafe {
         core::slice::from_raw_parts(
             smp_trampoline_start as *const u8,
@@ -237,6 +241,7 @@ pub fn init() {
     }
 
     for &ap_id in ap_ids {
+        crate::serial_write(&alloc::format!("[SMP] booting AP {}\n", ap_id));
         let stack = crate::memory::stack::alloc_stack(8)
             .expect("Failed to allocate AP stack");
         
@@ -247,22 +252,29 @@ pub fn init() {
 
         let mut booted = false;
         for attempt in 0..3 {
+            crate::serial_write(&alloc::format!("[SMP] AP {} attempt {}\n", ap_id, attempt));
             if attempt == 0 {
                 // INIT IPI
+                crate::serial_write("[SMP] sending INIT\n");
                 crate::apic::send_ipi(ap_id, 0, 0x05);
+                crate::serial_write("[SMP] INIT sent, waiting delivery\n");
                 crate::apic::wait_for_ipi();
+                crate::serial_write("[SMP] INIT delivered, spin 10ms\n");
                 // Wait 10ms (spinloop approximation)
                 for _ in 0..10_000_000 { core::hint::spin_loop(); }
+                crate::serial_write("[SMP] 10ms wait done\n");
             }
 
             // STARTUP IPI (send twice as per Intel spec)
             let vector = (TRAMPOLINE_PHYS >> 12) as u8;
+            crate::serial_write("[SMP] sending SIPI\n");
             for _ in 0..2 {
                 crate::apic::send_ipi(ap_id, vector, 0x06);
                 crate::apic::wait_for_ipi();
                 // Short delay between SIPIs (~200us)
                 for _ in 0..200_000 { core::hint::spin_loop(); }
             }
+            crate::serial_write("[SMP] SIPI sent, waiting ap_count\n");
 
             // Wait with timeout
             let mut timeout = 0u64;
@@ -270,6 +282,7 @@ pub fn init() {
                 timeout += 1;
                 core::hint::spin_loop();
             }
+            crate::serial_write("[SMP] ap_count wait done\n");
 
             if unsafe { (*core::ptr::addr_of!(BOOT_DATA)).ap_count.load(Ordering::SeqCst) } > 0 {
                 booted = true;
@@ -294,9 +307,11 @@ pub fn init() {
 
 #[no_mangle]
 pub extern "C" fn ap_kernel_entry() -> ! {
+    crate::serial_write("[AP] ap_kernel_entry\n");
     unsafe {
         (*core::ptr::addr_of!(BOOT_DATA)).ap_count.fetch_add(1, Ordering::SeqCst);
     }
+    crate::serial_write("[AP] count incremented\n");
 
     // Enable CPU features (SSE, SMEP, etc.) matching the BSP setup.
     // This prevents #UD when executing SSE instructions and enables security features.
@@ -316,6 +331,10 @@ pub extern "C" fn ap_kernel_entry() -> ! {
         use x86_64::registers::model_specific::Efer;
         Efer::update(|efer| efer.insert(x86_64::registers::model_specific::EferFlags::SYSTEM_CALL_EXTENSIONS));
     }
+
+    // STAR/LSTAR/SFMask are per-CPU MSRs that reset to 0; set them on this AP
+    // so user `syscall` doesn't jump to LSTAR=0 with CS=0/SS=8.
+    crate::syscalls::init_syscall_msrs();
 
     // Each AP needs its own GDT and IDT
     crate::gdt::init_ap();

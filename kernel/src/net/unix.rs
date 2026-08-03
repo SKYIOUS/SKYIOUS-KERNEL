@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 

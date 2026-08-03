@@ -176,7 +176,7 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
                  nic_inner.init();
 
                  let nic_device = crate::drivers::net::e1000::E1000Device { inner: nic_inner };
-                 let nic_arc = alloc::sync::Arc::new(spin::Mutex::new(nic_device));
+                 let nic_arc = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(nic_device));
 
                  *crate::drivers::net::NIC.lock() = Some(crate::drivers::net::NicDevice::E1000(nic_arc));
              }
@@ -214,9 +214,9 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
 
                 let nic_inner = crate::drivers::net::virtio::VirtIONet::new(io_base);
                 let nic_device = crate::drivers::net::virtio::VirtIONetDevice {
-                    inner: alloc::sync::Arc::new(spin::Mutex::new(nic_inner))
+                    inner: alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(nic_inner))
                 };
-                let nic_arc = alloc::sync::Arc::new(spin::Mutex::new(nic_device));
+                let nic_arc = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(nic_device));
 
                 *crate::drivers::net::NIC.lock() = Some(crate::drivers::net::NicDevice::VirtIO(nic_arc));
             }

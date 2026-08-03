@@ -5,7 +5,7 @@ pub mod state;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 static BOOT_TRACE: Mutex<Option<Vec<BootEvent>>> = Mutex::new(None);
 static BOOT_INIT_PATHS: Mutex<Option<Vec<String>>> = Mutex::new(None);

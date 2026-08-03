@@ -57,7 +57,7 @@ fn test_boost_priority_stub() -> Result<(), &'static str> {
 
 /// Inject threads into futex queue then wake via public API.
 fn test_futex_wake_prepopulated() -> Result<(), &'static str> {
-    use crate::task::thread::{Thread, ThreadId, ThreadStatus};
+    use crate::task::thread::{Thread, ThreadId, ThreadStatus, STRIDE_MAX};
     use crate::memory::stack::Stack;
     let t = Thread {
         _id: ThreadId::new(),
@@ -70,6 +70,9 @@ fn test_futex_wake_prepopulated() -> Result<(), &'static str> {
         futex_wake_addr: Some(0xAAAA),
         pipe_block_key: None,
         fs_base: 0,
+        pass: 0,
+        stride: STRIDE_MAX / 20,
+        tickets: 20,
     };
     crate::task::scheduler::add_futex_thread(t);
     let t2 = Thread {
@@ -83,6 +86,9 @@ fn test_futex_wake_prepopulated() -> Result<(), &'static str> {
         futex_wake_addr: Some(0xBBBB),
         pipe_block_key: None,
         fs_base: 0,
+        pass: 0,
+        stride: STRIDE_MAX / 20,
+        tickets: 20,
     };
     crate::task::scheduler::add_futex_thread(t2);
     let woken = crate::task::scheduler::wake_futex(0xAAAA, 10);

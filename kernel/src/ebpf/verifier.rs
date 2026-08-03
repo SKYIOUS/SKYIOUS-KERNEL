@@ -48,12 +48,15 @@ pub fn verify(insns: &[EbpfInsn]) -> bool {
                 if target >= insns.len() { return false; }
                 targets.insert(target);
                 if op != BPF_JA { targets.insert(i + 1); }
-            } else {
+            } else if op != BPF_EXIT {
                 let target = ((i as i64) + 1 + (insn.off as i64)) as usize;
                 if target >= insns.len() { return false; }
                 targets.insert(target); targets.insert(i + 1);
             }
-        } else if i + 1 < insns.len() { targets.insert(i + 1); }
+        } else if i + 1 < insns.len() {
+            let step = if insn.code & 0x1f == 0x18 { 2 } else { 1 };
+            targets.insert(i + step);
+        }
     }
     for &t in &targets {
         if t >= insns.len() { return false; }
@@ -74,7 +77,12 @@ pub fn verify(insns: &[EbpfInsn]) -> bool {
         let next = cur + if insn.code & 0x1f == 0x18 { 2 } else { 1 };
         if next < insns.len() { worklist.push(next); }
     }
-    for i in 0..insns.len() { if !visited.contains(&i) { return false; } }
+    for i in 0..insns.len() {
+        // LD_DW continuation slots are consumed by their parent insn.
+        if !visited.contains(&i) && !(i > 0 && insns[i - 1].code & 0x1f == 0x18) {
+            return false;
+        }
+    }
     true
 }
 

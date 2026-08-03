@@ -1,7 +1,7 @@
 use hashbrown::HashMap;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 
 pub const PAGE_SIZE: usize = 4096;

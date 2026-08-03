@@ -74,7 +74,7 @@ pub fn run_boot() -> ! {
 }
 
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::Process;
 
 static BOOT_PROCESS: Mutex<Option<Arc<Process>>> = Mutex::new(None);
@@ -128,6 +128,12 @@ fn state_create_address_space(ctx: &mut BootContext, session: &mut BootSession) 
 fn state_map_stack(ctx: &mut BootContext, session: &mut BootSession) -> Result<BootState, BootError> {
     let process_guard = BOOT_PROCESS.lock();
     let process = process_guard.as_ref().ok_or(BootError::StackAllocationFailed)?;
+    // Activate the process address space BEFORE mapping the user stack, so
+    // virt_to_phys (which walks the active tables) can translate the stack
+    // pages setup_user_stack maps into the process's own page tables.
+    // SAFETY: the address space was fully set up by Process::load_elf() in
+    // CreateAddressSpace and shares the kernel higher-half mapping.
+    unsafe { process.address_space.activate(); }
     let argv = alloc::vec![alloc::string::String::from("/bin/init")];
     let user_rsp = process.setup_user_stack(&argv)
         .map_err(|_| BootError::StackAllocationFailed)?;
@@ -156,9 +162,9 @@ fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<
             use crate::task::process::FileDescriptor;
             let mut fd_table = process.fd_table.lock();
             fd_table.resize(3, None);
-            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
-            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
-            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: spin::Mutex::new(0) });
+            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
+            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
+            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: crate::sync::IrqSafeMutex::new(0) });
             drop(fd_table);
             BootLogger::info(ctx, "stdin/stdout/stderr -> /dev/tty0");
         }

@@ -1,7 +1,7 @@
 use super::{SkyFS, Extent, BLOCK_SIZE};
 use crate::drivers::block::BlockDevice;
 use crate::alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 const BTREE_ORDER: usize = 16;
 const KEY_MAX: usize = BTREE_ORDER - 1;

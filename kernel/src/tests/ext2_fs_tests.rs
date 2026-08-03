@@ -7,7 +7,7 @@ use crate::alloc::sync::Arc;
 use crate::alloc::vec;
 use crate::alloc::vec::Vec;
 use crate::vfs::FileSystem;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 const SECTOR_SIZE: usize = 512;
 const BLOCK_SIZE: usize = 1024;
@@ -253,9 +253,9 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
     // "hello.txt" entry at offset 24
     write_le32(&mut dir_data, 24, test_inode_num);
     write_le16(&mut dir_data, 28, (BLOCK_SIZE - 24) as u16);
-    dir_data[30] = 10; // name_len ("hello.txt" = 10)
+    dir_data[30] = 9; // name_len ("hello.txt" = 9)
     dir_data[31] = 1; // file_type = regular
-    dir_data[32..42].copy_from_slice(b"hello.txt");
+    dir_data[32..41].copy_from_slice(b"hello.txt");
 
     // Write back
     for i in 0..2 {

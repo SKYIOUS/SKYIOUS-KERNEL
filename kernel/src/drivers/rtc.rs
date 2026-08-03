@@ -19,7 +19,7 @@ const STATUS_UPDATE_IN_PROGRESS: u8 = 0x80;
 const NMI_DISABLE: u8 = 0x80;
 
 static RTC_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static RTC_EPOCH_SECS: spin::Mutex<u64> = spin::Mutex::new(0);
+static RTC_EPOCH_SECS: crate::sync::IrqSafeMutex<u64> = crate::sync::IrqSafeMutex::new(0);
 
 /// Read from CMOS register
 fn cmos_read(reg: u8) -> u8 {

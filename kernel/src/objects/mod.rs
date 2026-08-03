@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub mod handle;
 pub mod namespace;

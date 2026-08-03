@@ -1,7 +1,7 @@
 use volatile::Volatile;
 use crate::acpi;
 use crate::memory;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub struct LocalApic {
     base: usize,

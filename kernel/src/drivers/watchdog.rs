@@ -1,4 +1,4 @@
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::println;
 use crate::serial_write;
 use crate::interrupts;

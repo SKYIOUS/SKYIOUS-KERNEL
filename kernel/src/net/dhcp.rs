@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use smoltcp::socket::dhcpv4;
 use smoltcp::wire::Ipv4Address;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 use alloc::vec::Vec;
 

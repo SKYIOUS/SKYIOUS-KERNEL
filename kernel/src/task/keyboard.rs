@@ -5,7 +5,7 @@ use futures_util::stream::Stream;
 use crossbeam_queue::ArrayQueue;
 use crate::println;
 use core::task::Waker;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 
 lazy_static! {

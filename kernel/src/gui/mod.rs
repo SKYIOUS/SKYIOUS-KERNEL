@@ -17,7 +17,7 @@ pub mod surface;
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use core::sync::atomic::Ordering;
 use crate::drivers::graphics::FRAMEBUFFER;
 use self::surface::{DamageTracker, DirtyRect};

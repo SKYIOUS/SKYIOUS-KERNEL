@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use alloc::string::ToString;
 use crate::vfs::{FileSystem, VfsNode, Stat, S_IFDIR, S_IFREG, S_IFLNK};
 use crate::drivers::block::BlockDevice;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 // ── Shared node type ──────────────────────────────────────────────────────────
 

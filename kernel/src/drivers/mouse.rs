@@ -8,7 +8,7 @@
 
 use x86_64::instructions::port::Port;
 use core::sync::atomic::{AtomicIsize, AtomicU8, AtomicI8, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 /// Counts how many times the mouse IRQ handler fires. Diagnostic — read from GUI task.
 pub static MOUSE_IRQ_COUNT: AtomicU64 = AtomicU64::new(0);

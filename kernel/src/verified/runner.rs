@@ -19,11 +19,11 @@
 //! ```
 
 use crate::verified::{Invariant, VerificationFailure, VerificationReport};
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 /// Global verification runner instance.
 ///
-/// Guarded by `spin::Mutex` for interrupt-safe access from scheduler
+/// Guarded by `crate::sync::IrqSafeMutex` for interrupt-safe access from scheduler
 /// checkpoints (which may fire from timer IRQ context).
 pub static VERIFICATION_RUNNER: Mutex<VerificationRunner> = Mutex::new(VerificationRunner::new());
 

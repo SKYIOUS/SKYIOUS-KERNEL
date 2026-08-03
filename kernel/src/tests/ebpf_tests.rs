@@ -52,7 +52,7 @@ fn ebpf_pass_lddw() -> Result<(), &'static str> {
 
 fn ebpf_pass_conditional_jump() -> Result<(), &'static str> {
     let p = &[
-        mk(0x15, 0, 1, 2, 0),       // if r0 == r1, pc += 2
+        mk(0x15, 0, 1, 1, 0),       // if r0 == r1, pc += 1 (skip to exit)
         mk(0x07, 0, 0, 0, 1),       // r0 += 1
         exit(),
     ];
@@ -145,12 +145,6 @@ fn ebpf_fail_div_by_zero() -> Result<(), &'static str> {
 
 fn ebpf_fail_jump_out_of_bounds() -> Result<(), &'static str> {
     let p = &[mk(0x05, 0, 0, 100, 0), exit()];
-    if !verifier::verify(p) { Ok(()) } else { Err("jump out of bounds should fail") }
-} -> Result<(), &'static str> {
-    let p = &[
-        mk(0x05, 0, 0, 100, 0),     // ja +100 (out of bounds)
-        exit(),
-    ];
     if !verifier::verify(p) { Ok(()) } else { Err("jump out of bounds should fail") }
 }
 

@@ -1,6 +1,5 @@
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use hashbrown::HashMap;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI32, Ordering};
 use lazy_static::lazy_static;
 
@@ -70,19 +69,23 @@ pub fn get_current_time_ns() -> u64 {
 }
 
 pub fn check_posix_timers() {
+    // Called from IRQ context (timer tick): the IRQ may have preempted the
+    // holder of these locks, and a spin here would deadlock the CPU. Skip the
+    // pass on contention — expired timers re-expire on the next tick.
+    if POSIX_TIMERS.try_lock().is_none()
+        || crate::task::process::PROCESS_TABLE.try_lock().is_none()
+    {
+        return;
+    }
     let now = get_current_time_ns();
     let mut timers = POSIX_TIMERS.lock();
 
-    let expired_ids: Vec<i32> = timers.iter()
-        .filter(|(_, t)| t.active && t.value > 0 && now >= t.value)
-        .map(|(tid, _)| *tid)
-        .collect();
-
-    for tid in expired_ids {
-        let expired = match timers.get_mut(&tid) {
-            Some(t) => t,
-            None => continue,
-        };
+    // One-pass in place: no Vec collect, no allocation in IRQ context.
+    // ponytail: mutating during iter_mut is safe — no structural changes here.
+    for (_, expired) in timers.iter_mut() {
+        if !expired.active || expired.value == 0 || now < expired.value {
+            continue;
+        }
 
         if expired.overrun < i32::MAX {
             expired.overrun += 1;
@@ -91,10 +94,11 @@ pub fn check_posix_timers() {
         if expired.sigev_notify == SIGEV_SIGNAL {
             let table = crate::task::process::PROCESS_TABLE.lock();
             if let Some(proc) = table.get(&expired.owner_pid) {
-                let mut sigstate = proc.signals.lock();
-                let bit = (expired.sigev_signo as u32).wrapping_sub(1);
-                if bit < 64 {
-                    sigstate.pending |= 1u64 << bit;
+                if let Some(mut sigstate) = proc.signals.try_lock() {
+                    let bit = (expired.sigev_signo as u32).wrapping_sub(1);
+                    if bit < 64 {
+                        sigstate.pending |= 1u64 << bit;
+                    }
                 }
             }
         }

@@ -2,7 +2,7 @@ use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{LStar, Star, SFMask};
 use x86_64::registers::rflags::RFlags;
 use crate::gdt;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::vfs::{VFS, VfsNode, Stat};
 use alloc::sync::Arc;
 use crate::task::process::Process;
@@ -170,10 +170,12 @@ fn store_dir_path(process: &Arc<crate::task::process::Process>, fd: u64, path_st
     process.dir_fds.lock().insert(fd as usize, abs_path);
 }
 
-pub fn init() {
-    // Detect SMAP and enable if available (must be done before any user access)
-    user_access::init_smap();
-
+/// Write the `syscall`/`sysret` MSRs (STAR, LSTAR, SFMask) for the current CPU.
+/// These MSRs are per-logical-processor and reset to 0, so they must be set on
+/// every core — the BSP via `init()`, each AP via `init_syscall_msrs()` in
+/// `ap_kernel_entry`. Without this, a user `syscall` on an AP loads CS=0/SS=8
+/// from STAR and jumps to LSTAR=0 (fetch at address 0).
+pub fn init_syscall_msrs() {
     let selectors = gdt::get_selectors();
 
     Star::write(
@@ -185,6 +187,13 @@ pub fn init() {
 
     LStar::write(VirtAddr::new(syscall_entry as *const () as u64));
     SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::DIRECTION_FLAG | RFlags::ALIGNMENT_CHECK);
+}
+
+pub fn init() {
+    // Detect SMAP and enable if available (must be done before any user access)
+    user_access::init_smap();
+
+    init_syscall_msrs();
 
     unsafe {
         use x86_64::registers::model_specific::Efer;
@@ -206,7 +215,7 @@ pub struct PerCpuPtr(pub *mut PerCpuData);
 unsafe impl Send for PerCpuPtr {}
 unsafe impl Sync for PerCpuPtr {}
 
-pub static PER_CPU_AREAS: spin::Mutex<alloc::vec::Vec<PerCpuPtr>> = spin::Mutex::new(alloc::vec::Vec::new());
+pub static PER_CPU_AREAS: crate::sync::IrqSafeMutex<alloc::vec::Vec<PerCpuPtr>> = crate::sync::IrqSafeMutex::new(alloc::vec::Vec::new());
 
 /// Get the current CPU's per-CPU data via GS segment.
 pub fn get_per_cpu() -> &'static mut PerCpuData {
@@ -3420,8 +3429,8 @@ use smoltcp::wire::IpEndpoint;
 use smoltcp::iface::SocketHandle;
 
 lazy_static::lazy_static! {
-    static ref TCP_BIND_ENDPOINTS: spin::Mutex<HashMap<(u64, SocketHandle), IpEndpoint>> =
-        spin::Mutex::new(HashMap::new());
+    static ref TCP_BIND_ENDPOINTS: crate::sync::IrqSafeMutex<HashMap<(u64, SocketHandle), IpEndpoint>> =
+        crate::sync::IrqSafeMutex::new(HashMap::new());
 }
 
 fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
@@ -4517,13 +4526,10 @@ fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) -> u
     let title_str = if title_ptr.is_null() {
         alloc::string::String::from("User App").into_boxed_str()
     } else {
-        let mut len = 0;
-        unsafe {
-            while *title_ptr.add(len) != 0 { len += 1; }
+        match unsafe { crate::syscalls::user_access::read_user_string(title_ptr, 256) } {
+            Ok(s) => s.into_boxed_str(),
+            Err(_) => alloc::string::String::from("User App").into_boxed_str(),
         }
-        let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, len) };
-        let s = core::str::from_utf8(title_slice).unwrap_or("User App");
-        alloc::string::String::from(s).into_boxed_str()
     };
 
     let mut win = Window::new(0, 0, width + 2, height + 22, &title_str);
@@ -5705,7 +5711,7 @@ fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
     static NEXT_SIGNALFD_HANDLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
     let handle = NEXT_SIGNALFD_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    let data = alloc::sync::Arc::new(spin::Mutex::new(SignalFdData {
+    let data = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(SignalFdData {
         mask: mask_val,
         pending: alloc::collections::VecDeque::new(),
         nonblock: (flags & SFD_NONBLOCK) != 0,
@@ -5734,7 +5740,7 @@ fn sys_eventfd2(initval: u32, flags: i32) -> u64 {
         None => return errno::Errno::ESRCH as u64,
     };
 
-    let data = alloc::sync::Arc::new(spin::Mutex::new(EventFdData {
+    let data = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(EventFdData {
         counter: initval as u64,
         semaphore: (flags & EFD_SEMAPHORE) != 0,
         nonblock: (flags & EFD_NONBLOCK) != 0,

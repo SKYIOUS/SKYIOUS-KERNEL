@@ -1,6 +1,6 @@
 use pc_keyboard::{Keyboard, ScancodeSet1, HandleControl, layouts, DecodedKey};
 use crossbeam_queue::ArrayQueue;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 
 const TTY_BUF_SIZE: usize = 4096;

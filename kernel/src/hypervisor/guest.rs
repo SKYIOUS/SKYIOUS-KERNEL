@@ -1,6 +1,6 @@
 use alloc::string::String;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::hypervisor::vmm::VirtualMachine;
 
 /// Guest OS type.

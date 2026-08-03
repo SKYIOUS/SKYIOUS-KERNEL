@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use crate::objects::{KernelObject, ObjectHeader, ObjectTypeId, security::SecurityDescriptor};
 use crate::task::thread::Thread;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub struct ThreadObject {
     pub header: ObjectHeader,

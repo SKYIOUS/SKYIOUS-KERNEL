@@ -8,7 +8,7 @@ pub mod tnum;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::slice;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 use vm::{EbpfVm, EbpfInsn, EbpfRegs, STACK_SIZE};
 use verifier::{verify, tnum_verify};

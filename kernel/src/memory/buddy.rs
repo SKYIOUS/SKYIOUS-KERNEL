@@ -2,7 +2,7 @@ use x86_64::{
     structures::paging::{PhysFrame, Size4KiB, FrameAllocator},
     PhysAddr, VirtAddr,
 };
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub const MAX_ORDER: usize = 11; // Blocks up to 2^11 * 4096 = 8MB
 

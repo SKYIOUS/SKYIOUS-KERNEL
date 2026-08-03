@@ -1,7 +1,7 @@
 use super::{SkyFS, BLOCK_SIZE};
 use crate::drivers::block::BlockDevice;
 use crate::alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 const JOURNAL_MAGIC: u64 = 0x4A4F55524E414C5F;
 const MAX_TRANSACTION_BLOCKS: u32 = 256;

@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use super::KernelObject;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 
 /// A directory in the global object namespace.

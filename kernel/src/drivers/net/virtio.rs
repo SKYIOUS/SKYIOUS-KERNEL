@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use x86_64::VirtAddr;
 use smoltcp::phy::{Device, DeviceCapabilities, RxToken, TxToken, ChecksumCapabilities};
 use smoltcp::time::Instant;

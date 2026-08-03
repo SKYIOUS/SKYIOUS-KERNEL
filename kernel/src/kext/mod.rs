@@ -6,7 +6,7 @@ pub mod isolation;
 use alloc::string::String;
 use hashbrown::HashMap;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 
 /// Unique identifier for a loaded kernel extension.

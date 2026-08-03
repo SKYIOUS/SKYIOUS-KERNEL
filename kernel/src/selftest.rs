@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use core::fmt::Write;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub type TestFn = fn() -> Result<(), &'static str>;
 

@@ -8,7 +8,7 @@ use core::sync::atomic::Ordering;
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 lazy_static! {
-    static ref TSS: spin::Mutex<TaskStateSegment> = spin::Mutex::new(TaskStateSegment::new());
+    static ref TSS: crate::sync::IrqSafeMutex<TaskStateSegment> = crate::sync::IrqSafeMutex::new(TaskStateSegment::new());
 }
 
 pub fn init_tss() {

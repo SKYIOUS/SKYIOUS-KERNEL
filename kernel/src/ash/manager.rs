@@ -1,6 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 use crate::ash::{
     AshHandler, HookPoint, VerifiedAsh, AshResult, AshError, AshStats,

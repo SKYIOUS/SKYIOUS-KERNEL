@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use super::{SkyFS, SkyfsInode, INODE_SIZE, BLOCK_SIZE};
 use crate::alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub fn alloc_inode_inner(fs: &Arc<Mutex<SkyFS>>) -> Result<u64, ()> {
     let binding = fs.lock();

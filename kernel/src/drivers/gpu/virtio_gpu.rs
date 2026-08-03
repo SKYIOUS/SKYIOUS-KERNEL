@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use x86_64::instructions::port::Port;
 use x86_64::VirtAddr;
 

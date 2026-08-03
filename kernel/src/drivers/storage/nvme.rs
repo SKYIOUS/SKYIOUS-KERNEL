@@ -2,7 +2,7 @@ use volatile::Volatile;
 use crate::drivers::block::{BlockDevice, BlockDeviceError, register_block_device};
 use alloc::sync::Arc;
 use alloc::boxed::Box;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use core::alloc::Layout;
 use x86_64::VirtAddr;
 

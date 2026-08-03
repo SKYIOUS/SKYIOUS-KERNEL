@@ -1,7 +1,7 @@
 use core::fmt;
 use font8x8::UnicodeFonts;
 use font8x8::BASIC_FONTS;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use core::sync::atomic::Ordering;
 use crate::drivers::graphics::{FRAMEBUFFER, WIDTH, HEIGHT, STRIDE};
 use alloc::vec::Vec;

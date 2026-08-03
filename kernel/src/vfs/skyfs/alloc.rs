@@ -3,7 +3,7 @@ use super::{SkyFS, BLOCK_SIZE};
 use crate::drivers::block::BlockDevice;
 use crate::alloc::vec;
 use crate::alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub fn allocate_block_inner(fs: &Arc<Mutex<SkyFS>>, dev: &mut dyn BlockDevice) -> Result<u64, ()> {
     let sb = &fs.lock().sb;

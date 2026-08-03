@@ -1,6 +1,6 @@
 use x86_64::instructions::port::Port;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::drivers::block::{BlockDevice, BlockDeviceError, register_block_device};
 
 const DATA: u16 = 0x1F0;

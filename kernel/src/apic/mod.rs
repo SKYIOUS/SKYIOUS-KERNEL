@@ -42,8 +42,7 @@ unsafe fn lapic_write32(offset: u32, value: u32) {
 }
 
 /// Send an IPI to a specific LAPIC via ICR writes on the current CPU.
-pub fn send_ipi(dest_lapic_id: u8, vector: u8, delivery_mode: u8) {
-    // SAFETY: write to current CPU's LAPIC ICR registers (0x310 high, 0x300 low).
+pub fn send_ipi(dest_lapic_id: u8, vector: u8, delivery_mode: u8) {    // SAFETY: write to current CPU's LAPIC ICR registers (0x310 high, 0x300 low).
     unsafe {
         lapic_write32(0x310, (dest_lapic_id as u32) << 24);
         lapic_write32(0x300, (1 << 14) | ((delivery_mode as u32) << 8) | (vector as u32));
@@ -66,8 +65,7 @@ pub fn wait_for_ipi() {
     }
 }
 
-pub fn eoi() {
-    // Direct write to the current CPU's LAPIC EOI register.
+pub fn eoi() {    // Direct write to the current CPU's LAPIC EOI register.
     // LAPIC registers are accessed at their physical address (0xfee00000) via
     // the physical memory mapping.  Each CPU's access to this address targets
     // its own LAPIC, so this is inherently per-CPU and does NOT need the

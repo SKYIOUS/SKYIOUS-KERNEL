@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use super::vm::{EbpfVm, EbpfInsn, EbpfRegs, STACK_SIZE};
 use super::verifier;
 

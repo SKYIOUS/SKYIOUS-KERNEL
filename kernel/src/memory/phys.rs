@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use bootloader_api::info::{MemoryRegions, MemoryRegionKind};
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_FRAMES: usize = 1_048_576; // enough for 4 GB @ 4K pages

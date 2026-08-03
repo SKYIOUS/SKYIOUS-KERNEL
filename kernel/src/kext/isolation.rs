@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::objects::{KernelObject, ObjectHeader, ObjectTypeId};
 use crate::objects::handle::HandleTable;
 use crate::objects::security::SecurityDescriptor;

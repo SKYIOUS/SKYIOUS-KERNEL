@@ -1031,7 +1031,7 @@ fn default_ep0_max_packet(speed: u8) -> u16 {
 
 // SAFETY: XhciController holds raw MMIO pointers and DMA buffer pointers.
 // All access is mediated through the `XHCI` Mutex in `drivers::usb`, which
-// (via spin::Mutex) disables interrupts across the critical section. The
+// (via crate::sync::IrqSafeMutex) disables interrupts across the critical section. The
 // pointers are never dereferenced without that lock held.
 unsafe impl Send for XhciController {}
 unsafe impl Sync for XhciController {}

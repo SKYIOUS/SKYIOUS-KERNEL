@@ -3,7 +3,7 @@ use alloc::string::{String, ToString};
 use hashbrown::HashMap;
 use crate::drivers::block::BlockDevice;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::lock::SchedLock;
 use lazy_static::lazy_static;
 
@@ -374,10 +374,10 @@ impl VfsManager {
 }
 
 /// Boot device selection: None = initrd, Some(n) = block device index
-pub static BOOT_DEVICE: spin::Mutex<Option<usize>> = spin::Mutex::new(None);
+pub static BOOT_DEVICE: crate::sync::IrqSafeMutex<Option<usize>> = crate::sync::IrqSafeMutex::new(None);
 
 /// Ramdisk (initrd) provided by bootloader. Set before vfs::init() is called.
-pub static RAMDISK: spin::Mutex<Option<&'static [u8]>> = spin::Mutex::new(None);
+pub static RAMDISK: crate::sync::IrqSafeMutex<Option<&'static [u8]>> = crate::sync::IrqSafeMutex::new(None);
 
 /// Set the boot device by index into BLOCK_DEVICES.
 #[allow(dead_code)]
@@ -441,7 +441,7 @@ pub fn init() {
             if let Some(dev) = devices.first() {
                 let partitions = crate::drivers::block::partition::parse_partitions(dev);
                 if let Some(part) = partitions.first() {
-                    let part_dev = Arc::new(spin::Mutex::new(
+                    let part_dev = Arc::new(crate::sync::IrqSafeMutex::new(
                         crate::drivers::block::partition::PartitionDevice::new(
                             dev.clone(), part.lba_start, part.sector_count,
                         )
@@ -557,7 +557,7 @@ pub fn init() {
             let part_name = alloc::format!("{}{}", dev_name, part.index);
 
             // Register partition as a block device
-            let part_dev = Arc::new(spin::Mutex::new(
+            let part_dev = Arc::new(crate::sync::IrqSafeMutex::new(
                 crate::drivers::block::partition::PartitionDevice::new(
                     dev.clone(), part.lba_start, part.sector_count,
                 )

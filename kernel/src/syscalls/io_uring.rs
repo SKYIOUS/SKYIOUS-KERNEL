@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use core::slice;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::syscalls::errno::Errno;
 use crate::syscalls::user_access;
 

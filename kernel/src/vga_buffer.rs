@@ -1,6 +1,6 @@
 use core::fmt;
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use volatile::Volatile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

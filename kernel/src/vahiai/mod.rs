@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use alloc::string::String;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 
 pub enum IntentResult {

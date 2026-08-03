@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::objects::{KernelObject, ObjectHeader, security::SecurityDescriptor, TYPE_GUI_WINDOW};
 use crate::gui::window::Window;
 

@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::vfs::{FileSystem, VfsNode, Stat, S_IFDIR, S_IFREG};
 use crate::interrupts;
 

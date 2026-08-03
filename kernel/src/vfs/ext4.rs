@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::drivers::block::BlockDevice;
 use crate::vfs::{FileSystem, VfsNode, Stat};
 

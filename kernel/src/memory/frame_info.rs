@@ -1,5 +1,5 @@
 use x86_64::PhysAddr;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 struct RefCountTable {
     counts: &'static mut [u16],

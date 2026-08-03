@@ -8,7 +8,7 @@ use x86_64::VirtAddr;
 use x86_64::instructions::port::Port;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub const VIRTIO_BLOCK_DEVICE_ID: u16 = 0x1001;
 

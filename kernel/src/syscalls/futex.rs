@@ -1,5 +1,5 @@
 use hashbrown::HashMap;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 use crate::task::process::CURRENT_PROCESS;
 use crate::task::scheduler;

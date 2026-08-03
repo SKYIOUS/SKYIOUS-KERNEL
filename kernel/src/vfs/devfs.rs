@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crossbeam_queue::ArrayQueue;
 use crate::vfs::{FileSystem, VfsNode, Stat};
 use crate::drivers::input::InputEvent;

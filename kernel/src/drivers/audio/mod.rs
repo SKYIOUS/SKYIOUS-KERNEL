@@ -2,7 +2,7 @@
 pub mod hda;
 pub mod pcspeaker;
 
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 use alloc::sync::Arc;
 use crate::syscalls::errno::Errno;
