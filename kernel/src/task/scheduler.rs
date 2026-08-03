@@ -560,14 +560,14 @@ pub fn tick(current_ticks: u64) {
         }
     }
     for &pid in &itimer_pids[..itimer_count] {
-        let proc = {
-            let table = match crate::task::process::PROCESS_TABLE.try_lock() {
-                Some(t) => t,
-                None => continue,
-            };
-            table.get(&pid).cloned()
+        // Hold the table lock and touch the process in place: a .cloned()
+        // Process is a full allocation and IRQ context must not allocate.
+        // All inner locks are try_lock, so this cannot deadlock.
+        let table = match crate::task::process::PROCESS_TABLE.try_lock() {
+            Some(t) => t,
+            None => return,
         };
-        let Some(proc) = proc else { continue };
+        let Some(proc) = table.get(&pid) else { continue };
         let mut it = match proc.itimer_real.try_lock() {
             Some(it) => it,
             None => continue,
