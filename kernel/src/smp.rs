@@ -111,9 +111,19 @@ t_prot:
     mov ss, ax
     mov esp, 0x9000   # Set stack to identity-mapped area
     
-    # Enable PAE + PGE + NXE (CR4 bits 5, 7, 11)
+    # Enable PAE + PGE (CR4 bits 5, 7); SMEP (bit 11) only if CPUID
+    # leaf 7 ECX bit 2 says so, matching the BSP (arch_x86_64 init_cpu).
+    # Unconditional SMEP trips a QEMU TCG stall on AP CR4 writes and
+    # #GPs on SMEP-less hardware.  EBX/EDX are unused for the rest of
+    # the trampoline, so cpuid clobbers are harmless.
+    mov eax, 7
+    xor ecx, ecx
+    cpuid
+    and ecx, 4
+    shl ecx, 9        # 4 << 9 = SMEP (bit 11)
     mov eax, cr4
-    or eax, (1 << 5) | (1 << 7) | (1 << 11)
+    or eax, (1 << 5) | (1 << 7)
+    or eax, ecx
     mov cr4, eax
 
     # Load page table base from shared data at 0x7000
