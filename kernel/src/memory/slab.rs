@@ -61,19 +61,19 @@ fn list_index(layout: &Layout) -> Option<usize> {
     BLOCK_SIZES.iter().position(|&s| s >= required_block_size)
 }
 
-/// A wrapper around spin::Mutex to permit trait implementations.
+/// A wrapper around crate::sync::IrqSafeMutex to permit trait implementations.
 pub struct Locked<A> {
-    inner: spin::Mutex<A>,
+    inner: crate::sync::IrqSafeMutex<A>,
 }
 
 impl<A> Locked<A> {
     pub const fn new(inner: A) -> Self {
         Locked {
-            inner: spin::Mutex::new(inner),
+            inner: crate::sync::IrqSafeMutex::new(inner),
         }
     }
 
-    pub fn lock(&self) -> spin::MutexGuard<'_, A> {
+    pub fn lock(&self) -> crate::sync::IrqSafeMutexGuard<'_, A> {
         self.inner.lock()
     }
 }
@@ -122,7 +122,10 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
             None => {
                 // SAFETY: ptr is a valid pointer from a previous alloc() call with matching layout.
                 if allocator.poison_on_free {
-                    let poison = core::slice::from_raw_parts_mut(ptr, layout.size());
+                    // ponytail: cap poison at 1 MiB; large frees (32MB ramdisks) would
+                    // otherwise hold the allocator lock for seconds on slow hosts.
+                    let cap = layout.size().min(1024 * 1024);
+                    let poison = core::slice::from_raw_parts_mut(ptr, cap);
                     for b in poison.iter_mut() { *b = 0xDE; }
                 }
                 allocator.fallback_allocator.lock().deallocate(

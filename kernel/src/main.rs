@@ -47,6 +47,7 @@
 
 extern crate alloc;
 mod memory;
+mod sync;
 mod allocator;
 mod shell;
 mod task;
@@ -312,14 +313,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let _ = drivers::rtc::init();
     serial_write("[BOOT] RTC initialized\n");
 
-    #[cfg(feature = "self_test")]
-    {
-        serial_write("[SELF-TEST] registering tests...\n");
-        tests::register_all();
-        serial_write("[SELF-TEST] running...\n");
-        selftest::run_all();
-    }
-
     #[cfg(feature = "verification")]
     {
         serial_write("[VERIFY] initializing verification runner...\n");
@@ -330,6 +323,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     serial_write("[BOOT] scheduler init...\n");
     task::scheduler::init();
+
+    #[cfg(feature = "self_test")]
+    {
+        serial_write("[SELF-TEST] registering tests...\n");
+        tests::register_all();
+        serial_write("[SELF-TEST] running...\n");
+        selftest::run_all();
+    }
     serial_write("[BOOT] GUI init...\n");
     gui::init();
 
@@ -338,7 +339,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::scheduler::spawn(init_os_task);
 
     #[cfg(not(target_arch = "aarch64"))]
-    x86_64::instructions::interrupts::enable();
+    {
+        x86_64::instructions::interrupts::enable();
+    }
     #[cfg(target_arch = "aarch64")]
     unsafe { core::arch::asm!("msr daifclr, #2"); } // Clear IRQ mask
 
@@ -570,9 +573,9 @@ pub fn spawn_userspace_app(path: &'static str) {
                             use crate::task::process::FileDescriptor;
                             let mut fd_table = process_arc.fd_table.lock();
                             fd_table.resize(3, None);
-                            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
-                            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: spin::Mutex::new(0) });
-                            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: spin::Mutex::new(0) });
+                            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
+                            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
+                            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: crate::sync::IrqSafeMutex::new(0) });
                             drop(fd_table);
                         }
                     }
@@ -601,7 +604,7 @@ pub fn spawn_userspace_app(path: &'static str) {
 }
 
 lazy_static::lazy_static! {
-    static ref APP_PATH_TO_LAUNCH: spin::Mutex<alloc::string::String> = spin::Mutex::new(alloc::string::String::new());
+    static ref APP_PATH_TO_LAUNCH: crate::sync::IrqSafeMutex<alloc::string::String> = crate::sync::IrqSafeMutex::new(alloc::string::String::new());
 }
 
 #[panic_handler]

@@ -9,7 +9,7 @@ pub mod dir;
 use crate::alloc::sync::Arc;
 use crate::alloc::vec::Vec;
 use crate::alloc::string::String;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::vfs::{FileSystem, VfsNode, Stat, StatFs};
 use crate::drivers::block::BlockDevice;
 
@@ -40,7 +40,7 @@ pub struct Superblock {
     pub inode_blocks: u64,
     pub root_inode: u64,
     pub state: u8,
-    pub _padding: [u8; 4023],
+    pub _padding: [u8; 4007],
 }
 
 #[repr(C, packed)]
@@ -67,6 +67,7 @@ pub struct Extent {
 }
 
 #[repr(C, packed)]
+#[derive(Copy, Clone)]
 pub struct DirEntry {
     pub inode: u64,
     pub rec_len: u16,
@@ -78,7 +79,7 @@ pub struct DirEntry {
 pub struct SkyFS {
     pub device: Arc<Mutex<dyn BlockDevice>>,
     pub sb: Superblock,
-    pub journal: spin::Mutex<journal::Journal>,
+    pub journal: crate::sync::IrqSafeMutex<journal::Journal>,
 }
 
 impl SkyFS {
@@ -111,7 +112,7 @@ impl SkyFS {
             inode_blocks,
             root_inode: 1,
             state: STATE_CLEAN,
-            _padding: [0u8; 4023],
+            _padding: [0u8; 4007],
         };
 
         // Write superblock
@@ -216,14 +217,14 @@ impl SkyFS {
 
         let fs = Arc::new(Mutex::new(SkyFS {
             device,
-            journal: spin::Mutex::new(journal::Journal::new(j_start, j_blocks)),
+            journal: crate::sync::IrqSafeMutex::new(journal::Journal::new(j_start, j_blocks)),
             sb: Superblock {
                 magic: sb.magic, version: sb.version, block_size: sb.block_size,
                 total_blocks: sb.total_blocks, journal_start: sb.journal_start,
                 journal_blocks: sb.journal_blocks, bitmap_start: sb.bitmap_start,
                 bitmap_blocks: sb.bitmap_blocks, inode_start: sb.inode_start,
                 inode_count: sb.inode_count, inode_blocks: sb.inode_blocks,
-                root_inode: sb.root_inode, state: sb.state, _padding: [0u8; 4023],
+                root_inode: sb.root_inode, state: sb.state, _padding: [0u8; 4007],
             },
         }));
         Ok(fs)
@@ -284,8 +285,7 @@ impl SkyFSHandle {
 
 impl FileSystem for SkyFSHandle {
     fn root(&self) -> Result<Arc<dyn VfsNode>, ()> {
-        let fs = self.fs.lock();
-        let root_ino = fs.sb.root_inode;
+        let root_ino = self.fs.lock().sb.root_inode;
         let inode = read_inode_inner(&self.fs, root_ino)?;
         Ok(Arc::new(SkyfsNode {
             fs: self.fs.clone(),
@@ -621,9 +621,10 @@ impl VfsNode for SkyfsNode {
 
     fn children(&self) -> Result<Vec<Arc<dyn VfsNode>>, ()> {
         if !self.is_dir() { return Err(()); }
-        let inode = self.inode.lock();
+        // Re-read: self.inode is a cached snapshot and goes stale after
+        // mkdir/create/unlink persisted to disk.
+        let inode = read_inode_inner(&self.fs, self.ino)?;
         let data = read_dir_data(&self.fs, &inode)?;
-        drop(inode);
         let mut children = crate::alloc::vec![];
         dir::parse_entries(&data, |entry, name| {
             if name != "." && name != ".." {
@@ -636,9 +637,8 @@ impl VfsNode for SkyfsNode {
     }
 
     fn find_child(&self, name: &str) -> Option<Arc<dyn VfsNode>> {
-        let inode = self.inode.lock();
+        let inode = read_inode_inner(&self.fs, self.ino).ok()?;
         let data = read_dir_data(&self.fs, &inode).ok()?;
-        drop(inode);
         let mut found = None;
         dir::parse_entries(&data, |entry, entry_name| {
             if entry_name == name && found.is_none() {
@@ -675,9 +675,10 @@ impl VfsNode for SkyfsNode {
     }
 
     fn unlink(&self, name: &str) -> Result<(), ()> {
-        let inode = self.inode.lock();
+        // Re-read: self.inode is a cached snapshot and goes stale after
+        // mkdir/create/unlink persisted to disk.
+        let inode = read_inode_inner(&self.fs, self.ino)?;
         let data = read_dir_data(&self.fs, &inode)?;
-        drop(inode);
         let mut new_data = Vec::with_capacity(data.len());
         let mut found = false;
         dir::parse_entries(&data, |entry, entry_name| {
@@ -703,13 +704,17 @@ fn write_dirent_append(buf: &mut Vec<u8>, entry: &DirEntry, name: &[u8]) {
 }
 
 fn write_dirent(buf: &mut [u8], off: &mut usize, entry: &DirEntry, name: &[u8]) -> Result<(), ()> {
-    let entry_bytes = unsafe {
-        core::slice::from_raw_parts(entry as *const DirEntry as *const u8, core::mem::size_of::<DirEntry>())
-    };
-    let end = *off + entry_bytes.len() + name.len();
-    let padding = (4 - (end % 4)) % 4;
-    let total = end + padding;
+    let entry_len = core::mem::size_of::<DirEntry>() + name.len();
+    let padded = (entry_len + 3) & !3;
+    let total = *off + padded;
     if total > buf.len() { return Err(()); }
+    // rec_len is the stride of THIS entry (entry+name+padding), not the
+    // absolute end offset — parse_entries steps by it.
+    let mut entry = *entry;
+    entry.rec_len = padded as u16;
+    let entry_bytes = unsafe {
+        core::slice::from_raw_parts(&entry as *const DirEntry as *const u8, core::mem::size_of::<DirEntry>())
+    };
     buf[*off..*off + entry_bytes.len()].copy_from_slice(entry_bytes);
     *off += entry_bytes.len();
     buf[*off..*off + name.len()].copy_from_slice(name);

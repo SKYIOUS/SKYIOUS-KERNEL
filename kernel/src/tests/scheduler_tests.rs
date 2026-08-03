@@ -20,41 +20,50 @@ fn make_test_thread(priority: u8, sleep_until: Option<u64>) -> Thread {
 }
 
 fn test_tick_empty() -> Result<(), &'static str> {
-    let mut target = cpu_sched(0).ok_or("no cpu 0")?.lock();
-    GLOBAL.tick(0, &mut *target);
-    GLOBAL.tick(100, &mut *target);
+    crate::task::scheduler::tick(0);
+    crate::task::scheduler::tick(100);
     Ok(())
 }
 
 fn test_sleep_queue_add_and_tick() -> Result<(), &'static str> {
-    let mut target = cpu_sched(0).ok_or("no cpu 0")?.lock();
+    // ponytail: sleep_until values are far-future so the real LAPIC timer
+    // (already > 150 ticks into boot) can't wake test threads mid-test.
     let before = GLOBAL.sleep_queue.lock().len();
-    GLOBAL.add_sleeping_thread(make_test_thread(5, Some(100)));
+    GLOBAL.add_sleeping_thread(make_test_thread(5, Some(1_000_000)));
     if GLOBAL.sleep_queue.lock().len() != before + 1 { return Err("sleep queue should grow by 1"); }
-    GLOBAL.tick(100, &mut *target);
-    if GLOBAL.sleep_queue.lock().len() != before { return Err("thread should be woken at tick=100"); }
+    crate::task::scheduler::tick(1_000_000);
+    if GLOBAL.sleep_queue.lock().len() != before { return Err("thread should be woken at tick=1M"); }
     Ok(())
 }
 
 fn test_sleep_queue_not_woken_early() -> Result<(), &'static str> {
-    let mut target = cpu_sched(0).ok_or("no cpu 0")?.lock();
     let before = GLOBAL.sleep_queue.lock().len();
-    GLOBAL.add_sleeping_thread(make_test_thread(5, Some(100)));
-    GLOBAL.tick(50, &mut *target);
+    GLOBAL.add_sleeping_thread(make_test_thread(5, Some(1_000_000)));
+    crate::task::scheduler::tick(500_000);
     if GLOBAL.sleep_queue.lock().len() != before + 1 { return Err("thread should still be sleeping"); }
     Ok(())
 }
 
 fn test_sleep_queue_multiple_wake() -> Result<(), &'static str> {
-    let mut target = cpu_sched(0).ok_or("no cpu 0")?.lock();
     let before = GLOBAL.sleep_queue.lock().len();
-    GLOBAL.add_sleeping_thread(make_test_thread(5, Some(50)));
-    GLOBAL.add_sleeping_thread(make_test_thread(3, Some(100)));
-    GLOBAL.add_sleeping_thread(make_test_thread(7, Some(150)));
-    GLOBAL.tick(100, &mut *target);
-    if GLOBAL.sleep_queue.lock().len() != before + 1 { return Err("only the last thread should remain"); }
-    GLOBAL.tick(200, &mut *target);
-    if GLOBAL.sleep_queue.lock().len() != before { return Err("all should be woken by tick=200"); }
+    GLOBAL.add_sleeping_thread(make_test_thread(5, Some(500_000)));
+    GLOBAL.add_sleeping_thread(make_test_thread(3, Some(1_000_000)));
+    GLOBAL.add_sleeping_thread(make_test_thread(7, Some(1_500_000)));
+    crate::task::scheduler::tick(1_000_000);
+    let after = GLOBAL.sleep_queue.lock().len();
+    // Absolute counts: pre-existing threads (e.g. test_sleep_queue_not_woken_early's
+    // leftover, wake_time <= 1M) are woken by this tick, so only the 1.5M thread
+    // may remain regardless of `before`.
+    if after != 1 {
+        crate::serial_write(&alloc::format!("[sched-test] sleep_multiple_wake: before={} after={}\n", before, after));
+        return Err("only the last thread should remain");
+    }
+    crate::task::scheduler::tick(2_000_000);
+    let after2 = GLOBAL.sleep_queue.lock().len();
+    if after2 != 0 {
+        crate::serial_write(&alloc::format!("[sched-test] sleep_multiple_wake: after2={}\n", after2));
+        return Err("all should be woken by tick=2M");
+    }
     Ok(())
 }
 

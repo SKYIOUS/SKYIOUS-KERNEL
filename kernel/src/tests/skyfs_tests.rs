@@ -3,7 +3,7 @@ use crate::alloc::sync::Arc;
 use crate::alloc::vec;
 use crate::alloc::vec::Vec;
 use crate::vfs::FileSystem;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 struct RamBlock {
     data: Vec<u8>,
@@ -80,7 +80,10 @@ fn test_mkdir_children() -> Result<(), &'static str> {
     root.mkdir("subdir").map_err(|_| "mkdir failed")?;
     let children = root.children().map_err(|_| "children failed")?;
     let names: Vec<crate::alloc::string::String> = children.iter().map(|c| c.name()).collect();
-    if !names.iter().any(|n| n == "ino:2") { return Err("expected child ino:2"); }
+    if !names.iter().any(|n| n == "ino:2") {
+        crate::serial_write(&alloc::format!("[skyfs-test] mkdir_children: names={:?}\n", names));
+        return Err("expected child ino:2");
+    }
     let child = root.find_child("subdir").ok_or("find_child failed")?;
     if !child.is_dir() { return Err("subdir should be a dir"); }
     Ok(())

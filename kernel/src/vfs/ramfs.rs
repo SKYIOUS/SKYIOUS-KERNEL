@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use crate::vfs::{FileSystem, VfsNode, Stat};
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 pub struct Tmpfs {
     root: Arc<TmpNode>,
@@ -162,6 +162,9 @@ impl VfsNode for TmpNode {
         if !self.is_dir {
             return Err(());
         }
+        if name == "." || name == "/" || name.is_empty() {
+            return Err(());
+        }
         let mut children = self.children.lock();
         if children.iter().any(|c| c.name() == name) {
             return Err(());
@@ -188,6 +191,9 @@ impl VfsNode for TmpNode {
 
     fn create(&self, name: &str) -> Result<Arc<dyn VfsNode>, ()> {
         if !self.is_dir {
+            return Err(());
+        }
+        if name == "." || name == "/" || name.is_empty() {
             return Err(());
         }
         let mut children = self.children.lock();

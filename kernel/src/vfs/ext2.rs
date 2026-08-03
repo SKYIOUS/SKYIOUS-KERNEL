@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::String;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::drivers::block::BlockDevice;
 use crate::vfs::{FileSystem, VfsNode, Stat, StatFs};
 
@@ -348,7 +348,10 @@ impl Ext2FileSystem {
         if inode.i_block[14] != 0 {
             blocks.append(&mut self.read_indirect(inode.i_block[14], 3)?);
         } else {
-            blocks.extend(core::iter::repeat(0).take(entries * entries * entries));
+            // ponytail: an empty triple-indirect level is a pure hole that no
+            // reader ever reaches (reads stop at inode size). Expanding it to
+            // entries^3 zeros is a 67MB/4GB Vec per inode. Cap at level-2 size.
+            blocks.extend(core::iter::repeat(0).take(entries * entries));
         }
         Ok(blocks)
     }
@@ -693,11 +696,14 @@ impl VfsNode for Ext2Node {
     }
 
     fn read(&self, _max_len: usize) -> Result<Vec<u8>, ()> {
-        if (self.inode.i_mode & S_IFMT) == 0x4000 { return Err(()); }
         let fs = self.fs.lock();
-        let size = self.inode.i_size_lo as usize;
+        // Re-read from disk: self.inode is a cached snapshot and goes stale
+        // after write/link/unlink persisted changes.
+        let inode = fs.read_inode(self.inode_num)?;
+        if (inode.i_mode & S_IFMT) == 0x4000 { return Err(()); }
+        let size = inode.i_size_lo as usize;
         let mut data = Vec::with_capacity(size);
-        for &b in &fs.read_all_block_indices(&self.inode)? {
+        for &b in &fs.read_all_block_indices(&inode)? {
             let buf = if b == 0 {
                 vec![0u8; fs.block_size]
             } else {
@@ -712,13 +718,14 @@ impl VfsNode for Ext2Node {
     }
 
     fn stat(&self) -> Result<Stat, ()> {
+        let inode = self.fs.lock().read_inode(self.inode_num)?;
         Ok(Stat {
             st_dev: 0, st_ino: self.inode_num as u64,
-            st_mode: self.inode.i_mode as u32, st_nlink: self.inode.i_links_count as u32,
-            st_uid: self.inode.i_uid as u32, st_gid: self.inode.i_gid as u32,
-            st_rdev: 0, st_size: self.inode.i_size_lo as i64,
-            st_atime: self.inode.i_atime as i64, st_mtime: self.inode.i_mtime as i64,
-            st_ctime: self.inode.i_ctime as i64,
+            st_mode: inode.i_mode as u32, st_nlink: inode.i_links_count as u32,
+            st_uid: inode.i_uid as u32, st_gid: inode.i_gid as u32,
+            st_rdev: 0, st_size: inode.i_size_lo as i64,
+            st_atime: inode.i_atime as i64, st_mtime: inode.i_mtime as i64,
+            st_ctime: inode.i_ctime as i64,
         
             ..Default::default()
         })
@@ -739,9 +746,9 @@ impl VfsNode for Ext2Node {
     }
 
     fn write(&self, data: &[u8]) -> Result<(), ()> {
-        if (self.inode.i_mode & S_IFMT) == 0x4000 { return Err(()); }
-        let mut inode = self.inode;
         let fs = self.fs.lock();
+        let mut inode = fs.read_inode(self.inode_num)?;
+        if (inode.i_mode & S_IFMT) == 0x4000 { return Err(()); }
         fs.write_file_blocks(&mut inode, data)?;
         inode.i_mtime = fs.now();
         inode.i_ctime = fs.now();
@@ -891,6 +898,11 @@ impl VfsNode for Ext2Node {
         // ext2 doesn't allow hard links to directories
         if existing.is_dir() { return Err(()); }
         
+        // Determine file type from existing node's stat.
+        // stat() takes the fs lock, so it must run before `fs` is held below.
+        let stat = existing.stat()?;
+        let ftype = if (stat.st_mode & 0xF000) == 0x4000 { 2u8 } else { 1u8 };
+
         // Check if name already exists in target directory
         let fs = self.fs.lock();
         let dir_inode = fs.read_inode(self.inode_num)?;
@@ -898,10 +910,6 @@ impl VfsNode for Ext2Node {
             return Err(());
         }
         let _ = dir_inode;
-        
-        // Determine file type from existing node's stat
-        let stat = existing.stat()?;
-        let ftype = if (stat.st_mode & 0xF000) == 0x4000 { 2u8 } else { 1u8 };
         
         // Add dentry pointing to existing inode
         fs.add_dentry(self.inode_num, existing_inum, name, ftype)?;
