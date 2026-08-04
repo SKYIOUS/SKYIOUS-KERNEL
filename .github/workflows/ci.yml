@@ -94,19 +94,22 @@ jobs:
         working-directory: builder
         run: cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
 
-      - name: Boot + verify selftest TAP
+      - name: Boot + verify selftest TAP (smp1 + smp2)
         run: |
           IMG=$(find . -name "bootimage-vahi_kernel.bin" | head -1)
           [ -n "$IMG" ] || { echo "FAIL: no bootimage produced"; exit 1; }
-          timeout 300 qemu-system-x86_64 \
-            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
-            -drive format=raw,file="$IMG" \
-            -m 512M -smp 1 -nographic -no-reboot \
-            -serial file:serial.log 2>/dev/null || true
-          grep -q "TAP version 13" serial.log || { echo "FAIL: no TAP output"; tail -20 serial.log; exit 1; }
-          grep -q "# .* passed, 0 failed" serial.log || { echo "FAIL: suite incomplete/failed"; grep -E "not ok|# [0-9]" serial.log; tail -20 serial.log; exit 1; }
-          grep -q "not ok" serial.log && { echo "FAIL: TAP failures"; grep "not ok" serial.log; exit 1; }
-          echo "SELFTEST PASS"
+          for SMP in 1 2; do
+            rm -f serial.log
+            timeout 300 qemu-system-x86_64 \
+              -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+              -drive format=raw,file="$IMG" \
+              -m 512M -smp $SMP -nographic -no-reboot \
+              -serial file:serial.log 2>/dev/null || true
+            grep -q "TAP version 13" serial.log || { echo "FAIL (smp $SMP): no TAP output"; tail -20 serial.log; exit 1; }
+            grep -q "# .* passed, 0 failed" serial.log || { echo "FAIL (smp $SMP): suite incomplete/failed"; grep -E "not ok|# [0-9]" serial.log; tail -20 serial.log; exit 1; }
+            grep -q "not ok" serial.log && { echo "FAIL (smp $SMP): TAP failures"; grep "not ok" serial.log; exit 1; }
+            echo "SMP $SMP SELFTEST PASS"
+          done
 
   clippy:
     runs-on: ubuntu-latest
