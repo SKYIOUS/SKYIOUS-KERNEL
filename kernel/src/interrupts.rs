@@ -181,9 +181,9 @@ extern "x86-interrupt" fn double_fault_handler(
 /// touching the heap allocator (allocating there can deadlock on the
 /// global ALLOCATOR spinlock — see scheduler::tick docs).
 #[cfg(not(target_arch = "aarch64"))]
-struct IrqFmtBuf<'a> {
-    buf: &'a mut [u8],
-    len: usize,
+pub(crate) struct IrqFmtBuf<'a> {
+    pub buf: &'a mut [u8],
+    pub len: usize,
 }
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -334,6 +334,30 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
     drop(cur);
+
+    // Dump the faulting stack: for a CALL to a garbage address, [SP] holds the
+    // return address of the call site. Formatted without allocation (IRQ ctx).
+    {
+        let mut scratch = [0u8; 2048];
+        let dump_len;
+        {
+            let mut w = IrqFmtBuf { buf: &mut scratch, len: 0 };
+            let sp = stack_frame.stack_pointer.as_u64();
+            let page = sp & !0xFFF;
+            let _ = core::fmt::write(&mut w, format_args!("FAULT STACK @ {:#x} (page {:#x}):\n", sp, page));
+            for i in 0..48usize {
+                let addr = sp + (i as u64) * 8;
+                // Only read within the page containing SP — the panic path must
+                // never fault again on a guard page.
+                if addr & !0xFFF != page { break; }
+                // SAFETY: SP is a live kernel stack; reads are best-effort diagnostics
+                let word = unsafe { *(addr as *const u64) };
+                let _ = core::fmt::write(&mut w, format_args!("  [{:02}] {:016x}\n", i, word));
+            }
+            dump_len = w.len;
+        }
+        crate::serial_write(core::str::from_utf8(&scratch[..dump_len]).unwrap_or(""));
+    }
 
     panic!(
         "PAGE FAULT at {:?}  error={:?}\n{:#?}",

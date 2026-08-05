@@ -66,12 +66,18 @@ fn futex_wait(uaddr: *mut u32, expected: u32) -> u64 {
         return errno::Errno::EINTR as u64;
     }
 
-    if let Some(mut current_thread) = scheduler::take_current_thread() {
-        current_thread.status = crate::task::thread::ThreadStatus::Blocked;
-        current_thread.futex_wake_addr = Some(uaddr as u64);
-        scheduler::add_futex_thread(*current_thread);
+    // Mark the current thread Blocked in place. The block-point context is
+    // saved into the thread's own `stack_ptr` by `prepare_switch`, so the
+    // resume (after `schedule()` returns) continues the syscall postamble.
+    {
+        let mut sched = scheduler::this_cpu_sched().lock();
+        if let Some(current) = sched.current_thread.as_mut() {
+            current.status = crate::task::thread::ThreadStatus::Blocked;
+            current.futex_wake_addr = Some(uaddr as u64);
+        }
     }
     scheduler::schedule();
+    0
 }
 
 /// FUTEX_LOCK_PI — acquire a PI-aware futex, boosting the owner's priority.
@@ -122,12 +128,16 @@ fn futex_lock_pi(uaddr: *mut u32) -> u64 {
 
     if signal_pending() { return errno::Errno::EINTR as u64; }
 
-    if let Some(mut current_thread) = scheduler::take_current_thread() {
-        current_thread.status = crate::task::thread::ThreadStatus::Blocked;
-        current_thread.futex_wake_addr = Some(uaddr as u64);
-        scheduler::add_futex_thread(*current_thread);
+    // Mark the current thread Blocked in place; see futex_wait.
+    {
+        let mut sched = scheduler::this_cpu_sched().lock();
+        if let Some(current) = sched.current_thread.as_mut() {
+            current.status = crate::task::thread::ThreadStatus::Blocked;
+            current.futex_wake_addr = Some(uaddr as u64);
+        }
     }
     scheduler::schedule();
+    0
 }
 
 /// FUTEX_UNLOCK_PI — release a PI futex, waking waiters.

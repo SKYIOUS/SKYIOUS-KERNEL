@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 use core::fmt::Write;
+use core::sync::atomic::Ordering;
 use crate::sync::IrqSafeMutex as Mutex;
 
 pub type TestFn = fn() -> Result<(), &'static str>;
@@ -33,6 +34,7 @@ pub fn run_all() {
     }
     
     let mut passed = 0usize;
+    crate::task::scheduler::SCHED_QUIESCE.store(true, Ordering::Relaxed);
     for (i, t) in tests.iter().enumerate() {
         let test_num = i + 1;
         match (t.func)() {
@@ -60,6 +62,22 @@ pub fn run_all() {
     
     // TAP summary to serial
     crate::serial_write(&alloc::format!("# {}/{} passed, {} failed\n", passed, count, count - passed));
+    crate::task::scheduler::SCHED_QUIESCE.store(false, Ordering::Relaxed);
+
+    // Drain test-injected threads from the global queues: with wake paths now
+    // marking ready queues dirty, woken test threads (bogus contexts) would be
+    // picked by the real scheduler once quiesce clears.
+    for q in [&crate::task::scheduler::GLOBAL.pending_queue,
+              &crate::task::scheduler::GLOBAL.sleep_queue,
+              &crate::task::scheduler::GLOBAL.block_queue,
+              &crate::task::scheduler::GLOBAL.futex_queue] {
+        while q.lock().pop_front().is_some() {}
+    }
+    for i in 0..crate::task::scheduler::MAX_CPUS {
+        if let Some(s) = crate::task::scheduler::cpu_sched(i) {
+            s.lock().reset_runnable_state();
+        }
+    }
     
     // VGA summary
     let summary = alloc::format!("  {}/{} passed, {} failed\n", passed, count, count - passed);

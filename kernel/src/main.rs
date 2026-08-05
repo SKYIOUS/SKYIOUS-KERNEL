@@ -146,6 +146,11 @@ pub fn oom_kill() -> ! {
         serial_write("[OOM] No current process!\n");
     }
     crate::task::scheduler::schedule();
+    // schedule() returns if this thread is the sole runnable work; never
+    // return from oom_kill.
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
 }
 
 fn init_kaslr() {
@@ -352,6 +357,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     task::scheduler::schedule();
+    // schedule() returns only when the current thread is the sole runnable
+    // work; the boot stack is parked at its first switch and never reaches
+    // here, but kernel_main is `-> !`, so idle-wait instead of falling off.
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
 }
 
 extern "C" fn init_os_task() -> ! {

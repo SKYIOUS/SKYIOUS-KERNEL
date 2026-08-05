@@ -118,17 +118,17 @@ pub extern "C" fn usb_hid_poller() -> ! {
             }
         }
 
-        // Sleep ~1 tick. Mirrors the body of sys_nanosleep: pull the current
-        // thread off this CPU, mark it Blocked with a wake deadline, re-queue
-        // on the sleep list, and invoke the scheduler to pick something else.
-        // SAFETY: `take_current_thread`/`add_sleeping_thread`/`schedule`
-        // operate on the calling CPU's scheduler state; we are in thread
-        // context (IF=1, not an ISR), which is the required precondition.
+        // Sleep ~1 tick. Mirrors the body of sys_nanosleep: mark the current
+        // thread Blocked in place with a wake deadline; the scheduler saves
+        // the block-point context into its own `stack_ptr` and wakes it when
+        // the deadline passes. We are in thread context (IF=1, not an ISR).
         let target_tick = crate::interrupts::get_ticks() + 1;
-        if let Some(mut current) = crate::task::scheduler::take_current_thread() {
-            current.status = crate::task::thread::ThreadStatus::Blocked;
-            current.sleep_until = Some(target_tick);
-            crate::task::scheduler::add_sleeping_thread(*current);
+        {
+            let mut sched = crate::task::scheduler::this_cpu_sched().lock();
+            if let Some(current) = sched.current_thread.as_mut() {
+                current.status = crate::task::thread::ThreadStatus::Blocked;
+                current.sleep_until = Some(target_tick);
+            }
         }
         crate::task::scheduler::schedule();
     }

@@ -125,6 +125,9 @@ fn test_pick_next_from_pending() -> Result<(), &'static str> {
     let before = GLOBAL.pending_queue.lock().len();
     GLOBAL.pending_queue.lock().push_back(alloc::boxed::Box::new(make_test_thread(5, None)));
     let mut target = cpu_sched(0).ok_or("no cpu 0")?.lock();
+    // Drain threads woken by earlier wake tests — they live in cpu0's stride
+    // heap / ready_queues and would shadow the pending thread.
+    target.reset_runnable_state();
     let thread = target.pick_next();
     if thread.is_none() { return Err("pick_next should return thread from pending"); }
     let t = thread.unwrap();
@@ -136,6 +139,7 @@ fn test_pick_next_from_pending() -> Result<(), &'static str> {
 
 fn test_pick_next_empty() -> Result<(), &'static str> {
     let mut target = cpu_sched(0).ok_or("no cpu 0")?.lock();
+    target.reset_runnable_state();
     let thread = target.pick_next();
     if thread.is_some() { return Err("pick_next on empty should return None"); }
     Ok(())

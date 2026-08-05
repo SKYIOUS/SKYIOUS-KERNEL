@@ -34,8 +34,14 @@ pub fn run_boot() -> ! {
             BootState::EnterUserspace => state_enter_userspace(&ctx, &session),
             BootState::Running => {
                 BootLogger::info(&ctx, "Boot complete, entering scheduler dispatch");
-                // Running is terminal — hand off to scheduler
+                // Running is terminal — hand off to scheduler. schedule()
+                // returns only when this thread is the sole runnable work;
+                // then idle-wait (the timer IRQ's try_schedule does all
+                // future switching).
                 crate::task::scheduler::schedule();
+                loop {
+                    x86_64::instructions::interrupts::enable_and_hlt();
+                }
             }
             BootState::Failed => {
                 // Panic handler will dump trace

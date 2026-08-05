@@ -359,6 +359,11 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     // This core is now ready to be scheduled.
     crate::println!("SMP: CPU {} entering scheduler", cpu_id);
     crate::task::scheduler::schedule();
+    // schedule() returns only when the current thread is the sole runnable
+    // work; this entry never resumes, so idle-wait instead of falling off.
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
 }
 /// Returns the LAPIC ID of the current CPU.
 pub fn get_cpu_id() -> usize {

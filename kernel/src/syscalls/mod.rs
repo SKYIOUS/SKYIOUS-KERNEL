@@ -1827,6 +1827,11 @@ fn sys_exit(status: u64) -> u64 {
         thread.status = crate::task::thread::ThreadStatus::Exited;
     });
     crate::task::scheduler::schedule();
+    // The thread is Exited; schedule() switches away and frees the stack.
+    // If it ever returned, idle-wait rather than returning from sys_exit.
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
 }
 
 fn sys_set_tid_address(tidptr: *const u32) -> u64 {
@@ -1864,13 +1869,20 @@ fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
 
     let target_tick = crate::interrupts::get_ticks() + sleep_ticks;
 
-    if let Some(mut current_thread) = crate::task::scheduler::take_current_thread() {
-        current_thread.status = crate::task::thread::ThreadStatus::Blocked;
-        current_thread.sleep_until = Some(target_tick);
-        crate::task::scheduler::add_sleeping_thread(*current_thread);
+    // Mark the current thread Blocked in place — do NOT take it out of
+    // `current_thread`. `prepare_switch` saves the block-point context into
+    // the thread's own `stack_ptr`, and when woken the thread resumes inside
+    // `schedule()` and returns here → syscall postamble → sysretq.
+    {
+        let mut sched = crate::task::scheduler::this_cpu_sched().lock();
+        if let Some(current) = sched.current_thread.as_mut() {
+            current.status = crate::task::thread::ThreadStatus::Blocked;
+            current.sleep_until = Some(target_tick);
+        }
     }
 
     crate::task::scheduler::schedule();
+    0
 }
 
 fn sys_sysinfo(buf: *mut u64) -> u64 {
@@ -2658,7 +2670,6 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
     let parent_lock = CURRENT_PROCESS.lock();
     if let Some(ref parent) = *parent_lock {
         let parent_id = parent.id;
-        
         // 1. Clone Address Space with CoW
         let mut frame_allocator = BuddyFrameAllocator;
         let child_as = match parent.address_space.clone_cow(&mut frame_allocator) {
@@ -2693,7 +2704,7 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
             
             // 4. Add to scheduler
             crate::task::scheduler::spawn_thread(child_thread);
-            
+
             return child_pid;
         }
     }
@@ -5605,10 +5616,12 @@ fn sys_pause() -> u64 {
         }
         // Sleep 1 tick (~10ms) then re-check
         let now = crate::interrupts::get_ticks();
-        if let Some(mut current_thread) = crate::task::scheduler::take_current_thread() {
-            current_thread.status = crate::task::thread::ThreadStatus::Blocked;
-            current_thread.sleep_until = Some(now + 1);
-            crate::task::scheduler::add_sleeping_thread(*current_thread);
+        {
+            let mut sched = crate::task::scheduler::this_cpu_sched().lock();
+            if let Some(current) = sched.current_thread.as_mut() {
+                current.status = crate::task::thread::ThreadStatus::Blocked;
+                current.sleep_until = Some(now + 1);
+            }
         }
         crate::task::scheduler::schedule();
     }
