@@ -367,7 +367,9 @@ fn sys_dup2(old_fd: u64, new_fd: u64) -> u64 {
         }
         
         fd_table[new_fd as usize] = old_desc;
-        p.fd_flags.lock()[new_fd as usize] = old_flags;
+        // dup2 clears FD_CLOEXEC on the target (Linux semantics); other
+        // status flags are preserved.
+        p.fd_flags.lock()[new_fd as usize] = old_flags & !0x80000;
         return new_fd;
     }
     errno::Errno::ESRCH as u64
@@ -381,14 +383,18 @@ fn sys_dup(old_fd: u64) -> u64 {
             return errno::Errno::EBADF as u64;
         }
         let old_desc = fd_table[old_fd as usize].clone().unwrap();
+        let mut flags = p.fd_flags.lock();
         // Find lowest available fd
         for (i, slot) in fd_table.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(old_desc);
+                if i >= flags.len() { flags.resize(i + 1, 0); }
+                flags[i] = 0; // dup clears FD_CLOEXEC (Linux semantics)
                 return i as u64;
             }
         }
         fd_table.push(Some(old_desc));
+        flags.push(0);
         return (fd_table.len() - 1) as u64;
     }
     errno::Errno::ESRCH as u64
@@ -426,17 +432,39 @@ fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
         match cmd {
             F_DUPFD => {
                 let desc = fd_table[fd as usize].clone().unwrap();
+                let mut flags = p.fd_flags.lock();
                 for (i, slot) in fd_table.iter_mut().enumerate() {
                     if slot.is_none() && i as u64 > arg {
                         *slot = Some(desc);
+                        if i >= flags.len() { flags.resize(i + 1, 0); }
+                        flags[i] = 0; // dup clears FD_CLOEXEC (Linux semantics)
                         return i as u64;
                     }
                 }
                 fd_table.push(Some(desc));
+                flags.push(0);
                 (fd_table.len() - 1) as u64
             }
-            F_GETFD => 0, // No close-on-exec flag tracked yet
-            F_SETFD => 0, // Accept and ignore
+            F_GETFD => {
+                let flags = p.fd_flags.lock();
+                let has = (fd as usize) < flags.len() && flags[fd as usize] & 0x80000 != 0;
+                if has { 1 } else { 0 } // Linux FD_CLOEXEC = 0x1
+            }
+            F_SETFD => {
+                let mut flags = p.fd_flags.lock();
+                if (fd as usize) >= flags.len() {
+                    flags.resize(fd as usize + 1, 0);
+                }
+                // Only FD_CLOEXEC (bit 0) exists in Linux fd flags; map it to
+                // the kernel's internal cloexec bit (0x80000) without
+                // clobbering the O_* status flags in the low 16 bits.
+                if arg & 1 != 0 {
+                    flags[fd as usize] |= 0x80000;
+                } else {
+                    flags[fd as usize] &= !0x80000;
+                }
+                0
+            }
             F_GETFL => {
                 let flags = p.fd_flags.lock();
                 if (fd as usize) < flags.len() { flags[fd as usize] } else { 0 }
@@ -1369,6 +1397,13 @@ fn sys_close(fd: u64) -> u64 {
         fd_table[fd as usize] = None;
     }
     drop(fd_table);
+    // Clear fd flags: a stale FD_CLOEXEC bit on a closed slot would
+    // silently close an unrelated fd reused at the same index after exec.
+    let mut flags = process.fd_flags.lock();
+    if (fd as usize) < flags.len() {
+        flags[fd as usize] = 0;
+    }
+    drop(flags);
     // Also close from handle_table
     if process.handle_table.lock().close(fd).is_some() {
         found = true;
@@ -4492,8 +4527,18 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
         crate::println!("[EMULATION] Running Linux binary: {}", path);
     }
 
-    // Restore fd table and flags
-    *process.fd_table.lock() = old_fd_table;
+    // Restore fd table and flags, honoring FD_CLOEXEC (internal bit 0x80000,
+    // set by F_SETFD / O_CLOEXEC / MFD_CLOEXEC / SFD_CLOEXEC): those fds are
+    // closed across exec.
+    let mut new_fd_table = old_fd_table;
+    for (i, fl) in old_fd_flags.iter().enumerate() {
+        if fl & 0x80000 != 0 {
+            if let Some(slot) = new_fd_table.get_mut(i) {
+                *slot = None;
+            }
+        }
+    }
+    *process.fd_table.lock() = new_fd_table;
     *process.fd_flags.lock() = old_fd_flags;
 
     let entry = process.entry_point;
