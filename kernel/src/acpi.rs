@@ -47,13 +47,20 @@ pub enum TriggerMode {
 }
 
 pub struct InterruptOverride {
-    pub _isa_irq: u8,
-    pub _global_system_interrupt: u32,
-    pub _polarity: Polarity,
-    pub _trigger_mode: TriggerMode,
+    pub isa_irq: u8,
+    pub global_system_interrupt: u32,
+    pub polarity: Polarity,
+    pub trigger_mode: TriggerMode,
 }
 
 pub static OVERRIDES: spin::Once<alloc::vec::Vec<InterruptOverride>> = spin::Once::new();
+/// PCI (bus, device, pin) → GSI mapping populated from ACPI _PRT.
+///
+/// _PRT is an AML object in the DSDT/SSDT; the `acpi` crate v4.1.1 does not
+/// parse it. When _PRT parsing is implemented, populate this map so that
+/// `apic::route_by_gsi` can route PCI INTx by GSI instead of ISA IRQ.
+pub static PCI_GSI_MAP: spin::Once<alloc::collections::BTreeMap<(u8, u8, u8), u8>> =
+    spin::Once::new();
 
 pub fn init(boot_rsdp: Option<u64>) {
     let handler = SkyAcpiHandler;
@@ -112,13 +119,17 @@ pub fn init(boot_rsdp: Option<u64>) {
                     acpi::platform::interrupt::TriggerMode::Level => TriggerMode::Level,
                 };
                 overrides.push(InterruptOverride {
-                    _isa_irq: interrupt_override.isa_source,
-                    _global_system_interrupt: interrupt_override.global_system_interrupt,
-                    _polarity: pol,
-                    _trigger_mode: trig,
+                    isa_irq: interrupt_override.isa_source,
+                    global_system_interrupt: interrupt_override.global_system_interrupt,
+                    polarity: pol,
+                    trigger_mode: trig,
                 });
             }
             OVERRIDES.call_once(|| overrides);
+            crate::acpi_prt::parse_prt_from_tables(&tables);
+            // Currently route_pci_irq matches overrides by isa_irq only; full PCI
+            // INTx routing requires selecting the GSI from _PRT and routing by
+            // global_system_interrupt when an override exists.
         } else {
             crate::serial_write("[ACPI] interrupt model is NOT Apic!\n");
         }
@@ -242,9 +253,15 @@ pub fn acpi_reboot() {
 fn find_rsdp() -> Option<usize> {
     let offset = memory::physical_memory_offset();
     let ebda_ptr_virt = offset + 0x40E;
+    // The EBDA pointer at 0x40E is a 16-bit real-mode segment, so its physical
+    // address (`segment << 4`) is always below 1 MiB. We still validate it:
+    // EBDA is conventionally located in the 0x80000-0xA0000 window (between
+    // conventional memory and the VGA/ROM hole). A corrupted pointer landing
+    // in the VGA/ROM hole (0xA0000-0xFFFF0) would make `search_range` read from
+    // ROM/graphics MMIO; skip such values and fall through to the BIOS ROM scan.
     let ebda_base = unsafe { (*(ebda_ptr_virt as *const u16) as u64) << 4 };
 
-    if ebda_base > 0 {
+    if ebda_base > 0 && ebda_base < 0xA_0000 {
         if let Some(addr) = search_range(offset + ebda_base, offset + ebda_base + 1024) {
             return Some((addr - offset) as usize);
         }
@@ -263,3 +280,5 @@ fn search_range(start: u64, end: u64) -> Option<u64> {
     }
     None
 }
+
+

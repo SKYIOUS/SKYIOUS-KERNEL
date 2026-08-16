@@ -66,6 +66,7 @@ mod gdt;
 mod keyboard;
 #[cfg(not(target_arch = "aarch64"))]
 mod acpi;
+mod acpi_prt;
 #[cfg(not(target_arch = "aarch64"))]
 mod apic;
 #[cfg(not(target_arch = "aarch64"))]
@@ -93,9 +94,7 @@ pub mod arch;
 pub mod hal;
 #[cfg(feature = "gpu")]
 pub mod compositor;
-#[cfg(feature = "self_test")]
 mod selftest;
-#[cfg(feature = "self_test")]
 mod tests;
 #[cfg(feature = "hypervisor")]
 pub mod hypervisor;
@@ -266,6 +265,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         acpi::init(boot_info.rsdp_addr.into_option());
         serial_write("[BOOT] APIC init...\n");
         apic::init();
+        crate::tests::run_all();
         #[cfg(feature = "smp")]
         { serial_write("[BOOT] SMP init...\n"); smp::init(); }
         serial_write("[BOOT] PS/2 init...\n");

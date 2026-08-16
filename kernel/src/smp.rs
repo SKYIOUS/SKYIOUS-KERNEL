@@ -268,7 +268,9 @@ pub fn init() {
                 crate::serial_write("[SMP] sending INIT\n");
                 crate::apic::send_ipi(ap_id, 0, 0x05);
                 crate::serial_write("[SMP] INIT sent, waiting delivery\n");
-                crate::apic::wait_for_ipi();
+                if !crate::apic::wait_for_ipi() {
+                    crate::serial_write("[SMP] INIT IPI delivery stalled\n");
+                }
                 crate::serial_write("[SMP] INIT delivered, spin 10ms\n");
                 // Wait 10ms (spinloop approximation)
                 for _ in 0..10_000_000 { core::hint::spin_loop(); }
@@ -280,7 +282,9 @@ pub fn init() {
             crate::serial_write("[SMP] sending SIPI\n");
             for _ in 0..2 {
                 crate::apic::send_ipi(ap_id, vector, 0x06);
-                crate::apic::wait_for_ipi();
+                if !crate::apic::wait_for_ipi() {
+                    crate::serial_write("[SMP] SIPI IPI delivery stalled\n");
+                }
                 // Short delay between SIPIs (~200us)
                 for _ in 0..200_000 { core::hint::spin_loop(); }
             }
@@ -388,7 +392,9 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
     drop(areas);
 
     crate::apic::send_ipi(cpu_id, 251, 0); // IpiFunc vector
-    crate::apic::wait_for_ipi();
+    if !crate::apic::wait_for_ipi() {
+        crate::serial_write(&alloc::format!("[SMP] IPI to CPU {} stalled\n", cpu_id));
+    }
 }
 
 /// Broadcasts a function call to all CPU cores except self.
@@ -410,7 +416,9 @@ pub fn smp_broadcast(func: extern "C" fn(u64), _arg: u64) {
     for cpu_id in 0..crate::syscalls::MAX_CPUS as u8 {
         if cpu_id != current_cpu {
             crate::apic::send_ipi(cpu_id, 251, 0);
-            crate::apic::wait_for_ipi();
+            if !crate::apic::wait_for_ipi() {
+                crate::serial_write(&alloc::format!("[SMP] broadcast IPI to CPU {} stalled\n", cpu_id));
+            }
         }
     }
 }
@@ -440,6 +448,8 @@ pub fn smp_broadcast_func(kind: u64, arg: u64) {
 pub fn broadcast_tlb_flush(addr: u64) {
     // Broadcast vector 250 (TlbFlush) to all excluding self
     crate::apic::send_broadcast_ipi(250);
-    crate::apic::wait_for_ipi();
+    if !crate::apic::wait_for_ipi() {
+        crate::serial_write("[SMP] broadcast TLB flush IPI stalled\n");
+    }
     let _ = addr;
 }
