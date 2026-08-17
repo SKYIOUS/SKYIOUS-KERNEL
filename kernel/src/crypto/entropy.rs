@@ -17,7 +17,7 @@ impl EntropyHarvester {
     /// Adds entropy from a raw source.
     pub fn add_entropy(&self, val: u64) {
         // Simple mixing using a prime multiplier and XOR
-        self.pool.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+        self.pool.try_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
             Some(old.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(val) ^ (val >> 13))
         }).ok();
     }
