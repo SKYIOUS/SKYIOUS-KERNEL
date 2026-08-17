@@ -19,6 +19,7 @@ pub trait InterruptController: Send + Sync {
     fn eoi(&self, vector: IrqVector);
     fn mask_irq(&self, irq: u8, masked: bool);
     fn route_pci_irq(&self, bus: u8, device: u8, pin: u8, vector: IrqVector);
+    fn set_affinity(&self, vector: IrqVector, cpu_mask: u64);
     fn controller_id(&self) -> u32;
     unsafe fn enable_cpu(&self);
 }

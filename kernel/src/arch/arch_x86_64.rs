@@ -193,4 +193,8 @@ impl crate::hal::irq::InterruptController for X86IrqController {
     unsafe fn enable_cpu(&self) {
         x86_64::instructions::interrupts::enable();
     }
+
+    fn set_affinity(&self, _vector: crate::hal::irq::IrqVector, _cpu_mask: u64) {
+        crate::serial_write("[APIC] set_affinity (stub)\n");
+    }
 }
