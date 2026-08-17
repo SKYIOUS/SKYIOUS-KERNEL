@@ -6,8 +6,10 @@
 //! which picks the highest-priority ready thread and context-switches to it.
 //!
 //! Pick order:
-//!   1. Local ready queues (highest priority first, round-robin within a level).
-//!   2. Global pending queue (newly-spawned threads).
+//!   1. Global pending queue (newly-spawned threads — drained first so
+//!      spawn()/fork()/clone() work can never be starved by an
+//!      always-runnable local pair).
+//!   2. Local ready queues (highest priority first, round-robin within a level).
 //!   3. Work stealing from other CPUs' highest-priority queues.
 //!
 //! Blocked threads are tracked in global sleep/futex/pipe queues and woken by
@@ -128,34 +130,32 @@ impl PerCpuScheduler {
         // Only flush if dirty to avoid O(k log N) overhead when no threads were woken
         self.flush_ready_queues();
 
-        // 1. Stride heap — O(log N) pop
-        if let Some(PassOrd(t)) = self.stride_heap.pop() {
-            return Some(t);
-        }
-
-        // 2. Try global pending queue — non-blocking: this runs in IRQ context
-        // (try_schedule) and can preempt `spawn()`, which holds this lock.
-        // Spinning here would deadlock the CPU (the holder cannot run until iret).
+        // 1. Global pending queue first — non-blocking: this runs in IRQ
+        // context (try_schedule) and can preempt `spawn()`, which holds this
+        // lock. Spinning here would deadlock the CPU (the holder cannot run
+        // until iret). Newly-spawned threads must be picked before local
+        // ready work: with local-first order, two always-runnable threads
+        // (e.g. the async executor and a kernel poller ping-ponging through
+        // schedule()) keep the ready queues permanently non-empty and starve
+        // pending forever — the boot-time init thread sat in pending while
+        // the CPU livelocked between the two locals.
         if let Some(t) = GLOBAL.pending_queue.try_lock().and_then(|mut q| q.pop_front()) {
             return Some(t);
         }
 
+        // 2. Stride heap — O(log N) pop
+        if let Some(PassOrd(t)) = self.stride_heap.pop() {
+            return Some(t);
+        }
+
         // 3. Work stealing: try to grab the min-pass thread from another CPU
-        // Add simple deadlock detection by tracking steal attempts
         let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
-        let mut steal_attempts = 0;
         for i in 0..MAX_CPUS {
             if i == current_cpu { continue; }
             if let Some(mut other) = PER_CPU[i].try_lock() {
                 other.flush_ready_queues();
                 if let Some(PassOrd(t)) = other.stride_heap.pop() {
                     return Some(t);
-                }
-                steal_attempts += 1;
-                // Avoid excessive work stealing - if we've tried 3 CPUs without success,
-                // break to prevent potential deadlock scenarios
-                if steal_attempts >= 3 {
-                    break;
                 }
             }
         }
