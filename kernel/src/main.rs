@@ -78,6 +78,7 @@ mod net;
 pub mod korlang;
 #[cfg(feature = "smp")]
 mod smp;
+mod tests;
 pub mod debug;
 #[cfg(feature = "ai_rule")]
 pub mod vahiai;
@@ -95,7 +96,6 @@ pub mod hal;
 #[cfg(feature = "gpu")]
 pub mod compositor;
 mod selftest;
-mod tests;
 #[cfg(feature = "hypervisor")]
 pub mod hypervisor;
 pub mod boot;
@@ -141,6 +141,12 @@ pub fn oom_kill() -> ! {
         let msg2 = alloc::format!("[OOM] Killing pid {}\n", pid);
         serial_write(&msg2);
         crate::task::process::kill_process(pid);
+        // The victim is the current thread. Mark it Exited so the next
+        // context switch frees its kernel stack and address space instead
+        // of letting the zombie thread keep running with no process entry.
+        crate::task::scheduler::with_current_thread(|thread| {
+            thread.status = crate::task::thread::ThreadStatus::Exited;
+        });
     } else {
         serial_write("[OOM] No current process!\n");
     }
@@ -265,7 +271,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         acpi::init(boot_info.rsdp_addr.into_option());
         serial_write("[BOOT] APIC init...\n");
         apic::init();
-        crate::tests::run_all();
+    crate::tests::run_all();
         #[cfg(feature = "smp")]
         { serial_write("[BOOT] SMP init...\n"); smp::init(); }
         serial_write("[BOOT] PS/2 init...\n");
@@ -448,6 +454,8 @@ pub async fn gui_refresh_task() {
             }
             if let Ok(Some(key_event)) = kbd.add_byte(scancode) {
                 if let Some(key) = kbd.process_keyevent(key_event) {
+                    crate::serial_write(&alloc::format!("[KBD-FWD] {:?}
+", key));
                     let mut comp = crate::gui::COMPOSITOR.lock();
                     comp.handle_keyboard(key);
                 }
@@ -544,7 +552,9 @@ fn test_memory_allocations() {
     // Add a brief delay so the user can read the output
     println!("Pausing briefly...");
     serial_write("[TRACE] before spin loop\n");
-    for _ in 0..1000000 {
+    // ponytail: 1M spin_loop iterations took ~90s in debug+TCG; 10k is
+    // enough for a human to read a framebuffer splash.
+    for _ in 0..10000 {
         core::hint::spin_loop();
     }
     serial_write("[TRACE] after spin loop\n");
@@ -662,3 +672,10 @@ fn panic(info: &PanicInfo) -> ! {
 
     loop { crate::arch::CurrentArch::halt(); }
 }
+
+
+
+
+
+
+

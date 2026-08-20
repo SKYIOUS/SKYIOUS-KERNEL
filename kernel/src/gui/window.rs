@@ -199,14 +199,51 @@ impl Window {
                         term.handle_char(c);
                     }
                 }
-                pc_keyboard::DecodedKey::RawKey(_k) => {}
+                pc_keyboard::DecodedKey::RawKey(k) => {
+                    let mapped: Option<u8> = match k {
+                        pc_keyboard::KeyCode::Tab => Some(0x09),
+                        pc_keyboard::KeyCode::Enter => Some(0x0A),
+                        pc_keyboard::KeyCode::Backspace => Some(0x08),
+                        pc_keyboard::KeyCode::Escape => Some(0x1B),
+                        pc_keyboard::KeyCode::ArrowUp => Some(0x11),
+                        pc_keyboard::KeyCode::ArrowDown => Some(0x12),
+                        pc_keyboard::KeyCode::ArrowLeft => Some(0x10),
+                        pc_keyboard::KeyCode::ArrowRight => Some(0x13),
+                        pc_keyboard::KeyCode::Delete => Some(0x7F),
+                        _ => None,
+                    };
+                    if let Some(c) = mapped {
+                        term.handle_char(c as char);
+                    }
+                }
             }
         } else {
             match key {
                 pc_keyboard::DecodedKey::Unicode(c) => {
                     self.key_events.push_back(c as u8);
                 }
-                pc_keyboard::DecodedKey::RawKey(_k) => {}
+                pc_keyboard::DecodedKey::RawKey(k) => {
+                    // Map special keys to the byte values apps already handle
+                    let mapped: Option<u8> = match k {
+                        pc_keyboard::KeyCode::Tab => Some(0x09),
+                        pc_keyboard::KeyCode::Enter => Some(0x0A),
+                        pc_keyboard::KeyCode::Backspace => Some(0x08),
+                        pc_keyboard::KeyCode::Escape => Some(0x1B),
+                        pc_keyboard::KeyCode::ArrowUp => Some(0x11),
+                        pc_keyboard::KeyCode::ArrowDown => Some(0x12),
+                        pc_keyboard::KeyCode::ArrowLeft => Some(0x10),
+                        pc_keyboard::KeyCode::ArrowRight => Some(0x13),
+                        pc_keyboard::KeyCode::Home => Some(0x01),
+                        pc_keyboard::KeyCode::End => Some(0x05),
+                        pc_keyboard::KeyCode::PageUp => Some(0x0B),
+                        pc_keyboard::KeyCode::PageDown => Some(0x0C),
+                        pc_keyboard::KeyCode::Delete => Some(0x7F),
+                        _ => None,
+                    };
+                    if let Some(c) = mapped {
+                        self.key_events.push_back(c);
+                    }
+                }
             }
         }
     }
