@@ -132,48 +132,10 @@ impl Shell {
         let cmd = parts.next().unwrap_or("");
         let args: Vec<&str> = parts.collect();
 
-        match cmd {
-            "help" => commands::system::help(),
-            "info" => commands::system::info(),
-            "uptime" => commands::system::uptime(),
-            "clear" => commands::system::clear(),
-            "reboot" => commands::system::reboot(),
-            "poweroff" => commands::system::poweroff(),
-            "neofetch" => commands::system::neofetch(),
-            "sleep" => commands::system::sleep(args.first().unwrap_or(&"0")),
-            "exec" => commands::system::exec(args.first().unwrap_or(&"")),
-
-            "ls" => commands::fs::ls(args.first().unwrap_or(&".")),
-            "cd" => commands::fs::cd(args.first().unwrap_or(&"")),
-            "pwd" => commands::fs::pwd(),
-            "mkdir" => commands::fs::mkdir(args.first().unwrap_or(&"")),
-            "rm" => commands::fs::rm(args.first().unwrap_or(&"")),
-            "touch" => commands::fs::touch(args.first().unwrap_or(&"")),
-            "cat" => commands::fs::cat(args.first().unwrap_or(&"")),
-            "stat" => commands::fs::stat(args.first().unwrap_or(&"")),
-            "cp" => commands::fs::cp(args.first().unwrap_or(&""), args.get(1).unwrap_or(&"")),
-            "mount" => commands::fs::mount(),
-
-            #[cfg(feature = "net")]
-            "ping" => commands::net::ping(args.first().unwrap_or(&"")),
-            #[cfg(feature = "net")]
-            "nslookup" => commands::net::nslookup(args.first().unwrap_or(&"")),
-            #[cfg(feature = "net")]
-            "fetch" => commands::net::fetch(args.first().unwrap_or(&"")),
-
-            "heap_test" => commands::debug::heap_test(),
-            "lspci" => commands::debug::lspci(),
-            "panic" => commands::debug::panic(),
-            "test_pf" => commands::debug::test_pf(),
-            "test_cow" => commands::debug::test_cow(),
-
-            "theme" => commands::theme::theme(args.first().unwrap_or(&"")),
-
-            _ => {
-                vga_buffer::set_color(Color::Red, Color::Black);
-                println!("Unknown command: {}", command);
-                vga_buffer::set_color(Color::White, Color::Black);
-            }
+        if !commands::dispatch(cmd, &args, &mut |s| print!("{}", s), false) {
+            vga_buffer::set_color(Color::Red, Color::Black);
+            println!("Unknown command: {}", command);
+            vga_buffer::set_color(Color::White, Color::Black);
         }
     }
 }

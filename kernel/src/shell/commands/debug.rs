@@ -1,22 +1,20 @@
 use crate::println;
-use crate::vga_buffer::{self, Color};
+use alloc::format;
 
-pub fn heap_test() {
+pub fn heap_test(out: &mut dyn FnMut(&str)) {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
-    
-    vga_buffer::set_color(Color::LightGreen, Color::Black);
-    println!("Running Heap Test...");
+
+    out("Running Heap Test...\n");
     let x = Box::new(5);
-    println!("Boxed value: {} at {:p}", x, x);
-    
+    out(&format!("Boxed value: {} at {:p}\n", x, x));
+
     let mut v = Vec::new();
     for i in 0..100 {
         v.push(i);
     }
-    println!("Vector sum: {} at {:p}", v.iter().sum::<i32>(), v.as_ptr());
-    println!("Heap test passed!");
-    vga_buffer::set_color(Color::White, Color::Black);
+    out(&format!("Vector sum: {} at {:p}\n", v.iter().sum::<i32>(), v.as_ptr()));
+    out("Heap test passed!\n");
 }
 
 pub fn lspci() {
@@ -26,6 +24,9 @@ pub fn lspci() {
 pub fn panic() {
     panic!("User requested panic!");
 }
+
+// [vga] console-only tests below: they write via the VGA buffer and activate
+// test address spaces — not safe from the GUI terminal.
 
 pub fn test_pf() {
     use crate::task::process::{Process, Vma, CURRENT_PROCESS};

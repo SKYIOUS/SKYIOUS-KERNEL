@@ -1,23 +1,22 @@
 #![cfg(feature = "net")]
-use crate::println;
 use alloc::format;
 use alloc::vec::Vec;
 
-pub fn nslookup(name: &str) {
+pub fn nslookup(name: &str, out: &mut dyn FnMut(&str)) {
     if name.is_empty() { return; }
     let name_null = format!("{}\0", name);
     let mut ip_bytes = [0u8; 4];
     let res = crate::syscalls::syscall_handler(200, name_null.as_ptr() as u64, ip_bytes.as_mut_ptr() as u64, 0, 0, 0, core::ptr::null_mut());
     if res == 0 {
-        println!("{} resolves to {}.{}.{}.{}", name, ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+        out(&format!("{} resolves to {}.{}.{}.{}\n", name, ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]));
     } else {
-        println!("nslookup: Host '{}' not found", name);
+        out(&format!("nslookup: Host '{}' not found\n", name));
     }
 }
 
-pub fn ping(target: &str) {
+pub fn ping(target: &str, out: &mut dyn FnMut(&str)) {
     if target.is_empty() {
-        println!("Usage: ping <ip>");
+        out("Usage: ping <ip>\n");
         return;
     }
     let ip_parts: Vec<&str> = target.split('.').collect();
@@ -30,7 +29,7 @@ pub fn ping(target: &str) {
             ip_parts[3].parse().unwrap_or(0)
         );
         
-        println!("PING {}...", ip);
+        out(&format!("PING {}...\n", ip));
         
         let fd = crate::syscalls::syscall_handler(41, 1, 3, 0, 0, 0, core::ptr::null_mut()); // SYS_SOCKET (AF_INET=1, SOCK_RAW=3)
         if fd < 1000 {
@@ -53,43 +52,43 @@ pub fn ping(target: &str) {
             
             crate::syscalls::syscall_handler(44, fd, buf.as_ptr() as u64, buf.len() as u64, addr_buf.as_ptr() as u64, 16, core::ptr::null_mut()); // SYS_SENDTO (44)
             
-            println!("Echo request sent. Waiting for reply...");
+            out("Echo request sent. Waiting for reply...\n");
             
             let mut rx_buf = [0u8; 1024];
             #[allow(clippy::never_loop)]
             for _ in 0..100 {
                 let n = crate::syscalls::syscall_handler(45, fd, rx_buf.as_mut_ptr() as u64, 1024, 0, 0, core::ptr::null_mut()); // SYS_RECVFROM (45)
                 if n != 0 && n < 1024 {
-                    println!("64 bytes from {}: icmp_seq=1", ip);
+                    out(&format!("64 bytes from {}: icmp_seq=1\n", ip));
                     break;
                 }
                 crate::task::scheduler::schedule();
             }
             crate::syscalls::syscall_handler(3, fd, 0, 0, 0, 0, core::ptr::null_mut()); // SYS_CLOSE
         } else {
-            println!("ping: socket failed (error: {})", fd);
+            out(&format!("ping: socket failed (error: {})\n", fd));
         }
     } else {
-        println!("Usage: ping <ip>");
+        out("Usage: ping <ip>\n");
     }
 }
 
-pub fn fetch(url: &str) {
+pub fn fetch(url: &str, out: &mut dyn FnMut(&str)) {
     if url.is_empty() { return; }
     let host = if url.starts_with("http://") { &url[7..] } else { url };
     let hostname = if let Some(pos) = host.find('/') { &host[..pos] } else { host };
 
-    println!("Resolving {}...", hostname);
+    out(&format!("Resolving {}...\n", hostname));
     let host_null = format!("{}\0", hostname);
     let mut ip_bytes = [0u8; 4];
     let res = crate::syscalls::syscall_handler(200, host_null.as_ptr() as u64, ip_bytes.as_mut_ptr() as u64, 0, 0, 0, core::ptr::null_mut());
     
     if res == 0 {
         let ip = format!("{}.{}.{}.{}", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-        println!("Connecting to {} ({}) on port 80...", hostname, ip);
-        println!("Connected! Sending GET request...");
-        println!("HTTP/1.1 200 OK\nContent-Type: text/html\n\n<HTML><BODY>Welcome to Vahi!</BODY></HTML>");
+        out(&format!("Connecting to {} ({}) on port 80...\n", hostname, ip));
+        out("Connected! Sending GET request...\n");
+        out("HTTP/1.1 200 OK\nContent-Type: text/html\n\n<HTML><BODY>Welcome to Vahi!</BODY></HTML>\n");
     } else {
-        println!("fetch: Could not resolve host {}", hostname);
+        out(&format!("fetch: Could not resolve host {}\n", hostname));
     }
 }

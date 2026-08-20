@@ -74,8 +74,56 @@ pub fn test_phys_alloc() -> Result<(), &'static str> {
     crate::memory::phys::test_alloc_free()
 }
 
+pub fn test_user_copy_fault_abort() -> Result<(), &'static str> {
+    use crate::syscalls::user_access::{copy_from_user, copy_to_user, user_copy_active};
+    // Unmapped user-range address (4 GiB; phys memory lives at 0xFFFF_8000_...).
+    // The fault must abort the copy to Err(()) without panicking the kernel.
+    let bad: *const u8 = 0x0000_1000_0000 as *const u8;
+    let mut buf = [0u8; 64];
+    if unsafe { copy_from_user(&mut buf, bad) }.is_ok() {
+        return Err("copy from unmapped address succeeded");
+    }
+    if user_copy_active() {
+        return Err("user_copy_nest not reset after abort");
+    }
+    // Repeat (exercises the nested-fault entry path twice) and the store
+    // direction; kernel must still be fully alive afterwards.
+    if unsafe { copy_to_user(bad as *mut u8, &buf) }.is_ok() {
+        return Err("copy to unmapped address succeeded");
+    }
+    if user_copy_active() {
+        return Err("user_copy_nest not reset after store abort");
+    }
+    Ok(())
+}
+
 pub fn test_virt_constants() -> Result<(), &'static str> {
     crate::memory::virt::test_page_constants()
+}
+
+pub fn test_shell_dispatch() -> Result<(), &'static str> {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    let mut lines: Vec<String> = Vec::new();
+    {
+        let mut sink = |s: &str| lines.push(String::from(s));
+        if !crate::shell::commands::dispatch("help", &[], &mut sink, false) {
+            return Err("help was not handled");
+        }
+        if crate::shell::commands::dispatch("theme", &["vahi"], &mut sink, true) {
+            return Err("vga-only command ran from GUI dispatch");
+        }
+    }
+    if lines.is_empty() {
+        return Err("help produced no output");
+    }
+    if !lines.concat().contains("exec") {
+        return Err("help output missing commands");
+    }
+    if crate::shell::commands::dispatch("bogus_cmd_xyz", &[], &mut |_| {}, false) {
+        return Err("unknown command reported as handled");
+    }
+    Ok(())
 }
 
 pub fn register_all() {
@@ -87,4 +135,6 @@ pub fn register_all() {
     selftest::register("phys::bitmap_alloc_free", test_phys_alloc);
     selftest::register("virt::page_constants", test_virt_constants);
     selftest::register("pata::mbr_signature", pata_read_test::test_pata_mbr_sig);
+    selftest::register("user_copy::fault_abort_recovers", test_user_copy_fault_abort);
+    selftest::register("shell::dispatch_table", test_shell_dispatch);
 }
