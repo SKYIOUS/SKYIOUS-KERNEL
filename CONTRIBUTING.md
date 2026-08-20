@@ -141,7 +141,7 @@ cd kernel && cargo build
 
 # 3. Build with features
 cargo build --features self_test
-cargo build --features "smp,net,ai_rule"
+cargo build --features "smp,net,ext4"
 
 # 4. Build bootimage
 cd ../builder && cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
@@ -221,7 +221,7 @@ cd kernel
 cargo build                     # Debug build
 cargo build --release           # Release build with LTO + opt-level=z
 cargo build --features self_test  # With self-test framework
-cargo build --features "smp,net,ai_rule"  # Default features
+cargo build --features "smp,net,ext4"  # Default features
 ```
 
 ### Cargo Features
@@ -230,8 +230,12 @@ cargo build --features "smp,net,ai_rule"  # Default features
 |---------|---------|-------------|
 | `smp` | Yes | SMP support (multi-core) |
 | `net` | Yes | Network stack (smoltcp) |
-| `ai_rule` | Yes | VahiAI subsystem |
-| `ai_llm` | No | LLM integration |
+| `ext4` | Yes | Ext4 filesystem support |
+| `uhci` | No | USB UHCI controller |
+| `ash` | No | ASH sandbox engine |
+| `gpu` | No | GPU/compositor support |
+| `hypervisor` | No | Hypervisor support |
+| `verification` | No | Runtime verification runner |
 | `self_test` | No | Built-in self-test framework |
 
 ### Builder

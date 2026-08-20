@@ -11,8 +11,9 @@ use core::sync::atomic::{AtomicU64, Ordering::*};
 use core::cell::UnsafeCell;
 
 /// A mutex that blocks rather than spins when contended.
-/// ponytail: Currently unused. Deploy on VFS/compositor/BUDDY_ALLOCATOR when
-/// contention is measured via profiling (add a counter to SchedLock::lock slow path).
+/// Used by the VFS global lock (vfs/mod.rs). Deploy on BUDDY_ALLOCATOR or the
+/// compositor when contention is measured via profiling (add a counter to
+/// SchedLock::lock slow path).
 #[allow(dead_code)]
 pub struct SchedLock<T> {
     held: AtomicU64,       // 0 = free, 1 = held

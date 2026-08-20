@@ -142,7 +142,6 @@ impl Shell {
             "neofetch" => commands::system::neofetch(),
             "sleep" => commands::system::sleep(args.first().unwrap_or(&"0")),
             "exec" => commands::system::exec(args.first().unwrap_or(&"")),
-            "kor" => commands::system::kor(args.first().unwrap_or(&"")),
 
             "ls" => commands::fs::ls(args.first().unwrap_or(&".")),
             "cd" => commands::fs::cd(args.first().unwrap_or(&"")),
@@ -167,9 +166,6 @@ impl Shell {
             "panic" => commands::debug::panic(),
             "test_pf" => commands::debug::test_pf(),
             "test_cow" => commands::debug::test_cow(),
-
-            #[cfg(feature = "ai_rule")]
-            "vahiai" => commands::ai::vahiai(&args),
 
             "theme" => commands::theme::theme(args.first().unwrap_or(&"")),
 

@@ -21,8 +21,6 @@ pub fn help() {
     println!("  cat <file>: Display content of a file");
     println!("  stat <file>: Display file information");
     println!("  exec <file> : Execute a user-mode ELF binary (e.g. exec init.elf)");
-    #[cfg(feature = "ai_rule")]
-    println!("  vahiai <intent> [args...] : Invoke VahiAI intent (e.g. vahiai net.info)");
     #[cfg(feature = "net")]
     println!("  ping <host> : Send ICMP echo request (e.g. ping 10.0.2.2)");
     println!("  cp <source> <dest> : Copy a file");
@@ -103,22 +101,4 @@ pub fn exec(filename: &str) {
     
     println!("[SHELL] Executing {}...", filename);
     crate::syscalls::syscall_handler(59, path_c.as_ptr() as u64, argv.as_ptr() as u64, 0, 0, 0, core::ptr::null_mut());
-}
-
-pub fn kor(path: &str) {
-    if path.is_empty() {
-        println!("Usage: kor <file>");
-        return;
-    }
-    println!("Loading Korlang program: {}...", path);
-    if let Some(node) = crate::vfs::VFS.lock().resolve_path(path) {
-        if let Ok(data) = node.read(usize::MAX) {
-            println!("Executing {} ({} bytes)...", path, data.len());
-            println!("Korlang program finished with exit code 0");
-        } else {
-            println!("kor: Failed to read file {}", path);
-        }
-    } else {
-        println!("kor: File '{}' not found", path);
-    }
 }

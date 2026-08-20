@@ -12,6 +12,12 @@ OVMF.fd
 # QEMU logs and captures
 qemu_*.log
 serial.log
+serial_*.log
+prev_*.log
+builder_run.log
+
+# Debug archives
+old_initrd_compare.tar
 
 # Build output directory
 SkyOS/

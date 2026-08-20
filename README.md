@@ -1,6 +1,6 @@
 # Vahi Kernel
 
-> A modern, monolithic Rust kernel — the core of **SARGA OS**.
+> A modern, monolithic Rust kernel â€” the core of **SARGA OS**.
 > Multi-architecture, feature-rich, and built for performance and safety.
 
 <div align="center">
@@ -33,8 +33,7 @@
   - [GUI Compositor](#gui-compositor)
   - [eBPF](#ebpf)
   - [Linux Compatibility](#linux-compatibility)
-  - [Korlang Runtime](#korlang-runtime)
-  - [VahiAI](#vahiai)
+  - [ASH Sandbox](#ash-sandbox)
   - [io_uring](#io_uring)
 - [Build & Run](#build--run)
 - [Project Structure](#project-structure)
@@ -48,7 +47,7 @@
 
 ## Overview
 
-**Vahi** (Sanskrit: "the carrier") is a monolithic kernel written entirely in Rust. It powers **SARGA OS** — a modern operating system built from scratch with a focus on safety, performance, and extensibility.
+**Vahi** (Sanskrit: "the carrier") is a monolithic kernel written entirely in Rust. It powers **SARGA OS** â€” a modern operating system built from scratch with a focus on safety, performance, and extensibility.
 
 ### Design Philosophy
 
@@ -73,11 +72,11 @@
 ## How This Project Was Built
 >
 > The vast majority of this codebase was generated with the assistance of AI (large language models).
-> This allowed a single developer to create a full monolithic kernel from scratch — something that
+> This allowed a single developer to create a full monolithic kernel from scratch â€” something that
 > would normally require a team of engineers over many years.
 >
 > **We are looking for human contributors.** If you understand Rust, operating systems, or any part
-> of this codebase — whether you wrote none of it or all of it — your help is needed and welcome.
+> of this codebase â€” whether you wrote none of it or all of it â€” your help is needed and welcome.
 > We are actively seeking people to:
 >
 > - Review the code for correctness, security, and performance
@@ -95,84 +94,84 @@
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     Vahi Kernel                              │
-│                                                              │
-│  ┌───────────────────────────────────────────────────────┐   │
-│  │                  Syscall Layer                        │   │
-│  │  90+ syscalls: read/write/open/mmap/fork/execve/net/  │   │
-│  │  gui/clone/futex/io_uring/bpf/vahiai                  │   │
-│  └───────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌────────────┐ ┌──────────┐ ┌────────┐ ┌────────────────┐   │
-│  │  Scheduler │ │  Memory  │ │  VFS   │ │  Network       │   │
-│  │  Preemptive│ │  Buddy   │ │ 7 FS   │ │  smoltcp       │   │
-│  │  8 prio    │ │  Slab    │ │ mounts │ │  E1000/VirtIO  │   │
-│  └────────────┘ └──────────┘ └────────┘ └────────────────┘   │
-│                                                              │
-│  ┌────────────┐ ┌──────────┐ ┌────────┐ ┌────────────────┐   │
-│  │  Drivers   │ │  GUI     │ │ eBPF   │ │  Security      │   │
-│  │  12+ devs  │ │Compositor│ │ VM+Ver │ │  SMEP/UMIP/    │   │
-│  │  PCI/ACPI  │ │ 30 FPS   │ │ Map+Hlp│ │  ASLR/Caps     │   │
-│  └────────────┘ └──────────┘ └────────┘ └────────────────┘   │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │              Arch Abstraction (Arch trait)             │  │
-│  │  x86_64 (SYSCALL/SYSRET, FSGSBASE)                     │  │
-│  │  aarch64 (SVC/ERET, TPIDR_EL0, GICv2/v3)               │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                     Vahi Kernel                              â”‚
+â”‚                                                              â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚                  Syscall Layer                        â”‚   â”‚
+â”‚  â”‚  90+ syscalls: read/write/open/mmap/fork/execve/net/  â”‚   â”‚
+â”‚  â”‚  gui/clone/futex/io_uring/bpf                       â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚                                                              â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚  Scheduler â”‚ â”‚  Memory  â”‚ â”‚  VFS   â”‚ â”‚  Network       â”‚   â”‚
+â”‚  â”‚  Preemptiveâ”‚ â”‚  Buddy   â”‚ â”‚ 7 FS   â”‚ â”‚  smoltcp       â”‚   â”‚
+â”‚  â”‚  8 prio    â”‚ â”‚  Slab    â”‚ â”‚ mounts â”‚ â”‚  E1000/VirtIO  â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚                                                              â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚  Drivers   â”‚ â”‚  GUI     â”‚ â”‚ eBPF   â”‚ â”‚  Security      â”‚   â”‚
+â”‚  â”‚  12+ devs  â”‚ â”‚Compositorâ”‚ â”‚ VM+Ver â”‚ â”‚  SMEP/UMIP/    â”‚   â”‚
+â”‚  â”‚  PCI/ACPI  â”‚ â”‚ 30 FPS   â”‚ â”‚ Map+Hlpâ”‚ â”‚  ASLR/Caps     â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚                                                              â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”‚
+â”‚  â”‚              Arch Abstraction (Arch trait)             â”‚  â”‚
+â”‚  â”‚  x86_64 (SYSCALL/SYSRET, FSGSBASE)                     â”‚  â”‚
+â”‚  â”‚  aarch64 (SVC/ERET, TPIDR_EL0, GICv2/v3)               â”‚  â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 ### Boot Flow
 
 ```
 UEFI firmware
-    │
-    ▼
+    â”‚
+    â–¼
 bootloader crate (UEFI boot protocol)
-    │
-    ▼
+    â”‚
+    â–¼
 kernel_main()
-    ├── KASLR init (RDTSC entropy)
-    ├── CPUID feature detection (SMEP, UMIP, FSGSBASE)
-    ├── Memory init (OffsetPageTable, physical map)
-    ├── Framebuffer init (UEFI GOP)
-    ├── Frame allocator init (Buddy)
-    ├── Heap init (linked_list_allocator @ 0xFFFF_C000_0000_0000)
-    ├── GDT + TSS init
-    ├── IDT + PIC init (exception handlers, IRQs)
-    ├── Syscall init (STAR/LStar/SFMask MSRs, SYSCALL entry)
-    ├── ACPI init (RSDP parse, FADT, MADT)
-    ├── APIC init (LAPIC + I/O APIC)
-    ├── SMP boot (SIPI to APs)
-    ├── PS/2 init (keyboard + mouse)
-    ├── PCI enumeration (scan bus, init drivers)
-    ├── VFS init (mount initrd, devfs, ctlfs, tmpfs, partitions)
-    ├── Network init (smoltcp, E1000)
-    ├── LSM init
-    ├── GUI init (compositor, window manager, desktop)
-    ├── Spawn async tasks (kernel shell, GUI refresh, network poll)
-    ├── Spawn init_os_task (loads /bin/init into userspace)
-    ├── Enable interrupts (sti)
-    └── Enter scheduler (never returns)
+    â”œâ”€â”€ KASLR init (RDTSC entropy)
+    â”œâ”€â”€ CPUID feature detection (SMEP, UMIP, FSGSBASE)
+    â”œâ”€â”€ Memory init (OffsetPageTable, physical map)
+    â”œâ”€â”€ Framebuffer init (UEFI GOP)
+    â”œâ”€â”€ Frame allocator init (Buddy)
+    â”œâ”€â”€ Heap init (linked_list_allocator @ 0xFFFF_C000_0000_0000)
+    â”œâ”€â”€ GDT + TSS init
+    â”œâ”€â”€ IDT + PIC init (exception handlers, IRQs)
+    â”œâ”€â”€ Syscall init (STAR/LStar/SFMask MSRs, SYSCALL entry)
+    â”œâ”€â”€ ACPI init (RSDP parse, FADT, MADT)
+    â”œâ”€â”€ APIC init (LAPIC + I/O APIC)
+    â”œâ”€â”€ SMP boot (SIPI to APs)
+    â”œâ”€â”€ PS/2 init (keyboard + mouse)
+    â”œâ”€â”€ PCI enumeration (scan bus, init drivers)
+    â”œâ”€â”€ VFS init (mount initrd, devfs, ctlfs, tmpfs, partitions)
+    â”œâ”€â”€ Network init (smoltcp, E1000)
+    â”œâ”€â”€ LSM init
+    â”œâ”€â”€ GUI init (compositor, window manager, desktop)
+    â”œâ”€â”€ Spawn async tasks (kernel shell, GUI refresh, network poll)
+    â”œâ”€â”€ Spawn init_os_task (loads /bin/init into userspace)
+    â”œâ”€â”€ Enable interrupts (sti)
+    â””â”€â”€ Enter scheduler (never returns)
 ```
 
 ### Memory Layout
 
 ```
-0x0000_0000_0000 ┌──────────────────────┐
-                 │   Userspace          │
-                 │   (per-process)      │
-0x7FFF_FFFF_E000 ├──────────────────────┤
-                 │   Kernel Mapping     │
-0xFFFF_8000_0000 ├──────────────────────┤
-                 │   Physical Memory    │
-                 │   (1:1 mapped)       │
-0xFFFF_C000_0000 ├──────────────────────┤
-                 │   Kernel Heap        │
-                 │   (Buddy + Slab)     │
-0xFFFF_FFFF_FFFF └──────────────────────┘
+0x0000_0000_0000 â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                 â”‚   Userspace          â”‚
+                 â”‚   (per-process)      â”‚
+0x7FFF_FFFF_E000 â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+                 â”‚   Kernel Mapping     â”‚
+0xFFFF_8000_0000 â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+                 â”‚   Physical Memory    â”‚
+                 â”‚   (1:1 mapped)       â”‚
+0xFFFF_C000_0000 â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+                 â”‚   Kernel Heap        â”‚
+                 â”‚   (Buddy + Slab)     â”‚
+0xFFFF_FFFF_FFFF â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 ---
@@ -201,8 +200,6 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 | **Kernel** | `uname` `sysinfo` `reboot` |
 | **eBPF** | `bpf` |
 | **io_uring** | `io_uring_setup` `io_uring_enter` |
-| **Korlang** | `korlang` (#201) |
-| **AI** | `vahiai` (#300) |
 
 ### Filesystems
 
@@ -244,7 +241,7 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 
 | Driver | Description |
 |--------|-------------|
-| **HDA** | Intel High Definition Audio — playback, volume control (0-100%), stream halt |
+| **HDA** | Intel High Definition Audio â€” playback, volume control (0-100%), stream halt |
 | **PC Speaker** | Legacy programmable interval timer beeper |
 
 #### Display
@@ -258,7 +255,7 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 
 | Driver | Description |
 |--------|-------------|
-| **xHCI** | USB 3.0 controller — device descriptor parsing, config walking, HID/mass storage class detection |
+| **xHCI** | USB 3.0 controller â€” device descriptor parsing, config walking, HID/mass storage class detection |
 
 #### Other
 
@@ -346,7 +343,7 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 - Clipboard support
 ```
 
-The GUI is rendered entirely in kernel space — no userspace display server needed. Each window gets a dedicated framebuffer, and the compositor blends them together at 30 FPS.
+The GUI is rendered entirely in kernel space â€” no userspace display server needed. Each window gets a dedicated framebuffer, and the compositor blends them together at 30 FPS.
 
 ### eBPF
 
@@ -383,20 +380,11 @@ The kernel includes a per-process Linux emulation mode, auto-detected via ELF in
 - Remaining 60+ syscalls routed through do_syscall
 ```
 
-### Korlang Runtime
+### ASH Sandbox
 
 ```
-- Custom programming language runtime
-- SYS_KORLANG syscall (#201)
-- Korlang interpreter/JIT runtime integration
-```
-
-### VahiAI
-
-```
-- AI/ML subsystem (gated by ai_rule feature)
-- SYS_VAHIAI syscall (#300) for model queries
-- Accessible from userspace via aicli / libsarga::vahiai
+- Native helper sandbox engine (gated by ash feature)
+- SYS_ASH_* syscalls for rule enforcement
 ```
 
 ### io_uring
@@ -513,22 +501,22 @@ qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=bootimage-vahi_kernel.bi
 
 | FS | R/W | Mount point | Notes |
 |----|-----|-------------|-------|
-| Ext2 | ✅ | Auto-detected on block devices | Full R/W, indirect blocks, mkdir, create |
+| Ext2 | âœ… | Auto-detected on block devices | Full R/W, indirect blocks, mkdir, create |
 | Ext4 | Read | Auto-detected | Read-only, extent trees (cfg feature) |
-| FAT32 | ✅ | Auto-detected on block devices | Via fatfs crate |
+| FAT32 | âœ… | Auto-detected on block devices | Via fatfs crate |
 | TarFS | Read | Initrd / block devices | ustar format |
-| Tmpfs | ✅ | `/tmp` | In-memory, writable |
-| DevFS | ✅ | `/dev` | Device nodes (tty0, fb0, null, zero, block devs) |
+| Tmpfs | âœ… | `/tmp` | In-memory, writable |
+| DevFS | âœ… | `/dev` | Device nodes (tty0, fb0, null, zero, block devs) |
 | CtlFS | Read | `/ctl` | Plan9-style control files |
 
 ### Auto-Mount Behavior
 
 During boot, `vfs::init()` scans all block devices and partitions, auto-detecting and mounting ext2, ext4, FAT32, TarFS, and SkyFS under `/mnt/`. The root filesystem is selected from:
 
-1. Explicit `BOOT_DEVICE` index → tries ext4 → ext2 → SkyFS
-2. First block device partition → tries ext4 → ext2 → SkyFS
-3. First whole block device → tries ext4 → ext2 → SkyFS
-4. Bootloader initrd → TarFS (fallback)
+1. Explicit `BOOT_DEVICE` index â†’ tries ext4 â†’ ext2 â†’ SkyFS
+2. First block device partition â†’ tries ext4 â†’ ext2 â†’ SkyFS
+3. First whole block device â†’ tries ext4 â†’ ext2 â†’ SkyFS
+4. Bootloader initrd â†’ TarFS (fallback)
 
 ### Testing with an Ext2 Disk Image
 
@@ -569,11 +557,11 @@ spkg install hello-world.skp
 With the `self_test` feature enabled, five ext2 filesystem tests run at boot:
 
 ```
-ext2_format_mount   — Format and mount minimal ext2
-ext2_read_file      — Read pre-written file, verify content
-ext2_write_file     — Create, write, read back file
-ext2_mkdir_and_stat — Create directory, verify stat
-ext2_permissions    — Verify permission bits in stat
+ext2_format_mount   â€” Format and mount minimal ext2
+ext2_read_file      â€” Read pre-written file, verify content
+ext2_write_file     â€” Create, write, read back file
+ext2_mkdir_and_stat â€” Create directory, verify stat
+ext2_permissions    â€” Verify permission bits in stat
 ```
 
 See `docs/filesystem-design.md` for the full FS architecture.
@@ -584,198 +572,192 @@ See `docs/filesystem-design.md` for the full FS architecture.
 
 ```
 SKYIOUS KERNEL/
-├── kernel/                        # Vahi kernel crate
-│   ├── Cargo.toml                 # v0.3.0, nightly Rust
-│   ├── rust-toolchain.toml        # nightly, rust-src, llvm-tools
-│   ├── build.rs                   # Initrd embedding, hash verification
-│   ├── linker.ld                  # x86_64 linker script (higher-half)
-│   ├── aarch64-linker.ld          # aarch64 linker script (physical)
-│   ├── aarch64-unknown-none.json  # aarch64 target spec
-│   └── src/
-│       ├── main.rs                # Entry point, boot flow, panic handler
-│       ├── vga_buffer.rs          # VGA text-mode driver
-│       ├── interrupts.rs          # IDT, PIC, exception handlers
-│       ├── gdt.rs                 # GDT, TSS, kernel stacks
-│       ├── keyboard.rs            # Scancode ring buffer
-│       ├── pci.rs                 # PCI bus enumeration
-│       ├── acpi.rs                # ACPI table parsing
-│       ├── allocator.rs           # Kernel heap init
-│       ├── security.rs            # LSM framework
-│       ├── shell.rs               # Kernel shell (async task)
-│       ├── tty.rs                 # TTY device
-│       ├── pty.rs                 # Pseudoterminal
-│       ├── smp.rs                 # SMP AP boot
-│       ├── elf_dyn.rs             # Dynamic ELF loading
-│       ├── emulation.rs           # Linux syscall emulation
-│       ├── selftest.rs            # Self-test framework
-│       ├── arch/
-│       │   ├── mod.rs             # Arch trait (10 methods)
-│       │   ├── arch_x86_64.rs     # x86_64 implementation
-│       │   └── arch_aarch64.rs    # aarch64 implementation (in progress)
-│       ├── memory/
-│       │   ├── mod.rs             # Memory init, virt_to_phys
-│       │   ├── buddy.rs           # Buddy frame allocator
-│       │   ├── slab.rs            # Slab object allocator
-│       │   ├── paging.rs          # Page tables (AddressSpace)
-│       │   ├── frame_info.rs      # Frame tracking
-│       │   └── stack.rs           # Kernel stack allocation
-│       ├── task/
-│       │   ├── mod.rs             # Task/YieldNow async primitive
-│       │   ├── thread.rs          # Thread struct, context switch, userspace jump
-│       │   ├── process.rs         # Process, ELF loading, VMA, fork/execve
-│       │   ├── scheduler.rs       # Preemptive scheduler
-│       │   ├── executor.rs        # Async executor
-│       │   └── keyboard.rs        # Async keyboard queue
-│       ├── syscalls/
-│       │   ├── mod.rs             # Syscall dispatch, signals
-│       │   ├── numbers.rs         # Syscall number constants
-│       │   ├── errno.rs           # Error numbers
-│       │   ├── signal.rs          # Signal types/state
-│       │   ├── user_access.rs     # SMAP-safe user memory access
-│       │   └── io_uring.rs        # io_uring setup/enter
-│       ├── vfs/
-│       │   ├── mod.rs             # VFS manager, node/fs traits, mount, path resolution
-│       │   ├── ramfs.rs           # In-memory tmpfs
-│       │   ├── devfs.rs           # Device filesystem
-│       │   ├── ctlfs.rs           # Plan9-style control FS
-│       │   ├── tarfs.rs           # Read-only tar FS
-│       │   ├── fat.rs             # FAT32 via fatfs crate
-│       │   ├── ext2.rs            # ext2 filesystem
-│       │   ├── pipe.rs            # Unix pipe IPC
-│       │   └── skyfs/             # SkyFS journaling filesystem
-│       │       ├── mod.rs         # SkyFS superblock, format, mount
-│       │       ├── alloc.rs       # Block bitmap allocator
-│       │       ├── btree.rs       # B-tree extent storage
-│       │       ├── dir.rs         # Directory operations
-│       │       ├── inode.rs       # Inode read/write
-│       │       └── journal.rs     # WAL journaling
-│       ├── drivers/
-│       │   ├── mod.rs             # Driver module declarations
-│       │   ├── ps2.rs             # PS/2 controller
-│       │   ├── mouse.rs           # PS/2 mouse
-│       │   ├── rtc.rs             # Real-time clock
-│       │   ├── graphics.rs        # UEFI GOP framebuffer
-│       │   ├── input.rs           # Input subsystem
-│       │   ├── watchdog.rs        # Watchdog timer
-│       │   ├── net/
-│       │   │   ├── mod.rs         # Network module
-│       │   │   ├── e1000.rs       # Intel E1000 driver
-│       │   │   └── virtio.rs      # VirtIO-Net driver
-│       │   ├── block/
-│       │   │   ├── mod.rs         # Block device trait
-│       │   │   ├── cache.rs       # Block cache
-│       │   │   └── partition.rs   # MBR/GPT partition parser
-│       │   ├── storage/
-│       │   │   ├── ahci.rs        # AHCI SATA driver
-│       │   │   ├── nvme.rs        # NVMe SSD driver
-│       │   │   └── virtio_block.rs # VirtIO-Block driver
-│       │   ├── gpu/
-│       │   │   └── virtio_gpu.rs  # VirtIO GPU driver
-│       │   ├── audio/
-│       │   │   ├── hda.rs         # Intel HDA audio driver
-│       │   │   └── pcspeaker.rs   # PC speaker driver
-│       │   └── usb/
-│       │       └── xhci.rs        # xHCI USB 3.0 driver
-│       ├── apic/
-│       │   ├── mod.rs             # APIC module
-│       │   ├── lapic.rs           # Local APIC
-│       │   └── ioapic.rs          # I/O APIC
-│       ├── net/
-│       │   ├── mod.rs             # Network stack (smoltcp)
-│       │   ├── dhcp.rs            # DHCP client
-│       │   └── dns.rs             # DNS resolver
-│       ├── gui/
-│       │   ├── mod.rs             # GUI compositor
-│       │   ├── window.rs          # Window management
-│       │   ├── drawing.rs         # Drawing primitives
-│       │   ├── terminal.rs        # Terminal emulator
-│       │   ├── splash.rs          # Boot splash screen
-│       │   ├── shell.rs           # Window manager
-│       │   ├── filemanager.rs     # File manager widget
-│       │   ├── mouse.rs           # Mouse cursor
-│       │   ├── widgets.rs         # Desktop widgets
-│       │   └── wallpaper.rs       # Wallpaper rendering
-│       ├── vahiai/
-│       │   └── mod.rs             # VahiAI subsystem
-│       ├── korlang/
-│       │   ├── mod.rs             # Korlang runtime
-│       │   └── runtime.rs         # Korlang interpreter/JIT
-│       ├── ebpf/
-│       │   ├── mod.rs             # eBPF module
-│       │   ├── vm.rs              # eBPF virtual machine
-│       │   ├── verifier.rs        # eBPF verifier
-│       │   ├── maps.rs            # eBPF maps
-│       │   └── helpers.rs         # Built-in eBPF helpers
-│       ├── crypto/
-│       │   ├── mod.rs             # Crypto module
-│       │   └── sha256.rs          # SHA-256 implementation
-│       ├── debug/
-│       │   ├── mod.rs             # Debug module
-│       │   └── symbols.rs         # Symbol lookup/unwinding
-│       └── tests/                 # Unit tests (self_test feature)
-├── userspace/                     # Userspace workspace
-│   ├── Cargo.toml                 # 15 workspace members
-│   ├── init/                      # Init process (PID 1)
-│   ├── sargash/                   # Shell
-│   ├── libc/                      # C standard library
-│   ├── libskyos/                  # OS library
-│   ├── libsarga/                  # Alt userspace library
-│   ├── libskyaudio/               # Audio library
-│   ├── coreutils/                 # 40+ Unix utilities
-│   ├── skyedit/                   # Text editor
-│   ├── sarga-disp/                # Display server
-│   ├── skypkg/                    # Package manager
-│   ├── login/                     # Login utility
-│   ├── passwd/                    # Password utility
-│   ├── skybuild/                  # Build tool
-│   ├── setup/                     # System setup
-│   ├── svc/                       # Service manager
-│   └── vahid/                     # Vahi daemon
-├── builder/                       # Bootimage builder crate
-│   └── src/main.rs                # Creates UEFI bootable disk image
-├── SkyOS/                         # Initrd staging
-│   ├── bin/                       # Userspace binaries
-│   ├── etc/                       # Config files
-│   └── initrd.tar                 # Packed initramfs
-├── docs/                          # Documentation (23+ files)
-│   ├── index.md                   # Documentation hub
-│   ├── ARCHITECTURE.md            # Architecture overview
-│   ├── BUILD.md                   # Build instructions
-│   ├── CHANGELOG.md               # Changelog
-│   ├── CONTRIBUTING.md            # Contributing guide
-│   ├── DRIVER_MODEL.md            # Driver architecture
-│   ├── MEMORY_MAP.md              # Virtual address space
-│   ├── SCHEDULER.md               # Scheduler design
-│   ├── SYSCALL_ABI.md             # Frozen syscall ABI
-│   ├── VFS_DESIGN.md              # VFS design
-│   ├── korlang_abi.md             # Korlang ABI
-│   ├── api/                       # API reference
-│   ├── architecture/              # Deep architecture dives
-│   ├── build/                     # Build system docs
-│   ├── contributing/              # Contribution workflow
-│   ├── design/                    # Design decisions
-│   ├── drivers/                   # Driver documentation
-│   ├── future/                    # Roadmap
-│   ├── guide/                     # Developer guides
-│   ├── reference/                 # Technical reference
-│   ├── security/                  # Security docs
-│   ├── syscalls/                  # Syscall table
-│   └── testing/                   # Testing methodology
-├── tests/                         # Integration tests
-│   ├── test_boot.ps1              # Boot test
-│   ├── test_login.ps1             # Login test
-│   └── test_panic.ps1             # Panic test
-├── .github/workflows/             # CI pipeline
-│   ├── build.yml                  # Build + selftest workflow
-│   └── build-kernel.yml           # Kernel build workflow
-├── make_bootimage.ps1             # Windows bootimage script
-├── make_bootimage.sh              # Linux bootimage script
-├── build_userspace.ps1            # Userspace build script
-├── build_initrd.py                # Initrd creation script
-├── build_disk.py                  # Disk image creation
-├── run_qemu_display.ps1           # QEMU launch (display)
-├── run_test_nographic.ps1         # QEMU launch (serial-only)
-└── vahi_uefi.img                  # Pre-built disk image
+â”œâ”€â”€ kernel/                        # Vahi kernel crate
+â”‚   â”œâ”€â”€ Cargo.toml                 # v0.3.0, nightly Rust
+â”‚   â”œâ”€â”€ rust-toolchain.toml        # nightly, rust-src, llvm-tools
+â”‚   â”œâ”€â”€ build.rs                   # Initrd embedding, hash verification
+â”‚   â”œâ”€â”€ linker.ld                  # x86_64 linker script (higher-half)
+â”‚   â”œâ”€â”€ aarch64-linker.ld          # aarch64 linker script (physical)
+â”‚   â”œâ”€â”€ aarch64-unknown-none.json  # aarch64 target spec
+â”‚   â””â”€â”€ src/
+â”‚       â”œâ”€â”€ main.rs                # Entry point, boot flow, panic handler
+â”‚       â”œâ”€â”€ vga_buffer.rs          # VGA text-mode driver
+â”‚       â”œâ”€â”€ interrupts.rs          # IDT, PIC, exception handlers
+â”‚       â”œâ”€â”€ gdt.rs                 # GDT, TSS, kernel stacks
+â”‚       â”œâ”€â”€ keyboard.rs            # Scancode ring buffer
+â”‚       â”œâ”€â”€ pci.rs                 # PCI bus enumeration
+â”‚       â”œâ”€â”€ acpi.rs                # ACPI table parsing
+â”‚       â”œâ”€â”€ allocator.rs           # Kernel heap init
+â”‚       â”œâ”€â”€ security.rs            # LSM framework
+â”‚       â”œâ”€â”€ shell.rs               # Kernel shell (async task)
+â”‚       â”œâ”€â”€ tty.rs                 # TTY device
+â”‚       â”œâ”€â”€ pty.rs                 # Pseudoterminal
+â”‚       â”œâ”€â”€ smp.rs                 # SMP AP boot
+â”‚       â”œâ”€â”€ elf_dyn.rs             # Dynamic ELF loading
+â”‚       â”œâ”€â”€ emulation.rs           # Linux syscall emulation
+â”‚       â”œâ”€â”€ selftest.rs            # Self-test framework
+â”‚       â”œâ”€â”€ arch/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # Arch trait (10 methods)
+â”‚       â”‚   â”œâ”€â”€ arch_x86_64.rs     # x86_64 implementation
+â”‚       â”‚   â””â”€â”€ arch_aarch64.rs    # aarch64 implementation (in progress)
+â”‚       â”œâ”€â”€ memory/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # Memory init, virt_to_phys
+â”‚       â”‚   â”œâ”€â”€ buddy.rs           # Buddy frame allocator
+â”‚       â”‚   â”œâ”€â”€ slab.rs            # Slab object allocator
+â”‚       â”‚   â”œâ”€â”€ paging.rs          # Page tables (AddressSpace)
+â”‚       â”‚   â”œâ”€â”€ frame_info.rs      # Frame tracking
+â”‚       â”‚   â””â”€â”€ stack.rs           # Kernel stack allocation
+â”‚       â”œâ”€â”€ task/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # Task/YieldNow async primitive
+â”‚       â”‚   â”œâ”€â”€ thread.rs          # Thread struct, context switch, userspace jump
+â”‚       â”‚   â”œâ”€â”€ process.rs         # Process, ELF loading, VMA, fork/execve
+â”‚       â”‚   â”œâ”€â”€ scheduler.rs       # Preemptive scheduler
+â”‚       â”‚   â”œâ”€â”€ executor.rs        # Async executor
+â”‚       â”‚   â””â”€â”€ keyboard.rs        # Async keyboard queue
+â”‚       â”œâ”€â”€ syscalls/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # Syscall dispatch, signals
+â”‚       â”‚   â”œâ”€â”€ numbers.rs         # Syscall number constants
+â”‚       â”‚   â”œâ”€â”€ errno.rs           # Error numbers
+â”‚       â”‚   â”œâ”€â”€ signal.rs          # Signal types/state
+â”‚       â”‚   â”œâ”€â”€ user_access.rs     # SMAP-safe user memory access
+â”‚       â”‚   â””â”€â”€ io_uring.rs        # io_uring setup/enter
+â”‚       â”œâ”€â”€ vfs/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # VFS manager, node/fs traits, mount, path resolution
+â”‚       â”‚   â”œâ”€â”€ ramfs.rs           # In-memory tmpfs
+â”‚       â”‚   â”œâ”€â”€ devfs.rs           # Device filesystem
+â”‚       â”‚   â”œâ”€â”€ ctlfs.rs           # Plan9-style control FS
+â”‚       â”‚   â”œâ”€â”€ tarfs.rs           # Read-only tar FS
+â”‚       â”‚   â”œâ”€â”€ fat.rs             # FAT32 via fatfs crate
+â”‚       â”‚   â”œâ”€â”€ ext2.rs            # ext2 filesystem
+â”‚       â”‚   â”œâ”€â”€ pipe.rs            # Unix pipe IPC
+â”‚       â”‚   â””â”€â”€ skyfs/             # SkyFS journaling filesystem
+â”‚       â”‚       â”œâ”€â”€ mod.rs         # SkyFS superblock, format, mount
+â”‚       â”‚       â”œâ”€â”€ alloc.rs       # Block bitmap allocator
+â”‚       â”‚       â”œâ”€â”€ btree.rs       # B-tree extent storage
+â”‚       â”‚       â”œâ”€â”€ dir.rs         # Directory operations
+â”‚       â”‚       â”œâ”€â”€ inode.rs       # Inode read/write
+â”‚       â”‚       â””â”€â”€ journal.rs     # WAL journaling
+â”‚       â”œâ”€â”€ drivers/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # Driver module declarations
+â”‚       â”‚   â”œâ”€â”€ ps2.rs             # PS/2 controller
+â”‚       â”‚   â”œâ”€â”€ mouse.rs           # PS/2 mouse
+â”‚       â”‚   â”œâ”€â”€ rtc.rs             # Real-time clock
+â”‚       â”‚   â”œâ”€â”€ graphics.rs        # UEFI GOP framebuffer
+â”‚       â”‚   â”œâ”€â”€ input.rs           # Input subsystem
+â”‚       â”‚   â”œâ”€â”€ watchdog.rs        # Watchdog timer
+â”‚       â”‚   â”œâ”€â”€ net/
+â”‚       â”‚   â”‚   â”œâ”€â”€ mod.rs         # Network module
+â”‚       â”‚   â”‚   â”œâ”€â”€ e1000.rs       # Intel E1000 driver
+â”‚       â”‚   â”‚   â””â”€â”€ virtio.rs      # VirtIO-Net driver
+â”‚       â”‚   â”œâ”€â”€ block/
+â”‚       â”‚   â”‚   â”œâ”€â”€ mod.rs         # Block device trait
+â”‚       â”‚   â”‚   â”œâ”€â”€ cache.rs       # Block cache
+â”‚       â”‚   â”‚   â””â”€â”€ partition.rs   # MBR/GPT partition parser
+â”‚       â”‚   â”œâ”€â”€ storage/
+â”‚       â”‚   â”‚   â”œâ”€â”€ ahci.rs        # AHCI SATA driver
+â”‚       â”‚   â”‚   â”œâ”€â”€ nvme.rs        # NVMe SSD driver
+â”‚       â”‚   â”‚   â””â”€â”€ virtio_block.rs # VirtIO-Block driver
+â”‚       â”‚   â”œâ”€â”€ gpu/
+â”‚       â”‚   â”‚   â””â”€â”€ virtio_gpu.rs  # VirtIO GPU driver
+â”‚       â”‚   â”œâ”€â”€ audio/
+â”‚       â”‚   â”‚   â”œâ”€â”€ hda.rs         # Intel HDA audio driver
+â”‚       â”‚   â”‚   â””â”€â”€ pcspeaker.rs   # PC speaker driver
+â”‚       â”‚   â””â”€â”€ usb/
+â”‚       â”‚       â””â”€â”€ xhci.rs        # xHCI USB 3.0 driver
+â”‚       â”œâ”€â”€ apic/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # APIC module
+â”‚       â”‚   â”œâ”€â”€ lapic.rs           # Local APIC
+â”‚       â”‚   â””â”€â”€ ioapic.rs          # I/O APIC
+â”‚       â”œâ”€â”€ net/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # Network stack (smoltcp)
+â”‚       â”‚   â”œâ”€â”€ dhcp.rs            # DHCP client
+â”‚       â”‚   â””â”€â”€ dns.rs             # DNS resolver
+â”‚       â”œâ”€â”€ gui/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # GUI compositor
+â”‚       â”‚   â”œâ”€â”€ window.rs          # Window management
+â”‚       â”‚   â”œâ”€â”€ drawing.rs         # Drawing primitives
+â”‚       â”‚   â”œâ”€â”€ terminal.rs        # Terminal emulator
+â”‚       â”‚   â”œâ”€â”€ splash.rs          # Boot splash screen
+â”‚       â”‚   â”œâ”€â”€ shell.rs           # Window manager
+â”‚       â”‚   â”œâ”€â”€ filemanager.rs     # File manager widget
+â”‚       â”‚   â”œâ”€â”€ mouse.rs           # Mouse cursor
+â”‚       â”‚   â”œâ”€â”€ widgets.rs         # Desktop widgets
+â”‚       â”‚   â””â”€â”€ wallpaper.rs       # Wallpaper rendering
+â”‚       â”œâ”€â”€ ebpf/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # eBPF module
+â”‚       â”‚   â”œâ”€â”€ vm.rs              # eBPF virtual machine
+â”‚       â”‚   â”œâ”€â”€ verifier.rs        # eBPF verifier
+â”‚       â”‚   â”œâ”€â”€ maps.rs            # eBPF maps
+â”‚       â”‚   â””â”€â”€ helpers.rs         # Built-in eBPF helpers
+â”‚       â”œâ”€â”€ crypto/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # Crypto module
+â”‚       â”‚   â””â”€â”€ sha256.rs          # SHA-256 implementation
+â”‚       â”œâ”€â”€ debug/
+â”‚       â”‚   â”œâ”€â”€ mod.rs             # Debug module
+â”‚       â”‚   â””â”€â”€ symbols.rs         # Symbol lookup/unwinding
+â”‚       â””â”€â”€ tests/                 # Unit tests (self_test feature)
+â”œâ”€â”€ userspace/                     # Userspace workspace
+â”‚   â”œâ”€â”€ Cargo.toml                 # 15 workspace members
+â”‚   â”œâ”€â”€ init/                      # Init process (PID 1)
+â”‚   â”œâ”€â”€ sargash/                   # Shell
+â”‚   â”œâ”€â”€ libc/                      # C standard library
+â”‚   â”œâ”€â”€ libskyos/                  # OS library
+â”‚   â”œâ”€â”€ libsarga/                  # Alt userspace library
+â”‚   â”œâ”€â”€ libskyaudio/               # Audio library
+â”‚   â”œâ”€â”€ coreutils/                 # 40+ Unix utilities
+â”‚   â”œâ”€â”€ skyedit/                   # Text editor
+â”‚   â”œâ”€â”€ sarga-disp/                # Display server
+â”‚   â”œâ”€â”€ skypkg/                    # Package manager
+â”‚   â”œâ”€â”€ login/                     # Login utility
+â”‚   â”œâ”€â”€ passwd/                    # Password utility
+â”‚   â”œâ”€â”€ skybuild/                  # Build tool
+â”‚   â”œâ”€â”€ setup/                     # System setup
+â”‚   â”œâ”€â”€ svc/                       # Service manager
+â”‚   â””â”€â”€ vahid/                     # Vahi daemon
+â”œâ”€â”€ builder/                       # Bootimage builder crate
+â”‚   â””â”€â”€ src/main.rs                # Creates UEFI bootable disk image
+â”œâ”€â”€ SkyOS/                         # Initrd staging
+â”‚   â”œâ”€â”€ bin/                       # Userspace binaries
+â”‚   â”œâ”€â”€ etc/                       # Config files
+â”‚   â””â”€â”€ initrd.tar                 # Packed initramfs
+â”œâ”€â”€ docs/                          # Documentation (23+ files)
+â”‚   â”œâ”€â”€ index.md                   # Documentation hub
+â”‚   â”œâ”€â”€ ARCHITECTURE.md            # Architecture overview
+â”‚   â”œâ”€â”€ BUILD.md                   # Build instructions
+â”‚   â”œâ”€â”€ CHANGELOG.md               # Changelog
+â”‚   â”œâ”€â”€ CONTRIBUTING.md            # Contributing guide
+â”‚   â”œâ”€â”€ DRIVER_MODEL.md            # Driver architecture
+â”‚   â”œâ”€â”€ MEMORY_MAP.md              # Virtual address space
+â”‚   â”œâ”€â”€ SCHEDULER.md               # Scheduler design
+â”‚   â”œâ”€â”€ SYSCALL_ABI.md             # Frozen syscall ABI
+â”‚   â”œâ”€â”€ VFS_DESIGN.md              # VFS design
+â”‚   â”œâ”€â”€ api/                       # API reference
+â”‚   â”œâ”€â”€ architecture/              # Deep architecture dives
+â”‚   â”œâ”€â”€ build/                     # Build system docs
+â”‚   â”œâ”€â”€ contributing/              # Contribution workflow
+â”‚   â”œâ”€â”€ design/                    # Design decisions
+â”‚   â”œâ”€â”€ drivers/                   # Driver documentation
+â”‚   â”œâ”€â”€ future/                    # Roadmap
+â”‚   â”œâ”€â”€ guide/                     # Developer guides
+â”‚   â”œâ”€â”€ reference/                 # Technical reference
+â”‚   â”œâ”€â”€ security/                  # Security docs
+â”‚   â”œâ”€â”€ syscalls/                  # Syscall table
+â”‚   â””â”€â”€ testing/                   # Testing methodology
+â”œâ”€â”€ tests/                         # Integration tests
+â”‚   â”œâ”€â”€ test_boot.ps1              # Boot test
+â”‚   â”œâ”€â”€ test_login.ps1             # Login test
+â”‚   â””â”€â”€ test_panic.ps1             # Panic test
+â”œâ”€â”€ .github/workflows/             # CI pipeline
+â”‚   â”œâ”€â”€ build.yml                  # Build + selftest workflow
+â”‚   â””â”€â”€ build-kernel.yml           # Kernel build workflow
+â”œâ”€â”€ make_bootimage.ps1             # Windows bootimage script
+â”œâ”€â”€ make_bootimage.sh              # Linux bootimage script
+â”œâ”€â”€ build_userspace.ps1            # Userspace build script
+â”œâ”€â”€ build_initrd.py                # Initrd creation script
+â”œâ”€â”€ build_disk.py                  # Disk image creation
+â”œâ”€â”€ run_qemu_display.ps1           # QEMU launch (display)
+â”œâ”€â”€ run_test_nographic.ps1         # QEMU launch (serial-only)
+â””â”€â”€ vahi_uefi.img                  # Pre-built disk image
 ```
 
 ---
@@ -795,24 +777,23 @@ Comprehensive documentation lives in the [`docs/`](docs/) directory:
 | [Driver Model](docs/DRIVER_MODEL.md) | Character, block, network, PCI driver architecture |
 | [Contributing](docs/CONTRIBUTING.md) | PR workflow, code style, testing |
 | [Changelog](docs/CHANGELOG.md) | Version history and release notes |
-| [Korlang ABI](docs/korlang_abi.md) | Korlang runtime ABI contract |
 
 Additional deep-dive directories:
 
 ```
 docs/
-├── api/           # Syscall API reference (read, write, open, mmap, execve, GUI, VFS, drivers, libc)
-├── architecture/  # Overview, memory, process, scheduling, interrupts, syscall, SMP, IPC, sync, time
-├── build/         # Prerequisites, building, boot images, config, cross-compilation, Docker, troubleshooting
-├── contributing/  # Code of conduct, PRs, issues, maintainers, license
-├── design/        # Philosophy, why Rust, async model, VFS, memory safety, GUI, networking, driver model, ELF
-├── drivers/       # PS/2, mouse, keyboard, graphics, RTC, E1000, VirtIO-Net, PCI, ACPI
-├── future/        # 8-phase roadmap (stabilization, networking, GUI, userspace, drivers, security, performance, portability)
-├── guide/         # Getting started, QEMU, adding a syscall, writing a driver, debugging, testing, VFS guide
-├── reference/     # x86_64, UEFI, ELF, PCI IDs, PS/2 scan codes, I/O ports, IRQ table, memory map
-├── security/      # Memory protection, syscall security, user isolation, future security
-├── syscalls/      # Individual syscall documentation
-└── testing/       # Unit, integration, memory, syscall, network, stress, regression, CI/CD
+â”œâ”€â”€ api/           # Syscall API reference (read, write, open, mmap, execve, GUI, VFS, drivers, libc)
+â”œâ”€â”€ architecture/  # Overview, memory, process, scheduling, interrupts, syscall, SMP, IPC, sync, time
+â”œâ”€â”€ build/         # Prerequisites, building, boot images, config, cross-compilation, Docker, troubleshooting
+â”œâ”€â”€ contributing/  # Code of conduct, PRs, issues, maintainers, license
+â”œâ”€â”€ design/        # Philosophy, why Rust, async model, VFS, memory safety, GUI, networking, driver model, ELF
+â”œâ”€â”€ drivers/       # PS/2, mouse, keyboard, graphics, RTC, E1000, VirtIO-Net, PCI, ACPI
+â”œâ”€â”€ future/        # 8-phase roadmap (stabilization, networking, GUI, userspace, drivers, security, performance, portability)
+â”œâ”€â”€ guide/         # Getting started, QEMU, adding a syscall, writing a driver, debugging, testing, VFS guide
+â”œâ”€â”€ reference/     # x86_64, UEFI, ELF, PCI IDs, PS/2 scan codes, I/O ports, IRQ table, memory map
+â”œâ”€â”€ security/      # Memory protection, syscall security, user isolation, future security
+â”œâ”€â”€ syscalls/      # Individual syscall documentation
+â””â”€â”€ testing/       # Unit, integration, memory, syscall, network, stress, regression, CI/CD
 ```
 
 ---

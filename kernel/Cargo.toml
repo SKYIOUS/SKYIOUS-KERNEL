@@ -1,4 +1,4 @@
-cargo-features = ["profile-rustflags"]
+﻿cargo-features = ["profile-rustflags"]
 
 [package]
 name = "vahi_kernel"
@@ -30,12 +30,11 @@ x86_64 = "0.14.2"
 pic8259 = "0.10.1"
 pc-keyboard = "0.5.1"
 acpi = "4.1.1"
+aml = { version = "0.16.4", optional = true }
 
 [features]
-default = ["smp", "net", "ai_rule", "ext4"]
+default = ["smp", "net", "ext4"]
 verification = []
-ai_rule = []
-ai_llm = []
 smp = []
 net = []
 uhci = []
@@ -44,11 +43,14 @@ self_test = []
 ash = []
 gpu = []
 hypervisor = []
-objects_v2 = []
 
 [profile.dev]
 panic = "abort"
 rustflags = ["-Z", "stack-protector=strong"]
+
+[profile.test]
+opt-level = 0
+debug = "line-directives-only"
 
 [profile.release]
 opt-level = "z"
@@ -56,3 +58,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 rustflags = ["-Z", "stack-protector=strong"]
+
+# Local build-std workaround (not upstream): hashbrown's optional
+# `rustc-std-workspace-alloc` shim dependency conflicts with -Zbuild-std's
+# injected alloc extern (E0464: multiple candidates for alloc). The vendored
+# copy drops that shim; cargo then resolves `extern crate alloc` via the
+# build-std extern like every other crate in this kernel.
+[patch.crates-io]
+hashbrown = { path = "vendor/hashbrown" }

@@ -263,7 +263,7 @@ impl CtlFs {
         add_child(&kernel_dir, "log", file_fn(|| {
             let ticks = interrupts::get_ticks();
             alloc::format!(
-                "Kernel booted at tick 0, current tick {}\nSMP init complete\nVFS mounted\nNetwork started\nVahiAI engine active\n",
+                "Kernel booted at tick 0, current tick {}\nSMP init complete\nVFS mounted\nNetwork started\n",
                 ticks
             ).into_bytes()
         }));

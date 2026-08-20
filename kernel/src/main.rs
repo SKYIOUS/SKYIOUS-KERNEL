@@ -75,13 +75,10 @@ pub mod drivers;
 pub mod gui;
 #[cfg(feature = "net")]
 mod net;
-pub mod korlang;
 #[cfg(feature = "smp")]
 mod smp;
 mod tests;
 pub mod debug;
-#[cfg(feature = "ai_rule")]
-pub mod vahiai;
 #[cfg(feature = "verification")]
 mod verified;
 pub mod elf_dyn;
@@ -310,10 +307,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     serial_write("[BOOT] LSM init...\n");
     security::init();
-    serial_write("[BOOT] korlang init...\n");
-    korlang::init();
-    #[cfg(feature = "ai_rule")]
-    { serial_write("[BOOT] vahiai init...\n"); vahiai::init(); }
     #[cfg(feature = "ash")]
     { serial_write("[BOOT] ASH init...\n"); ash::manager::init(); }
     #[cfg(feature = "hypervisor")]
@@ -375,36 +368,6 @@ extern "C" fn init_os_task() -> ! {
     crate::boot::state::run_boot()
 }
 
-#[allow(dead_code)]
-extern "C" fn threading_demo() -> ! {
-    crate::serial_write("[DEMO] threading_demo: spawning two threads...\n");
-
-    extern "C" fn thread_a() -> ! {
-        loop {
-            crate::serial_write("[thread-A] A\n");
-            for _ in 0..5_000_000 { core::hint::spin_loop(); }
-            crate::task::scheduler::try_schedule();
-        }
-    }
-    extern "C" fn thread_b() -> ! {
-        loop {
-            crate::serial_write("[thread-B] B\n");
-            for _ in 0..5_000_000 { core::hint::spin_loop(); }
-            crate::task::scheduler::try_schedule();
-        }
-    }
-
-    let t_a = crate::task::thread::Thread::new(thread_a);
-    let t_b = crate::task::thread::Thread::new(thread_b);
-    crate::task::scheduler::spawn_thread(t_a);
-    crate::task::scheduler::spawn_thread(t_b);
-
-    crate::serial_write("[DEMO] threading_demo: threads spawned, entering idle loop.\n");
-    loop {
-        crate::arch::CurrentArch::halt();
-    }
-}
-
 extern "C" fn run_async_tasks() -> ! {
     crate::serial_write("[ASYNC] Async Executor Started.\n");
     use task::{Task, executor::Executor};
@@ -412,7 +375,6 @@ extern "C" fn run_async_tasks() -> ! {
 
     // ponytail: kernel shell disabled — it writes directly to the framebuffer,
     // clobbering the GUI compositor's rendered output. The GUI handles keyboard.
-    // executor.spawn(Task::new(shell::kernel_shell()));
     let _ = executor.spawn(Task::new(network_poll_task()));
     let _ = executor.spawn(Task::new(gui_refresh_task()));
     executor.run();
@@ -454,8 +416,6 @@ pub async fn gui_refresh_task() {
             }
             if let Ok(Some(key_event)) = kbd.add_byte(scancode) {
                 if let Some(key) = kbd.process_keyevent(key_event) {
-                    crate::serial_write(&alloc::format!("[KBD-FWD] {:?}
-", key));
                     let mut comp = crate::gui::COMPOSITOR.lock();
                     comp.handle_keyboard(key);
                 }

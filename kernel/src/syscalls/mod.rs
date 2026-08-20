@@ -2,6 +2,7 @@ use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{LStar, Star, SFMask};
 use x86_64::registers::rflags::RFlags;
 use crate::gdt;
+use crate::interrupts::IrqFmtBuf;
 use crate::sync::IrqSafeMutex as Mutex;
 use crate::vfs::{VFS, VfsNode, Stat};
 use alloc::sync::Arc;
@@ -172,7 +173,7 @@ fn store_dir_path(process: &Arc<crate::task::process::Process>, fd: u64, path_st
 
 /// Write the `syscall`/`sysret` MSRs (STAR, LSTAR, SFMask) for the current CPU.
 /// These MSRs are per-logical-processor and reset to 0, so they must be set on
-/// every core — the BSP via `init()`, each AP via `init_syscall_msrs()` in
+/// every core Ã¢â‚¬â€ the BSP via `init()`, each AP via `init_syscall_msrs()` in
 /// `ap_kernel_entry`. Without this, a user `syscall` on an AP loads CS=0/SS=8
 /// from STAR and jumps to LSTAR=0 (fetch at address 0).
 pub fn init_syscall_msrs() {
@@ -207,6 +208,9 @@ pub fn init() {
 /// Maximum supported CPU count.
 #[allow(dead_code)]
 pub const MAX_CPUS: usize = 8;
+/// Upper bound for a single read/write syscall buffer allocation.
+/// Larger requests are clamped (callers must loop Ã¢â‚¬â€ POSIX allows short I/O).
+const MAX_IO_CHUNK: usize = 1 << 20;
 
 /// Array of per-CPU area pointers for indexed access from non-GS contexts.
 #[derive(Clone, Copy)]
@@ -230,7 +234,7 @@ pub fn init_gs_base(cpu_id: usize) {
     use x86_64::registers::model_specific::KernelGsBase;
     use x86_64::registers::model_specific::GsBase;
 
-    // Allocate per-CPU data (leaked intentionally — lives forever)
+    // Allocate per-CPU data (leaked intentionally Ã¢â‚¬â€ lives forever)
     let data = alloc::boxed::Box::leak(alloc::boxed::Box::new(PerCpuData {
         self_ptr: 0, // will be set after allocation
         cpu_id: cpu_id as u64,
@@ -240,6 +244,8 @@ pub fn init_gs_base(cpu_id: usize) {
         ipi_arg: core::sync::atomic::AtomicU64::new(0),
         idle_count: 0,
         current_process: core::sync::atomic::AtomicU64::new(0),
+        user_copy_nest: core::sync::atomic::AtomicU64::new(0),
+        pf_entry_rsp: 0,
     }));
     data.self_ptr = data as *mut PerCpuData as u64; // self-referential pointer
     
@@ -257,18 +263,29 @@ pub fn init_gs_base(cpu_id: usize) {
 
 #[repr(C)]
 pub struct PerCpuData {
-    pub self_ptr:  u64,      // offset 0x00 — pointer to self (gs:0x0 reads this)
+    pub self_ptr:  u64,      // offset 0x00 Ã¢â‚¬â€ pointer to self (gs:0x0 reads this)
     pub cpu_id:    u64,      // offset 0x08
-    pub kernel_rsp: u64,      // offset 0x10 — loaded on syscall entry
-    pub user_rsp:  u64,      // offset 0x18 — saved on syscall entry
-    pub ipi_kind: core::sync::atomic::AtomicU64, // offset 0x20 — IPI discriminant (0=none,1=tlb,2=resched,3=func)
-    pub ipi_arg: core::sync::atomic::AtomicU64,  // offset 0x28 — IPI argument / func ptr
-    pub idle_count: u64,     // offset 0x30 — idle loop counter
+    pub kernel_rsp: u64,      // offset 0x10 Ã¢â‚¬â€ loaded on syscall entry
+    pub user_rsp:  u64,      // offset 0x18 Ã¢â‚¬â€ saved on syscall entry
+    pub ipi_kind: core::sync::atomic::AtomicU64, // offset 0x20 Ã¢â‚¬â€ IPI discriminant (0=none,1=tlb,2=resched,3=func)
+    pub ipi_arg: core::sync::atomic::AtomicU64,  // offset 0x28 Ã¢â‚¬â€ IPI argument / func ptr
+    pub idle_count: u64,     // offset 0x30 Ã¢â‚¬â€ idle loop counter
     /// Per-CPU current process pointer (uintptr to Arc<Process>).
     /// Read lock-free on the owning CPU; written only by that CPU's scheduler.
     /// Other CPUs must use the global PROCESS_TABLE for cross-process ops.
     pub current_process: core::sync::atomic::AtomicU64, // offset 0x38
+    /// Nesting count of active user-memory copies on this CPU. Read by the
+    /// page-fault dispatch trampoline via `gs:0x0 + USER_COPY_NEST_OFFSET`.
+    pub user_copy_nest: core::sync::atomic::AtomicU64, // offset 0x40
+    /// RSP at page-fault dispatch entry (points at the error code). Written by
+    /// the `vahi_pf_dispatch` trampoline so a copy abort can iret to the fixup.
+    pub pf_entry_rsp: u64, // offset 0x48
 }
+
+/// Offset of `PerCpuData::pf_entry_rsp`, written directly by the page-fault
+/// dispatch trampoline (asm). Kept in lock-step via this assertion.
+pub const PF_ENTRY_RSP_OFFSET: usize = 0x48;
+const _: () = assert!(core::mem::offset_of!(PerCpuData, pf_entry_rsp) == PF_ENTRY_RSP_OFFSET);
 
 #[repr(C, packed)]
 pub struct UtsName {
@@ -286,7 +303,7 @@ pub fn sys_open_path(path: &str) -> Result<u64, errno::Errno> {
     let fd = syscall_handler(numbers::SYS_OPEN, path_c.as_ptr() as u64, 0x0, 0, 0, 0, core::ptr::null_mut()); // O_RDONLY=0
     if (fd as i64) < 0 {
         let errval = fd as i64;
-        // ponytail: match instead of transmute — transmuting arbitrary i64 to #[repr(i64)] enum is UB if no variant matches
+        // ponytail: match instead of transmute Ã¢â‚¬â€ transmuting arbitrary i64 to #[repr(i64)] enum is UB if no variant matches
         let e = match errval {
             -1  => errno::Errno::EPERM,
             -2  => errno::Errno::ENOENT,
@@ -363,13 +380,17 @@ fn sys_dup2(old_fd: u64, new_fd: u64) -> u64 {
         
         if new_fd as usize >= fd_table.len() {
             fd_table.resize(new_fd as usize + 1, None);
-            p.fd_flags.lock().resize(new_fd as usize + 1, 0);
         }
-        
+        // fd_flags may lag fd_table (e.g. after fork); keep them in sync
+        // before indexing, or dup2 panics on a short flags vector.
+        let mut flags = p.fd_flags.lock();
+        if flags.len() < fd_table.len() {
+            flags.resize(fd_table.len(), 0);
+        }
         fd_table[new_fd as usize] = old_desc;
         // dup2 clears FD_CLOEXEC on the target (Linux semantics); other
         // status flags are preserved.
-        p.fd_flags.lock()[new_fd as usize] = old_flags & !0x80000;
+        flags[new_fd as usize] = old_flags & !0x80000;
         return new_fd;
     }
     errno::Errno::ESRCH as u64
@@ -410,7 +431,7 @@ fn sys_access(path_ptr: *const u8, mode: i32) -> u64 {
         None => return errno::Errno::ENOENT as u64,
     };
     // Convert F_OK(0)/X_OK(1)/W_OK(2)/R_OK(4) to permission bits
-    // Linux: R_OK=4, W_OK=2, X_OK=1, F_OK=0 — same as our bit layout
+    // Linux: R_OK=4, W_OK=2, X_OK=1, F_OK=0 Ã¢â‚¬â€ same as our bit layout
     let need = (mode & 7) as u32;
     if need == 0 { return 0; } // F_OK: file exists
     if check_node_permission(&node, need) { 0 } else { errno::Errno::EACCES as u64 }
@@ -537,7 +558,7 @@ fn sys_uname(buf: *mut UtsName) -> u64 {
     fill(&mut uts.sysname, "Vahi");
     fill(&mut uts.nodename, "sarga-os");
     fill(&mut uts.release, "0.3.0");
-    fill(&mut uts.version, "SARGA OS — Vahi V5.0 Roadmap Implementation");
+    fill(&mut uts.version, "SARGA OS Ã¢â‚¬â€ Vahi V5.0 Roadmap Implementation");
     #[cfg(not(target_arch = "aarch64"))]
     fill(&mut uts.machine, "x86_64");
     #[cfg(target_arch = "aarch64")]
@@ -582,7 +603,7 @@ pub extern "sysv64" fn syscall_handler(
     do_syscall(n, arg1, arg2, arg3, arg4, arg5, regs_ptr)
 }
 
-/// Inner dispatch without emulation redirect — called by both the public entry
+/// Inner dispatch without emulation redirect Ã¢â‚¬â€ called by both the public entry
 /// point and the Linux emulation layer to avoid infinite recursion.
 pub(crate) fn do_syscall(
     n: u64,
@@ -669,10 +690,8 @@ pub(crate) fn do_syscall(
         numbers::SYS_CHDIR => sys_chdir(arg1 as *const u8),
         numbers::SYS_MKDIR => sys_mkdir(arg1 as *const u8, arg2 as u32),
         numbers::SYS_UNLINK => sys_unlink(arg1 as *const u8),
-        numbers::SYS_VAHIAI => sys_vahiai(arg1 as *const u8, arg2 as *const *const u8, arg3, arg4 as *mut u8, arg5),
         numbers::SYS_RESOLVE => sys_resolve(arg1 as *const u8, arg2 as *mut u8),
         numbers::SYS_KILL => sys_kill(arg1 as i64, arg2 as u32),
-        numbers::SYS_KORLANG => sys_korlang(arg1, arg2, arg3, arg4, arg5),
         numbers::SYS_FUTEX => {
             // val3 = saved r9 at regs_ptr offset 6 (between r10 at +5 and r8 at +7)
             let val3 = unsafe { *regs_ptr.add(6) as u32 };
@@ -1033,6 +1052,9 @@ fn sys_rt_sigreturn(regs_ptr: *mut u64) -> u64 {
 }
 
 fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
+    // Cap single-call allocation: huge counts from user space must not
+    // OOM the kernel heap. Short reads are legal; callers loop.
+    let count = core::cmp::min(count, MAX_IO_CHUNK);
     let process = {
         let process_lock = CURRENT_PROCESS.lock();
         match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
@@ -1214,6 +1236,8 @@ fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
 }
 
 fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
+    // Cap single-call allocation (see sys_read); write may return short.
+    let count = core::cmp::min(count, MAX_IO_CHUNK);
     let process = {
         let process_lock = CURRENT_PROCESS.lock();
         match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
@@ -1302,16 +1326,44 @@ pub(crate) fn get_current_process() -> Option<Arc<Process>> {
 /// Add a file descriptor via the Object Manager (bind-time security).
 fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -> u64 {
     let type_id = if node.is_dir() { crate::objects::TYPE_DIR } else { crate::objects::TYPE_FILE };
-    let obj = crate::vfs::VfsObject::new(node, type_id);
+    let obj = crate::vfs::VfsObject::new(node.clone(), type_id);
     let access = match open_flags & 3 {
         1 => crate::objects::security::ACCESS_WRITE,
         2 => crate::objects::security::ACCESS_READ | crate::objects::security::ACCESS_WRITE,
         _ => crate::objects::security::ACCESS_READ,
     };
-    match process.new_handle(obj as Arc<dyn KernelObject>, access, open_flags as u64) {
-        Ok(fd) => fd,
-        Err(_) => errno::Errno::EACCES as u64,
+    let mut ht = process.handle_table.lock();
+    // Bind-time security check (mirrors HandleTable::insert).
+    let cred = crate::objects::current_credentials();
+    {
+        let sec = obj.header().security.lock();
+        if !crate::objects::security::access_check(&cred, &sec, access) {
+            return errno::Errno::EACCES as u64;
+        }
     }
+    // Pick a slot free in BOTH the handle table and the legacy fd_table.
+    // sys_open returns this value as the fd, and sys_read/sys_write/dup/
+    // fstat index fd_table by it Ã¢â‚¬â€ so the two tables must agree on what an
+    // fd number means. A forked child has an empty handle table but inherits
+    // stdio fds 0-2 in fd_table, so without this the first open returned fd
+    // 0 and read/write hit the tty instead of the opened file (e.g. the
+    // /ctl/sys/mem/free read came back empty for exactly this reason).
+    let mut ft = process.fd_table.lock();
+    let limit = core::cmp::max(ht.len(), ft.len());
+    let mut idx = 0usize;
+    while idx < limit && (ht.is_valid(idx as u64) || ft.get(idx).map_or(false, |s| s.is_some())) {
+        idx += 1;
+    }
+    ht.insert_at(idx as u64, obj, access, open_flags as u64);
+    if ft.len() <= idx { ft.resize(idx + 1, None); }
+    ft[idx] = Some(FileDescriptor::File { node, offset: crate::sync::IrqSafeMutex::new(0) });
+    // Keep fd_flags in lockstep so read/write access-mode checks see the
+    // O_ACCMODE bits; sys_openat ORs O_CLOEXEC in afterwards.
+    drop(ft);
+    let mut ffl = process.fd_flags.lock();
+    if ffl.len() <= idx { ffl.resize(idx + 1, 0); }
+    ffl[idx] = open_flags as u64;
+    idx as u64
 }
 
 fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
@@ -1668,7 +1720,7 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) ->
                     Err(_) => return -(errno::Errno::EIO as i64) as u64,
                 };
                 let read_size = core::cmp::min(stat.st_size as usize, (offset + len_aligned) as usize);
-                // ponytail: reads entire file into memory — add page cache when large files are needed
+                // ponytail: reads entire file into memory Ã¢â‚¬â€ add page cache when large files are needed
                 match node.read(read_size) {
                     Ok(d) => Some(d),
                     Err(_) => return -(errno::Errno::EIO as i64) as u64,
@@ -1904,10 +1956,10 @@ fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
 
     let target_tick = crate::interrupts::get_ticks() + sleep_ticks;
 
-    // Mark the current thread Blocked in place — do NOT take it out of
+    // Mark the current thread Blocked in place Ã¢â‚¬â€ do NOT take it out of
     // `current_thread`. `prepare_switch` saves the block-point context into
     // the thread's own `stack_ptr`, and when woken the thread resumes inside
-    // `schedule()` and returns here → syscall postamble → sysretq.
+    // `schedule()` and returns here Ã¢â€ â€™ syscall postamble Ã¢â€ â€™ sysretq.
     {
         let mut sched = crate::task::scheduler::this_cpu_sched().lock();
         if let Some(current) = sched.current_thread.as_mut() {
@@ -2003,7 +2055,7 @@ fn sys_swapon(path_ptr: *const u8, _swap_flags: i32) -> u64 {
         Err(_) => return errno::Errno::ENODEV as u64,
     };
 
-    // Calculate swap slots — each slot holds one 4K page
+    // Calculate swap slots Ã¢â‚¬â€ each slot holds one 4K page
     let slot_count = dev_size / 4096;
     if slot_count == 0 {
         return errno::Errno::ENODEV as u64;
@@ -2077,6 +2129,11 @@ fn sys_sched_yield() -> u64 {
     };
     if let Some((old_ptr, new_sp, new_fs)) = switch {
         crate::task::thread::switch_thread(old_ptr, new_sp, new_fs);
+        // The yielded thread was parked in `switching_old` by
+        // prepare_switch; the post-switch drain doesn't run inside a
+        // syscall (we return to userland directly), so reclaim it here.
+        let mut sched = scheduler::this_cpu_sched().lock();
+        scheduler::route_switching_old(&mut sched);
     }
     0
 }
@@ -2702,6 +2759,7 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
     use crate::task::process::{Process, CURRENT_PROCESS};
     use crate::memory::buddy::BuddyFrameAllocator;
 
+    crate::serial_write("[FORK] enter\n");
     let parent_lock = CURRENT_PROCESS.lock();
     if let Some(ref parent) = *parent_lock {
         let parent_id = parent.id;
@@ -2711,6 +2769,34 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
             Some(as_space) => as_space,
             None => return errno::Errno::ENOMEM as u64,
         };
+        crate::serial_write("[FORK] cow done\n");
+        // FORKDIAG: dump the parent's slab free-list heads (ALLOCATOR .bss at
+        // the init binary's 0x4063d8) with VMA residency, to see whether a
+        // free-list entry already points at an unmapped page pre-fork.
+        {
+            let mut scratch = [0u8; 1024];
+            let mut w = IrqFmtBuf { buf: &mut scratch, len: 0 };
+            let _ = core::fmt::write(&mut w, format_args!("[FORKDIAG] pid={} heads:", parent_id));
+            for cls in 0..9usize {
+                let addr = 0x4063d8u64 + (cls as u64) * 8;
+                let pv = crate::memory::virt_to_phys(x86_64::VirtAddr::new(addr));
+                let head = match pv {
+                    Some(phys) => {
+                        let k = crate::memory::physical_memory_offset() + phys.as_u64();
+                        unsafe { *(k as *const u64) }
+                    }
+                    None => u64::MAX,
+                };
+                let in_vma = head != 0 && head != u64::MAX
+                    && parent.find_vma(head).is_some();
+                let _ = core::fmt::write(&mut w, format_args!(" c{}={:#x}{}", cls, head, if head != 0 && head != u64::MAX { if in_vma { "v" } else { "X" } } else { "" }));
+            }
+            let _ = core::fmt::write(&mut w, format_args!("
+"));
+            let diag_len = w.len;
+            drop(w);
+            crate::serial_write(core::str::from_utf8(&scratch[..diag_len]).unwrap_or(""));
+        }
 
         // 2. Create new Process
         let child_pid = Process::next_id();
@@ -2727,22 +2813,41 @@ fn sys_fork(regs_ptr: *mut u64) -> u64 {
         *child_process.pgid.lock() = *parent.pgid.lock();
         *child_process.session.lock() = *parent.session.lock();
         *child_process.is_group_leader.lock() = false;
+        // Copy the brk pointer: the child heap region must mirror the parent
+        // or demand-paging of inherited brk pages SIGSEGVs.
+        *child_process.brk.lock() = *parent.brk.lock();
         let child_arc = Arc::new(child_process);
-        
+        crate::serial_write("[FORK] process cloned\n");
+
+        // 3. Clone current thread (deep copy stack) BEFORE registering the
+        // child, so a stack-alloc failure leaves no orphan in children/table.
+        let child_thread = {
+            let sched = crate::task::scheduler::this_cpu_sched().lock();
+            match sched.current_thread.as_ref() {
+                Some(t) => match t.clone_fork(child_arc.clone(), regs_ptr) {
+                    Some(t) => t,
+                    None => return errno::Errno::ENOMEM as u64,
+                },
+                None => {
+                    crate::serial_write("[FORK] no current thread!\n");
+                    return errno::Errno::EPERM as u64;
+                }
+            }
+        };
+        crate::serial_write("[FORK] thread cloned\n");
+
         // Track child in parent and global table
         parent.children.lock().push(child_pid);
         crate::task::process::Process::register(child_arc.clone());
+        crate::serial_write("[FORK] registered\n");
 
-        // 3. Clone current thread (deep copy stack)
-        if let Some(ref current_thread) = crate::task::scheduler::this_cpu_sched().lock().current_thread {
-            let child_thread: crate::task::thread::Thread = current_thread.clone_fork(child_arc, regs_ptr);
-            
-            // 4. Add to scheduler
-            crate::task::scheduler::spawn_thread(child_thread);
+        // 4. Add to scheduler
+        crate::task::scheduler::spawn_thread(child_thread);
+        crate::serial_write("[FORK] spawned\n");
 
-            return child_pid;
-        }
+        return child_pid;
     }
+    crate::serial_write("[FORK] no current process!\n");
     
     errno::Errno::EPERM as u64 
 }
@@ -2800,25 +2905,37 @@ fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: u64,
 
         let child_arc = Arc::new(child_process);
 
+        // Clone thread before registering Ã¢â‚¬â€ a stack-alloc failure must not
+        // leave an orphan child in PROCESS_TABLE/children.
+        let child_thread = {
+            let sched = crate::task::scheduler::this_cpu_sched().lock();
+            match sched.current_thread.as_ref() {
+                Some(t) => match t.clone_thread(child_arc.clone(), regs_ptr, child_stack) {
+                    Some(t) => t,
+                    None => return errno::Errno::ENOMEM as u64,
+                },
+                None => return errno::Errno::EPERM as u64,
+            }
+        };
+
         parent.children.lock().push(child_pid);
         crate::task::process::Process::register(child_arc.clone());
 
-        if let Some(ref current_thread) = crate::task::scheduler::this_cpu_sched().lock().current_thread {
-            let mut child_thread = current_thread.clone_thread(child_arc, regs_ptr, child_stack);
-
-            if flags & CLONE_SETTLS != 0 {
-                child_thread.fs_base = child_tls;
-            }
-
-            crate::task::scheduler::spawn_thread(child_thread);
-            return child_pid;
+        let mut child_thread = child_thread;
+        if flags & CLONE_SETTLS != 0 {
+            child_thread.fs_base = child_tls;
         }
+
+        crate::task::scheduler::spawn_thread(child_thread);
+        return child_pid;
     }
 
     errno::Errno::EPERM as u64
 }
 
-fn sys_wait4(pid: i64, status_ptr: *mut i32, _options: i32, _rusage: *mut u8) -> u64 {
+fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8) -> u64 {
+    const WNOHANG: i32 = 1;
+    const WUNTRACED: i32 = 2;
     let parent_id = {
         let lock = CURRENT_PROCESS.lock();
         if let Some(ref p) = *lock { p.id } else { return errno::Errno::ESRCH as u64; }
@@ -2864,11 +2981,24 @@ fn sys_wait4(pid: i64, status_ptr: *mut i32, _options: i32, _rusage: *mut u8) ->
             return child_pid;
         }
 
-        // No child exited yet — check for signals before yielding
+        // No child exited yet Ã¢â‚¬â€ check for signals before sleeping
         if check_signal_interrupt() { return errno::Errno::EINTR as u64; }
 
-        // Yield to other threads (child gets a chance to run)
-        crate::task::scheduler::try_schedule();
+        // WNOHANG: report nothing to reap instead of blocking.
+        if options & WNOHANG != 0 {
+            return 0;
+        }
+
+        // Block the current thread for one tick instead of spinning; the
+        // timer tick re-wakes it and the loop re-scans the child table.
+        {
+            let mut sched = crate::task::scheduler::this_cpu_sched().lock();
+            if let Some(current) = sched.current_thread.as_mut() {
+                current.status = crate::task::thread::ThreadStatus::Blocked;
+                current.sleep_until = Some(crate::interrupts::get_ticks() + 1);
+            }
+        }
+        crate::task::scheduler::schedule();
     }
 }
 
@@ -3375,7 +3505,7 @@ fn write_sockaddr(addr_ptr: *mut u8, addrlen_ptr: *mut u32, ep: &smoltcp::wire::
 }
 
 fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
-    // AF_UNIX (domain 1) — always available, no net feature gate needed
+    // AF_UNIX (domain 1) Ã¢â‚¬â€ always available, no net feature gate needed
     if domain == 1 {
         if ty != 1 && ty != 2 {
             return errno::Errno::EINVAL as u64;
@@ -3435,7 +3565,7 @@ fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
             let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 4096]);
             let socket = smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer);
             crate::net::SOCKETS.lock().add(socket)
-        } else if ty == 3 { // SOCK_RAW — ponytail: backed by ICMP socket for ping
+        } else if ty == 3 { // SOCK_RAW Ã¢â‚¬â€ ponytail: backed by ICMP socket for ping
             let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
                 vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4],
                 vec![0u8; 4096],
@@ -4506,7 +4636,13 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
         Err(_) => return errno::Errno::EIO as u64,
     };
 
-    // 3. Copy fd table and flags from old process
+    // 3. Copy fd table and flags from old process. Serialize the whole
+    // exec tail across CPUs: concurrent execs (fork children exec'ing on
+    // different CPUs) otherwise overwrite the global CURRENT_PROCESS mid-
+    // flight, so one exec'd process runs with another's process context
+    // (wrong fd table, wrong VMA list -> SIGSEGV on its first heap write).
+    static EXEC_LOCK: crate::sync::IrqSafeMutex<()> = crate::sync::IrqSafeMutex::new(());
+    let exec_guard = EXEC_LOCK.lock();
     let (old_fd_table, old_fd_flags) = crate::task::process::CURRENT_PROCESS.lock()
         .as_ref().map(|p| (p.fd_table.lock().clone(), p.fd_flags.lock().clone()))
         .unwrap_or_default();
@@ -4570,6 +4706,12 @@ fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const
         });
     }
 
+    crate::serial_write(&alloc::format!(
+        "[EXEC] pid={} path={} elf={} entry={:#x} rsp={:#x}\n",
+        process_arc.id, path, elf_data.len(), entry, user_rsp
+    ));
+
+    drop(exec_guard);
     unsafe {
         crate::task::thread::jump_to_usermode(entry, user_rsp);
     }
@@ -5092,51 +5234,6 @@ fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
 }
 
 
-#[cfg(feature = "ai_rule")]
-fn sys_vahiai(intent_ptr: *const u8, args_ptr: *const *const u8, arg_count: u64, out_ptr: *mut u8, out_len: u64) -> u64 {
-    let intent_name = match unsafe { user_access::read_user_string(intent_ptr, 128) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
-
-    let mut args = Vec::new();
-    if !args_ptr.is_null() && arg_count > 0 {
-        for i in 0..core::cmp::min(arg_count as usize, 10) {
-            let mut ptr: *const u8 = core::ptr::null();
-            unsafe {
-                if user_access::copy_from_user(core::slice::from_raw_parts_mut(&mut ptr as *mut _ as *mut u8, 8), args_ptr.add(i) as *const u8).is_err() {
-                    break;
-                }
-            }
-            if !ptr.is_null() {
-                if let Ok(s) = unsafe { user_access::read_user_string(ptr, 256) } {
-                    args.push(s);
-                }
-            }
-        }
-    }
-
-    let args_slices: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-    let engine = crate::vahiai::ENGINE.lock();
-    match engine.execute(&intent_name, &args_slices) {
-        crate::vahiai::IntentResult::Success(msg) => {
-            if !out_ptr.is_null() && out_len > 0 {
-                let copy_len = core::cmp::min(msg.len(), out_len as usize);
-                if unsafe { user_access::copy_to_user(out_ptr, &msg.as_bytes()[..copy_len]) }.is_err() {
-                    return errno::Errno::EFAULT as u64;
-                }
-                return copy_len as u64;
-            }
-            0
-        },
-        crate::vahiai::IntentResult::Error(_) => errno::Errno::EINVAL as u64,
-        crate::vahiai::IntentResult::ExecuteSyscall(n, _s_args) => {
-            // Placeholder: currently we don't trigger the nested syscall here for return simplicity
-            n
-        }
-    }
-}
 
 core::arch::global_asm!(
     r#"
@@ -5192,7 +5289,7 @@ core::arch::global_asm!(
         pop r14
         pop r13
         pop r12
-        add rsp, 8              # Skip scratch r11 — real RFLAGS is loaded later
+        add rsp, 8              # Skip scratch r11 Ã¢â‚¬â€ real RFLAGS is loaded later
         pop r10
         pop r9
         pop r8
@@ -5203,7 +5300,7 @@ core::arch::global_asm!(
         pop rdx
         pop rcx
         mov r11, [rsp+16]       # Load user RFLAGS (saved at [rsp+16]) into R11 for sysretq
-        # Skip saved rax (syscall number) — return value from handler is already in RAX
+        # Skip saved rax (syscall number) Ã¢â‚¬â€ return value from handler is already in RAX
         add rsp, 8
         # Drop saved user_rip, rflags, rsp (they are restored via sysret and mov rsp)
         add rsp, 24
@@ -5645,7 +5742,7 @@ fn sys_sigprocmask(how: i32, set_ptr: *const u64, oldset_ptr: *mut u64) -> u64 {
     0
 }
 
-// ─── pause ─────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ pause Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 fn sys_pause() -> u64 {
     loop {
@@ -5672,7 +5769,7 @@ fn sys_pause() -> u64 {
     }
 }
 
-// ─── sigaltstack ───────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ sigaltstack Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 use crate::task::process::stack_t;
 use crate::task::process::{SS_DISABLE, SS_ONSTACK, MINSIGSTKSZ};
@@ -5725,7 +5822,7 @@ fn sys_sigaltstack(ss_ptr: *const u8, old_ss_ptr: *mut u8) -> u64 {
     0
 }
 
-// ─── signalfd4 ─────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ signalfd4 Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 use crate::task::process::{SignalFdData, SignalFdInfo, SIGNAL_FDS, SFD_NONBLOCK, SFD_CLOEXEC};
 use crate::task::process::{EventFdData, EFD_SEMAPHORE, EFD_NONBLOCK, EFD_MAX};
@@ -5790,7 +5887,7 @@ fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
     (fd_table.len() - 1) as u64
 }
 
-// ─── eventfd2 ────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ eventfd2 Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 fn sys_eventfd2(initval: u32, flags: i32) -> u64 {
     let process = match get_current_process() {
@@ -5816,7 +5913,7 @@ fn sys_eventfd2(initval: u32, flags: i32) -> u64 {
     (fd_table.len() - 1) as u64
 }
 
-// ─── itimer ────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ itimer Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 use crate::task::process::itimerval;
 use crate::task::process::timeval;
@@ -5875,7 +5972,7 @@ fn sys_setitimer(which: u64, new_ptr: *const u8, old_ptr: *mut u8) -> u64 {
     0
 }
 
-// ─── times ─────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ times Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 use crate::task::process::tms;
 
@@ -5902,48 +5999,6 @@ fn sys_times(buf_ptr: *mut u8) -> u64 {
     crate::interrupts::get_ticks()
 }
 
-fn sys_korlang(id: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u64) -> u64 {
-    use crate::korlang::runtime;
-    match id {
-        1 => runtime::korlang_alloc(arg1 as usize, arg2 as usize) as u64,
-        2 => {
-            runtime::korlang_free(arg1 as *mut u8, arg2 as usize, arg3 as usize);
-            0
-        },
-        10 => {
-            let mut buf = vec![0u8; arg2 as usize];
-            if unsafe { user_access::copy_from_user(&mut buf, arg1 as *const u8) }.is_err() {
-                return errno::Errno::EFAULT as u64;
-            }
-            runtime::_kor_stdout_write(buf.as_ptr(), buf.len());
-            0
-        },
-        11 => {
-             let mut buf = vec![0u8; arg2 as usize];
-             if unsafe { user_access::copy_from_user(&mut buf, arg1 as *const u8) }.is_err() {
-                 return errno::Errno::EFAULT as u64;
-             }
-             runtime::_kor_stdout_write(buf.as_ptr(), buf.len());
-             crate::print!("\n");
-             0
-        },
-        20 => {
-            let path = match unsafe { user_access::read_user_string(arg1 as *const u8, 256) } {
-                Ok(s) => s,
-                Err(_) => return errno::Errno::EFAULT as u64,
-            };
-            runtime::_kor_file_open(path.as_ptr(), path.len()) as u64
-        },
-        99 => {
-             let msg = match unsafe { user_access::read_user_string(arg1 as *const u8, 256) } {
-                 Ok(s) => s,
-                 Err(_) => "Korlang panic (failed to read msg)".into(),
-             };
-             runtime::_kor_panic(msg.as_ptr(), msg.len());
-        },
-        _ => 0,
-    }
-}
 
 fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
     const DRM_IOCTL_GET_DISPLAY_INFO: u64 = 0x0100;
@@ -6094,7 +6149,7 @@ fn sys_hash(hash_type: u64, password_ptr: *const u8, password_len: u64, salt_out
     }
 }
 
-/// SYS_OPENPTY — create master/slave PTY pair, returns packed (master_fd | slave_fd << 16)
+/// SYS_OPENPTY Ã¢â‚¬â€ create master/slave PTY pair, returns packed (master_fd | slave_fd << 16)
 fn sys_openpty() -> u64 {
     let (idx, pair) = match crate::pty::alloc_pty() {
         Some(p) => p,
@@ -6117,7 +6172,7 @@ fn sys_openpty() -> u64 {
     }
 }
 
-/// SYS_OBJMGR_ENUM — list all open handles for the current process.
+/// SYS_OBJMGR_ENUM Ã¢â‚¬â€ list all open handles for the current process.
 fn sys_objmgr_enum(buf: *mut u8, len: usize) -> u64 {
     let process = match get_current_process() {
         Some(p) => p,
@@ -6298,7 +6353,7 @@ fn sys_vm_inject_irq(guest_id: u64, vector: u8) -> u64 {
     }
 }
 
-/// SYS_OBJMGR_AUDIT — return audit trail entries for a given PID.
+/// SYS_OBJMGR_AUDIT Ã¢â‚¬â€ return audit trail entries for a given PID.
 fn sys_objmgr_audit(pid: u64, buf: *mut u8, len: usize) -> u64 {
     let audits = crate::objects::namespace::audit_by_pid(pid);
     let entry_size = core::mem::size_of::<(u64, u16, u64)>();
@@ -6320,7 +6375,7 @@ fn sys_objmgr_audit(pid: u64, buf: *mut u8, len: usize) -> u64 {
     count as u64
 }
 
-// ─── *at syscall variants ─────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ *at syscall variants Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 fn sys_openat(dirfd: i64, path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
     let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {

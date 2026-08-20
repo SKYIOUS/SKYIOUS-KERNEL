@@ -1,13 +1,13 @@
 # ADR-008: Cargo Feature Flags for Kernel Configuration
 
 ## Status
-Accepted
+Accepted (updated 2026-08-20: dropped dead features)
 
 ## Date
 2026-08-01
 
 ## Context
-The kernel has optional subsystems (networking, SMP, AI, GPU, etc.) that not all builds need. We needed a mechanism to conditionally compile components without a separate configuration system.
+The kernel has optional subsystems (networking, SMP, GPU, etc.) that not all builds need. We needed a mechanism to conditionally compile components without a separate configuration system.
 
 Requirements:
 - No runtime configuration overhead for disabled features
@@ -20,10 +20,8 @@ Use Cargo feature flags (compile-time) for all optional subsystems. No runtime c
 
 ```toml
 [features]
-default = ["smp", "net", "ai_rule", "ext4"]
+default = ["smp", "net", "ext4"]
 verification = []
-ai_rule = []
-ai_llm = []
 smp = []
 net = []
 uhci = []
@@ -32,7 +30,6 @@ self_test = []
 ash = []
 gpu = []
 hypervisor = []
-objects_v2 = []
 ```
 
 Each feature gate is checked with `#[cfg(feature = "...")]` in source code, applied at the module level or individual item level.
@@ -55,8 +52,9 @@ Each feature gate is checked with `#[cfg(feature = "...")]` in source code, appl
 - Rejected: Feature flags are sufficient for our subsystem-level gating
 
 ## Consequences
-- `default = ["smp", "net", "ai_rule", "ext4"]` for general use
+- `default = ["smp", "net", "ext4"]` for general use
 - `#[cfg(feature = "smp")]` prevents SMP code from being compiled when disabled
 - Features are additive — no feature interaction issues
 - Build combinations are tested in CI with `--no-default-features` and feature combinations
 - Zero runtime overhead for disabled features
+- Removed 2026-08-20: `ai_rule`, `ai_llm`, `objects_v2` (subsystems deleted); `gpu` temporarily excluded from the CI all-features list until compositor↔gpu wiring lands (plan A4)

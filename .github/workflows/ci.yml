@@ -41,7 +41,7 @@ jobs:
         run: cargo build --features "smp,net"
 
       - name: Build (all features, no default)
-        run: cargo build --no-default-features --features "smp,net,ai_rule,ai_llm,ext4,ash,gpu,hypervisor,objects_v2"
+        run: cargo build --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification"
 
       - name: Check (self_test feature compiles in bin mode)
         run: cargo check --features self_test
@@ -88,7 +88,7 @@ jobs:
 
       - name: Build kernel (self_test)
         working-directory: kernel
-        run: cargo build --features net,smp,ai_rule,self_test
+        run: cargo build --features net,smp,self_test
 
       - name: Build bootimage
         working-directory: builder
