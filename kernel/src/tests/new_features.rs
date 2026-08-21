@@ -126,6 +126,29 @@ pub fn test_shell_dispatch() -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(feature = "ash")]
+pub fn test_ash_hook() -> Result<(), &'static str> {
+    use crate::ash::{AshResult, HookPoint, Protocol};
+    // Single eBPF insn: r0 += 2 → R0=2 → AshResult::Drop via map_return.
+    // Bytecode is exactly 12 bytes (size_of::<EbpfInsn> = 12 with #[repr(C)]).
+    // The verifier loads 1 insn; the VM executes it and returns R0=2,
+    // which map_return maps to AshResult::Drop.
+    let prog = &[
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    let hook = HookPoint::NetReceive { interface: 0, port: 9999, protocol: Protocol::Udp };
+    let id = crate::ash::manager::register(999, prog, hook.clone(), 16, None)
+        .map_err(|_| "ash register failed")?;
+    let mut packet = [0x42u8; 32];
+    let result = crate::ash::hooks::net::hook_net_receive(&mut packet, 0, 17, 1234, 9999);
+    crate::ash::manager::unregister(id, 999).map_err(|_| "ash unregister failed")?;
+    if result != AshResult::Drop {
+        return Err("ash net hook did not drop as programmed");
+    }
+    Ok(())
+}
+
 pub fn register_all() {
     selftest::register("entropy::robust_harvester", test_entropy);
     selftest::register("vfs::page_cache_basic", test_page_cache);
@@ -137,4 +160,6 @@ pub fn register_all() {
     selftest::register("pata::mbr_signature", pata_read_test::test_pata_mbr_sig);
     selftest::register("user_copy::fault_abort_recovers", test_user_copy_fault_abort);
     selftest::register("shell::dispatch_table", test_shell_dispatch);
+    #[cfg(feature = "ash")]
+    selftest::register("ash::net_hook_fires", test_ash_hook);
 }

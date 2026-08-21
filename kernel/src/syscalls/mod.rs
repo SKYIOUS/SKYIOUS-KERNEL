@@ -614,6 +614,16 @@ pub(crate) fn do_syscall(
     arg5: u64,
     regs_ptr: *mut u64,
 ) -> u64 {
+    #[cfg(feature = "ash")]
+    {
+        match crate::ash::hooks::syscall::hook_syscall_entry(n, arg1, arg2, arg3) {
+            crate::ash::AshResult::Drop | crate::ash::AshResult::Handled => {
+                return errno::Errno::EPERM as u64;
+            }
+            _ => {}
+        }
+    }
+
     let result = match n {
         numbers::SYS_READ => sys_read(arg1, arg2 as *mut u8, arg3 as usize),
         numbers::SYS_WRITE => sys_write(arg1, arg2 as *const u8, arg3 as usize),
@@ -3409,7 +3419,20 @@ fn recvfrom_internal(
             if let Some(_) = with_tcp_mut(sockets, handle, |socket| {
                 if socket.may_recv() {
                     match socket.recv_slice(buf) {
-                        Ok(n) => { result = Ok((n, None)); }
+                        Ok(n) => {
+                            #[cfg(feature = "ash")]
+                            {
+                                let src = socket.remote_endpoint().map(|e| e.port).unwrap_or(0);
+                                let dst = socket.local_endpoint().map(|e| e.port).unwrap_or(0);
+                                if crate::ash::hooks::net::hook_net_receive(&mut buf[..n], 0, 6, src, dst)
+                                    == crate::ash::AshResult::Drop
+                                {
+                                    result = Err(errno::Errno::EAGAIN as u64);
+                                    return;
+                                }
+                            }
+                            result = Ok((n, None));
+                        }
                         Err(_) => {}
                     }
                 }
@@ -3419,6 +3442,17 @@ fn recvfrom_internal(
             let mut result = Err(errno::Errno::EAGAIN as u64);
             if let Some(_) = with_udp_mut(sockets, handle, |socket| {
                 if let Ok((n, meta)) = socket.recv_slice(buf) {
+                    #[cfg(feature = "ash")]
+                    {
+                        let src = meta.endpoint.port;
+                        let dst = socket.endpoint().port;
+                        if crate::ash::hooks::net::hook_net_receive(&mut buf[..n], 0, 17, src, dst)
+                            == crate::ash::AshResult::Drop
+                        {
+                            result = Err(errno::Errno::EAGAIN as u64);
+                            return;
+                        }
+                    }
                     result = Ok((n, Some(meta.endpoint)));
                 }
             }) { result.map_err(|_| errno::Errno::EAGAIN as u64) } else { Err(errno::Errno::EINVAL as u64) }

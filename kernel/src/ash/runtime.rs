@@ -24,31 +24,6 @@ pub fn execute_handler(
     map_return(result)
 }
 
-/// Execute using JIT-compiled code if available.
-#[allow(dead_code)]
-pub fn execute_handler_jit(
-    handler: &VerifiedAsh,
-    context: &[u8],
-    payload: &mut [u8],
-) -> AshResult {
-    if !handler.jited.is_empty() {
-        // ponytail: JIT execution path — calls native code directly
-        let ctx_ptr = context.as_ptr();
-        let payload_ptr = payload.as_mut_ptr();
-        let len = payload.len();
-        let jit_code = &handler.jited;
-        // SAFETY: jited code was verified by the eBPF verifier and
-        // only accesses context/payload/scratch memory within bounds.
-        let ret: u64 = unsafe {
-            let func: extern "sysv64" fn(*const u8, *mut u8, usize) -> u64 =
-                core::mem::transmute(jit_code.as_ptr());
-            func(ctx_ptr, payload_ptr, len)
-        };
-        return map_return(ret);
-    }
-    execute_handler(handler, context, payload)
-}
-
 fn map_return(val: u64) -> AshResult {
     match val {
         0 => AshResult::Continue,

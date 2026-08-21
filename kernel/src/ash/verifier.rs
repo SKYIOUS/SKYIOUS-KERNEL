@@ -1,6 +1,7 @@
 use crate::ebpf::vm::EbpfInsn;
 use crate::ebpf::verifier::{self, tnum_verify};
 use crate::ash::{AshHandler, HookPoint, VerifiedAsh, AshResult, AshError};
+use alloc::vec::Vec;
 
 /// Maximum number of eBPF instructions allowed for an ASH handler.
 pub const ASH_MAX_INSNS: usize = 512;
@@ -43,7 +44,7 @@ pub fn verify_handler(handler: &AshHandler) -> Result<VerifiedAsh, AshResult> {
 
     let context_size = hook_context_size(&handler.hook_point);
 
-    let jited = crate::ash::jit::jit_compile(insns).unwrap_or_default();
+    let jited = Vec::new(); // ponytail: no JIT until A5's exec-memory allocator lands
 
     Ok(VerifiedAsh {
         bytecode: handler.bytecode.clone(),

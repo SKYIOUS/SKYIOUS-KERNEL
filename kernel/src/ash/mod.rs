@@ -4,7 +4,6 @@ pub mod verifier;
 pub mod runtime;
 pub mod manager;
 pub mod syscalls;
-pub mod jit;
 pub mod hooks;
 
 use alloc::vec::Vec;

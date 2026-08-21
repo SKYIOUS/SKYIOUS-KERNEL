@@ -2,134 +2,106 @@
 
 ## Overview
 
-ASH (Application-Specific Safe Handlers) is a mechanism in the Vahi Kernel
-that allows `libsarga` to download safe eBPF bytecode that runs in the NIC
-interrupt context, enabling sub-microsecond packet response without scheduling
-userspace.
+ASH (Application-Specific Safe Handlers) lets privileged userspace attach
+small eBPF programs to kernel hook points (network receive, syscall entry).
+Handlers are verified before installation and executed by the kernel's eBPF
+interpreter; they never run native code (no JIT — see below).
+
+Implementation lives in `kernel/src/ash/` and is compiled with the `ash`
+feature flag.
 
 ## Lifecycle
 
 ```
-Load → Verify → Install → Execute (IRQ) → Results Collection
+Register → Verify → Install → Execute (hook point) → Unregister
 ```
 
-1. **Load**: Userspace calls `bpf(BPF_PROG_LOAD, ...)` to load an eBPF program.
-   The program undergoes standard eBPF verification (structural + tnum abstract
-   interpretation).
+1. **Register**: userspace calls `SYS_ASH_REGISTER` (310) with a raw eBPF
+   bytecode buffer (an array of `EbpfInsn`, 8 bytes each) and a packed
+   `hook_info` value describing the hook point. Requires euid 0 or
+   CAP_SYS_ADMIN (bit 13) / CAP_SYS_PTRACE (bit 21).
 
-2. **Verify**: The program is additionally checked for IRQ safety:
-   - ≤ 512 instructions (ASH limit)
-   - No unsafe helper calls (only helpers 1–3: map_lookup, get_pid, get_ticks)
-   - tnum verification passes (bounded loops, stack bounds, no div-by-zero)
+2. **Verify**: `ash::verifier::verify_handler` runs the structural eBPF
+   verifier plus tnum abstract interpretation, then checks hook
+   compatibility (memory accesses stay within the hook's context size).
+   Limits: ≤ 512 instructions, memory budget 512 bytes. Rejected handlers
+   return `EINVAL`.
 
-3. **Install**: Userspace calls `bpf(BPF_PROG_ATTACH, fd, BPF_ATTACH_ASH,
-   "protocol:port")` to install the handler. The target string specifies
-   protocol and port filtering (e.g. `"6:80"` for TCP port 80, `"1:0"` for all
-   ICMP). The program bytecode is copied into an IRQ-safe handler table.
+3. **Install**: the handler is stored in the manager's tables
+   (`ASH_MANAGER`, a BTreeMap keyed by handler id) together with its
+   verified form. Duplicate registrations (same pid + bytecode + hook) are
+   rejected.
 
-4. **Execute (IRQ)**: On each NIC interrupt, before the main network stack
-   processes the packet, every matching ASH handler runs on a pre-allocated
-   per-CPU stack. No heap allocation occurs.
+4. **Execute**: when the corresponding kernel event fires, every matching
+   handler runs via the eBPF interpreter (`ash::runtime::execute_handler`)
+   with R1 = context struct pointer, R2 = payload pointer, R3 = payload
+   length. Return value R0 maps to an `AshResult`.
 
-5. **Results Collection**: The handler's return value (R0) determines the
-   action the NIC driver should take.
+5. **Unregister**: `SYS_ASH_UNREGISTER` (311) removes a handler by id
+   (owner-only). `SYS_ASH_STATS` (312) exposes counters, `SYS_ASH_CONTROL`
+   (313) is reserved for future control operations.
 
-## Register ABI
+## Hook points
 
-| Register | Input/Output | Description |
-|----------|-------------|-------------|
-| R1       | Input       | Packet data pointer |
-| R2       | Input       | Packet length |
-| R3       | Input       | Protocol number (1=ICMP, 6=TCP, 17=UDP) |
-| R4       | Input       | Destination port |
-| R5       | Output      | Destination IP for reply (DropWithReply) |
-| R6       | Output      | Destination port for reply (DropWithReply) |
-| R7       | Output      | Reply data length (DropWithReply) |
-| R0       | Output      | Action code (0=Pass, 1=Drop, 2=DropWithReply) |
+`ash::HookPoint` enumerates the attach points:
 
-## Action Codes
+| HookPoint | Context size | Where it fires |
+|-----------|-------------|----------------|
+| `NetReceive { interface, port, protocol }` | 32 B | `recvfrom_internal` in syscalls (TCP arm protocol 6, UDP arm protocol 17) after `recv_slice` |
+| `NetTransmit { interface, port, protocol }` | 32 B | reserved (not yet wired) |
+| `SyscallEntry { syscall_num }` | 64 B | `do_syscall` in `syscalls/mod.rs`, before the dispatch match |
+| `SyscallExit { syscall_num }` | 64 B | reserved (not yet wired) |
+| `TimerFired { timer_id }` | 16 B | reserved |
+| `SignalDelivery { signal }` | 16 B | reserved |
+| `MessageReceive { channel }` | 32 B | reserved |
 
-| Value | Constant        | Description |
-|-------|-----------------|-------------|
-| 0     | `ASH_PASS`      | Pass packet to normal network stack |
-| 1     | `ASH_DROP`      | Drop packet silently |
-| 2     | `ASH_DROP_REPLY`| Drop and initiate reply (read R5–R7) |
+`hook_info` packing (rdx of `SYS_ASH_REGISTER`):
+`[u8 hook_type, u8 protocol, u16 port, u32 arg]` — protocol/port apply to
+net hooks, the u32 arg is the syscall number (SyscallEntry) or other hook
+identifier.
 
-## Allowed Helpers
+## Result semantics
 
-ASH programs may only call helpers that are safe in IRQ context
-(no blocking, no allocation, no console I/O):
+Handlers return one of:
 
-| Helper ID | Function              | Reason |
-|-----------|-----------------------|--------|
-| 1         | `map_lookup_elem`     | Pre-allocated maps, lock-free read |
-| 2         | `get_current_pid`     | Returns cached process ID |
-| 3         | `get_ticks`           | Returns monotonically increasing tick counter |
+| R0 | AshResult | Net receive | Syscall entry |
+|----|-----------|-------------|---------------|
+| 0  | Continue  | data delivered | syscall proceeds |
+| 1  | Handled   | stops later handlers, data delivered | syscall denied (`EPERM`) |
+| 2  | Drop      | data discarded (`EAGAIN` to caller) | syscall denied (`EPERM`) |
+| 3  | Modified  | data may have been edited in place | syscall proceeds |
+| ≥4 | Error     | data delivered | syscall proceeds |
 
-Helper 4 (`debug_print`) and any future helpers that acquire locks or
-allocate memory are **forbidden** in ASH context.
+## Context ABI
 
-## Safety Guarantees
-
-| Guarantee | Mechanism |
-|-----------|-----------|
-| No heap allocation in IRQ | Pre-allocated per-CPU stack (`AshPerCpu`), no `alloc` in execution path |
-| Bounded loops | tnum abstract interpretation proves termination (Phase 4 verifier) |
-| Stack bounds | tnum verification checks all memory accesses are within `[0, STACK_SIZE)` |
-| No division by zero | tnum verifier rejects programs where divisor could be zero |
-| Bounded instruction count | `is_ash_safe()` enforces ≤ 512 instructions |
-| No unsafe helpers | `is_ash_safe()` restricts helper calls to IDs 1–3 |
-| Register bounds | Structural verifier enforces dst_reg/src_reg ≤ 10, no write to R10 |
-| Interrupt-safe | Called with interrupts disabled; no blocking operations |
-
-## Data Structures
-
-```rust
-pub struct AshHandler {
-    pub prog_id: u64,
-    pub insns: Vec<EbpfInsn>,
-    pub can_initiate: bool,
-    pub protocol: u8,
-    pub dst_port: u16,
-}
-
-pub struct AshPerCpu {
-    pub stack: [u8; STACK_SIZE],  // 512 bytes
-    pub regs: EbpfRegs,
-}
-```
-
-## Syscall Integration
-
-`BPF_PROG_ATTACH` with `attach_type = 4` (`BPF_ATTACH_ASH`):
+Network context (`NetContext`, `#[repr(C)]`, 32 bytes):
 
 ```
-target format: "<protocol>:<port>"
-  "6:80"    → TCP port 80
-  "1:0"     → All ICMP
-  "0:0"     → All protocols and ports
+offset 0  u8  interface
+offset 1  u8  protocol
+offset 2  u16 src_port
+offset 4  u16 dst_port
+offset 6  u8  _pad[26]
 ```
 
-`BPF_PROG_DETACH` with `attach_type = 4` removes the handler.
+Syscall context is 64 bytes (reserved layout, populated in a later step).
 
-## File Locations
+## Interpreter-only execution (no JIT)
 
-| File | Purpose |
-|------|---------|
-| `kernel/src/ebpf/ash.rs` | ASH execution engine |
-| `kernel/src/ebpf/ash_tests.rs` | Self-tests for ASH |
-| `kernel/src/ebpf/verifier.rs` | `is_ash_safe()` — IRQ safety verifier |
-| `kernel/src/interrupts.rs` | ASH invocation in NIC interrupt handler |
-| `docs/ash-spec.md` | This document |
+A previous JIT path transmuted a heap-allocated bytecode buffer into a
+function pointer and called it — a non-executable (NX) memory violation on
+real hardware. The JIT path (`ash::jit.rs`, `runtime::execute_handler_jit`)
+has been removed; all handlers run through the interpreter until a real
+executable-memory allocator exists (see implementation plan A5).
 
-## Reply Transmission (Future)
+## Kernel call sites
 
-The `ash_send_udp()` function constructs a minimal UDP/IP packet and writes
-directly to the NIC's TX ring. This requires:
-- Pre-allocated TX descriptors per CPU
-- IP header checksum calculation (no allocation)
-- UDP checksum offload or manual calculation
-- DMA-compatible buffer management
+- `syscalls/mod.rs::do_syscall` — `hook_syscall_entry` (feature `ash`).
+- `syscalls/mod.rs::recvfrom_internal` — `hook_net_receive` (feature `ash`),
+  both TCP and UDP arms.
 
-Currently `ash_send_udp()` is a stub returning `false`. Full TX-path
-integration is tracked for a future milestone.
+## Selftest
+
+`ash::net_hook_fires` (tests/new_features.rs): registers a two-instruction
+handler (`r0 += 2; exit` → Drop) on UDP port 9999, fires a synthetic packet
+through `hook_net_receive`, asserts the result is `Drop`, then unregisters.
