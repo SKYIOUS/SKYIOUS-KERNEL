@@ -29,7 +29,7 @@
 
 use alloc::collections::{VecDeque, BinaryHeap};
 use crate::sync::IrqSafeMutex as Mutex;
-use crate::task::thread::Thread;
+use crate::task::thread::{Thread, ThreadId};
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,7 +40,7 @@ pub static SCHED_QUIESCE: AtomicBool = AtomicBool::new(false);
 
 /// Wrapper that orders threads by ascending `pass` so BinaryHeap (a max-heap)
 /// gives us the min-pass thread.
-struct PassOrd(Box<Thread>);
+pub struct PassOrd(pub Box<Thread>);
 
 impl PartialEq for PassOrd {
     fn eq(&self, other: &Self) -> bool { self.0.pass == other.0.pass }
@@ -60,10 +60,10 @@ impl Ord for PassOrd {
 /// `ready_queues` used only by `wake_*()` helpers.
 pub struct PerCpuScheduler {
     /// O(log N) stride heap — primary source of next thread.
-    stride_heap: BinaryHeap<PassOrd>,
+    pub stride_heap: BinaryHeap<PassOrd>,
     /// Legacy queues kept for `wake_*()` / `tick()` API compatibility.
     /// Drained into `stride_heap` during `pick_next`.
-    ready_queues: [VecDeque<Box<Thread>>; 8],
+    pub ready_queues: [VecDeque<Box<Thread>>; 8],
     /// Dirty flag to track if ready_queues need flushing - avoids O(k log N) when empty
     ready_queues_dirty: bool,
     pub current_thread: Option<Box<Thread>>,
@@ -71,7 +71,15 @@ pub struct PerCpuScheduler {
     /// Thread currently being switched away from — not yet in any ready queue
     /// so other CPUs can't steal it. Pushed to ready_queues after the context
     /// switch completes (in schedule()/try_schedule()).
-    switching_old: Option<Box<Thread>>,
+    pub switching_old: Option<Box<Thread>>,
+    /// Permanent per-CPU idle thread. The CPU switches here whenever nothing
+    /// else is runnable and the current slot is Exited/empty/blocked (see
+    /// `prepare_switch`), giving every CPU a stable context from which
+    /// `try_schedule` can pick new work and a safe stack on which to reclaim
+    /// an Exited thread. Never placed in any ready queue.
+    pub idle: Option<Box<Thread>>,
+    /// ThreadId of `idle`, used to recognize a preempted idle thread.
+    idle_id: Option<ThreadId>,
 }
 
 impl PerCpuScheduler {
@@ -86,6 +94,8 @@ impl PerCpuScheduler {
             current_thread: None,
             dummy: 0,
             switching_old: None,
+            idle: None,
+            idle_id: None,
         }
     }
 
@@ -144,7 +154,56 @@ impl PerCpuScheduler {
         }
 
         // 2. Stride heap — O(log N) pop
+        #[cfg(feature = "verification")]
+        let snapshot_passes: alloc::vec::Vec<u64> = self.stride_heap.iter().map(|p| (&*p.0).pass).collect();
         if let Some(PassOrd(t)) = self.stride_heap.pop() {
+            #[cfg(feature = "verification")]
+            {
+                let selected_pass = t.pass;
+                // INVARIANT 2: selected must be min-pass
+                if let Some(min_pass) = snapshot_passes.iter().min() {
+                    if selected_pass > *min_pass {
+                        let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                        runner.record_failure("scheduler::pick_next", &alloc::format!(
+                            "SelectedNotMinPass: selected={} min={} among {} ready threads",
+                            selected_pass, min_pass, snapshot_passes.len()
+                        ));
+                    }
+                }
+                // INVARIANT 3: stretch bound
+                if let (Some(max_pass), Some(min_pass)) = (snapshot_passes.iter().max(), snapshot_passes.iter().min()) {
+                    let limit = crate::verified::scheduler::STRIDE_MAX.saturating_mul(2);
+                    if max_pass.saturating_sub(*min_pass) > limit {
+                        let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                        runner.record_failure("scheduler::pick_next", &alloc::format!(
+                            "StretchViolation: max={} min={} limit={}",
+                            max_pass, min_pass, limit
+                        ));
+                    }
+                }
+                // INVARIANT 1: pass sum bounded
+                let total_pass: u64 = snapshot_passes.iter().sum();
+                let max_possible = crate::interrupts::get_ticks().saturating_mul(crate::verified::scheduler::STRIDE_MAX);
+                if total_pass > max_possible.saturating_mul(2) {
+                    let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                    runner.record_failure("scheduler::pick_next", &alloc::format!(
+                        "PassSumMismatch: sum={} >> expected max={} (ticks={})",
+                        total_pass, max_possible, crate::interrupts::get_ticks()
+                    ));
+                }
+                // Starvation check
+                if let Some(min_pass) = snapshot_passes.iter().min() {
+                    for pass in &snapshot_passes {
+                        let gap = pass.saturating_sub(*min_pass);
+                        if gap > crate::verified::scheduler::STRIDE_MAX.saturating_mul(4) {
+                            let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                            runner.record_failure("scheduler::pick_next", &alloc::format!(
+                                "StarvationRisk: pass={} min={} gap={}", pass, min_pass, gap
+                            ));
+                        }
+                    }
+                }
+            }
             return Some(t);
         }
 
@@ -154,7 +213,51 @@ impl PerCpuScheduler {
             if i == current_cpu { continue; }
             if let Some(mut other) = PER_CPU[i].try_lock() {
                 other.flush_ready_queues();
+                #[cfg(feature = "verification")]
+                let stolen_passes: alloc::vec::Vec<u64> = other.stride_heap.iter().map(|p| (&*p.0).pass).collect();
                 if let Some(PassOrd(t)) = other.stride_heap.pop() {
+                    #[cfg(feature = "verification")]
+                    {
+                        let selected_pass = t.pass;
+                        if let Some(min_pass) = stolen_passes.iter().min() {
+                            if selected_pass > *min_pass {
+                                let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                                runner.record_failure("scheduler::pick_next::work_steal", &alloc::format!(
+                                    "SelectedNotMinPass: selected={} min={} among {} ready threads",
+                                    selected_pass, min_pass, stolen_passes.len()
+                                ));
+                            }
+                        }
+                        if let (Some(max_pass), Some(min_pass)) = (stolen_passes.iter().max(), stolen_passes.iter().min()) {
+                            let limit = crate::verified::scheduler::STRIDE_MAX.saturating_mul(2);
+                            if max_pass.saturating_sub(*min_pass) > limit {
+                                let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                                runner.record_failure("scheduler::pick_next::work_steal", &alloc::format!(
+                                    "StretchViolation: max={} min={} limit={}", max_pass, min_pass, limit
+                                ));
+                            }
+                        }
+                        let total_pass: u64 = stolen_passes.iter().sum();
+                        let max_possible = crate::interrupts::get_ticks().saturating_mul(crate::verified::scheduler::STRIDE_MAX);
+                        if total_pass > max_possible.saturating_mul(2) {
+                            let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                            runner.record_failure("scheduler::pick_next::work_steal", &alloc::format!(
+                                "PassSumMismatch: sum={} >> expected max={} (ticks={})",
+                                total_pass, max_possible, crate::interrupts::get_ticks()
+                            ));
+                        }
+                        if let Some(min_pass) = stolen_passes.iter().min() {
+                            for pass in &stolen_passes {
+                                let gap = pass.saturating_sub(*min_pass);
+                                if gap > crate::verified::scheduler::STRIDE_MAX.saturating_mul(4) {
+                                    let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                                    runner.record_failure("scheduler::pick_next::work_steal", &alloc::format!(
+                                        "StarvationRisk: pass={} min={} gap={}", pass, min_pass, gap
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     return Some(t);
                 }
             }
@@ -265,10 +368,94 @@ pub fn this_cpu_sched() -> &'static Mutex<PerCpuScheduler> {
     &PER_CPU[cpu_id]
 }
 
+/// Route a thread being switched away to the queue matching its blocking
+/// criterion (sleep/futex/pipe), or back to the ready queues for preempted
+/// threads. The parent's saved registers live in its own `stack_ptr` once
+/// `switch_context` runs, so the saved state travels with the Box regardless
+/// of which queue it lands in.
+fn route_outgoing(s: &mut PerCpuScheduler, mut switching: Box<Thread>) {
+    if switching.sleep_until.is_some() {
+        GLOBAL.sleep_queue.lock().push_back(switching);
+    } else if switching.futex_wake_addr.is_some() {
+        GLOBAL.futex_queue.lock().push_back(switching);
+    } else if switching.pipe_block_key.is_some() {
+        GLOBAL.block_queue.lock().push_back(switching);
+    } else if switching.status != crate::task::thread::ThreadStatus::Exited {
+        switching.status = crate::task::thread::ThreadStatus::Ready;
+        let p_idx = (switching.priority as usize).min(7);
+        s.ready_queues[p_idx].push_back(switching);
+        s.mark_ready_queues_dirty();
+    } else {
+        // Exited: we are now on the NEXT thread's kernel stack (the switch
+        // already completed), so it is safe to unmap the dying thread's stack
+        // and destroy its address space.
+        if let Some(ref proc) = switching.process {
+            crate::memory::paging::AddressSpace::destroy(&proc.address_space);
+        }
+        crate::memory::stack::free_stack(&switching.stack);
+        // Dropping the Box here reclaims the Thread struct.
+    }
+}
+
+/// Entry point of each CPU's permanent idle thread: drain anything the
+/// switch that brought us here parked (an Exited thread whose stack is
+/// reclaimed on this safe stack, or a blocked thread being routed to its
+/// wake queue), then hlt until an IRQ wakes us and try to pick work.
+extern "C" fn cpu_idle_entry() -> ! {
+    loop {
+        if let Some(mut sched) = this_cpu_sched().try_lock() {
+            route_switching_old(&mut sched);
+        }
+        x86_64::instructions::interrupts::enable_and_hlt();
+        try_schedule();
+    }
+}
+
 impl PerCpuScheduler {
     /// Caller MUST drop the Mutex guard BEFORE calling switch_context.
     pub fn prepare_switch(&mut self) -> Option<(*mut u64, u64)> {
-        let mut next = self.pick_next()?;
+        // Reclaim anything parked by an earlier switch whose post-switch
+        // drain never ran: a fork/clone child iretq's to userspace without
+        // running route_switching_old, and a try_schedule drain can lose the
+        // try_lock. Route ALL parked threads — Exited ones are freed, the
+        // rest return to the ready queue. Never drop a parked thread: its
+        // saved context would be lost forever.
+        if let Some(parked) = self.switching_old.take() {
+            route_outgoing(&mut *self, parked);
+        }
+        let mut next = match self.pick_next() {
+            Some(t) => t,
+            None => {
+                // Nothing runnable. Switch to this CPU's idle thread when
+                // the current slot is Exited (a dying thread whose stack
+                // cannot be freed while we are still executing on it),
+                // empty (a CPU that booted with nothing to run), or a
+                // futex/pipe-blocked thread that wake_*() can only reach
+                // through its queue. Running / sleep-blocked sole threads
+                // stay current: schedule() resumes them in place.
+                let want_idle = match self.current_thread.as_ref().map(|t| t.status) {
+                    None | Some(crate::task::thread::ThreadStatus::Exited) => true,
+                    Some(crate::task::thread::ThreadStatus::Blocked) => {
+                        let cur = self.current_thread.as_ref().unwrap();
+                        cur.futex_wake_addr.is_some() || cur.pipe_block_key.is_some()
+                    }
+                    _ => false,
+                };
+                if want_idle {
+                    match self.idle.take() {
+                        Some(idle) => idle,
+                        None => return None,
+                    }
+                } else {
+                    return None;
+                }
+            }
+        };
+        // A fork/clone child iretq's to user space on its first scheduling
+        // and never returns through the post-switch `route_switching_old`,
+        // so the parent would sit forever in `switching_old`. Detect that
+        // case here and route the parent directly instead.
+        let child_first = next.first_switch_pending;
 
         // Update CURRENT_PROCESS before activating address space.
         if let Some(ref process) = next.process {
@@ -278,6 +465,10 @@ impl PerCpuScheduler {
                     let p_idx = next.priority as usize;
                     let p_idx = if p_idx > 7 { 7 } else { p_idx };
                     self.ready_queues[p_idx].push_back(next);
+                    // The thread was popped from the stride heap, so the
+                    // dirty flag was already cleared by flush_ready_queues;
+                    // re-mark it or pick_next will never see this thread.
+                    self.mark_ready_queues_dirty();
                     return None;
                 }
             };
@@ -288,24 +479,45 @@ impl PerCpuScheduler {
         }
 
         next.status = crate::task::thread::ThreadStatus::Running;
+        // The child is about to be switched to for the first time (or put
+        // back): clear its one-shot flag so a later schedule treats it as a
+        // normal thread.
+        next.first_switch_pending = false;
         let new_rsp = next.stack_ptr;
         let stack_top = next.stack_top();
 
         let old_rsp_ptr = if let Some(mut old) = self.current_thread.take() {
             if old.status == crate::task::thread::ThreadStatus::Exited {
-                if let Some(ref proc) = old.process {
-                    crate::memory::paging::AddressSpace::destroy(&proc.address_space);
-                }
-                crate::memory::stack::free_stack(&old.stack);
-                self.switching_old = None;
+                // Do NOT free the dying stack/AS here: we are still executing
+                // on its kernel stack until switch_context switches away, and
+                // free_stack unmaps pages that our next push/return needs.
+                // Park it and let route_outgoing (post-switch, new stack)
+                // reclaim the memory.
+                self.switching_old = Some(old);
                 &raw mut self.dummy
+            } else if self.idle_id == Some(old._id) {
+                // The preempted idle thread: save its context and put it
+                // back in the idle slot. It must never enter a ready queue
+                // (pick_next would treat it as ordinary work).
+                let p = &mut old.stack_ptr as *mut u64;
+                old.pass = old.pass.wrapping_add(old.stride);
+                self.idle = Some(old);
+                p
             } else {
                 let p = &mut old.stack_ptr as *mut u64;
                 // Advance pass by stride (virtual time accounting)
                 old.pass = old.pass.wrapping_add(old.stride);
-                // Store in switching_old instead of ready_queues — the thread is still
-                // executing on this CPU until switch_context saves its registers.
-                self.switching_old = Some(old);
+                if child_first {
+                    // The new thread never drains `switching_old`, so park
+                    // the parent directly. Its regs are saved into
+                    // `old.stack_ptr` by switch_context below, exactly as a
+                    // preempted thread's would be.
+                    route_outgoing(&mut *self, old);
+                } else {
+                    // Store in switching_old instead of ready_queues — the thread is still
+                    // executing on this CPU until switch_context saves its registers.
+                    self.switching_old = Some(old);
+                }
                 p
             }
         } else {
@@ -315,6 +527,7 @@ impl PerCpuScheduler {
 
         self.current_thread = Some(next);
         crate::syscalls::set_kernel_stack(stack_top);
+        crate::gdt::set_privilege_stack(stack_top);
 
         Some((old_rsp_ptr, new_rsp))
     }
@@ -331,22 +544,14 @@ impl PerCpuScheduler {
 /// preempted threads. The context switch already saved the thread's
 /// registers into its own `stack_ptr` (via `prepare_switch`), so the saved
 /// state travels with the Box regardless of which queue it lands in.
-fn route_switching_old(s: &mut PerCpuScheduler) {
-    if let Some(mut switching) = s.switching_old.take() {
-        if switching.sleep_until.is_some() {
-            GLOBAL.sleep_queue.lock().push_back(switching);
-        } else if switching.futex_wake_addr.is_some() {
-            GLOBAL.futex_queue.lock().push_back(switching);
-        } else if switching.pipe_block_key.is_some() {
-            GLOBAL.block_queue.lock().push_back(switching);
-        } else if switching.status != crate::task::thread::ThreadStatus::Exited {
-            switching.status = crate::task::thread::ThreadStatus::Ready;
-            let p_idx = (switching.priority as usize).min(7);
-            s.ready_queues[p_idx].push_back(switching);
-            s.mark_ready_queues_dirty();
-        }
-        // Exited: stack/AS were freed in prepare_switch; dropping the Box
-        // here reclaims the Thread struct.
+///
+/// Also called from `prepare_switch` for the fork/clone child case: a
+/// freshly-created child iretq's to userspace without ever returning from
+/// `switch_context`, so the parent parked in `switching_old` must be
+/// routed then, before the slot is overwritten.
+pub(crate) fn route_switching_old(s: &mut PerCpuScheduler) {
+    if let Some(switching) = s.switching_old.take() {
+        route_outgoing(s, switching);
     }
 }
 
@@ -366,6 +571,14 @@ pub fn schedule() {
             x86_64::instructions::interrupts::enable_and_hlt();
             continue;
         }
+        // The prepare -> switch -> route sequence must be atomic with
+        // respect to interrupts, exactly as in try_schedule: syscalls run
+        // with IF=1 (SYSCALL does not clear IF), so a timer IRQ landing
+        // between prepare_switch and switch_thread would re-enter the
+        // scheduler and double-schedule the thread being switched to.
+        let saved: u64;
+        unsafe { core::arch::asm!("pushfq; pop {0}; cli", out(reg) saved, options(att_syntax)); }
+
         let (old_ptr, new_sp, new_fs) = {
             let mut s = this_cpu_sched().lock();
             s.prepare_switch_tls()
@@ -386,6 +599,9 @@ pub fn schedule() {
             if let Some(cur) = s.current_thread.as_mut() {
                 if cur.status == crate::task::thread::ThreadStatus::Running {
                     drop(s);
+                    if saved & 0x200 != 0 {
+                        unsafe { core::arch::asm!("sti"); }
+                    }
                     return;
                 }
                 if cur.status == crate::task::thread::ThreadStatus::Blocked {
@@ -397,11 +613,18 @@ pub fn schedule() {
                         cur.status = crate::task::thread::ThreadStatus::Running;
                         cur.sleep_until = None;
                         drop(s);
+                        if saved & 0x200 != 0 {
+                            unsafe { core::arch::asm!("sti"); }
+                        }
                         return;
                     }
                 }
             }
             drop(s);
+        }
+
+        if saved & 0x200 != 0 {
+            unsafe { core::arch::asm!("sti"); }
         }
 
         watchdog_counter = watchdog_counter.wrapping_add(1);
@@ -424,6 +647,16 @@ pub fn try_schedule() {
     if SCHED_QUIESCE.load(Ordering::Relaxed) {
         return;
     }
+    // The prepare -> switch -> route sequence must be atomic with respect to
+    // interrupts. try_schedule is called from the idle loop with IF=1, so a
+    // timer IRQ can land between prepare_switch (which parks the current
+    // thread and picks a new one) and switch_thread, re-entering
+    // try_schedule and double-scheduling the thread we are about to switch
+    // to (its context gets loaded here AND it sits in a queue). Disable
+    // interrupts for the whole sequence and restore the caller's IF state.
+    let saved: u64;
+    unsafe { core::arch::asm!("pushfq; pop {0}; cli", out(reg) saved, options(att_syntax)); }
+
     let switch = {
         let mut s = this_cpu_sched().try_lock();
         if let Some(ref mut sched) = s {
@@ -431,6 +664,9 @@ pub fn try_schedule() {
             // Without this guard, a timer interrupt after `sti` but before
             // `schedule()` would hijack the boot stack into the DUMMY slot.
             if sched.current_thread.is_none() {
+                if saved & 0x200 != 0 {
+                    unsafe { core::arch::asm!("sti"); }
+                }
                 return;
             }
             sched.prepare_switch_tls()
@@ -447,6 +683,13 @@ pub fn try_schedule() {
         if let Some(mut sched) = this_cpu_sched().try_lock() {
             route_switching_old(&mut sched);
         }
+    }
+
+    // Restore the caller's interrupt state (may be on a different thread's
+    // stack than the one that entered try_schedule — this runs in the
+    // context that switch_thread returned to, i.e. the preempted thread).
+    if saved & 0x200 != 0 {
+        unsafe { core::arch::asm!("sti"); }
     }
 }
 
@@ -718,6 +961,13 @@ pub fn init() {
             for q in sched.ready_queues.iter_mut() {
                 q.reserve(64);
             }
+            // Permanent per-CPU idle thread: the CPU switches here when
+            // nothing else is runnable (see prepare_switch), so every CPU
+            // has a stable context to pick work from and a safe stack on
+            // which to reclaim Exited threads.
+            let idle = Box::new(Thread::new(cpu_idle_entry));
+            sched.idle_id = Some(idle._id);
+            sched.idle = Some(idle);
         }
     }
 }

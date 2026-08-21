@@ -3,6 +3,18 @@ use crate::drivers::block::BlockDevice;
 use crate::alloc::sync::Arc;
 use crate::sync::IrqSafeMutex as Mutex;
 
+#[cfg(feature = "verification")]
+use crate::verified::journal::{JournalStateMachine, JournalEvent};
+#[cfg(feature = "verification")]
+use crate::verified::runner::VERIFICATION_RUNNER;
+#[cfg(feature = "verification")]
+use lazy_static::lazy_static;
+
+#[cfg(feature = "verification")]
+lazy_static! {
+    static ref JOURNAL_VERIFIER: Mutex<JournalStateMachine> = Mutex::new(JournalStateMachine::new());
+}
+
 const JOURNAL_MAGIC: u64 = 0x4A4F55524E414C5F;
 const MAX_TRANSACTION_BLOCKS: u32 = 256;
 
@@ -77,6 +89,16 @@ impl Journal {
         buf[..src.len()].copy_from_slice(src);
         SkyFS::write_block(dev, block, &buf)?;
         journal.next_free += 1;
+
+        #[cfg(feature = "verification")]
+        {
+            let mut verifier = JOURNAL_VERIFIER.lock();
+            if let Err(v) = verifier.apply(JournalEvent::BeginTxn) {
+                let mut runner = VERIFICATION_RUNNER.lock();
+                runner.record_failure("journal::begin_transaction", &alloc::format!("{:?}", v));
+            }
+        }
+
         Ok(block)
     }
 
@@ -87,7 +109,18 @@ impl Journal {
         hdr.state = 2;
         let checksum = simple_checksum(&buf);
         hdr.checksum = checksum;
-        SkyFS::write_block(dev, header_block, &buf)
+        SkyFS::write_block(dev, header_block, &buf)?;
+
+        #[cfg(feature = "verification")]
+        {
+            let mut verifier = JOURNAL_VERIFIER.lock();
+            if let Err(v) = verifier.apply(JournalEvent::TxnPersisted) {
+                let mut runner = VERIFICATION_RUNNER.lock();
+                runner.record_failure("journal::commit_transaction", &alloc::format!("{:?}", v));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn journal_data(dev: &mut dyn BlockDevice, journal: &mut Journal, data: &[u8]) -> Result<u64, ()> {
@@ -104,6 +137,15 @@ impl Journal {
     }
 
     pub fn recover_from_dev(dev: &mut dyn BlockDevice, journal: &mut Journal) -> Result<(), ()> {
+        #[cfg(feature = "verification")]
+        {
+            let mut verifier = JOURNAL_VERIFIER.lock();
+            if let Err(v) = verifier.apply(JournalEvent::Crash) {
+                let mut runner = VERIFICATION_RUNNER.lock();
+                runner.record_failure("journal::recover_from_dev::crash", &alloc::format!("{:?}", v));
+            }
+        }
+
         for i in 0..journal.num_blocks {
             let block = journal.start_block + i;
             let mut buf = [0u8; BLOCK_SIZE];
@@ -123,6 +165,16 @@ impl Journal {
         }
         journal.sequence = 0;
         journal.next_free = 1;
+
+        #[cfg(feature = "verification")]
+        {
+            let mut verifier = JOURNAL_VERIFIER.lock();
+            if let Err(v) = verifier.apply(JournalEvent::RecoveryComplete) {
+                let mut runner = VERIFICATION_RUNNER.lock();
+                runner.record_failure("journal::recover_from_dev::recovery_complete", &alloc::format!("{:?}", v));
+            }
+        }
+
         Ok(())
     }
 
