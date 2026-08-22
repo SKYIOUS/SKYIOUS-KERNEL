@@ -9,6 +9,8 @@
 //! - PR_SET_CHILD_SUBREAPER: Mark as subreaper for orphaned children
 //! - PR_SET_TIMERSLACK: Set timer slack
 //! - PR_GET_TIMERSLACK: Get timer slack
+//! - PR_SET_OOM_SCORE_ADJ: Set OOM killer adjustment (-1000..1000)
+//! - PR_GET_OOM_SCORE_ADJ: Get OOM killer adjustment
 
 use crate::task::process::CURRENT_PROCESS;
 use crate::syscalls::errno;
@@ -39,6 +41,8 @@ pub const PR_SET_MDWE_REFUSE_EXEC_GAIN: u64 = 59;
 pub const PR_GET_MDWE_REFUSE_EXEC_GAIN: u64 = 60;
 pub const PR_SET_VMA: u64 = 0x5356_4D41; // 'VMA\0'
 pub const PR_SET_VMA_ANON_NAME: u64 = 0;
+pub const PR_SET_OOM_SCORE_ADJ: u64 = 44;
+pub const PR_GET_OOM_SCORE_ADJ: u64 = 45;
 
 /// prctl() syscall
 pub fn sys_prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
@@ -200,6 +204,17 @@ pub fn sys_prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64
                 return 0;
             }
             errno::Errno::EINVAL as u64
+        }
+
+        PR_SET_OOM_SCORE_ADJ => {
+            let adj = (arg2 as i32).clamp(-1000, 1000);
+            let _ = crate::task::oom::set_oom_score_adj(proc.id, adj);
+            crate::serial_write(&alloc::format!("[PRCTL] pid={} oom_score_adj={}\n", proc.id, adj));
+            0
+        }
+
+        PR_GET_OOM_SCORE_ADJ => {
+            crate::task::oom::get_oom_score_adj(proc.id) as u64
         }
 
         _ => {

@@ -130,30 +130,7 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 }
 
 pub fn oom_kill() -> ! {
-    let msg = b"\n[OOM] Out of memory - killing current process\n";
-    for &b in msg {
-        serial_putc(b);
-    }
-    let pid = crate::task::process::CURRENT_PROCESS.lock().as_ref().map(|p| p.id);
-    if let Some(pid) = pid {
-        let msg2 = alloc::format!("[OOM] Killing pid {}\n", pid);
-        serial_write(&msg2);
-        crate::task::process::kill_process(pid);
-        // The victim is the current thread. Mark it Exited so the next
-        // context switch frees its kernel stack and address space instead
-        // of letting the zombie thread keep running with no process entry.
-        crate::task::scheduler::with_current_thread(|thread| {
-            thread.status = crate::task::thread::ThreadStatus::Exited;
-        });
-    } else {
-        serial_write("[OOM] No current process!\n");
-    }
-    crate::task::scheduler::schedule();
-    // schedule() returns if this thread is the sole runnable work; never
-    // return from oom_kill.
-    loop {
-        x86_64::instructions::interrupts::enable_and_hlt();
-    }
+    crate::task::oom::handle_oom()
 }
 
 fn init_kaslr() {

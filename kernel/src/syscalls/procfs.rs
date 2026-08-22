@@ -51,6 +51,8 @@ fn read_meminfo() -> String {
     s.push_str("SReclaimable:       64 kB\n");
     s.push_str("SUnreclaim:        960 kB\n");
     s.push_str("PageTables:        128 kB\n");
+    let (oom_kills, _) = crate::task::oom::oom_stats();
+    s.push_str(&alloc::format!("OOMKills:          {}\n", oom_kills));
     s
 }
 
@@ -77,6 +79,25 @@ fn read_stat() -> String {
 /// Read /proc/loadavg
 fn read_loadavg() -> String {
     String::from("1.00 1.00 1.00 1/1 1\n")
+}
+
+/// Read /proc/PID/oom_score — computed OOM score for a process.
+fn read_proc_oom_score(pid: u64) -> String {
+    let table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get(&pid) {
+        let rss = crate::task::oom::estimate_process_rss(proc);
+        let total_mem = crate::task::oom::total_system_memory();
+        let (score, _, _) = crate::task::oom::compute_oom_score(pid, rss, total_mem);
+        alloc::format!("{}\n", score)
+    } else {
+        String::from("0\n")
+    }
+}
+
+/// Read /proc/PID/oom_score_adj — user-tunable OOM adjustment.
+fn read_proc_oom_adj(pid: u64) -> String {
+    let adj = crate::task::oom::get_oom_score_adj(pid);
+    alloc::format!("{}\n", adj)
 }
 
 /// Read /proc/PID/status (simplified)
@@ -167,6 +188,8 @@ impl VfsNode for ProcFsNode {
                             match file {
                                 "status" => read_proc_status(pid),
                                 "cmdline" => read_proc_cmdline(pid),
+                                "oom_score" => read_proc_oom_score(pid),
+                                "oom_score_adj" => read_proc_oom_adj(pid),
                                 _ => String::new(),
                             }
                         } else {
@@ -225,13 +248,18 @@ impl VfsNode for ProcFsNode {
                     &alloc::format!("/proc/{}", pid),
                 )) as Arc<dyn VfsNode>);
             }
-        } else if self.path.starts_with("/proc/") && !self.path[6..].contains('/') {
+        } else if self.path.starts_with("/proc/") && !self.path[6..].contains('/') {            entries.push(Arc::new(ProcFsNode::new(
+                    &alloc::format!("{}/status", self.path),
+                )) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new(
-                &alloc::format!("{}/status", self.path),
-            )) as Arc<dyn VfsNode>);
+                    &alloc::format!("{}/cmdline", self.path),
+                )) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new(
-                &alloc::format!("{}/cmdline", self.path),
-            )) as Arc<dyn VfsNode>);
+                    &alloc::format!("{}/oom_score", self.path),
+                )) as Arc<dyn VfsNode>);
+            entries.push(Arc::new(ProcFsNode::new(
+                    &alloc::format!("{}/oom_score_adj", self.path),
+                )) as Arc<dyn VfsNode>);
         }
 
         Ok(entries)

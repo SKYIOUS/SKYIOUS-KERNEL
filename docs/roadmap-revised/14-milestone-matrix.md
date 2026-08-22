@@ -30,7 +30,7 @@ Not letter grades — measurable criteria.
 | mmap | File mapping works | ✅ |
 | COW | Fork uses COW correctly | ✅ |
 | Page fault | Anonymous + file-backed faults work | ✅ |
-| Memory pressure | OOM killer works | ❌ Not tested |
+| Memory pressure | OOM killer works | ✅ Score-based victim selection, retry, prctl + /proc integration |
 
 ### VFS Correctness
 

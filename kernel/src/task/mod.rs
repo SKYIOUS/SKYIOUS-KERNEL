@@ -8,6 +8,7 @@ pub mod scheduler;
 pub mod thread;
 pub mod process;
 pub mod lock;
+pub mod oom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct TaskId(u64);
