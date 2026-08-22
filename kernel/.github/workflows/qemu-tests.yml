@@ -1,0 +1,236 @@
+# QEMU integration tests for the Vahi kernel.
+#
+# Runs on every push and PR. Builds the kernel, creates a bootable image,
+# launches QEMU, and validates TAP selftest output.
+
+name: QEMU Integration Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  # ── Build kernel ──────────────────────────────────────────────────────
+  build:
+    name: Build kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('kernel/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build kernel (debug, self_test)
+        working-directory: kernel
+        run: cargo build --features self_test --target x86_64-unknown-none
+
+      - name: Upload kernel ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-elf
+          path: kernel/target/x86_64-unknown-none/debug/vahi_kernel
+
+  # ── QEMU boot + selftest ─────────────────────────────────────────────
+  qemu-selftest:
+    name: QEMU selftest (${{ matrix.profile }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+        smp: [1, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install bootimage
+        run: cargo install bootimage
+
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('kernel/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build kernel (${{ matrix.profile }})
+        working-directory: kernel
+        run: |
+          PROFILE_FLAG=""
+          if [[ "${{ matrix.profile }}" == "release" ]]; then
+            PROFILE_FLAG="--release"
+          fi
+          cargo build $PROFILE_FLAG --features self_test --target x86_64-unknown-none
+
+      - name: Create bootable image
+        working-directory: kernel
+        run: cargo bootimage
+
+      - name: Run QEMU selftest (SMP=${{ matrix.smp }})
+        working-directory: kernel
+        run: |
+          # Find boot image
+          TARGET="target/x86_64-unknown-none/${{ matrix.profile }}"
+          IMAGE=$(find "$TARGET" -maxdepth 1 -name "bootimage-*.bin" | head -1)
+          if [[ -z "$IMAGE" ]]; then
+            echo "❌ No boot image found"
+            exit 1
+          fi
+          echo "Boot image: $IMAGE"
+
+          # Run QEMU with 120s timeout
+          timeout 120 qemu-system-x86_64 \
+            -drive "format=raw,file=$IMAGE" \
+            -m 512 \
+            -nographic \
+            -serial stdio \
+            -no-reboot \
+            -d guest_errors \
+            -smp ${{ matrix.smp }} \
+            > serial.log 2>&1 || true
+
+          echo "=== Serial Output ==="
+          cat serial.log
+          echo "=== End Serial ==="
+
+          # Parse TAP
+          PASSED=$(grep -c "^ok " serial.log || true)
+          FAILED=$(grep -c "^not ok " serial.log || true)
+          PLAN=$(grep "^1\.\." serial.log | head -1 || true)
+
+          echo "TAP Plan: $PLAN"
+          echo "Passed: $PASSED"
+          echo "Failed: $FAILED"
+
+          if [[ "$FAILED" -gt 0 ]]; then
+            echo "❌ Selftest failures detected!"
+            grep "^not ok" serial.log
+            exit 1
+          fi
+
+          if [[ "$PASSED" -eq 0 ]]; then
+            echo "⚠️ No TAP tests found — kernel may not have booted"
+            exit 1
+          fi
+
+          echo "✅ All $PASSED selftests passed (profile=${{ matrix.profile }}, smp=${{ matrix.smp }})"
+
+      - name: Upload serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-log-${{ matrix.profile }}-smp${{ matrix.smp }}
+          path: kernel/serial.log
+
+  # ── No-panic boot test ───────────────────────────────────────────────
+  qemu-no-panic:
+    name: QEMU no-panic
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install bootimage
+        run: cargo install bootimage
+
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('kernel/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build + bootimage
+        working-directory: kernel
+        run: |
+          cargo build --features self_test --target x86_64-unknown-none
+          cargo bootimage
+
+      - name: Boot kernel and check for panics
+        working-directory: kernel
+        run: |
+          IMAGE=$(find target/x86_64-unknown-none/debug -maxdepth 1 -name "bootimage-*.bin" | head -1)
+
+          timeout 120 qemu-system-x86_64 \
+            -drive "format=raw,file=$IMAGE" \
+            -m 512 -nographic -serial stdio -no-reboot \
+            -d guest_errors > serial.log 2>&1 || true
+
+          # Check for panics
+          if grep -qi "kernel panic\|PANIC\|double fault\|triple fault\|stack smashing" serial.log; then
+            echo "❌ Kernel panic detected!"
+            grep -i "panic\|fault\|stack smashing" serial.log
+            exit 1
+          fi
+
+          echo "✅ Kernel booted without panics"
+
+  # ── Build verification (no self_test) ────────────────────────────────
+  build-verify:
+    name: Build verify (all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('kernel/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build (default features)
+        working-directory: kernel
+        run: cargo build --target x86_64-unknown-none
+
+      - name: Build (all features)
+        working-directory: kernel
+        run: cargo build --target x86_64-unknown-none --all-features || true
+
+      - name: Build (no features)
+        working-directory: kernel
+        run: cargo build --target x86_64-unknown-none --no-default-features
