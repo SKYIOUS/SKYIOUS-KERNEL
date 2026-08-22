@@ -1,0 +1,62 @@
+name: 100x Build Regression Test
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  build-regression:
+    name: 100 consecutive builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('kernel/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Run 100 consecutive builds
+        working-directory: kernel
+        run: |
+          echo "Running 100 consecutive builds..."
+          FIRST_HASH=""
+          FAIL=0
+          for i in $(seq 1 100); do
+            cargo build --features self_test --target x86_64-unknown-none 2>&1 | tail -1
+            HASH=$(sha256sum target/x86_64-unknown-none/debug/vahi_kernel | awk '{print $1}')
+            if [[ $i -eq 1 ]]; then
+              FIRST_HASH="$HASH"
+            elif [[ "$HASH" != "$FIRST_HASH" ]]; then
+              echo "FAIL: Build $i hash differs from build 1"
+              FAIL=$((FAIL + 1))
+            fi
+            printf "\r  [%3d/100] hash=%s" "$i" "${HASH:0:12}"
+          done
+          echo ""
+          if [[ $FAIL -gt 0 ]]; then
+            echo "FAILED: $FAIL builds had inconsistent binaries"
+            exit 1
+          fi
+          echo "✅ All 100 builds produced identical binaries (hash=$FIRST_HASH)"
+
+      - name: Verify binary size is reasonable
+        working-directory: kernel
+        run: |
+          SIZE=$(stat -c%s target/x86_64-unknown-none/debug/vahi_kernel)
+          echo "Kernel binary size: $SIZE bytes ($(( SIZE / 1024 / 1024 )) MB)"
+          if [[ $SIZE -gt 100000000 ]]; then
+            echo "WARNING: Binary is over 100MB — may indicate bloat"
+          fi

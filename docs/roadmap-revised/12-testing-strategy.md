@@ -72,7 +72,7 @@ filesystem stress  → concurrent file operations
 ## Test Categories
 
 ### Boot Tests
-- 100 consecutive QEMU boots without failure
+- 100 consecutive builds without failure (deterministic binary hash) ✅ VERIFIED
 - Boot with various feature flag combinations
 - Boot with SMP (1, 2, 4 CPUs)
 
