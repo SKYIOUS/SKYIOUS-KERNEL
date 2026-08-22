@@ -101,6 +101,8 @@ pub fn synchronize_rcu() {
 /// The callback will be called with the given argument once all CPUs have
 /// passed through a quiescent state.
 pub fn call_rcu(callback: unsafe extern "C" fn(*mut u8), arg: *mut u8) {
+    // Register with CFI so the callback can be validated when executed
+    crate::sync::cfi::cfi_register_target(callback as usize);
     let cb = RcuCallback { func: callback, arg };
     RCU_STATE.callbacks.lock().push(cb);
 }
@@ -123,9 +125,13 @@ pub fn rcu_process_callbacks() {
     // Wait for grace period
     synchronize_rcu();
     
-    // Execute all callbacks
+    // Execute all callbacks (CFI validated)
     for cb in cbs {
-        unsafe { (cb.func)(cb.arg) };
+        if crate::sync::cfi::cfi_check(cb.func as usize) {
+            unsafe { (cb.func)(cb.arg) };
+        } else {
+            crate::serial_write("[CFI] Blocked invalid RCU callback\n");
+        }
     }
 }
 

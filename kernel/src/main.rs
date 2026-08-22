@@ -86,6 +86,7 @@ pub mod emulation;
 pub mod ebpf;
 pub mod crypto;
 pub mod pty;
+pub mod ipc;
 #[cfg(feature = "ash")]
 pub mod ash;
 pub mod arch;
@@ -230,6 +231,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_write("[BOOT] heap init...\n");
     allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
+    // 256 KiB exec pool for JIT (W^X) — after heap/frame alloc are ready.
+    #[cfg(feature = "ash")]
+    crate::hal::exec_mem::init_pool();
     #[cfg(not(target_arch = "aarch64"))]
     {
         serial_write("[BOOT] gdt init...\n");
@@ -307,6 +311,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     serial_write("[BOOT] LSM init...\n");
     security::init();
+    serial_write("[BOOT] CFI init...\n");
+    crate::sync::cfi::cfi_init();
     #[cfg(feature = "ash")]
     { serial_write("[BOOT] ASH init...\n"); ash::manager::init(); }
     #[cfg(feature = "hypervisor")]

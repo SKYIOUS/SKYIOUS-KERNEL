@@ -40,7 +40,7 @@
 | VFS trait | ✅ Working | `vfs/mod.rs` | FileSystem, VfsNode |
 | devfs | ✅ Working | `vfs/devfs.rs` | /dev/null, /dev/zero, tty |
 | SkyFS | ✅ Working | `vfs/skyfs/` | B-tree filesystem |
-| ext2 | ⚠️ Read-only | `vfs/ext2.rs` | No write support |
+| ext2 | ✅ Working | `vfs/ext2.rs` | Read + write + truncate |
 | ext4 | ⚠️ Read-only | `vfs/ext4.rs` | Feature-gated |
 | Pipe | ✅ Working | `vfs/pipe.rs` | Anonymous pipes |
 | Page cache | ✅ Working | `vfs/page_cache.rs` | Inode-keyed caching |
@@ -62,6 +62,31 @@
 | Namespaces | ✅ Working | `syscalls/namespaces.rs` | PID/Mount/Net/IPC/UTS/User |
 | Cgroup v2 | ✅ Working | `syscalls/cgroup.rs` | CPU/memory/pids/IO controllers |
 | Cgroup enforcement | ✅ Working | `interrupts.rs` | Memory limits at page fault time |
+| CFI (Control Flow Integrity) | ✅ Working | `sync/cfi.rs` | Software CFI: static + dynamic target validation |
+
+### Synchronization
+| Component | Status | File | Notes |
+|-----------|--------|------|-------|
+| IrqSafeMutex | ✅ Working | `sync/mod.rs` | IRQ-safe spin mutex |
+| RCU | ✅ Working | `sync/rcu.rs` | Read-Copy-Update with grace periods |
+
+### Scheduling
+| Component | Status | File | Notes |
+|-----------|--------|------|-------|
+| Stride scheduler | ✅ Working | `task/scheduler.rs` | Proportional-share |
+| SCHED_FIFO | ✅ Working | `task/thread.rs` | Real-time FIFO |
+| SCHED_RR | ✅ Working | `task/thread.rs` | Real-time round-robin |
+| CPU affinity | ✅ Working | `task/thread.rs` | 64-bit mask |
+
+### IPC
+| Component | Status | File | Notes |
+|-----------|--------|------|-------|
+| Vahi IPC | ✅ Working | `ipc/mod.rs` | Structured messages, zero-copy |
+
+### Capabilities
+| Component | Status | File | Notes |
+|-----------|--------|------|-------|
+| Capability model | ✅ Working | `objects/security.rs` | 16 rights, compose/fork/drop |
 
 ### ASH (Kernel Extensions)
 | Component | Status | File | Notes |
@@ -70,7 +95,15 @@
 | Interpreter | ✅ Working | `ash/runtime.rs` | |
 | Manager | ✅ Working | `ash/manager.rs` | Hook registration |
 | Hooks | ✅ Working | `ash/hooks/` | Net, syscall hooks |
-| JIT | ⚠️ Stub | `ash/jit.rs` | Not implemented |
+| JIT | ✅ Working | `ebpf/jit.rs` | x86_64 code gen: ALU64/32, JMP/JMP32, LD/ST, memory ops |
+
+### eBPF
+| Component | Status | File | Notes |
+|-----------|--------|------|-------|
+| VM | ✅ Working | `ebpf/vm.rs` | Full instruction set |
+| JIT compiler | ✅ Working | `ebpf/jit.rs` | x86_64 native code generation |
+| Verifier | ✅ Working | `ebpf/verifier.rs` | Safety checks |
+| Helpers | ✅ Working | `ebpf/helpers.rs` | Map lookup, pid, ticks, debug print |
 
 ### Drivers
 | Driver | Status | Notes |
@@ -114,9 +147,9 @@
 | Namespaces | ✅ PID/Mount/Net/IPC/UTS/User + unshare/setns | Phase 6 DONE |
 | Cgroup v2 | ✅ CPU/memory/pids/IO + enforcement at page fault | Phase 6 DONE |
 | Hypervisor | ✅ VMX/SVM, EPT/NPT, vCPU, launch_vm | Phase 7 DONE |
-| io_uring | Stubs only in `syscalls/io_uring.rs` | P2 |
-| CFI | Not implemented | P2 |
-| Dynamic linking kernel-side | `load_dynamic_binary()` exists, PT_INTERP may be incomplete | P1 (verify) |
+| io_uring | ✅ Working | `syscalls/io_uring.rs` | SQE processing, readv/writev, accept/connect, send/recv, GUI ops |
+| CFI | ✅ Working | `sync/cfi.rs` | Software CFI: validation tables, binary search, violation logging |
+| Dynamic linking kernel-side | ✅ Exists | `syscalls/process_lifecycle.rs` | Static + dynamic ELF loading |
 
 ## Previous Roadmap Errors Corrected
 

@@ -34,7 +34,7 @@
 
 | Item | Location | Impact | Notes |
 |------|----------|--------|-------|
-| No CFI (Control Flow Integrity) | `task/thread.rs` | Low | Not critical for correctness |
+| ~~No CFI~~ | ~~`task/thread.rs`~~ | ~~Low~~ | ✅ RESOLVED — Implemented in `sync/cfi.rs` |
 
 ### Testing Debt (Medium Priority)
 
@@ -49,7 +49,7 @@
 |--------|---------|-------|--------|
 | Architecture debt items | 4 | 4 | No change (low priority) |
 | Correctness debt items | 4 | 0 | -4 (all resolved) |
-| Security debt items | 3 | 1 | -2 (Landlock, seccomp resolved) |
+| Security debt items | 3 | 0 | -3 (Landlock, seccomp, CFI resolved) |
 | Performance debt items | 4 | 0 | -4 (all resolved) |
 | Testing debt items | 3 | 2 | -1 (CI resolved) |
-| Total debt items | 18 | 7 | -11 (61% reduction) |
+| Total debt items | 18 | 6 | -12 (67% reduction) |

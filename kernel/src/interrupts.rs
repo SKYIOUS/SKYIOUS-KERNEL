@@ -936,11 +936,15 @@ extern "x86-interrupt" fn ipi_func_handler(
             crate::task::scheduler::try_schedule();
         }
         3 => {
-            // Func â€” call registered function pointer
+            // Func - call registered function pointer (CFI validated)
             let func_val = cpu.ipi_arg.swap(0, core::sync::atomic::Ordering::AcqRel);
             if func_val != 0 {
-                let func: extern "C" fn(u64) = unsafe { core::mem::transmute(func_val) };
-                func(0);
+                if crate::sync::cfi::cfi_check(func_val as usize) {
+                    let func: extern "C" fn(u64) = unsafe { core::mem::transmute(func_val) };
+                    func(0);
+                } else {
+                    crate::serial_write("[CFI] Blocked invalid IPI function pointer\n");
+                }
             }
         }
         _ => {}

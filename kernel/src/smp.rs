@@ -378,6 +378,11 @@ pub fn get_cpu_id() -> usize {
 /// `func` must be a pointer to an `extern "C" fn(u64)`.
 #[allow(dead_code)]
 pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
+    // CFI: validate function pointer before dispatching via IPI
+    if !crate::sync::cfi::cfi_check(func as *const () as usize) {
+        crate::serial_write("[CFI] Blocked invalid SMP IPI function pointer\n");
+        return;
+    }
     // Set the function pointer and argument in the target's per-CPU data
     let areas = crate::syscalls::PER_CPU_AREAS.lock();
     if let Some(ptr) = areas.get(cpu_id as usize) {
@@ -400,6 +405,11 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
 /// Broadcasts a function call to all CPU cores except self.
 #[allow(dead_code)]
 pub fn smp_broadcast(func: extern "C" fn(u64), _arg: u64) {
+    // CFI: validate function pointer before broadcasting
+    if !crate::sync::cfi::cfi_check(func as *const () as usize) {
+        crate::serial_write("[CFI] Blocked invalid SMP broadcast function pointer\n");
+        return;
+    }
     let areas = crate::syscalls::PER_CPU_AREAS.lock();
     for ptr in areas.iter() {
         let raw = ptr.0;
