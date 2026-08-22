@@ -90,6 +90,7 @@ pub mod ipc;
 #[cfg(feature = "ash")]
 pub mod ash;
 pub mod arch;
+pub mod coverage;
 pub mod hal;
 #[cfg(feature = "gpu")]
 pub mod compositor;
@@ -316,7 +317,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         serial_write("[SELF-TEST] registering tests...\n");
         tests::register_all();
         serial_write("[SELF-TEST] running...\n");
+        coverage::init();
         selftest::run_all();
+        serial_write(&alloc::format!("[COVERAGE] unique={}, total={}, ratio={:.4}\n",
+            coverage::unique_blocks(), coverage::total_hits(), coverage::coverage_ratio()));
     }
     serial_write("[BOOT] GUI init...\n");
     gui::init();
