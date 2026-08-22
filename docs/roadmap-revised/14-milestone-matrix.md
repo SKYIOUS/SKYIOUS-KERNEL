@@ -66,7 +66,7 @@ Not letter grades — measurable criteria.
 |-----------|----------|--------|
 | SMAP/SMEP | Enforced in page fault handler | ✅ CR4 flags + STAC/CLAC |
 | KASLR | Kernel base randomized | ✅ init_kaslr() in main.rs |
-| CFI | Control flow protected | ❌ Not implemented (P3) |
+| CFI | Control flow protected | ✅ Software CFI in `sync/cfi.rs` |
 | Capabilities | Per-syscall checks work | ✅ |
 
 ### Networking

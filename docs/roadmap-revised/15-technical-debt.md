@@ -36,12 +36,12 @@
 |------|----------|--------|-------|
 | ~~No CFI~~ | ~~`task/thread.rs`~~ | ~~Low~~ | ✅ RESOLVED — Implemented in `sync/cfi.rs` |
 
-### Testing Debt (Medium Priority)
+### Testing Debt (Resolved)
 
 | Item | Location | Impact | Notes |
 |------|----------|--------|-------|
-| No stress tests | `tests/` | Medium | Would improve reliability |
-| No fuzzing | `tests/` | Medium | Would find edge cases |
+| ~~No stress tests~~ | ~~`tests/`~~ | ~~Medium~~ | ✅ RESOLVED — Implemented in `tests/stress.rs` |
+| ~~No fuzzing~~ | ~~`tests/`~~ | ~~Medium~~ | ✅ RESOLVED — Implemented in `tests/fuzzer.rs` |
 
 ## Debt Metrics (Updated)
 
@@ -51,5 +51,5 @@
 | Correctness debt items | 4 | 0 | -4 (all resolved) |
 | Security debt items | 3 | 0 | -3 (Landlock, seccomp, CFI resolved) |
 | Performance debt items | 4 | 0 | -4 (all resolved) |
-| Testing debt items | 3 | 2 | -1 (CI resolved) |
-| Total debt items | 18 | 6 | -12 (67% reduction) |
+| Testing debt items | 3 | 0 | -3 (all resolved) |
+| Total debt items | 18 | 4 | -14 (78% reduction) |

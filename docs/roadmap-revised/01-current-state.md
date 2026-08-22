@@ -83,6 +83,9 @@
 |-----------|--------|------|-------|
 | Vahi IPC | ✅ Working | `ipc/mod.rs` | Structured messages, zero-copy |
 | Zero-copy networking | ✅ Working | `net/zerocopy.rs` | Buffer registration, scatter-gather, MSG_ZEROCOPY |
+| RSS | ✅ Working | `net/rss.rs` | Toeplitz hash, multi-queue, per-queue stats |
+| TSO | ✅ Working | `net/rss.rs` | Software TCP segmentation offload |
+| Block I/O scheduler | ✅ Working | `drivers/block/scheduler.rs` | mq-deadline, priority classes, batch merge |
 
 ### Capabilities
 | Component | Status | File | Notes |
@@ -177,6 +180,8 @@
 | Phase 5: Security | ✅ COMPLETE | SMAP/SMEP, DAC, signals, seccomp, Landlock, prctl, capability dropping |
 | Phase 6: Containers | ✅ COMPLETE | PID/Mount/Net/IPC/UTS/User namespaces, unshare/setns, cgroup v2 primitives |
 | Phase 7: Virtualization | ✅ COMPLETE | VMX/SVM, EPT/NPT, vCPU, launch_vm, 10+ VM syscalls (integrated subsystem per ADR-025) |
+| Phase 10: Network Optimization | ✅ COMPLETE | Zero-copy networking, scatter-gather I/O, RSS, TSO |
+| Phase 11: Block I/O Scheduler | ✅ COMPLETE | mq-deadline scheduler, priority classes, batch merge |
 
 ## Key Findings from Phase 1 Audit
 
@@ -202,12 +207,11 @@ The dispatch table (lines 301-456 of `dispatch.rs`) shows complete signal frame 
 - Modify instruction pointer to handler
 - `rt_sigreturn` restores context
 
-### The biggest gap: epoll
+### All Phase 0-11 features implemented
 
-Without `epoll_create1`/`epoll_ctl`/`epoll_wait`, Vahi cannot run:
-- nginx
-- node.js
-- Go runtime's netpoller
-- Most modern event-driven servers
-
-This is the single highest-priority item for Phase 2.
+Every feature in the original roadmap (Phases 0-11) is now implemented:
+- **Phase 0-7**: Foundation, userspace, POSIX, storage, networking, security, containers, virtualization
+- **Phase 8**: eBPF JIT, RCU, RT scheduling, CPU affinity
+- **Phase 9**: ASH JIT, Vahi IPC, capability model, port IPC, job objects
+- **Phase 10**: Zero-copy networking, scatter-gather I/O, RSS, TSO
+- **Phase 11**: mq-deadline block I/O scheduler with priority classes
