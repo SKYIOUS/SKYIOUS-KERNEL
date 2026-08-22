@@ -1,0 +1,57 @@
+# Build artifacts
+target/
+*.o
+*.d
+*.a
+*.so
+*.dylib
+
+# Rust
+Cargo.lock
+
+# Python
+*.pyc
+__pycache__/
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Temp / Backup
+*.tmp
+*.bak
+*.orig
+*~
+
+# Cache
+.cache/
+.cargo/registry/
+.cargo/git/
+
+# QEMU / Debug
+*.log
+serial*.log
+qemu*.log
+
+# Kernel specific
+initrd.tar
+*.img
+*.bin
+*.fd

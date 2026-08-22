@@ -1,5 +1,7 @@
 target/
 .obsidian/
+.freebuff/
+.kilo/
 
 # Build artifacts
 *.img
@@ -7,6 +9,9 @@ target/
 *.bin
 *.fd
 *.iso
+*.o
+*.d
+*.a
 OVMF.fd
 
 # QEMU logs and captures
@@ -42,7 +47,28 @@ Thumbs.db
 .idea/
 .vscode/
 *.code-workspace
+*.sublime-project
+*.sublime-workspace
 
 # OS junk
 desktop.ini
 ehthumbs.db
+
+# Python
+*.pyc
+__pycache__/
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Temp / Backup
+*.tmp
+*.bak
+*.orig
+
+# Cache
+.cache/
+.cargo/registry/
+.cargo/git/
