@@ -141,7 +141,7 @@ fn do_readv(fd: i32, addr: u64, len: usize, _offset: u64) -> i32 {
     if len == 0 || addr == 0 { return Errno::EINVAL as i32; }
     if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
     let buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
-    let ret = crate::syscalls::sys_read(fd as u64, buf.as_mut_ptr() as *mut u8, len);
+    let ret = crate::syscalls::fs::sys_read(fd as u64, buf.as_mut_ptr() as *mut u8, len);
     ret as i32
 }
 
@@ -149,7 +149,7 @@ fn do_writev(fd: i32, addr: u64, len: usize, _offset: u64) -> i32 {
     if len == 0 || addr == 0 { return Errno::EINVAL as i32; }
     if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
     let buf = unsafe { slice::from_raw_parts(addr as *const u8, len) };
-    let ret = crate::syscalls::sys_write(fd as u64, buf.as_ptr() as *const u8, len);
+    let ret = crate::syscalls::fs::sys_write(fd as u64, buf.as_ptr() as *const u8, len);
     ret as i32
 }
 
@@ -161,26 +161,26 @@ fn do_accept(fd: i32, addr: u64, addrlen: u32) -> i32 {
     } else {
         core::ptr::null_mut()
     };
-    let ret = crate::syscalls::sys_accept(fd as u64, addr as *mut u8, addrlen_ptr);
+    let ret = crate::syscalls::net::sys_accept(fd as u64, addr as *mut u8, addrlen_ptr);
     if (ret as i64) < 0 { ret as i32 } else { ret as i32 }
 }
 
 fn do_connect(fd: i32, addr: u64, addrlen: usize) -> i32 {
-    let ret = crate::syscalls::sys_connect(fd as u64, addr as *const u8, addrlen as u64);
+    let ret = crate::syscalls::net::sys_connect(fd as u64, addr as *const u8, addrlen as u64);
     if (ret as i64) < 0 { ret as i32 } else { ret as i32 }
 }
 
 fn do_send(fd: i32, addr: u64, len: usize) -> i32 {
     if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
     let buf = unsafe { slice::from_raw_parts(addr as *const u8, len) };
-    let ret = crate::syscalls::sys_sendto(fd as u64, buf.as_ptr() as *const u8, len as u64, core::ptr::null(), 0);
+    let ret = crate::syscalls::net::sys_sendto(fd as u64, buf.as_ptr() as *const u8, len as u64, core::ptr::null(), 0);
     if (ret as i64) < 0 { ret as i32 } else { ret as i32 }
 }
 
 fn do_recv(fd: i32, addr: u64, len: usize) -> i32 {
     if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
     let buf = unsafe { slice::from_raw_parts_mut(addr as *mut u8, len) };
-    let ret = crate::syscalls::sys_recvfrom(fd as u64, buf.as_mut_ptr() as *mut u8, len as u64, core::ptr::null_mut(), core::ptr::null_mut());
+    let ret = crate::syscalls::net::sys_recvfrom(fd as u64, buf.as_mut_ptr() as *mut u8, len as u64, core::ptr::null_mut(), core::ptr::null_mut());
     if (ret as i64) < 0 { ret as i32 } else { ret as i32 }
 }
 
@@ -197,11 +197,11 @@ fn do_timeout(addr: u64) -> i32 {
 }
 
 fn do_gui_flush(handle: u64, buf_ptr: *const u32) -> i32 {
-    crate::syscalls::sys_gui_flush(handle, buf_ptr) as i32
+    crate::syscalls::gui::sys_gui_flush(handle, buf_ptr) as i32
 }
 
 fn do_gui_map_buffer(handle: u64) -> i32 {
-    crate::syscalls::sys_gui_map_buffer(handle) as i32
+    crate::syscalls::gui::sys_gui_map_buffer(handle) as i32
 }
 
 pub fn sys_io_uring_setup(entries: u64) -> u64 {

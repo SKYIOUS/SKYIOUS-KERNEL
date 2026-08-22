@@ -151,9 +151,9 @@ impl<'a> EbpfVm<'a> {
                             match insn.imm {
                                 1 => {
                                     let map_fd = regs.r(1) as u64;
-                                    let key_ptr = regs.r(2) as *const u8;
-                                    let val_ptr = regs.r(3) as *mut u8;
-                                    let ret = super::helpers::bpf_helper_map_lookup_elem(map_fd, key_ptr, val_ptr);
+                                    let key_off = regs.r(2) as usize;
+                                    let val_off = regs.r(3) as usize;
+                                    let ret = super::helpers::bpf_helper_map_lookup_elem(stack, map_fd, key_off, val_off);
                                     regs.set_r0(ret as u64);
                                 }
                                 2 => {
@@ -163,9 +163,9 @@ impl<'a> EbpfVm<'a> {
                                     regs.set_r0(super::helpers::bpf_helper_get_ticks());
                                 }
                                 4 => {
-                                    let msg_ptr = regs.r(1) as *const u8;
-                                    let len = regs.r(2);
-                                    super::helpers::bpf_helper_debug_print(msg_ptr, len);
+                                    let msg_off = regs.r(1) as usize;
+                                    let len = regs.r(2) as usize;
+                                    super::helpers::bpf_helper_debug_print(stack, msg_off, len);
                                 }
                                 _ => {}
                             }
