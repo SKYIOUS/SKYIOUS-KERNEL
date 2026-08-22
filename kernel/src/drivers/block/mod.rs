@@ -8,6 +8,7 @@
 
 pub mod partition;
 pub mod cache;
+pub mod scheduler;
 use alloc::sync::Arc;
 use crate::sync::IrqSafeMutex as Mutex;
 use alloc::vec::Vec;

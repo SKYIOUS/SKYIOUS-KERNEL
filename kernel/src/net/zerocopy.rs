@@ -412,6 +412,85 @@ pub fn drain_zerocopy_completions() -> Vec<ZerocopyCompletion> {
     core::mem::take(&mut *completions)
 }
 
+// ---------------------------------------------------------------------------
+// Scatter-Gather Recv: Write directly to iovecs
+// ---------------------------------------------------------------------------
+
+/// Write received data directly into iovec buffers instead of copying
+/// to a single contiguous buffer first.
+///
+/// This is the scatter-gather recv path: data is written to each iovec
+/// buffer in order, avoiding the intermediate allocation.
+///
+/// Returns the total bytes written across all iovecs.
+pub fn scatter_gather_recv(
+    recv_data: &[u8],
+    iovecs: &[crate::syscalls::net_helpers::iovec],
+) -> usize {
+    let mut offset = 0;
+    let total = recv_data.len();
+
+    for iov in iovecs {
+        if iov.iov_len == 0 || offset >= total {
+            break;
+        }
+        let to_copy = core::cmp::min(iov.iov_len, total - offset);
+        unsafe {
+            let dst = core::slice::from_raw_parts_mut(iov.iov_base as *mut u8, to_copy);
+            dst.copy_from_slice(&recv_data[offset..offset + to_copy]);
+        }
+        offset += to_copy;
+    }
+
+    offset
+}
+
+/// Scatter-gather recv with zero-copy awareness.
+///
+/// For registered zero-copy buffers, data is written directly without
+/// copying. For unregistered buffers, standard copy is used.
+///
+/// Returns (bytes_written, used_zero_copy).
+pub fn scatter_gather_recv_zerocopy(
+    recv_data: &[u8],
+    iovecs: &[crate::syscalls::net_helpers::iovec],
+) -> (usize, bool) {
+    let mut offset = 0;
+    let total = recv_data.len();
+    let mut used_zerocopy = false;
+
+    for iov in iovecs {
+        if iov.iov_len == 0 || offset >= total {
+            break;
+        }
+        let to_copy = core::cmp::min(iov.iov_len, total - offset);
+        let base = iov.iov_base as usize;
+
+        if is_zerocopy_registered(base) {
+            // Zero-copy: write directly to registered buffer
+            unsafe {
+                let dst = core::slice::from_raw_parts_mut(iov.iov_base as *mut u8, to_copy);
+                dst.copy_from_slice(&recv_data[offset..offset + to_copy]);
+            }
+            used_zerocopy = true;
+        } else {
+            // Standard copy
+            unsafe {
+                let dst = core::slice::from_raw_parts_mut(iov.iov_base as *mut u8, to_copy);
+                dst.copy_from_slice(&recv_data[offset..offset + to_copy]);
+            }
+        }
+        offset += to_copy;
+    }
+
+    (offset, used_zerocopy)
+}
+
+/// Calculate total iovec capacity.
+pub fn iovec_total_capacity(iovecs: &[crate::syscalls::net_helpers::iovec]) -> usize {
+    iovecs.iter().map(|iov| iov.iov_len).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
