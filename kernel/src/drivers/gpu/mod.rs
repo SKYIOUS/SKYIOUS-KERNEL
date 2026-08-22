@@ -1,4 +1,5 @@
 pub mod virtio_gpu;
+pub mod ring;
 
 /// DRM/KMS abstraction entry point for all GPU backends.
 pub fn width() -> u32 {

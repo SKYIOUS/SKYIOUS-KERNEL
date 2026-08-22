@@ -13,6 +13,7 @@ enum DevNodeInner {
     Null,
     Zero,
     Tty0,
+    Random,
     Framebuffer,
     InputEvent(&'static ArrayQueue<InputEvent>),
     Speaker,
@@ -39,6 +40,14 @@ impl VfsNode for DevNode {
             DevNodeInner::Dir => Err(()),
             DevNodeInner::Null => Err(()),
             DevNodeInner::Zero => Ok(vec![0u8; max_len]),
+            DevNodeInner::Random => {
+                let mut buf = Vec::with_capacity(max_len);
+                while buf.len() < max_len {
+                    let w = crate::crypto::GLOBAL_ENTROPY.get_u64().to_le_bytes();
+                    buf.extend_from_slice(&w[..core::cmp::min(8, max_len - buf.len())]);
+                }
+                Ok(buf)
+            }
             DevNodeInner::Framebuffer => {
                 let h = crate::drivers::graphics::HEIGHT.load(core::sync::atomic::Ordering::Relaxed);
                 let stride = crate::drivers::graphics::STRIDE.load(core::sync::atomic::Ordering::Relaxed);
@@ -93,6 +102,7 @@ impl VfsNode for DevNode {
             DevNodeInner::Dir => Err(()),
             DevNodeInner::Null => Ok(()),
             DevNodeInner::Zero => Ok(()),
+            DevNodeInner::Random => Ok(()),
             DevNodeInner::Framebuffer => {
                 let h = crate::drivers::graphics::HEIGHT.load(core::sync::atomic::Ordering::Relaxed);
                 let stride = crate::drivers::graphics::STRIDE.load(core::sync::atomic::Ordering::Relaxed);
@@ -107,6 +117,7 @@ impl VfsNode for DevNode {
                 Ok(())
             }
             DevNodeInner::Tty0 => {
+                crate::serial_write(&alloc::format!("[TTY0W] len={}\n", data.len()));
                 let mut writer = crate::drivers::graphics::console::WRITER.lock();
                 for &b in data {
                     writer.write_byte(b);
@@ -156,6 +167,11 @@ impl VfsNode for DevNode {
             DevNodeInner::Zero => Ok(Stat {
                 st_dev: 0, st_ino: 2, st_mode: 0o020666, st_nlink: 1,
                 st_uid: 0, st_gid: 0, st_rdev: 0x0105, st_size: 0,
+            ..Default::default()
+            }),
+            DevNodeInner::Random => Ok(Stat {
+                st_dev: 0, st_ino: 8, st_mode: 0o020666, st_nlink: 1,
+                st_uid: 0, st_gid: 0, st_rdev: 0x0108, st_size: 0,
                 st_atime: 0, st_mtime: 0, st_ctime: 0,
             
             ..Default::default()
@@ -339,6 +355,21 @@ impl DevFs {
             inner: DevNodeInner::Tty0,
             children: Mutex::new(Vec::new()),
         });
+        let random = Arc::new(DevNode {
+            name: String::from("random"),
+            inner: DevNodeInner::Random,
+            children: Mutex::new(Vec::new()),
+        });
+        let urandom = Arc::new(DevNode {
+            name: String::from("urandom"),
+            inner: DevNodeInner::Random,
+            children: Mutex::new(Vec::new()),
+        });
+        let console = Arc::new(DevNode {
+            name: String::from("console"),
+            inner: DevNodeInner::Tty0,
+            children: Mutex::new(Vec::new()),
+        });
         let fb0 = Arc::new(DevNode {
             name: String::from("fb0"),
             inner: DevNodeInner::Framebuffer,
@@ -375,6 +406,9 @@ impl DevFs {
         root.children.lock().push(zero);
         root.children.lock().push(tty0);
         root.children.lock().push(tty);
+        root.children.lock().push(random);
+        root.children.lock().push(urandom);
+        root.children.lock().push(console);
         root.children.lock().push(fb0);
         root.children.lock().push(speaker);
         root.children.lock().push(input_dir);

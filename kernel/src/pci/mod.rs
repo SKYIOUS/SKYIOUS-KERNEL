@@ -1,4 +1,4 @@
-use x86_64::instructions::port::Port;
+﻿use x86_64::instructions::port::Port;
 
 pub fn read_config_u32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
     let address: u32 = ((bus as u32) << 16) | ((slot as u32) << 11) |
@@ -99,9 +99,17 @@ pub fn pci_enable_msi(bus: u8, slot: u8, func: u8) -> Option<u8> {
 }
 
 /// Route a PCI device's legacy interrupt through the I/O APIC
-fn pci_route_legacy_irq(_bus: u8, _slot: u8, _func: u8, irq: u8) -> Option<u8> {
+fn pci_route_legacy_irq(bus: u8, slot: u8, _func: u8, pin: u8) -> Option<u8> {
     let vector = crate::apic::msi::alloc()?;
-    crate::apic::route_pci_irq(irq, vector);
+
+    if let Some(map) = crate::acpi::PCI_GSI_MAP.get() {
+        if let Some(&gsi) = map.get(&(bus, slot, pin)) {
+            crate::apic::route_by_gsi(gsi, vector);
+            return Some(vector);
+        }
+    }
+
+    crate::apic::route_pci_irq(pin, vector);
     Some(vector)
 }
 
@@ -162,10 +170,15 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
              let mem_base = bar_to_virt(bar0);
 
              // Try MSI first; fall back to IOAPIC routing for legacy INTx#
-             let net_vector = pci_enable_msi(bus, slot, func).unwrap_or_else(|| {
-                 pci_route_legacy_irq(bus, slot, func, irq)
-                     .expect("no available vectors for E1000 interrupt")
-             });
+              let net_vector = pci_enable_msi(bus, slot, func)
+                  .or_else(|| pci_route_legacy_irq(bus, slot, func, irq));
+              let net_vector = match net_vector {
+                  Some(v) => v,
+                  None => {
+                      crate::println!("       E1000: no available interrupt vectors, skipping");
+                      continue;
+                  }
+              };
 
              crate::interrupts::set_network_vector(net_vector);
              crate::println!("       Mem Base: 0x{:x}, IRQ: {}, Vector: {}", bar0, irq, net_vector);
@@ -256,7 +269,7 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             crate::drivers::usb::register_xhci(xhci);
         }
 
-        // UHCI (USB 1.x) — I/O BAR, bit 0 = 1
+        // UHCI (USB 1.x) â€” I/O BAR, bit 0 = 1
         #[cfg(feature = "uhci")]
         if class_code == 0x0C && subclass == 0x03 && prog_if == 0x00 {
             crate::println!("    -> UHCI (USB 1.x) Controller detected!");
@@ -283,3 +296,4 @@ pub fn enumerate_pci() {
         }
     }
 }
+

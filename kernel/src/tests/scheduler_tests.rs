@@ -13,9 +13,14 @@ fn make_test_thread(priority: u8, sleep_until: Option<u64>) -> Thread {
         futex_wake_addr: None,
         pipe_block_key: None,
         fs_base: 0,
+        first_switch_pending: false,
         pass: 0,
         stride: STRIDE_MAX / 20,
         tickets: 20,
+        policy: 0,
+        rt_priority: 0,
+        rr_time_slice: 0,
+        affinity_mask: 0xFFFFFFFFFFFFFFFF,
     }
 }
 

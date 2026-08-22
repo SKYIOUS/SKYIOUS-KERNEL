@@ -80,7 +80,7 @@ pub fn cat(filename: &str, out: &mut dyn FnMut(&str)) {
         out("Usage: cat <file>\n");
         return;
     }
-    match crate::syscalls::sys_open_path(filename) {
+    match crate::syscalls::fs::sys_open_path(filename) {
         Ok(fd) => {
             let mut buf = [0u8; 4096];
             let mut total = 0usize;

@@ -388,9 +388,18 @@ impl Ext2FileSystem {
             fs.device.lock().write_sector(sec, &buf).map_err(|_| ())
         } else {
             let buf = fs.read_block(*start_block)?;
-            let sub_idx = idx % epb;
+            // `span` = logical entries each pointer at this level covers: a
+            // level-L block holds `epb` pointers, each to an epb.pow(L-1)-entry
+            // subtree. Decompose `idx` top-major (idx/span, recurse idx%span)
+            // so the write lands at the same flat position `read_indirect`
+            // returns. Level-2: idx/epb then idx%epb. Level-3: idx/epb^2 then
+            // (idx/epb)%epb then idx%epb. The old code swapped the pair
+            // (sub_idx = idx % epb, recurse idx / epb), transposing level>=2
+            // writes away from their logical index.
+            let span = epb.pow(level - 1);
+            let sub_idx = idx / span;
             let mut sub = unsafe { *(buf.as_ptr() as *const u32).add(sub_idx) };
-            Self::set_block_ptr(fs, &mut sub, level - 1, idx / epb, epb, target)?;
+            Self::set_block_ptr(fs, &mut sub, level - 1, idx % span, epb, target)?;
             let mut buf2 = fs.read_block(*start_block)?;
             unsafe { *(buf2.as_mut_ptr() as *mut u32).add(sub_idx) = sub; }
             fs.device.lock().write_sector(*start_block as u64 * fs.block_size as u64 / 512, &buf2).map_err(|_| ())
@@ -421,13 +430,17 @@ impl Ext2FileSystem {
                     let mut blk = inode.i_block[12];
                     Self::set_block_ptr(self, &mut blk, 1, idx, epb, ndb)?;
                     inode.i_block[12] = blk;
-                } else if idx < epb * epb {
+                } else if idx < epb + epb * epb {
+                    // The double-indirect region spans idx in [epb, epb+epb^2)
+                    // (epb^2 entries), so its sub-flat is idx - epb.
                     let mut blk = inode.i_block[13];
-                    Self::set_block_ptr(self, &mut blk, 2, idx, epb, ndb)?;
+                    Self::set_block_ptr(self, &mut blk, 2, idx - epb, epb, ndb)?;
                     inode.i_block[13] = blk;
                 } else {
+                    // Triple-indirect region base = epb + epb^2 (sub-flat is
+                    // idx - epb - epb^2).
                     let mut blk = inode.i_block[14];
-                    Self::set_block_ptr(self, &mut blk, 3, idx, epb, ndb)?;
+                    Self::set_block_ptr(self, &mut blk, 3, idx - epb - epb * epb, epb, ndb)?;
                     inode.i_block[14] = blk;
                 }
                 ndb

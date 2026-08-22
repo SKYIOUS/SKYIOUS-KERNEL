@@ -21,6 +21,7 @@ pub fn lookup_extent(fs: &Arc<Mutex<SkyFS>>, root_block: u64, block_offset: u64)
     loop {
         let node = read_node(fs, current)?;
         let nk = node.num_keys as usize;
+        if nk > KEY_MAX { return None; } // corrupt node, never index out of bounds
         if node.is_leaf != 0 {
             for i in 0..nk {
                 if block_offset >= node.keys[i] {
@@ -76,6 +77,7 @@ pub fn insert_extent(fs: &Arc<Mutex<SkyFS>>, root_block: &mut u64, key: u64, val
 fn insert_non_full(fs: &Arc<Mutex<SkyFS>>, dev: &mut dyn BlockDevice, node_block: u64, key: u64, value: Extent) -> Result<Option<(u64, Extent, u64)>, ()> {
     let mut node = read_node_from_dev(dev, node_block)?;
     let nk = node.num_keys as usize;
+    if nk > KEY_MAX { return Err(()); } // corrupt disk node — refuse
 
     if node.is_leaf != 0 {
         if nk < KEY_MAX {

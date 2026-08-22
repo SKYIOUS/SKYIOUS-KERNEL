@@ -221,6 +221,9 @@ pub fn accept_unix(handle: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> Res
 }
 
 pub fn sendto_unix(handle: u64, buf: *const u8, len: u64, addr_ptr: *const u8, addrlen: u64) -> Result<u64, Errno> {
+    // Cap single message to avoid OOM panic from a hostile len.
+    const MAX_UNIX_MSG: u64 = 1 << 20;
+    let len = core::cmp::min(len, MAX_UNIX_MSG);
     let mut data = vec![0u8; len as usize];
     unsafe {
         user_access::copy_from_user(&mut data, buf).map_err(|_| Errno::EFAULT)?;
@@ -351,7 +354,7 @@ pub fn getsockname_unix(handle: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) {
     let socks = UNIX_SOCKETS.lock();
     if let Some(sock) = socks.get(&handle) {
         let inner = sock.inner.lock();
-        if let Some(ref path) = inner.bind_path {
+        if let Some(path) = &inner.bind_path {
             write_sockaddr_un(addr_ptr, addrlen_ptr, path);
         } else {
             write_sockaddr_un(addr_ptr, addrlen_ptr, "");
@@ -369,7 +372,7 @@ pub fn getpeername_unix(handle: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -
     let socks = UNIX_SOCKETS.lock();
     let peer = socks.get(&peer_handle).ok_or(Errno::ECONNRESET)?;
     let inner = peer.inner.lock();
-    if let Some(ref path) = inner.bind_path {
+    if let Some(path) = &inner.bind_path {
         write_sockaddr_un(addr_ptr, addrlen_ptr, path);
     } else {
         write_sockaddr_un(addr_ptr, addrlen_ptr, "");
@@ -409,7 +412,7 @@ pub fn cleanup_unix_socket(handle: u64) {
     if let Some(sock) = socks.remove(&handle) {
         let mut inner = sock.inner.lock();
         inner.closed = true;
-        if let Some(ref path) = inner.bind_path {
+        if let Some(path) = &inner.bind_path {
             UNIX_BOUND.lock().remove(path.as_str());
         }
         let peer_handle = inner.peer;

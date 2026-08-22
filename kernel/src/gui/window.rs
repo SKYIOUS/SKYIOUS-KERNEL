@@ -25,11 +25,36 @@ pub struct Window {
     pub file_manager: Option<crate::gui::filemanager::FileManagerWidget>,
     pub key_events: VecDeque<u8>,
     pub dirty: bool,
+    // Compositor fields (gpu feature only)
+    #[cfg(feature = "gpu")]
+    pub gpu_surface: Option<u32>,
+    #[cfg(feature = "gpu")]
+    pub opacity: f32,
+    #[cfg(feature = "gpu")]
+    pub blur_radius: u32,
+    #[cfg(feature = "gpu")]
+    pub shadow: Option<crate::compositor::shadow::ShadowParams>,
+    #[cfg(feature = "gpu")]
+    pub z_order: u32,
 }
 
 impl Window {
     pub fn new(x: usize, y: usize, width: usize, height: usize, title: &str) -> Self {
-        Window { x, y, width, height, title: title.into(), content: None, phys_addr: None, widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None, terminal: None, file_manager: None, key_events: VecDeque::new(), dirty: true }
+        Window {
+            x, y, width, height, title: title.into(), content: None, phys_addr: None,
+            widgets: alloc::vec::Vec::new(), minimized: false, saved_rect: None,
+            terminal: None, file_manager: None, key_events: VecDeque::new(), dirty: true,
+            #[cfg(feature = "gpu")]
+            gpu_surface: None,
+            #[cfg(feature = "gpu")]
+            opacity: 1.0,
+            #[cfg(feature = "gpu")]
+            blur_radius: 0,
+            #[cfg(feature = "gpu")]
+            shadow: None,
+            #[cfg(feature = "gpu")]
+            z_order: 0,
+        }
     }
 
     pub fn render(&self, buffer: &mut [u32], mouse_x: usize, mouse_y: usize) {

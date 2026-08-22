@@ -73,6 +73,21 @@ impl HandleTable {
         handle
     }
 
+    /// Insert an object at a specific handle index. The slot must be free;
+    /// the caller coordinates the index across all per-process fd tables.
+    pub fn insert_at(&mut self, handle: HandleValue, object: Arc<dyn KernelObject>, access_mask: u32, flags: u64) {
+        if handle as usize >= self.table.len() {
+            self.table.resize(handle as usize + 1, None);
+        }
+        let audit_id = NEXT_HANDLE_AUDIT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        self.table[handle as usize] = Some(HandleEntry { object, access_mask, flags, offset: 0, audit_id, create_time: 0 });
+    }
+
+    /// Number of allocated slots (including freed holes).
+    pub fn len(&self) -> usize {
+        self.table.len()
+    }
+
     /// Close a handle, returning a reference to the object for further cleanup.
     pub fn close(&mut self, handle: HandleValue) -> Option<Arc<dyn KernelObject>> {
         let entry = self.table.get_mut(handle as usize)?;

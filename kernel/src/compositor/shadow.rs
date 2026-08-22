@@ -1,5 +1,6 @@
 use crate::drivers::gpu::ring::{GpuCommand, GpuCommandRing, GpuOpcode};
 
+#[derive(Debug, Clone, Copy)]
 pub struct ShadowParams {
     pub radius: u32,
     pub offset_x: i32,

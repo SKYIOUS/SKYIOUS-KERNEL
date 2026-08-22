@@ -9,6 +9,69 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// Whether the CPU supports SMAP. Initialized once at boot via CPUID.
 static HAS_SMAP: AtomicBool = AtomicBool::new(false);
 
+// x86-64 copy with exception-style fixup. `rep movsb` faults if the user
+// range contains an unmapped page; the page-fault handler redirects RIP to
+// `user_copy_fault_return`, which returns 1 (failure). Otherwise 0.
+core::arch::global_asm!(
+    r#"
+    .global user_copy_bytes
+    user_copy_bytes:
+        mov rax, rdx
+        mov rcx, rdx
+        rep movsb
+        xor eax, eax
+        ret
+    .global user_copy_fault_return
+    user_copy_fault_return:
+        mov eax, 1
+        ret
+    "#
+);
+extern "C" {
+    fn user_copy_bytes(dst: *mut u8, src: *const u8, len: usize) -> usize;
+}
+// Address of the asm fixup label — the page-fault handler iret's here to
+// abort an active copy.
+extern "C" {
+    static user_copy_fault_return: u8;
+}
+
+/// True while the kernel is copying from/to user memory on the current CPU.
+/// The page-fault handler checks this: a fault while true means "bad user
+/// pointer" → abort the copy instead of panicking the kernel.
+pub fn user_copy_active() -> bool {
+    crate::syscalls::get_per_cpu().user_copy_nest.load(Ordering::Relaxed) > 0
+}
+
+/// Address the page-fault handler must return to to abort the active copy.
+pub fn user_copy_fixup_addr() -> u64 {
+    core::ptr::addr_of!(user_copy_fault_return) as u64
+}
+
+/// Abort the in-flight `user_copy_bytes` and return "failed" to its caller,
+/// without ever returning here. Called by the page-fault handler when a
+/// user-range fault inside a copy cannot be resolved (COW/swap/demand).
+///
+/// The trampoline stored the CPU entry RSP (pointing at the error code) in
+/// `PerCpuData::pf_entry_rsp`. We overwrite the saved RIP slot with the fixup
+/// and iretq into it; the fixup (`mov eax, 1; ret`) returns to the copy
+/// routine's caller where the nest count is decremented and `clac` runs.
+pub fn abort_user_copy() -> ! {
+    let entry_rsp = crate::syscalls::get_per_cpu().pf_entry_rsp;
+    let fixup = user_copy_fixup_addr();
+    unsafe {
+        core::arch::asm!(
+            "mov qword ptr [{e} + 8], {f}",  // saved RIP slot
+            "mov rsp, {e}",
+            "add rsp, 8",
+            "iretq",
+            e = in(reg) entry_rsp,
+            f = in(reg) fixup,
+            options(noreturn),
+        );
+    }
+}
+
 /// Call once at boot to detect SMAP support and set CR4.SMAP if available.
 pub fn init_smap() {
     let has_smap = smap_supported();
@@ -73,6 +136,18 @@ pub fn validate_ptr(ptr: *const u8, len: usize) -> bool {
     end <= user_limit
 }
 
+/// Core user-copy helper: validates pointers are in userspace, then performs
+/// the copy with SMAP and nest tracking. Returns the failure code from
+/// `user_copy_bytes` (0 = success, non-zero = fault).
+unsafe fn do_user_copy(dst: *mut u8, src: *const u8, len: usize) -> usize {
+    do_stac();
+    crate::syscalls::get_per_cpu().user_copy_nest.fetch_add(1, Ordering::Relaxed);
+    let failed = user_copy_bytes(dst, src, len);
+    crate::syscalls::get_per_cpu().user_copy_nest.fetch_sub(1, Ordering::Relaxed);
+    do_clac();
+    failed
+}
+
 /// Safely copies data from userspace to a kernel buffer.
 /// Returns Ok(()) if the address was valid and copy succeeded.
 pub unsafe fn copy_from_user(dst: &mut [u8], src_ptr: *const u8) -> Result<(), ()> {
@@ -80,10 +155,9 @@ pub unsafe fn copy_from_user(dst: &mut [u8], src_ptr: *const u8) -> Result<(), (
         return Err(());
     }
 
-    do_stac();
-    core::ptr::copy_nonoverlapping(src_ptr, dst.as_mut_ptr(), dst.len());
-    do_clac();
-    
+    if do_user_copy(dst.as_mut_ptr(), src_ptr, dst.len()) != 0 {
+        return Err(());
+    }
     Ok(())
 }
 
@@ -93,10 +167,9 @@ pub unsafe fn copy_to_user(dst_ptr: *mut u8, src: &[u8]) -> Result<(), ()> {
         return Err(());
     }
 
-    do_stac();
-    core::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr, src.len());
-    do_clac();
-    
+    if do_user_copy(dst_ptr, src.as_ptr(), src.len()) != 0 {
+        return Err(());
+    }
     Ok(())
 }
 
@@ -111,9 +184,9 @@ pub unsafe fn read_user_string(ptr: *const u8, max_len: usize) -> Result<alloc::
     }
 
     let mut buf = alloc::vec![0u8; max_len];
-    do_stac();
-    core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), max_len);
-    do_clac();
+    if do_user_copy(buf.as_mut_ptr(), ptr, max_len) != 0 {
+        return Err(());
+    }
 
     let actual_len = buf.iter().position(|&b| b == 0).unwrap_or(max_len);
     buf.truncate(actual_len);

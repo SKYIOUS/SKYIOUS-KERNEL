@@ -149,6 +149,23 @@ pub fn test_ash_hook() -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(feature = "gpu")]
+pub fn test_compositor_empty_scene() -> Result<(), &'static str> {
+    use crate::compositor::{HwCompositor, GuiScene};
+    let mut comp = HwCompositor::new();
+    let scene = GuiScene {
+        backbuffer: core::ptr::null(),
+        width: 800,
+        height: 600,
+        windows: alloc::vec::Vec::new(),
+        damage: None,
+    };
+    // Empty scene should not panic; may return Err if framebuffer not initialized (QEMU without gpu).
+    // We treat either Ok or Err as pass as long as it doesn't panic.
+    let _ = comp.compose(&scene);
+    Ok(())
+}
+
 pub fn register_all() {
     selftest::register("entropy::robust_harvester", test_entropy);
     selftest::register("vfs::page_cache_basic", test_page_cache);
@@ -162,4 +179,6 @@ pub fn register_all() {
     selftest::register("shell::dispatch_table", test_shell_dispatch);
     #[cfg(feature = "ash")]
     selftest::register("ash::net_hook_fires", test_ash_hook);
+    #[cfg(feature = "gpu")]
+    selftest::register("compositor::empty_scene_compose", test_compositor_empty_scene);
 }

@@ -24,7 +24,7 @@ pub fn gui_flush_async(window_id: u64) -> FlushResult {
     // Mark window dirty in compositor
     let mut comp = crate::gui::COMPOSITOR.lock();
     if let Some(win) = comp.windows.iter_mut().find(|w| {
-        w.gpu_resource_id.map_or(false, |rid| rid as u64 == window_id)
+        w.gpu_surface.map_or(false, |rid| rid as u64 == window_id)
     }) {
         win.dirty = true;
     }

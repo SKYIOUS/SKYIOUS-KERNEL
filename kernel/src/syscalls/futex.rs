@@ -29,8 +29,18 @@ pub fn sys_futex(uaddr: *mut u32, op: u32, val: u32, _val2: u32, uaddr2: *mut u3
     const FUTEX_UNLOCK_PI: u32 = 12;
 
     match op {
-        FUTEX_WAIT  => futex_wait(uaddr, val),
-        FUTEX_WAKE  => scheduler::wake_futex(uaddr as u64, val) as u64,
+        FUTEX_WAIT  => {
+            let pid = CURRENT_PROCESS.lock().as_ref().map(|p| p.id).unwrap_or(0);
+            let r = futex_wait(uaddr, val);
+            crate::serial_write(&alloc::format!("[FUTEX] WAIT pid={} uaddr=0x{:x} val={} ret={}\n", pid, uaddr as u64, val, r));
+            r
+        }
+        FUTEX_WAKE  => {
+            let pid = CURRENT_PROCESS.lock().as_ref().map(|p| p.id).unwrap_or(0);
+            let woken = scheduler::wake_futex(uaddr as u64, val) as u64;
+            crate::serial_write(&alloc::format!("[FUTEX] WAKE pid={} uaddr=0x{:x} val={} woken={}\n", pid, uaddr as u64, val, woken));
+            woken
+        }
         FUTEX_REQUEUE => {
             let woken = scheduler::wake_futex(uaddr as u64, val);
             if woken > 0 { scheduler::wake_futex(uaddr2 as u64, _val2); }
@@ -69,6 +79,8 @@ fn futex_wait(uaddr: *mut u32, expected: u32) -> u64 {
     // Mark the current thread Blocked in place. The block-point context is
     // saved into the thread's own `stack_ptr` by `prepare_switch`, so the
     // resume (after `schedule()` returns) continues the syscall postamble.
+    crate::serial_write(&alloc::format!("[FUTEX] WAIT pid={} uaddr=0x{:x} val={}\n",
+        CURRENT_PROCESS.lock().as_ref().map(|p| p.id).unwrap_or(0), uaddr as u64, expected));
     {
         let mut sched = scheduler::this_cpu_sched().lock();
         if let Some(current) = sched.current_thread.as_mut() {
@@ -129,6 +141,8 @@ fn futex_lock_pi(uaddr: *mut u32) -> u64 {
     if signal_pending() { return errno::Errno::EINTR as u64; }
 
     // Mark the current thread Blocked in place; see futex_wait.
+    crate::serial_write(&alloc::format!("[FUTEX] WAITPI pid={} uaddr=0x{:x}\n",
+        CURRENT_PROCESS.lock().as_ref().map(|p| p.id).unwrap_or(0), uaddr as u64));
     {
         let mut sched = scheduler::this_cpu_sched().lock();
         if let Some(current) = sched.current_thread.as_mut() {

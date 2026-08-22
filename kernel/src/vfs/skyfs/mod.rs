@@ -330,7 +330,7 @@ fn write_inode_inner(fs: &Arc<Mutex<SkyFS>>, ino: u64, inode: &SkyfsInode) -> Re
     // Journal the write
     let mut journal_lock = fs_lock.journal.lock();
     let hdr = journal::Journal::begin_transaction(&mut *dev, &mut *journal_lock)?;
-    journal::Journal::journal_data(&mut *dev, &mut *journal_lock, &buf)?;
+    journal::Journal::journal_data(&mut *dev, &mut *journal_lock, hdr, inode_block, &buf)?;
     SkyFS::write_block(&mut *dev, inode_block, &buf)?;
     journal::Journal::commit_transaction(&mut *dev, &mut *journal_lock, hdr)?;
     drop(journal_lock);

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use x86_64::instructions::port::Port;
+use crate::hal::dma::DmaBuf;
 use x86_64::VirtAddr;
 
 // ─── I/O register offsets ───────────────────────────────────────────────────
@@ -69,31 +70,6 @@ fn tok(pid: u32, addr: u32, ep: u32, toggle: u32, len: usize) -> u32 {
 fn td_link(phys: u32) -> u32 { phys }
 fn td_term() -> u32 { 1 }
 
-/// DMA buffer with physical address in the low 4G (UHCI is 32-bit only).
-struct DmaBuf {
-    virt: *mut u8,
-    phys: u32,
-    size: usize,
-}
-
-impl DmaBuf {
-    fn alloc(size: usize, align: usize) -> Self {
-        let layout = core::alloc::Layout::from_size_align(size, align).unwrap();
-        let virt = unsafe { alloc::alloc::alloc_zeroed(layout) };
-        let phys = crate::memory::virt_to_phys_dma(VirtAddr::new(virt as u64)).as_u64() as u32;
-        DmaBuf { virt, phys, size }
-    }
-    fn phys32(&self) -> u32 { self.phys }
-    fn virt(&self) -> *mut u8 { self.virt }
-    fn as_slice(&self) -> &[u8] { unsafe { core::slice::from_raw_parts(self.virt, self.size) } }
-    fn as_mut_slice(&mut self) -> &mut [u8] { unsafe { core::slice::from_raw_parts_mut(self.virt, self.size) } }
-}
-impl Drop for DmaBuf {
-    fn drop(&mut self) {
-        let layout = core::alloc::Layout::from_size_align(self.size, 1).unwrap();
-        unsafe { alloc::alloc::dealloc(self.virt, layout); }
-    }
-}
 
 // ─── UHCI Controller ────────────────────────────────────────────────────────
 pub struct UhciController {
@@ -107,7 +83,7 @@ pub struct UhciController {
 
 impl UhciController {
     pub fn new(io_base: u16) -> Self {
-        let fl = DmaBuf::alloc(FRAMES * 4, 4096);
+        let fl = DmaBuf::new(FRAMES * 4).unwrap();
         let layout = core::alloc::Layout::from_size_align(TD_POOL * 16, 16).unwrap();
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
         let td_phys = crate::memory::virt_to_phys_dma(VirtAddr::new(ptr as u64)).as_u64() as u32;
@@ -118,7 +94,7 @@ impl UhciController {
             td_arena,
             td_phys,
             td_free: 0,
-            data: [DmaBuf::alloc(128, 16), DmaBuf::alloc(128, 16)],
+            data: [DmaBuf::new(128).unwrap(), DmaBuf::new(128).unwrap()],
         }
     }
 
@@ -162,7 +138,7 @@ impl UhciController {
         for _ in 0..2000 { core::hint::spin_loop(); }
 
         // Frame list
-        self.wl(FLBASEADD, self.fl.phys32());
+        self.wl(FLBASEADD, self.fl.phys() as u32);
         self.wb(SOFMOD, 64);
         self.ww(USBCMD, CMD_RUN | CMD_CF);
 
@@ -283,12 +259,12 @@ impl UhciController {
             (*td0).link = td_link(ph1);
             (*td0).status = TD_ACTIVE | ls;
             (*td0).token = tok(PID_SETUP, addr, 0, 0, 8);
-            (*td0).buffer = self.data[0].phys32();
+            (*td0).buffer = self.data[0].phys() as u32;
 
             (*td1).link = td_link(ph2);
             (*td1).status = TD_ACTIVE | TD_IOC | ls;
             (*td1).token = tok(PID_IN, addr, 0, 0, l);
-            (*td1).buffer = self.data[1].phys32();
+            (*td1).buffer = self.data[1].phys() as u32;
 
             (*td2).link = td_term();
             (*td2).status = TD_ACTIVE | ls;
@@ -328,7 +304,7 @@ impl UhciController {
             (*td0).link = td_link(ph1);
             (*td0).status = TD_ACTIVE | ls;
             (*td0).token = tok(PID_SETUP, addr, 0, 0, 8);
-            (*td0).buffer = self.data[0].phys32();
+            (*td0).buffer = self.data[0].phys() as u32;
 
             (*td1).link = td_term();
             (*td1).status = TD_ACTIVE | TD_IOC | ls;

@@ -4,8 +4,6 @@ pub mod vmx;
 pub mod svm;
 #[cfg(target_arch = "x86_64")]
 pub mod ept;
-pub mod vmm;
-pub mod guest;
 pub mod vcpu;
 pub mod memory;
 pub mod hypercalls;
@@ -20,6 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::sync::IrqSafeMutex as Mutex;
+use crate::hypervisor::ept::EptManager;
 
 /// Check if virtualization is supported on this CPU.
 pub fn is_virtualization_available() -> bool {
@@ -76,6 +75,7 @@ pub struct GuestVm {
     pub devices: Vec<Box<dyn devices::VirtDevice>>,
     pub state: VmState,
     pub os_type: OsType,
+    pub ept: Option<EptManager>,
 }
 
 #[derive(PartialEq)]
@@ -284,10 +284,22 @@ pub fn create_guest(name: &str, os_type: OsType, mem_size: usize) -> Option<u64>
 
     let guest_id = hv.guests.len() as u64;
 
-    let _guest_memory = memory::GuestMemory::allocate_guest(mem_size)?;
+    let guest_memory = memory::GuestMemory::allocate_guest(mem_size)?;
     let mut memory_regions = Vec::new();
-    for region in &_guest_memory.regions {
+    for region in &guest_memory.regions {
         memory_regions.push(region.clone());
+    }
+
+    let mut ept_manager = match EptManager::new() {
+        Some(m) => m,
+        None => return None,
+    };
+
+    let mut ept_mappings = Vec::new();
+    for region in &memory_regions {
+        if ept_manager.map_guest(region.guest_phys, region.host_phys, region.size, crate::hypervisor::ept::EptFlags::read_write()) {
+            ept_mappings.push(region.clone());
+        }
     }
 
     let vcpu0 = vcpu::Vcpu::new(0, guest_id);
@@ -302,6 +314,7 @@ pub fn create_guest(name: &str, os_type: OsType, mem_size: usize) -> Option<u64>
         devices: Vec::new(),
         state: VmState::Created,
         os_type,
+        ept: Some(ept_manager),
     };
 
     hv.guests.insert(guest_id, vm);

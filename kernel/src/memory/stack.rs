@@ -3,7 +3,6 @@ use x86_64::structures::paging::{
 };
 use x86_64::VirtAddr;
 use crate::memory::buddy::BuddyFrameAllocator;
-use alloc::collections::VecDeque;
 use crate::sync::IrqSafeMutex as Mutex;
 
 pub struct Stack {
@@ -11,19 +10,9 @@ pub struct Stack {
     pub bottom: u64,
 }
 
-/// Free list of deallocated stacks (virtual address reuse)
-static STACK_FREE_LIST: Mutex<VecDeque<Stack>> = Mutex::new(VecDeque::new());
-
 pub fn alloc_stack(size_in_pages: usize) -> Option<Stack> {
-    // Check free list first for matching-size stacks
-    {
-        let mut free = STACK_FREE_LIST.lock();
-        if let Some(idx) = free.iter().position(|s| (s.top - s.bottom) as usize == size_in_pages * 4096) {
-            return Some(free.remove(idx).unwrap());
-        }
-    }
-
-    // Bump-allocate new virtual range
+    // Bump-allocate new virtual range. No free-list reuse: free_stack unmaps
+    // the pages, so handing back an unmapped Stack would fault on switch.
     static NEXT_STACK_TOP: Mutex<u64> = Mutex::new(0xFFFF_E000_0000_0000);
     
     let stack_size = size_in_pages as u64 * 4096;
@@ -64,8 +53,7 @@ pub fn alloc_stack(size_in_pages: usize) -> Option<Stack> {
     })
 }
 
-/// Free a stack: unmap pages, free physical frames, and return virtual range
-/// to the free list for reuse.
+/// Free a stack: unmap pages and return physical frames to the buddy.
 pub fn free_stack(stack: &Stack) {
     let stack_size = (stack.top - stack.bottom) as usize;
     if stack_size == 0 { return; }
@@ -90,9 +78,4 @@ pub fn free_stack(stack: &Stack) {
             crate::memory::buddy::BUDDY_ALLOCATOR.lock().deallocate_frame(frame);
         }
     }
-
-    STACK_FREE_LIST.lock().push_back(Stack {
-        top: stack.top,
-        bottom: stack.bottom,
-    });
 }

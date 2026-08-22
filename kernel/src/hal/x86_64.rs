@@ -1,4 +1,4 @@
-use crate::hal::cpu::{CpuContext, CpuId};
+﻿use crate::hal::cpu::{CpuContext, CpuId};
 use crate::hal::irq::{InterruptController, IrqVector};
 
 pub struct X86InterruptController;
@@ -70,3 +70,4 @@ impl CpuContext for X86CpuContext {
         crate::hal::cpu::CPU_COUNT.load(core::sync::atomic::Ordering::Relaxed) as usize
     }
 }
+

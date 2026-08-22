@@ -70,9 +70,14 @@ fn test_futex_wake_prepopulated() -> Result<(), &'static str> {
         futex_wake_addr: Some(0xAAAA),
         pipe_block_key: None,
         fs_base: 0,
+        first_switch_pending: false,
         pass: 0,
         stride: STRIDE_MAX / 20,
         tickets: 20,
+        policy: 0,
+        rt_priority: 0,
+        rr_time_slice: 0,
+        affinity_mask: 0xFFFFFFFFFFFFFFFF,
     };
     crate::task::scheduler::add_futex_thread(t);
     let t2 = Thread {
@@ -86,9 +91,14 @@ fn test_futex_wake_prepopulated() -> Result<(), &'static str> {
         futex_wake_addr: Some(0xBBBB),
         pipe_block_key: None,
         fs_base: 0,
+        first_switch_pending: false,
         pass: 0,
         stride: STRIDE_MAX / 20,
         tickets: 20,
+        policy: 0,
+        rt_priority: 0,
+        rr_time_slice: 0,
+        affinity_mask: 0xFFFFFFFFFFFFFFFF,
     };
     crate::task::scheduler::add_futex_thread(t2);
     let woken = crate::task::scheduler::wake_futex(0xAAAA, 10);

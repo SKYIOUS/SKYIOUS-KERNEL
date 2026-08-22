@@ -87,6 +87,37 @@ impl SignalState {
     }
 }
 
+#[repr(C)]
+pub struct SignalFrame {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rax: u64,
+    pub rip: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+}
+
+/// struct sigaction { sa_handler(u64), sa_flags(u64), sa_restorer(u64), sa_mask(u64) }
+#[repr(C)]
+pub struct SigAction {
+    pub sa_handler: u64,
+    pub sa_flags: u64,
+    pub sa_restorer: u64,
+    pub sa_mask: u64,
+}
+
 /// Returns true if the current process has any unmasked pending signal.
 pub fn has_pending_signal() -> bool {
     let lock = crate::task::process::CURRENT_PROCESS.lock();

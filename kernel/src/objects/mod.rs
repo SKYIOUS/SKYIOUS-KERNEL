@@ -5,6 +5,7 @@ use crate::sync::IrqSafeMutex as Mutex;
 pub mod handle;
 pub mod namespace;
 pub mod security;
+pub mod net_integration;
 
 /// Unique identifier for each category of kernel object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
