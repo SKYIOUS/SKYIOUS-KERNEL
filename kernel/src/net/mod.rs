@@ -1,6 +1,7 @@
 pub mod dns;
 pub mod dhcp;
 pub mod unix;
+pub mod zerocopy;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};

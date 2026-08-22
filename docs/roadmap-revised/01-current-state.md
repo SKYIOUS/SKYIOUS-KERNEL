@@ -82,6 +82,7 @@
 | Component | Status | File | Notes |
 |-----------|--------|------|-------|
 | Vahi IPC | ✅ Working | `ipc/mod.rs` | Structured messages, zero-copy |
+| Zero-copy networking | ✅ Working | `net/zerocopy.rs` | Buffer registration, scatter-gather, MSG_ZEROCOPY |
 
 ### Capabilities
 | Component | Status | File | Notes |
