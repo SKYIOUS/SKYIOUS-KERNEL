@@ -22,18 +22,23 @@ impl Tnum {
         let end = offset + size - 1;
         Tnum { value: offset & !(size - 1), mask: end & (size - 1) }
     }
-    pub fn add(self, rhs: Self) -> Self {
-        let value = self.value.wrapping_add(rhs.value);
-        let unknown_carry = (self.mask | rhs.mask) != 0;
-        let mask = if unknown_carry {
-            let carry_mask = (self.value & rhs.value) | (self.mask | rhs.mask);
-            let propagate = (carry_mask & 1) | ((carry_mask >> 1) & (self.mask | rhs.mask));
-            self.mask | rhs.mask | propagate
-        } else { 0 };
-        Tnum { value, mask }
+pub fn add(self, rhs: Self) -> Self {
+        // Linux tnum.c tnum_add: exact value+mask that tracks carries through
+        // the unknown bits so a forged add cannot leak outside the mask.
+        let sm = self.mask.wrapping_add(rhs.mask);
+        let sv = self.value.wrapping_add(rhs.value);
+        let sigma = sm.wrapping_add(sv);
+        let chi = sigma ^ sv;
+        let mu = self.mask | rhs.mask | chi;
+        Tnum { value: sv & !mu, mask: mu }
     }
     pub fn sub(self, rhs: Self) -> Self {
-        Tnum { value: self.value.wrapping_sub(rhs.value), mask: self.mask | rhs.mask }
+        // exact tnum_sub: a - b = a + (~b) + 1; bit carry flip is tracked by
+        // comparing the plain difference against a + ~b.
+        let sv = self.value.wrapping_sub(rhs.value);
+        let sn = self.value.wrapping_add(!rhs.value);
+        let mu = self.mask | rhs.mask | (sv ^ sn);
+        Tnum { value: sv & !mu, mask: mu }
     }
     pub fn mul(self, rhs: Self) -> Self {
         if self.mask == 0 && rhs.mask == 0 {

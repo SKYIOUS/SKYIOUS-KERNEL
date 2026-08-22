@@ -1,9 +1,11 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::vec::Vec;
 use crate::drivers::gpu::ring::{GpuCommand, GpuOpcode, COMMAND_RING};
+use crate::drivers::gpu::virtio_gpu::VirtioGpu;
 use crate::compositor::vsync::FpsCounter;
 use crate::compositor::blend::BlendMode;
 use crate::compositor::shadow::ShadowParams;
+use crate::compositor::scene::GuiScene;
 
 pub struct WindowSurface {
     pub window_id: u64,
@@ -210,5 +212,77 @@ impl HwCompositor {
 
     pub fn set_vsync(&mut self, enabled: bool) {
         self.vsync = enabled;
+    }
+
+    /// Render a complete frame using the provided scene from gui.
+    /// When gpu feature is off, falls back to software copy + flip.
+    #[cfg(feature = "gpu")]
+    pub fn compose(&mut self, scene: &GuiScene) -> Result<(), ()> {
+        // Sort windows by z_order (lower z = behind)
+        let mut sorted: Vec<usize> = (0..scene.windows.len()).collect();
+        sorted.sort_by_key(|&i| scene.windows[i].z_order);
+
+        VirtioGpu::get_framebuffer().ok_or(())?;
+
+        for &idx in &sorted {
+            let ws = &scene.windows[idx];
+            // Note: dirty tracking now done by gui via damage rect; we render all windows
+
+            // Submit shadow first (behind window)
+            if let Some(ref shadow_params) = ws.shadow {
+                crate::compositor::shadow::render_shadow(
+                    &COMMAND_RING,
+                    ws.gpu_surface,
+                    shadow_params,
+                    ws.position.0, ws.position.1,
+                    ws.size.0, ws.size.1,
+                )?;
+            }
+
+            // Submit blur effect
+            if ws.blur_radius > 0 {
+                let blur = crate::compositor::blur::GaussianBlur::generate_kernel(ws.blur_radius);
+                blur.apply(&COMMAND_RING, ws.gpu_surface, 0, 0, ws.size.0, ws.size.1)?;
+            }
+
+            // Submit alpha-blended window content
+            if ws.opacity < 1.0 {
+                crate::compositor::blend::blend_surface(
+                    &COMMAND_RING, self.display_surface, ws.gpu_surface,
+                    ws.position, ws.opacity, BlendMode::Normal,
+                )?;
+            } else {
+                // Opaque window: full copy via normal blend w/ opacity=1
+                crate::compositor::blend::blend_surface(
+                    &COMMAND_RING, self.display_surface, ws.gpu_surface,
+                    ws.position, 1.0, BlendMode::Normal,
+                )?;
+            }
+        }
+
+        // Submit flip
+        let cmd = GpuCommand {
+            opcode: GpuOpcode::Flip as u32,
+            flags: 0, payload_offset: 0, payload_len: 0,
+            fence_id: 0, reserved: [0; 8],
+        };
+        let fence = COMMAND_RING.submit(&cmd, &[])?;
+
+        // Wait for fence (simplified — real driver uses async completion IRQ)
+        while !COMMAND_RING.poll_completion(fence) {
+            core::hint::spin_loop();
+        }
+
+        // Clear dirty flags
+        for ws in &mut self.window_surfaces {
+            ws.dirty = false;
+        }
+
+        self.frame_count += 1;
+        self.fps_counter.tick(crate::interrupts::get_ticks());
+        if self.vsync {
+            crate::compositor::vsync::wait_vsync();
+        }
+        Ok(())
     }
 }

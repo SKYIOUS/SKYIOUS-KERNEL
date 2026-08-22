@@ -46,6 +46,14 @@ lazy_static! {
 
 // ── Syscall handler ───────────────────────────────────────────────
 pub fn sys_bpf(cmd: u32, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+    // eBPF programs can read/write arbitrary kernel memory through map
+    // helpers. Only root (or a process with CAP_SYS_ADMIN) may call any
+    // BPF command; unprivileged access is denied outright.
+    if crate::syscalls::get_current_euid() != 0
+        && !crate::syscalls::has_capability(crate::syscalls::CAP_SYS_ADMIN)
+    {
+        return Errno::EPERM as u64;
+    }
     match cmd {
         BPF_MAP_CREATE => bpf_map_create(arg1 as *const u8),
         BPF_MAP_LOOKUP_ELEM => bpf_map_lookup_elem(arg1, arg2 as *const u8, arg3 as *mut u8),
@@ -69,11 +77,15 @@ fn bpf_map_create(attr_ptr: *const u8) -> u64 {
     if attr.map_type >= maps::MAX_MAP_TYPE_COUNT || attr.key_size == 0 || attr.value_size == 0 || attr.max_entries == 0 {
         return Errno::EINVAL as u64;
     }
+    // Caps keep map sizes sane and prevent OOM panics from hostile args.
+    if attr.key_size > 1024 || attr.value_size > (1 << 20) || attr.max_entries > (1 << 16) {
+        return Errno::EINVAL as u64;
+    }
     let map: Arc<dyn Map> = match attr.map_type {
         t if t == BPF_MAP_TYPE_HASH => Arc::new(maps::HashTable::new(attr.key_size, attr.value_size, attr.max_entries)),
         t if t == BPF_MAP_TYPE_ARRAY => Arc::new(maps::ArrayMap::new(attr.value_size, attr.max_entries)),
         t if t == BPF_MAP_TYPE_PERF_EVENT_ARRAY => Arc::new(maps::PerfEventArray::new(attr.max_entries)),
-        t if t == BPF_MAP_TYPE_RINGBUF => Arc::new(maps::RingBuf::new((attr.max_entries * attr.value_size) as usize)),
+        t if t == BPF_MAP_TYPE_RINGBUF => Arc::new(maps::RingBuf::new(attr.max_entries as usize * attr.value_size as usize)),
         _ => return Errno::EINVAL as u64,
     };
     maps::register_map(map) as u64
@@ -84,11 +96,16 @@ fn bpf_map_lookup_elem(map_id: u64, key_ptr: *const u8, value_ptr: *mut u8) -> u
     let map = maps::get_map(map_id as usize);
     match map {
         Some(m) => {
-            let key = unsafe { slice::from_raw_parts(key_ptr, m.key_size()) };
-            match m.lookup(key) {
+            let mut key = alloc::vec![0u8; m.key_size()];
+            if unsafe { crate::syscalls::user_access::copy_from_user(&mut key, key_ptr).is_err() } {
+                return Errno::EFAULT as u64;
+            }
+            match m.lookup(&key) {
                 Some(val) => {
                     let copy_len = val.len().min(m.value_size());
-                    unsafe { core::ptr::copy_nonoverlapping(val.as_ptr(), value_ptr, copy_len); }
+                    if unsafe { crate::syscalls::user_access::copy_to_user(value_ptr, &val[..copy_len]) }.is_err() {
+                        return Errno::EFAULT as u64;
+                    }
                     0
                 }
                 None => Errno::ENOENT as u64,
@@ -103,9 +120,15 @@ fn bpf_map_update_elem(map_id: u64, key_ptr: *const u8, value_ptr: *const u8) ->
     let map = maps::get_map(map_id as usize);
     match map {
         Some(m) => {
-            let key = unsafe { slice::from_raw_parts(key_ptr, m.key_size()) };
-            let value = unsafe { slice::from_raw_parts(value_ptr, m.value_size()) };
-            if m.update(key, value) { 0 } else { Errno::ENOMEM as u64 }
+            let mut key = alloc::vec![0u8; m.key_size()];
+            if unsafe { crate::syscalls::user_access::copy_from_user(&mut key, key_ptr).is_err() } {
+                return Errno::EFAULT as u64;
+            }
+            let mut value = alloc::vec![0u8; m.value_size()];
+            if unsafe { crate::syscalls::user_access::copy_from_user(&mut value, value_ptr).is_err() } {
+                return Errno::EFAULT as u64;
+            }
+            if m.update(&key, &value) { 0 } else { Errno::ENOMEM as u64 }
         }
         None => Errno::ENOENT as u64,
     }
@@ -116,8 +139,11 @@ fn bpf_map_delete_elem(map_id: u64, key_ptr: *const u8) -> u64 {
     let map = maps::get_map(map_id as usize);
     match map {
         Some(m) => {
-            let key = unsafe { slice::from_raw_parts(key_ptr, m.key_size()) };
-            if m.delete(key) { 0 } else { Errno::ENOENT as u64 }
+            let mut key = alloc::vec![0u8; m.key_size()];
+            if unsafe { crate::syscalls::user_access::copy_from_user(&mut key, key_ptr).is_err() } {
+                return Errno::EFAULT as u64;
+            }
+            if m.delete(&key) { 0 } else { Errno::ENOENT as u64 }
         }
         None => Errno::ENOENT as u64,
     }
@@ -134,6 +160,11 @@ fn bpf_prog_load(attr_ptr: *const u8, _prog_type: u64) -> u64 {
     let attr: &BpfProgLoadAttr = unsafe { &*(attr_buf.as_ptr() as *const BpfProgLoadAttr) };
 
     if attr.insn_cnt == 0 || attr.insns.is_null() || attr.license.is_null() {
+        return Errno::EINVAL as u64;
+    }
+    // verifier() rejects > 4096 insns; reject here too so we never
+    // allocate a giant buffer for a hostile insn_cnt.
+    if attr.insn_cnt > 4096 {
         return Errno::EINVAL as u64;
     }
 
