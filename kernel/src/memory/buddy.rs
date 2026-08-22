@@ -157,6 +157,22 @@ impl BuddyAllocator {
         total
     }
 
+    /// Check if a specific 4 KiB frame is free (or part of a larger free block).
+    pub fn is_free(&self, addr: PhysAddr) -> bool {
+        for order in 0..=MAX_ORDER {
+            let block_size = 4096u64 << order;
+            let block_base = PhysAddr::new(addr.as_u64() & !(block_size - 1));
+            let mut cur = self.free_lists[order];
+            while let Some(a) = cur {
+                if a == block_base {
+                    return true;
+                }
+                cur = self.read_next_ptr(a);
+            }
+        }
+        false
+    }
+
     /// Get fragmentation ratio (0.0 = no fragmentation, 1.0 = highly fragmented)
     #[allow(dead_code)]
     pub fn fragmentation_ratio(&self) -> f64 {

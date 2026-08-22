@@ -172,6 +172,10 @@ fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<
             fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
             fd_table[2] = Some(FileDescriptor::File { node: tty, offset: crate::sync::IrqSafeMutex::new(0) });
             drop(fd_table);
+            // Keep fd_flags in lockstep with fd_table — exec/fork clone both,
+            // and a short flags vector makes dup2/fcntl index out of bounds.
+            // Access-mode bits (0=O_RDONLY, 1=O_WRONLY): fd0 read, fd1/fd2 write.
+            *process.fd_flags.lock() = alloc::vec![0u64, 1, 1];
             BootLogger::info(ctx, "stdin/stdout/stderr -> /dev/tty0");
         }
         None => {

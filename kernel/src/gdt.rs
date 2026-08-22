@@ -55,8 +55,33 @@ pub fn get_selectors() -> &'static Selectors {
     unsafe { (*core::ptr::addr_of!(SELECTORS)).as_ref().expect("GDT not initialized") }
 }
 
+/// Boot-time boot/p_stack top, used only as the initial per-CPU kernel_rsp
+/// seed (syscall entry) before the first context switch. After scheduling
+/// starts, `set_kernel_stack`/`set_privilege_stack` track the live value.
 pub fn get_kernel_stack() -> VirtAddr {
     TSS.lock().privilege_stack_table[0]
+}
+
+const MAX_CPUS: usize = 8;
+
+// Per-CPU pointer to the TSS actually loaded into that CPU's GDT (the leaked
+// clone). Set by init()/init_ap(). Indexed by LAPIC id, matching the
+// scheduler's per-CPU queues.
+static mut LOADED_TSS: [*mut TaskStateSegment; MAX_CPUS] = [core::ptr::null_mut(); MAX_CPUS];
+
+fn current_cpu_idx() -> usize {
+    core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1)
+}
+
+/// Point ring-3 entry rsp0 at the current thread's own kernel stack top.
+/// This is what makes user-mode interrupts (timer, page faults) land on the
+/// running thread's kernel stack instead of a single shared privilege stack,
+/// so a parked thread's saved context can't be clobbered by the next interrupt.
+pub fn set_privilege_stack(top: u64) {
+    let tss = unsafe { core::ptr::addr_of_mut!(LOADED_TSS[current_cpu_idx()]).read() };
+    if !tss.is_null() {
+        unsafe { (*tss).privilege_stack_table[0] = VirtAddr::new(top) };
+    }
 }
 
 pub fn init() {
@@ -69,6 +94,7 @@ pub fn init() {
     // 2. Setup GDT with the initialized TSS
     // Leak a reference to the global TSS for the BSP GDT entry
     let tss_ptr = Box::leak(Box::new(TSS.lock().clone()));
+    unsafe { LOADED_TSS[0] = tss_ptr as *mut TaskStateSegment };
     
     let mut gdt = GDT.0.clone();
     let tss_selector = gdt.add_entry(Descriptor::tss_segment(tss_ptr));
@@ -108,6 +134,10 @@ pub fn init_ap() {
     tss.privilege_stack_table[0] = VirtAddr::new(p_stack.top);
 
     let tss_ref = Box::leak(tss);
+    {
+        let idx = current_cpu_idx();
+        unsafe { LOADED_TSS[idx] = tss_ref as *mut TaskStateSegment };
+    }
 
     // Create a per-CPU GDT
     let mut gdt = GlobalDescriptorTable::new();

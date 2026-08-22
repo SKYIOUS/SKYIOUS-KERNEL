@@ -135,79 +135,109 @@ impl PerCpuScheduler {
         self.stride_heap.push(PassOrd(thread));
     }
 
+    /// Generic drain-and-wake: pull threads from `queue`, wake up to
+    /// `max_wake` matching ones (set status Ready, move to ready_queues),
+    /// and push non-matching ones back. Returns the number woken.
+    ///
+    /// `matches` — returns true for threads that should be woken.
+    /// `clear_block` — clears the per-thread field that caused the block
+    ///   (e.g. `futex_wake_addr = None`).
+    pub(crate) fn drain_wake(
+        &mut self,
+        queue: &mut VecDeque<Box<Thread>>,
+        max_wake: u32,
+        matches: impl Fn(&Thread) -> bool,
+        mut clear_block: impl FnMut(&mut Thread),
+    ) -> u32 {
+        let mut woken = 0u32;
+        let n = queue.len();
+        for _ in 0..n {
+            let Some(mut thread) = queue.pop_front() else { break };
+            if woken < max_wake && matches(&thread) {
+                clear_block(&mut thread);
+                thread.status = crate::task::thread::ThreadStatus::Ready;
+                let p = (thread.priority as usize).min(7);
+                self.ready_queues[p].push_back(thread);
+                woken += 1;
+            } else {
+                queue.push_back(thread);
+            }
+        }
+        if woken > 0 {
+            self.mark_ready_queues_dirty();
+        }
+        woken
+    }
+
+    /// Check scheduler invariants on a snapshot of pass values.
+    /// Records failures via the verification runner.
+    #[cfg(feature = "verification")]
+    fn check_pick_invariants(context: &str, selected_pass: u64, passes: &[u64]) {
+        if passes.is_empty() { return; }
+        // INVARIANT: selected must be min-pass
+        if let Some(min_pass) = passes.iter().min() {
+            if selected_pass > *min_pass {
+                let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                runner.record_failure(context, &alloc::format!(
+                    "SelectedNotMinPass: selected={} min={} among {} ready threads",
+                    selected_pass, min_pass, passes.len()
+                ));
+            }
+        }
+        // INVARIANT: stretch bound
+        if let (Some(max_pass), Some(min_pass)) = (passes.iter().max(), passes.iter().min()) {
+            let limit = crate::verified::scheduler::STRIDE_MAX.saturating_mul(2);
+            if max_pass.saturating_sub(*min_pass) > limit {
+                let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                runner.record_failure(context, &alloc::format!(
+                    "StretchViolation: max={} min={} limit={}",
+                    max_pass, min_pass, limit
+                ));
+            }
+        }
+        // INVARIANT: pass sum bounded
+        let total_pass: u64 = passes.iter().sum();
+        let max_possible = crate::interrupts::get_ticks().saturating_mul(crate::verified::scheduler::STRIDE_MAX);
+        if total_pass > max_possible.saturating_mul(2) {
+            let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+            runner.record_failure(context, &alloc::format!(
+                "PassSumMismatch: sum={} >> expected max={} (ticks={})",
+                total_pass, max_possible, crate::interrupts::get_ticks()
+            ));
+        }
+        // Starvation check
+        if let Some(min_pass) = passes.iter().min() {
+            for pass in passes {
+                let gap = pass.saturating_sub(*min_pass);
+                if gap > crate::verified::scheduler::STRIDE_MAX.saturating_mul(4) {
+                    let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
+                    runner.record_failure(context, &alloc::format!(
+                        "StarvationRisk: pass={} min={} gap={}", pass, min_pass, gap
+                    ));
+                }
+            }
+        }
+    }
+
     pub fn pick_next(&mut self) -> Option<Box<Thread>> {
         // Absorb anything added via ready_queues (wake paths)
-        // Only flush if dirty to avoid O(k log N) overhead when no threads were woken
         self.flush_ready_queues();
 
-        // 1. Global pending queue first — non-blocking: this runs in IRQ
-        // context (try_schedule) and can preempt `spawn()`, which holds this
-        // lock. Spinning here would deadlock the CPU (the holder cannot run
-        // until iret). Newly-spawned threads must be picked before local
-        // ready work: with local-first order, two always-runnable threads
-        // (e.g. the async executor and a kernel poller ping-ponging through
-        // schedule()) keep the ready queues permanently non-empty and starve
-        // pending forever — the boot-time init thread sat in pending while
-        // the CPU livelocked between the two locals.
+        // 1. Global pending queue first
         if let Some(t) = GLOBAL.pending_queue.try_lock().and_then(|mut q| q.pop_front()) {
             return Some(t);
         }
 
-        // 2. Stride heap — O(log N) pop
+        // 2. Stride heap
         #[cfg(feature = "verification")]
         let snapshot_passes: alloc::vec::Vec<u64> = self.stride_heap.iter().map(|p| (&*p.0).pass).collect();
         if let Some(PassOrd(t)) = self.stride_heap.pop() {
             #[cfg(feature = "verification")]
-            {
-                let selected_pass = t.pass;
-                // INVARIANT 2: selected must be min-pass
-                if let Some(min_pass) = snapshot_passes.iter().min() {
-                    if selected_pass > *min_pass {
-                        let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                        runner.record_failure("scheduler::pick_next", &alloc::format!(
-                            "SelectedNotMinPass: selected={} min={} among {} ready threads",
-                            selected_pass, min_pass, snapshot_passes.len()
-                        ));
-                    }
-                }
-                // INVARIANT 3: stretch bound
-                if let (Some(max_pass), Some(min_pass)) = (snapshot_passes.iter().max(), snapshot_passes.iter().min()) {
-                    let limit = crate::verified::scheduler::STRIDE_MAX.saturating_mul(2);
-                    if max_pass.saturating_sub(*min_pass) > limit {
-                        let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                        runner.record_failure("scheduler::pick_next", &alloc::format!(
-                            "StretchViolation: max={} min={} limit={}",
-                            max_pass, min_pass, limit
-                        ));
-                    }
-                }
-                // INVARIANT 1: pass sum bounded
-                let total_pass: u64 = snapshot_passes.iter().sum();
-                let max_possible = crate::interrupts::get_ticks().saturating_mul(crate::verified::scheduler::STRIDE_MAX);
-                if total_pass > max_possible.saturating_mul(2) {
-                    let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                    runner.record_failure("scheduler::pick_next", &alloc::format!(
-                        "PassSumMismatch: sum={} >> expected max={} (ticks={})",
-                        total_pass, max_possible, crate::interrupts::get_ticks()
-                    ));
-                }
-                // Starvation check
-                if let Some(min_pass) = snapshot_passes.iter().min() {
-                    for pass in &snapshot_passes {
-                        let gap = pass.saturating_sub(*min_pass);
-                        if gap > crate::verified::scheduler::STRIDE_MAX.saturating_mul(4) {
-                            let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                            runner.record_failure("scheduler::pick_next", &alloc::format!(
-                                "StarvationRisk: pass={} min={} gap={}", pass, min_pass, gap
-                            ));
-                        }
-                    }
-                }
-            }
+            Self::check_pick_invariants("scheduler::pick_next", t.pass, &snapshot_passes);
             return Some(t);
         }
 
-        // 3. Work stealing: try to grab the min-pass thread from another CPU
+        // 3. Work stealing
         let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
         for i in 0..MAX_CPUS {
             if i == current_cpu { continue; }
@@ -217,53 +247,13 @@ impl PerCpuScheduler {
                 let stolen_passes: alloc::vec::Vec<u64> = other.stride_heap.iter().map(|p| (&*p.0).pass).collect();
                 if let Some(PassOrd(t)) = other.stride_heap.pop() {
                     #[cfg(feature = "verification")]
-                    {
-                        let selected_pass = t.pass;
-                        if let Some(min_pass) = stolen_passes.iter().min() {
-                            if selected_pass > *min_pass {
-                                let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                                runner.record_failure("scheduler::pick_next::work_steal", &alloc::format!(
-                                    "SelectedNotMinPass: selected={} min={} among {} ready threads",
-                                    selected_pass, min_pass, stolen_passes.len()
-                                ));
-                            }
-                        }
-                        if let (Some(max_pass), Some(min_pass)) = (stolen_passes.iter().max(), stolen_passes.iter().min()) {
-                            let limit = crate::verified::scheduler::STRIDE_MAX.saturating_mul(2);
-                            if max_pass.saturating_sub(*min_pass) > limit {
-                                let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                                runner.record_failure("scheduler::pick_next::work_steal", &alloc::format!(
-                                    "StretchViolation: max={} min={} limit={}", max_pass, min_pass, limit
-                                ));
-                            }
-                        }
-                        let total_pass: u64 = stolen_passes.iter().sum();
-                        let max_possible = crate::interrupts::get_ticks().saturating_mul(crate::verified::scheduler::STRIDE_MAX);
-                        if total_pass > max_possible.saturating_mul(2) {
-                            let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                            runner.record_failure("scheduler::pick_next::work_steal", &alloc::format!(
-                                "PassSumMismatch: sum={} >> expected max={} (ticks={})",
-                                total_pass, max_possible, crate::interrupts::get_ticks()
-                            ));
-                        }
-                        if let Some(min_pass) = stolen_passes.iter().min() {
-                            for pass in &stolen_passes {
-                                let gap = pass.saturating_sub(*min_pass);
-                                if gap > crate::verified::scheduler::STRIDE_MAX.saturating_mul(4) {
-                                    let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                                    runner.record_failure("scheduler::pick_next::work_steal", &alloc::format!(
-                                        "StarvationRisk: pass={} min={} gap={}", pass, min_pass, gap
-                                    ));
-                                }
-                            }
-                        }
-                    }
+                    Self::check_pick_invariants("scheduler::pick_next::work_steal", t.pass, &stolen_passes);
                     return Some(t);
                 }
             }
         }
         None
-    }
+}
 }
 
 /// Global queues shared across all CPUs.
@@ -300,44 +290,20 @@ impl GlobalScheduler {
     /// Only holds block_queue lock — does not block other queues.
     pub fn wake_blocked_threads(&self, key: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
         let mut block = self.block_queue.lock();
-        let mut woken = 0u32;
-        let mut still_waiting = VecDeque::new();
-        while let Some(mut thread) = block.pop_front() {
-            if woken < max_wake && thread.pipe_block_key == Some(key) {
-                thread.status = crate::task::thread::ThreadStatus::Ready;
-                thread.pipe_block_key = None;
-                let p = if thread.priority > 7 { 7 } else { thread.priority };
-                target_ready.ready_queues[p as usize].push_back(thread);
-                woken += 1;
-            } else {
-                still_waiting.push_back(thread);
-            }
-        }
-        *block = still_waiting;
-        if woken > 0 { target_ready.mark_ready_queues_dirty(); }
-        woken
+        target_ready.drain_wake(&mut block, max_wake,
+            |t| t.pipe_block_key == Some(key),
+            |t| { t.pipe_block_key = None; },
+        )
     }
 
     /// Wake threads waiting on a futex.
     /// Only holds futex_queue lock — does not block other queues.
     pub fn wake_futex(&self, uaddr: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
         let mut futex = self.futex_queue.lock();
-        let mut woken = 0u32;
-        let mut still_waiting = VecDeque::new();
-        while let Some(mut thread) = futex.pop_front() {
-            if woken < max_wake && thread.futex_wake_addr == Some(uaddr) {
-                thread.status = crate::task::thread::ThreadStatus::Ready;
-                thread.futex_wake_addr = None;
-                let p = if thread.priority > 7 { 7 } else { thread.priority };
-                target_ready.ready_queues[p as usize].push_back(thread);
-                woken += 1;
-            } else {
-                still_waiting.push_back(thread);
-            }
-        }
-        *futex = still_waiting;
-        if woken > 0 { target_ready.mark_ready_queues_dirty(); }
-        woken
+        target_ready.drain_wake(&mut futex, max_wake,
+            |t| t.futex_wake_addr == Some(uaddr),
+            |t| { t.futex_wake_addr = None; },
+        )
     }
 }
 
@@ -752,51 +718,25 @@ pub fn wake_futex(uaddr: u64, max_wake: u32) -> u32 {
 }
 
 /// Wake all threads in the futex queue whose process ID matches.
-/// Called from tick() IRQ context — no allocation (rotate in place).
 pub fn wake_process_futex(pid: u64) -> u32 {
     let mut sched = this_cpu_sched().lock();
     let mut futex = GLOBAL.futex_queue.lock();
-    let mut woken = 0u32;
-    let n = futex.len();
-    for _ in 0..n {
-        let Some(mut thread) = futex.pop_front() else { break };
-        let matches = thread.process.as_ref().map(|p| p.id == pid).unwrap_or(false);
-        if matches {
-            thread.status = crate::task::thread::ThreadStatus::Ready;
-            thread.futex_wake_addr = None;
-            let p = if thread.priority > 7 { 7 } else { thread.priority };
-            sched.ready_queues[p as usize].push_back(thread);
-            woken += 1;
-        } else {
-            futex.push_back(thread);
-        }
-    }
-    if woken > 0 { sched.mark_ready_queues_dirty(); }
+    let woken = sched.drain_wake(&mut futex, u32::MAX,
+        |t| t.process.as_ref().map(|p| p.id == pid).unwrap_or(false),
+        |t| { t.futex_wake_addr = None; },
+    );
     if woken > 0 { broadcast_reschedule_ipi(); }
     woken
 }
 
 /// Wake all pipe-blocked threads whose process ID matches.
-/// Called from tick() IRQ context — no allocation (rotate in place).
 pub fn wake_process_blocked(pid: u64) -> u32 {
     let mut sched = this_cpu_sched().lock();
     let mut block = GLOBAL.block_queue.lock();
-    let mut woken = 0u32;
-    let n = block.len();
-    for _ in 0..n {
-        let Some(mut thread) = block.pop_front() else { break };
-        let matches = thread.process.as_ref().map(|p| p.id == pid).unwrap_or(false);
-        if matches {
-            thread.status = crate::task::thread::ThreadStatus::Ready;
-            thread.pipe_block_key = None;
-            let p = if thread.priority > 7 { 7 } else { thread.priority };
-            sched.ready_queues[p as usize].push_back(thread);
-            woken += 1;
-        } else {
-            block.push_back(thread);
-        }
-    }
-    if woken > 0 { sched.mark_ready_queues_dirty(); }
+    let woken = sched.drain_wake(&mut block, u32::MAX,
+        |t| t.process.as_ref().map(|p| p.id == pid).unwrap_or(false),
+        |t| { t.pipe_block_key = None; },
+    );
     if woken > 0 { broadcast_reschedule_ipi(); }
     woken
 }

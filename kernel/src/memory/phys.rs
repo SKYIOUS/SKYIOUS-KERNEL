@@ -1,110 +1,36 @@
 #![allow(dead_code)]
 
-use bootloader_api::info::{MemoryRegions, MemoryRegionKind};
-use crate::sync::IrqSafeMutex as Mutex;
+use bootloader_api::info::MemoryRegions;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-const MAX_FRAMES: usize = 1_048_576; // enough for 4 GB @ 4K pages
-const BITMAP_WORDS: usize = MAX_FRAMES / 64;
-
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
-static BITMAP: Mutex<[u64; BITMAP_WORDS]> = Mutex::new([0u64; BITMAP_WORDS]);
-static TOTAL_FREE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-static BITMAP_BASE_FRAME: Mutex<u64> = Mutex::new(0);
 
-fn frame_index(phys_addr: u64) -> Option<usize> {
-    let base = *BITMAP_BASE_FRAME.lock();
-    let frame = phys_addr >> 12;
-    if frame < base { return None; }
-    let idx = (frame - base) as usize;
-    if idx >= MAX_FRAMES { None } else { Some(idx) }
-}
-
-pub fn init(memory_regions: &'static MemoryRegions) {
-    if INITIALIZED.swap(true, Ordering::SeqCst) { return; }
-
-    let mut bitmap = BITMAP.lock();
-    let mut base_frame = u64::MAX;
-
-    // Find the lowest usable region to set as base
-    for region in memory_regions.iter() {
-        if region.kind == MemoryRegionKind::Usable {
-            let frame = region.start >> 12;
-            if frame < base_frame {
-                base_frame = frame;
-            }
-        }
-    }
-    if base_frame == u64::MAX { base_frame = 0; }
-    *BITMAP_BASE_FRAME.lock() = base_frame;
-
-    // Mark everything used initially
-    for word in bitmap.iter_mut() {
-        *word = u64::MAX;
-    }
-
-    // Mark usable regions as free
-    for region in memory_regions.iter() {
-        if region.kind == MemoryRegionKind::Usable {
-            let start_frame = region.start >> 12;
-            let end_frame = (region.end - 1) >> 12;
-            let start_idx = ((start_frame.saturating_sub(base_frame)) as usize).min(MAX_FRAMES);
-            let end_idx = ((end_frame.saturating_sub(base_frame)) as usize).min(MAX_FRAMES);
-            for i in start_idx..=end_idx {
-                if i < MAX_FRAMES {
-                    let word = &mut bitmap[i / 64];
-                    let bit = i % 64;
-                    *word &= !(1u64 << bit);
-                    TOTAL_FREE.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-    }
+pub fn init(_memory_regions: &'static MemoryRegions) {
+    // ponytail: consolidated — phys delegates to buddy; no separate bitmap
+    INITIALIZED.store(true, Ordering::SeqCst);
 }
 
 pub fn alloc_frame() -> Option<u64> {
-    let mut bitmap = BITMAP.lock();
-    let base = *BITMAP_BASE_FRAME.lock();
-    for (word_idx, word) in bitmap.iter_mut().enumerate() {
-        if *word != 0 {
-            let bit = word.trailing_zeros() as usize;
-            *word &= !(1u64 << bit);
-            let frame_idx = word_idx * 64 + bit;
-            if frame_idx < MAX_FRAMES {
-                let phys = (base + frame_idx as u64) << 12;
-                TOTAL_FREE.fetch_sub(1, Ordering::Relaxed);
-                return Some(phys);
-            }
-        }
-    }
-    None
+    crate::memory::buddy::BUDDY_ALLOCATOR
+        .lock()
+        .allocate_contiguous(0)
+        .map(|a| a.as_u64())
 }
 
 pub fn free_frame(phys_addr: u64) {
-    if let Some(idx) = frame_index(phys_addr) {
-        if idx < MAX_FRAMES {
-            let mut bitmap = BITMAP.lock();
-            let word = &mut bitmap[idx / 64];
-            let bit = idx % 64;
-            let mask = 1u64 << bit;
-            if *word & mask == 0 {
-                *word |= mask;
-                TOTAL_FREE.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+    // ponytail: guard double-free — buddy would otherwise re-insert and inflate count
+    if is_free(phys_addr) {
+        return;
     }
+    use x86_64::{PhysAddr, structures::paging::PhysFrame};
+    let frame = PhysFrame::containing_address(PhysAddr::new(phys_addr));
+    crate::memory::buddy::BUDDY_ALLOCATOR.lock().deallocate_frame(frame);
 }
 
 pub fn is_free(phys_addr: u64) -> bool {
-    if let Some(idx) = frame_index(phys_addr) {
-        if idx < MAX_FRAMES {
-            let bitmap = BITMAP.lock();
-            let word = bitmap[idx / 64];
-            let bit = idx % 64;
-            return (word & (1u64 << bit)) != 0;
-        }
-    }
-    false
+    crate::memory::buddy::BUDDY_ALLOCATOR
+        .lock()
+        .is_free(x86_64::PhysAddr::new(phys_addr))
 }
 
 pub fn is_initialized() -> bool {
@@ -112,7 +38,7 @@ pub fn is_initialized() -> bool {
 }
 
 pub fn total_free_frames() -> usize {
-    TOTAL_FREE.load(Ordering::Relaxed)
+    crate::memory::buddy::BUDDY_ALLOCATOR.lock().count_free_pages()
 }
 
 // ponytail: naive test, does not exhaust the allocator

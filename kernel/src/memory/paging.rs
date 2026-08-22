@@ -73,7 +73,11 @@ impl AddressSpace {
         let virt_offset = VirtAddr::new(phys_offset);
 
         let old_pml4_virt = virt_offset + self.pml4_frame.start_address().as_u64();
-        let old_pml4 = unsafe { &*(old_pml4_virt.as_ptr() as *const PageTable) };
+        // Mutable: clone_recursive flips the parent's writable leaves to
+        // read-only+COW so the parent cannot write into frames the child
+        // still maps (its write would mutate the child's memory and race
+        // the child's COW copy).
+        let old_pml4 = unsafe { &mut *(old_pml4_virt.as_mut_ptr() as *mut PageTable) };
 
         let new_pml4_virt = virt_offset + new_pml4_frame.start_address().as_u64();
         let new_pml4 = unsafe { &mut *(new_pml4_virt.as_mut_ptr() as *mut PageTable) };
@@ -92,12 +96,20 @@ impl AddressSpace {
             }
         }
 
+        // The parent's writable entries were flipped to read-only+COW; flush
+        // stale writable TLB entries on this CPU and every AP, or the parent
+        // could keep writing through the cached writable mapping into frames
+        // the child still maps.
+        x86_64::instructions::tlb::flush_all();
+        #[cfg(feature = "smp")]
+        crate::smp::broadcast_tlb_flush(0);
+
         Some(AddressSpace { pml4_frame: new_pml4_frame })
     }
 
     fn clone_recursive(
         index: usize,
-        src_table: &PageTable,
+        src_table: &mut PageTable,
         dst_table: &mut PageTable,
         level: u8,
         virt_offset: VirtAddr,
@@ -105,7 +117,7 @@ impl AddressSpace {
     ) -> Option<()> {
         use x86_64::structures::paging::PageTableFlags;
 
-        let entry = &src_table[index];
+        let entry = &mut src_table[index];
         if entry.is_unused() {
             return Some(());
         }
@@ -113,18 +125,25 @@ impl AddressSpace {
         if level == 1 {
             // This is a leaf page entry
             let mut flags = entry.flags();
-            
-            // If it's writable, we make it read-only and mark it COW
+
+            // If it's writable, we make it read-only and mark it COW in
+            // BOTH the child AND the parent. Flipping only the child left
+            // the parent's entry writable, so the parent kept writing into
+            // frames the child still maps: the child's "private" heap and
+            // allocator free-lists were really the parent's live memory,
+            // and blocks the parent later freed+munmap'd stayed in the
+            // child's inherited free list -> SIGSEGV on the unmapped block.
             if flags.contains(PageTableFlags::WRITABLE) {
                 flags.remove(PageTableFlags::WRITABLE);
                 // Bit 9 is available for software. We use it for COW.
                 let mut bits = flags.bits();
-                bits |= 1 << 9; 
+                bits |= 1 << 9;
                 flags = PageTableFlags::from_bits_truncate(bits);
+                entry.set_flags(flags);
             }
 
             dst_table[index].set_addr(entry.addr(), flags);
-            
+
             // Increment refcount for the physical frame
             memory::frame_info::increment(entry.addr());
 
@@ -137,7 +156,7 @@ impl AddressSpace {
         dst_table[index].set_frame(new_frame, entry.flags());
 
         let next_src_virt = virt_offset + entry.addr().as_u64();
-        let next_src_table = unsafe { &*(next_src_virt.as_ptr() as *const PageTable) };
+        let next_src_table = unsafe { &mut *(next_src_virt.as_mut_ptr() as *mut PageTable) };
         
         let next_dst_virt = virt_offset + new_frame.start_address().as_u64();
         let next_dst_table = unsafe { &mut *(next_dst_virt.as_mut_ptr() as *mut PageTable) };
@@ -180,8 +199,8 @@ impl AddressSpace {
             }
         }
 
-        // Free the PML4 frame itself
-        memory::frame_info::decrement(self.pml4_frame.start_address());
+        // Free the PML4 frame itself (exclusively owned: never shared via
+        // clone, so direct deallocate without refcount/deferred queue)
         crate::memory::buddy::BUDDY_ALLOCATOR.lock()
             .deallocate_frame(self.pml4_frame);
     }
@@ -207,10 +226,10 @@ impl AddressSpace {
             }
         }
 
-        // Free the page table frame itself (but NOT the PML4 — that's freed by destroy())
+        // Free the page table frame itself (but NOT the PML4 — that's freed by destroy()).
+        // Table frames are exclusively owned (never refcounted/shared), so free directly.
         crate::memory::buddy::BUDDY_ALLOCATOR.lock()
             .deallocate_frame(own_frame);
-        memory::frame_info::decrement(own_frame.start_address());
     }
 
     /// Handles a Copy-on-Write fault for a given page.
