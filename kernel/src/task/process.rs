@@ -73,6 +73,20 @@ pub enum EmulationMode {
     Windows,
 }
 
+/// Process identity fields — always accessed together in fork/setsid/setpgid.
+#[derive(Clone, Copy)]
+pub struct ProcessIdentity {
+    pub pgid: u64,
+    pub session: u64,
+    pub is_group_leader: bool,
+}
+
+/// Resource limits — always accessed together in getrlimit/setrlimit/prlimit64.
+#[derive(Clone, Copy)]
+pub struct ResourceLimits {
+    pub rlim_cur: [i64; 16],
+    pub rlim_max: [i64; 16],
+}
 pub struct Process {
     pub id: u64,
     pub parent_id: Option<u64>,
@@ -100,11 +114,8 @@ pub struct Process {
     pub clear_child_tid: Mutex<u64>,
     pub emulation: Mutex<EmulationMode>,
     pub umask: Mutex<u32>,
-    pub pgid: crate::sync::IrqSafeMutex<u64>,
-    pub session: crate::sync::IrqSafeMutex<u64>,
-    pub is_group_leader: crate::sync::IrqSafeMutex<bool>,
-    pub rlim_cur: crate::sync::IrqSafeMutex<[i64; 16]>,
-    pub rlim_max: crate::sync::IrqSafeMutex<[i64; 16]>,
+    pub identity: crate::sync::IrqSafeMutex<ProcessIdentity>,
+    pub limits: crate::sync::IrqSafeMutex<ResourceLimits>,
     pub altstack: crate::sync::IrqSafeMutex<stack_t>,
     pub itimer_real: crate::sync::IrqSafeMutex<itimerval>,
     pub utime: core::sync::atomic::AtomicU64,
@@ -115,6 +126,28 @@ pub struct Process {
     pub groups: crate::sync::IrqSafeMutex<alloc::vec::Vec<u32>>,
     /// virt_page_addr → (device_idx, slot_idx) for swapped-out pages
     pub swap_map: crate::sync::IrqSafeMutex<hashbrown::HashMap<u64, (usize, usize)>>,
+    /// Process/thread name (up to 15 chars + null)
+    pub name: crate::sync::IrqSafeMutex<String>,
+    /// Seccomp filtering state
+    pub seccomp: crate::sync::IrqSafeMutex<crate::syscalls::seccomp::SeccompState>,
+    /// Landlock LSM state
+    pub landlock: crate::sync::IrqSafeMutex<crate::syscalls::landlock::LandlockState>,
+    /// Namespace set (PID, Mount, Net, IPC, UTS, User)
+    pub namespaces: crate::sync::IrqSafeMutex<crate::syscalls::namespaces::NamespaceSet>,
+    /// Landlock rulesets indexed by fd number
+    pub landlock_fds: crate::sync::IrqSafeMutex<hashbrown::HashMap<usize, crate::syscalls::landlock::LandlockRuleset>>,
+    /// Namespace references indexed by fd number (for setns)
+    pub namespace_fds: crate::sync::IrqSafeMutex<hashbrown::HashMap<usize, crate::syscalls::namespaces::NamespaceType>>,
+    /// Whether exec can gain new privileges
+    pub no_new_privs: core::sync::atomic::AtomicBool,
+    /// Whether core dumps are enabled
+    pub dumpable: core::sync::atomic::AtomicBool,
+    /// Whether this process is a child subreaper
+    pub child_subreaper: core::sync::atomic::AtomicBool,
+    /// Timer slack value in nanoseconds
+    pub timerslack: core::sync::atomic::AtomicU64,
+    /// Cgroup path (e.g. "/", "/system.slice/docker.service")
+    pub cgroup_path: crate::sync::IrqSafeMutex<String>,
 }
 
 // ─── sigaltstack / itimerval / tms types ─────────────────────────
@@ -336,11 +369,8 @@ impl Process {
             clear_child_tid: Mutex::new(0),
             emulation: Mutex::new(EmulationMode::Native),
             umask: Mutex::new(0o022),
-            pgid: crate::sync::IrqSafeMutex::new(id),
-            session: crate::sync::IrqSafeMutex::new(id),
-            is_group_leader: crate::sync::IrqSafeMutex::new(true),
-            rlim_cur: crate::sync::IrqSafeMutex::new([i64::MAX; 16]),
-            rlim_max: crate::sync::IrqSafeMutex::new([i64::MAX; 16]),
+            identity: crate::sync::IrqSafeMutex::new(ProcessIdentity { pgid: id, session: id, is_group_leader: true }),
+            limits: crate::sync::IrqSafeMutex::new(ResourceLimits { rlim_cur: [i64::MAX; 16], rlim_max: [i64::MAX; 16] }),
             altstack: crate::sync::IrqSafeMutex::new(stack_t {
                 ss_sp: core::ptr::null_mut(),
                 ss_flags: SS_DISABLE,
@@ -357,6 +387,17 @@ impl Process {
             boot_ticks: crate::interrupts::get_ticks(),
             groups: crate::sync::IrqSafeMutex::new(alloc::vec::Vec::new()),
             swap_map: crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new()),
+            name: crate::sync::IrqSafeMutex::new(String::from("init")),
+            seccomp: crate::sync::IrqSafeMutex::new(crate::syscalls::seccomp::SeccompState::default()),
+            landlock: crate::sync::IrqSafeMutex::new(crate::syscalls::landlock::LandlockState::default()),
+            namespaces: crate::sync::IrqSafeMutex::new(crate::syscalls::namespaces::NamespaceSet::default()),
+            landlock_fds: crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new()),
+            namespace_fds: crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new()),
+            no_new_privs: core::sync::atomic::AtomicBool::new(false),
+            dumpable: core::sync::atomic::AtomicBool::new(true),
+            child_subreaper: core::sync::atomic::AtomicBool::new(false),
+            timerslack: core::sync::atomic::AtomicU64::new(0),
+            cgroup_path: crate::sync::IrqSafeMutex::new(String::from("/")),
         }
     }
 
@@ -498,6 +539,17 @@ impl Process {
                 let mem_size = ph.mem_size();
                 let offset = ph.offset() as usize;
 
+                // Reject header-told-but-file-lacking ranges before slicing.
+                // Malicious/truncated ELFs must fail to load, not panic.
+                if offset.checked_add(file_size as usize).map(|e| e > elf_data.len()).unwrap_or(true) {
+                    return Err("Program header ranges past end of file");
+                }
+                if mem_size == 0 { continue; }
+                let virt_end = match virt_start.checked_add(mem_size) {
+                    Some(e) => e,
+                    None => return Err("Program header virtual range overflow"),
+                };
+
                 let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
                 if ph.flags().is_write() { flags |= PageTableFlags::WRITABLE; }
                 if !ph.flags().is_execute() { flags |= PageTableFlags::NO_EXECUTE; }
@@ -505,7 +557,7 @@ impl Process {
                 // Define VMA
                 vmas.push(Vma {
                     start: virt_start,
-                    end: virt_start + mem_size,
+                    end: virt_end,
                     flags,
                     _name: "elf_phdr",
                     file_handle: None,
@@ -516,7 +568,7 @@ impl Process {
 
                 // Map and Copy
                 let start_page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(virt_start));
-                let end_page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(virt_start + mem_size - 1));
+                let end_page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(virt_end - 1));
                 
                 for page in Page::range_inclusive(start_page, end_page) {
                     let map_flags = flags | PageTableFlags::WRITABLE;
@@ -550,7 +602,7 @@ impl Process {
                     let page_start = page.start_address().as_u64();
                     let offset_in_segment = page_start.saturating_sub(virt_start);
                     let copy_start = virt_start + offset_in_segment;
-                    let copy_end = core::cmp::min(virt_start + file_size, page_start + 4096);
+                    let copy_end = core::cmp::min(virt_start.saturating_add(file_size), page_start + 4096);
                     
                     if copy_start < copy_end {
                         let len = copy_end - copy_start;
@@ -582,6 +634,9 @@ impl Process {
             if let Ok(xmas_elf::program::Type::Dynamic) = ph.get_type() {
                 let dyn_off = ph.offset() as usize;
                 let dyn_filesz = ph.file_size() as usize;
+                if dyn_off.checked_add(dyn_filesz).map(|e| e > elf_data.len()).unwrap_or(true) {
+                    return Err("Dynamic header past end of file");
+                }
                 let dyn_data = &elf_data[dyn_off..dyn_off + dyn_filesz];
 
                 let mut rela_vaddr = 0u64;
@@ -657,7 +712,7 @@ impl Process {
     }
 
     /// PHASE D2: User stack setup in execve
-    /// Maps 64KB stack at a randomized location and populates argc/argv.
+    /// Maps the user stack at a randomized location and populates argc/argv.
     /// Returns Err on OOM (partial frames are freed).
     pub fn setup_user_stack(&self, argv: &[alloc::string::String]) -> Result<u64, ()> {
                         use x86_64::structures::paging::{Mapper, Page, Size4KiB, PageTableFlags, FrameAllocator};
@@ -669,7 +724,9 @@ impl Process {
         // Old: 0x7FFF_FFFF_E000. New: 0x7FFF_F000_0000 + random * 4096 (up to 0xFFF pages)
         let stack_random = (Self::aslr_entropy() & 0xFFF) * 4096;
         let stack_top_addr = 0x7FFF_F000_0000u64 + stack_random;
-        let stack_pages = 16; // 64 KB
+        // 8 MiB (Linux default RLIMIT_STACK): 64 KB was too small — GUI apps
+        // (ade Desktop::new) use ~44 KB frames alone and overflowed it.
+        let stack_pages = 2048; // 8 MB
         
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 

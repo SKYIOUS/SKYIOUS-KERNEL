@@ -15,6 +15,7 @@ pub mod tarfs;
 pub mod devfs;
 pub mod ctlfs;
 pub mod skyfs;
+pub mod fuse;
 #[cfg(feature = "ext4")]
 pub mod ext4;
 pub mod page_cache;
@@ -504,6 +505,9 @@ pub fn init() {
     let ramfs = Arc::new(ramfs::Tmpfs::new());
     vfs.mount("/tmp", ramfs);
     crate::println!("VFS: Mounted Tmpfs at /tmp.");
+
+    // Mount procfs at /proc for process introspection
+    crate::syscalls::procfs::init();
 
 
     // Scan block devices for partitions and mount filesystems

@@ -256,7 +256,43 @@ fn map_linux_to_vahi(linux_n: u64) -> u64 {
         218 => numbers::SYS_SET_TID_ADDRESS,
         228 => numbers::SYS_CLOCK_GETTIME,
         231 => numbers::SYS_EXIT_GROUP,
+        232 => numbers::SYS_EPOLL_WAIT,
+        233 => numbers::SYS_EPOLL_CTL,
+        257 => numbers::SYS_OPENAT,
+        262 => numbers::SYS_FSTATAT,
+        263 => numbers::SYS_UNLINKAT,
+        264 => numbers::SYS_RENAMEAT,
+        265 => numbers::SYS_LINKAT,
+        266 => numbers::SYS_SYMLINKAT,
+        267 => numbers::SYS_READLINKAT,
+        269 => numbers::SYS_FACCESSAT,
+        270 => numbers::SYS_PPOLL,
+        271 => numbers::SYS_PSELECT6,
+        280 => numbers::SYS_UTIMENSAT,
+        281 => numbers::SYS_EPOLL_PWAIT,
+        282 => numbers::SYS_SIGNALFD,
+        285 => numbers::SYS_FALLOCATE,
+        288 => numbers::SYS_ACCEPT4,
+        289 => numbers::SYS_SIGNALFD4,
+        290 => numbers::SYS_EVENTFD2,
+        291 => numbers::SYS_EPOLL_CREATE1,
+        292 => numbers::SYS_DUP3,
+        293 => numbers::SYS_PIPE2,
+        302 => numbers::SYS_PR_LIMIT64,
+        318 => numbers::SYS_GETRANDOM,
+        319 => numbers::SYS_MEMFD_CREATE,
+        17 => numbers::SYS_PREAD64,
+        18 => numbers::SYS_PWRITE64,
         321 => numbers::SYS_BPF,
+        // Phase 5: Security syscalls
+        157 => numbers::SYS_PRCTL, // Linux prctl = 157 → Vahi 460
+        317 => numbers::SYS_SECCOMP,
+        444 => numbers::SYS_LANDLOCK_CREATE_RULESET,
+        445 => numbers::SYS_LANDLOCK_ADD_RULE,
+        446 => numbers::SYS_LANDLOCK_RESTRICT_SELF,
+        // Phase 6: Container syscalls
+        272 => numbers::SYS_UNSHARE,
+        308 => numbers::SYS_SETNS, // Linux setns = 308 → Vahi 464
         _ => 36, // SYS_SYNC as fallback (returns ENOSYS)
     }
 }

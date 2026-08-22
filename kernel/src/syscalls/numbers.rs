@@ -212,3 +212,43 @@ pub const SYS_MEMFD_CREATE: u64 = 319;
 // Swap syscalls
 pub const SYS_SWAPON: u64 = 326;
 pub const SYS_SWAPOFF: u64 = 327;
+
+// Phase 2: Linux-compatible syscalls
+pub const SYS_EPOLL_CREATE1: u64 = 432;
+pub const SYS_EPOLL_CTL: u64 = 433;
+pub const SYS_EPOLL_WAIT: u64 = 434;
+pub const SYS_EPOLL_PWAIT: u64 = 435;
+pub const SYS_EPOLL_CREATE: u64 = 436;
+pub const SYS_READV: u64 = 437;
+pub const SYS_WRITEV: u64 = 438;
+pub const SYS_MADVISE: u64 = 439;
+pub const SYS_PIPE2: u64 = 440;
+pub const SYS_DUP3: u64 = 441;
+pub const SYS_PREAD64: u64 = 442;
+pub const SYS_PWRITE64: u64 = 443;
+
+// Vahi-native syscalls (400-499)
+pub const SYS_EPOLL_CREATE1_NATIVE: u64 = 450;
+pub const SYS_EPOLL_CTL_NATIVE: u64 = 451;
+pub const SYS_EPOLL_WAIT_NATIVE: u64 = 452;
+
+// Additional Linux-compatible numbers (used by emulation layer)
+pub const SYS_PPOLL: u64 = 453;
+pub const SYS_PSELECT6: u64 = 454;
+pub const SYS_ACCEPT4: u64 = 455;
+pub const SYS_PR_LIMIT64: u64 = 456;
+pub const SYS_GETRANDOM: u64 = 457;
+
+// Phase 5: Security syscalls
+pub const SYS_PRCTL: u64 = 460;
+pub const SYS_SECCOMP: u64 = 317;
+pub const SYS_LANDLOCK_CREATE_RULESET: u64 = 444;
+pub const SYS_LANDLOCK_ADD_RULE: u64 = 445;
+pub const SYS_LANDLOCK_RESTRICT_SELF: u64 = 446;
+
+// Phase 6: Container syscalls
+pub const SYS_UNSHARE: u64 = 272;
+pub const SYS_SETNS: u64 = 464;
+pub const SYS_CGROUP_MKDIR: u64 = 461;
+pub const SYS_CGROUP_WRITE: u64 = 462;
+pub const SYS_CGROUP_READ: u64 = 463;
