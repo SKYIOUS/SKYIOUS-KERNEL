@@ -15,6 +15,8 @@ pub mod futex_test;
 pub mod vfs_tests;
 pub mod memory_tests;
 pub mod scheduler_tests;
+pub mod stress;
+pub mod fuzzer;
 #[cfg(not(target_arch = "aarch64"))]
 pub mod sync_tests;
 
@@ -65,6 +67,8 @@ pub fn register_all() {
     vfs_tests::register();
     memory_tests::register();
     scheduler_tests::register();
+    stress::register();
+    fuzzer::register();
     #[cfg(not(target_arch = "aarch64"))]
     sync_tests::register();
 }

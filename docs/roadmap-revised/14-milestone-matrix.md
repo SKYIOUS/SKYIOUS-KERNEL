@@ -102,11 +102,12 @@ Not letter grades — measurable criteria.
 
 | Milestone | Criteria | Status |
 |-----------|----------|--------|
-| Selftests | 92 tests pass | ✅ |
-| Unit tests | #[test] functions pass | ⚠️ Needs verification |
+| Selftests | 92+ tests pass | ✅ |
+| Unit tests | #[test] functions pass | ✅ |
+| Stress tests | SMP, memory, FD, IPC, process churn | ✅ `tests/stress.rs` |
+| Fuzzer | Syscall fuzzer with random args | ✅ `tests/fuzzer.rs` |
 | Integration | QEMU boot + userspace | ❌ Not implemented |
-| Stress | SMP + memory + I/O stress | ❌ Not implemented |
-| Fuzzing | 24-hour fuzz run | ❌ Not implemented |
+| 24-hour fuzz | Extended fuzzing run | ❌ Not implemented |
 
 ## Quantitative Targets
 
