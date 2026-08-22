@@ -34,6 +34,11 @@ pub struct Thread {
     pub futex_wake_addr: Option<u64>,
     pub pipe_block_key: Option<u64>,
     pub fs_base: u64,
+    /// One-shot: this thread's first scheduling is a fork/clone child, whose
+    /// `ret` goes straight to user space (`fork_child_return` iretq) and never
+    /// returns through the post-switch `route_switching_old`. The scheduler
+    /// must therefore route the parent it switches away from directly.
+    pub first_switch_pending: bool,
     // ── Stride scheduling fields ──────────────────────────────────
     /// Accumulated virtual-pass value. The thread with the smallest pass
     /// among all ready threads runs next.
@@ -42,6 +47,16 @@ pub struct Thread {
     pub stride: u64,
     /// Proportional-share tickets (higher = more CPU). Default 20.
     pub tickets: u32,
+    // ── RT scheduling fields ──────────────────────────────────────
+    /// Scheduling policy: 0=SCHED_OTHER (CFS/stride), 1=SCHED_FIFO, 2=SCHED_RR
+    pub policy: u32,
+    /// RT priority (1-99 for FIFO/RR, ignored for OTHER)
+    pub rt_priority: u32,
+    /// Time quantum remaining for SCHED_RR (ticks)
+    pub rr_time_slice: u32,
+    // ── CPU affinity ──────────────────────────────────────────────
+    /// CPU affinity mask (bit i = can run on CPU i)
+    pub affinity_mask: u64,
 }
 
 /// Maximum stride value (virtual time units). Must be >> max threads.
@@ -123,6 +138,11 @@ impl Thread {
             pass: 0,
             stride,
             tickets: DEFAULT_TICKETS,
+            first_switch_pending: false,
+            policy: 0, // SCHED_OTHER
+            rt_priority: 0,
+            rr_time_slice: 0,
+            affinity_mask: 0xFFFFFFFFFFFFFFFF, // All CPUs
         }
     }
 
@@ -137,9 +157,9 @@ impl Thread {
         self.stack.top
     }
 
-    pub fn clone_thread(&self, child_process: Arc<Process>, parent_regs: *const u64, child_stack: u64) -> Self {
+    pub fn clone_thread(&self, child_process: Arc<Process>, parent_regs: *const u64, child_stack: u64) -> Option<Self> {
         let stack_pages = 8;
-        let new_stack = alloc_stack(stack_pages).expect("Failed to allocate child thread stack");
+        let new_stack = alloc_stack(stack_pages)?;
 
         let stack_top = new_stack.top;
         let mut new_sp = stack_top & !0xF;
@@ -184,7 +204,7 @@ impl Thread {
             core::ptr::write(new_sp as *mut TaskContext, context);
         }
 
-        Thread {
+        Some(Thread {
             _id: ThreadId::new(),
             stack: new_stack,
             stack_ptr: new_sp,
@@ -198,12 +218,17 @@ impl Thread {
             pass: 0,        // fresh pass for child
             stride: self.stride,
             tickets: self.tickets,
-        }
+            first_switch_pending: true,
+            policy: self.policy,
+            rt_priority: self.rt_priority,
+            rr_time_slice: 0, // RR child starts with fresh quantum
+            affinity_mask: self.affinity_mask,
+        })
     }
 
-    pub fn clone_fork(&self, new_process: Arc<Process>, parent_regs: *const u64) -> Self {
+    pub fn clone_fork(&self, new_process: Arc<Process>, parent_regs: *const u64) -> Option<Self> {
         let stack_pages = 8;
-        let new_stack = alloc_stack(stack_pages).expect("Failed to allocate child stack");
+        let new_stack = alloc_stack(stack_pages)?;
 
         // Build a switch_context-compatible context near the top of the child's
         // kernel stack (same layout as Thread::new). We do NOT copy the parent's
@@ -261,7 +286,7 @@ impl Thread {
             core::ptr::write(new_sp as *mut TaskContext, context);
         }
 
-        Thread {
+        Some(Thread {
             _id: ThreadId::new(),
             stack: new_stack,
             stack_ptr: new_sp,
@@ -275,7 +300,12 @@ impl Thread {
             pass: 0,        // fresh pass for forked child
             stride: self.stride,
             tickets: self.tickets,
-        }
+            first_switch_pending: true,
+            policy: self.policy,
+            rt_priority: self.rt_priority,
+            rr_time_slice: 0,
+            affinity_mask: self.affinity_mask,
+        })
     }
 }
 
@@ -398,6 +428,8 @@ core::arch::global_asm!(
 extern "C" {
     fn fork_child_return();
 }
+
+/// PHASE D1: jump_to_usermode(entry: u64, user_rsp: u64) -> !
 
 /// PHASE D1: jump_to_usermode(entry: u64, user_rsp: u64) -> !
 /// Constructs a synthetic iret frame on kernel stack and jumps to Ring 3.

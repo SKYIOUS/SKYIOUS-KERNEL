@@ -76,6 +76,86 @@ pub const ACCESS_EXEC: u32 = 1;
 const CAP_DAC_OVERRIDE: u64 = 1 << 1;
 const CAP_DAC_READ_SEARCH: u64 = 1 << 2;
 
+/// Per-object capability rights (Vahi-native capability model).
+///
+/// Each capability is a bitfield that specifies what operations
+/// are allowed on a specific kernel object. Capabilities can be
+/// inherited, composed, and dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capability {
+    /// Rights bitmask
+    pub rights: u64,
+    /// Object type this capability applies to
+    pub object_type: u32,
+    /// Unique object ID (0 = wildcard)
+    pub object_id: u64,
+}
+
+// Capability rights bits
+pub const CAP_RIGHT_READ: u64 = 1 << 0;
+pub const CAP_RIGHT_WRITE: u64 = 1 << 1;
+pub const CAP_RIGHT_EXEC: u64 = 1 << 2;
+pub const CAP_RIGHT_CREATE: u64 = 1 << 3;
+pub const CAP_RIGHT_DELETE: u64 = 1 << 4;
+pub const CAP_RIGHT_MODIFY: u64 = 1 << 5;
+pub const CAP_RIGHT_ADMIN: u64 = 1 << 6;
+pub const CAP_RIGHT_CONNECT: u64 = 1 << 7;
+pub const CAP_RIGHT_LISTEN: u64 = 1 << 8;
+pub const CAP_RIGHT_BIND: u64 = 1 << 9;
+pub const CAP_RIGHT_SEND: u64 = 1 << 10;
+pub const CAP_RIGHT_RECV: u64 = 1 << 11;
+pub const CAP_RIGHT_IOCTL: u64 = 1 << 12;
+pub const CAP_RIGHT_MMAP: u64 = 1 << 13;
+pub const CAP_RIGHT_SHMEM: u64 = 1 << 14;
+pub const CAP_RIGHT_SIGNAL: u64 = 1 << 15;
+
+/// All valid rights
+pub const CAP_ALL_RIGHTS: u64 = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
+    | CAP_RIGHT_CREATE | CAP_RIGHT_DELETE | CAP_RIGHT_MODIFY | CAP_RIGHT_ADMIN
+    | CAP_RIGHT_CONNECT | CAP_RIGHT_LISTEN | CAP_RIGHT_BIND
+    | CAP_RIGHT_SEND | CAP_RIGHT_RECV | CAP_RIGHT_IOCTL
+    | CAP_RIGHT_MMAP | CAP_RIGHT_SHMEM | CAP_RIGHT_SIGNAL;
+
+impl Capability {
+    /// Create a new capability with the given rights.
+    pub fn new(rights: u64, object_type: u32, object_id: u64) -> Self {
+        Self { rights: rights & CAP_ALL_RIGHTS, object_type, object_id }
+    }
+    
+    /// Check if this capability grants a specific right.
+    pub fn has_right(&self, right: u64) -> bool {
+        (self.rights & right) == right
+    }
+    
+    /// Grant additional rights to this capability.
+    pub fn grant(&mut self, rights: u64) {
+        self.rights |= rights & CAP_ALL_RIGHTS;
+    }
+    
+    /// Drop specific rights from this capability.
+    pub fn drop_rights(&mut self, rights: u64) {
+        self.rights &= !rights;
+    }
+    
+    /// Compose two capabilities (intersect rights).
+    pub fn compose(&self, other: &Capability) -> Capability {
+        Capability {
+            rights: self.rights & other.rights,
+            object_type: self.object_type,
+            object_id: self.object_id,
+        }
+    }
+    
+    /// Create a child capability with reduced rights.
+    pub fn fork(&self, additional_rights: u64) -> Capability {
+        Capability {
+            rights: self.rights & additional_rights,
+            object_type: self.object_type,
+            object_id: self.object_id,
+        }
+    }
+}
+
 /// Unified bind-time access check.
 ///
 /// Checks: owner/group/other DAC bits → capabilities → ACL → LSM.
