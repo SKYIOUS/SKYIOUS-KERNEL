@@ -827,3 +827,60 @@ pub fn kill_process(pid: u64) {
         table.remove(&pid);
     }
 }
+
+// ─── Job Objects (Windows NT equivalent) ──────────────────────────
+
+/// Job object for process grouping and resource management.
+/// Similar to Windows NT Job Objects.
+pub struct JobObject {
+    /// Job name
+    pub name: alloc::string::String,
+    /// Job ID
+    pub id: u64,
+    /// Processes in this job
+    pub processes: alloc::vec::Vec<u64>,
+    /// Maximum processes allowed
+    pub max_processes: usize,
+    /// Maximum memory per process (bytes)
+    pub max_memory_per_process: usize,
+    /// Total memory limit for job
+    pub total_memory_limit: usize,
+    /// CPU rate limit (0 = unlimited)
+    pub cpu_rate_limit: u32,
+    /// Kill on last close flag
+    pub kill_on_last_close: bool,
+}
+
+impl JobObject {
+    pub fn new(name: alloc::string::String, id: u64) -> Self {
+        Self {
+            name,
+            id,
+            processes: alloc::vec::Vec::new(),
+            max_processes: 1024,
+            max_memory_per_process: 256 * 1024 * 1024, // 256MB
+            total_memory_limit: 4 * 1024 * 1024 * 1024, // 4GB
+            cpu_rate_limit: 0,
+            kill_on_last_close: true,
+        }
+    }
+
+    /// Add a process to the job
+    pub fn add_process(&mut self, pid: u64) -> Result<(), crate::syscalls::errno::Errno> {
+        if self.processes.len() >= self.max_processes {
+            return Err(crate::syscalls::errno::Errno::EAGAIN);
+        }
+        self.processes.push(pid);
+        Ok(())
+    }
+
+    /// Remove a process from the job
+    pub fn remove_process(&mut self, pid: u64) {
+        self.processes.retain(|&p| p != pid);
+    }
+
+    /// Check if job has capacity for more processes
+    pub fn has_capacity(&self) -> bool {
+        self.processes.len() < self.max_processes
+    }
+}
