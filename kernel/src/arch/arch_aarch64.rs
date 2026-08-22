@@ -509,7 +509,7 @@ pub extern "C" fn _start_aarch64() -> ! {
     }
 
     // 6. The standard boot path goes through the bootloader.
-    //    `bootloader_api::entry_point!` generates `_start` which calls `kernel_main(BootInfo)`.
+    //    Limine bootloader calls `_start()` which reads boot info from static Limine requests.
     //    This `_start_aarch64` is an alternative entry for non-UEFI / testing scenarios.
     //    For production, the kernel is entered via the bootloader-generated `_start`.
     crate::serial_write("[ARCH] aarch64 _start: bootloader entry would call kernel_main now\n");

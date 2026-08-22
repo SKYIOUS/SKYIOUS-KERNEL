@@ -1,11 +1,10 @@
 #![allow(dead_code)]
 
-use bootloader_api::info::MemoryRegions;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-pub fn init(_memory_regions: &'static MemoryRegions) {
+pub fn init_limine() {
     // ponytail: consolidated — phys delegates to buddy; no separate bitmap
     INITIALIZED.store(true, Ordering::SeqCst);
 }

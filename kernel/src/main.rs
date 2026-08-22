@@ -98,20 +98,17 @@ mod selftest;
 #[cfg(feature = "hypervisor")]
 pub mod hypervisor;
 pub mod boot;
+pub mod limine;
 
 use core::panic::PanicInfo;
-use bootloader_api::{entry_point, BootInfo, BootloaderConfig, config::Mapping};
 use crate::arch::Arch;
 
-
-pub static BOOTLOADER_CONFIG: BootloaderConfig = {
-    let mut config = BootloaderConfig::new_default();
-    config.mappings.physical_memory = Some(Mapping::FixedAddress(0xFFFF_8000_0000_0000));
-    config.kernel_stack_size = 128 * 1024; // 128 KiB
-    config
-};
-
-entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
+/// Limine entry point — called by the Limine bootloader.
+/// Reads all boot information from Limine static requests.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _start() -> ! {
+    kernel_main()
+}
 
 /// KASLR: kernel base slide offset (0 if not randomized)
 pub static KERNEL_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -164,7 +161,7 @@ pub fn serial_write(msg: &str) {
     }
 }
 
-fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+fn kernel_main() -> ! {
     // Seed stack canary BEFORE any function with stack protection runs.
     let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
     let base = if entropy == 0 { 0x9E3779B97F4A7C15 } else { entropy };
@@ -178,20 +175,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     serial_write("[BOOT] memory::init...\n");
+    let hhdm = crate::limine::hhdm_offset();
     #[cfg(not(target_arch = "aarch64"))]
-    let phys_mem_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset.into_option().expect("physical_memory_offset required"));
+    let phys_mem_offset = x86_64::VirtAddr::new(hhdm);
     #[cfg(not(target_arch = "aarch64"))]
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     #[cfg(target_arch = "aarch64")]
-    let phys_mem_offset_val = boot_info.physical_memory_offset.into_option().expect("physical_memory_offset required");
-    #[cfg(target_arch = "aarch64")]
-    let mut mapper = unsafe { memory::init_aarch64(phys_mem_offset_val) };
+    let mut mapper = unsafe { memory::init_aarch64(hhdm) };
     serial_write("[BOOT] memory::init done\n");
 
-    let fb = boot_info.framebuffer.as_mut();
+    let fb = crate::limine::framebuffer();
     if fb.is_some() { serial_write("[BOOT] fb=present\n"); }
     else { serial_write("[BOOT] fb=NONE\n"); }
-    drivers::graphics::init(fb);
+    drivers::graphics::init_limine(fb);
     // Show boot splash as soon as framebuffer is ready
     if crate::drivers::graphics::is_active() {
         gui::splash::init();
@@ -204,7 +200,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::vga_buffer::init();
 
     serial_write("[BOOT] frame allocator...\n");
-    unsafe { memory::init_frame_allocator(&boot_info.memory_regions) };
+    unsafe { memory::init_frame_allocator_limine() };
     let mut frame_allocator = memory::buddy::BuddyFrameAllocator;
     serial_write("[BOOT] heap init...\n");
     allocator::init_heap(&mut mapper, &mut frame_allocator)
@@ -233,12 +229,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::CurrentArch::init_hal_timer();
     serial_write("[BOOT] HAL init done\n");
     serial_write("[BOOT] frame tracker init...\n");
-    let mut max_phys = 0;
-    for region in boot_info.memory_regions.iter() {
-        if region.end > max_phys {
-            max_phys = region.end;
-        }
-    }
+    let max_phys = crate::limine::max_physical_address();
     memory::frame_info::init(max_phys);
     serial_write("[BOOT] -> VAHI Frame Tracker: OK\n");
 
@@ -247,7 +238,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(not(target_arch = "aarch64"))]
     {
         serial_write("[BOOT] ACPI init...\n");
-        acpi::init(boot_info.rsdp_addr.into_option());
+        acpi::init(crate::limine::rsdp_addr());
         serial_write("[BOOT] APIC init...\n");
         apic::init();
     crate::tests::run_all();
@@ -265,14 +256,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         serial_write("[BOOT] aarch64 platform init...\n");
     }
     serial_write("[BOOT] VFS init...\n");
-    if let Some(ramdisk_addr) = boot_info.ramdisk_addr.into_option() {
-        if boot_info.ramdisk_len > 0 {
-            let ramdisk_slice = unsafe {
-                core::slice::from_raw_parts(ramdisk_addr as *const u8, boot_info.ramdisk_len as usize)
-            };
-            *crate::vfs::RAMDISK.lock() = Some(ramdisk_slice);
-            serial_write("[BOOT] initrd from bootloader\n");
-        }
+    if let Some(ramdisk_data) = crate::limine::ramdisk() {
+        *crate::vfs::RAMDISK.lock() = Some(ramdisk_data);
+        serial_write("[BOOT] initrd from Limine modules\n");
     }
     vfs::init();
     serial_write("[BOOT] object manager init...\n");

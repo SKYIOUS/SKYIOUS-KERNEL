@@ -1,4 +1,4 @@
-﻿cargo-features = ["profile-rustflags"]
+cargo-features = ["profile-rustflags"]
 
 [package]
 name = "vahi_kernel"
@@ -6,7 +6,6 @@ version = "0.3.0"
 edition = "2021"
 
 [dependencies]
-bootloader_api = "0.11"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"
 volatile = "0.2.6"
@@ -23,6 +22,7 @@ mbr-nostd = "0.1.0"
 # Enhanced data structures
 hashbrown = { version = "0.14", default-features = false, features = ["alloc", "ahash"] }
 heapless = { version = "0.8", default-features = false }
+limine = "0.6.5"
 
 # x86_64-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]

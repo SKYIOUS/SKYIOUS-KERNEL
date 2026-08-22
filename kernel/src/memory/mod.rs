@@ -1,4 +1,3 @@
-use bootloader_api::info::{MemoryRegions, MemoryRegionKind};
 use spin::Once;
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -133,19 +132,14 @@ pub unsafe fn init_aarch64(physical_memory_offset: u64) -> u64 {
     physical_memory_offset
 }
 
-pub unsafe fn init_frame_allocator(memory_regions: &'static MemoryRegions) {
-    // Initialize Buddy Allocator with usable regions
+pub unsafe fn init_frame_allocator_limine() {
+    // Initialize Buddy Allocator with usable regions from Limine memory map
     let mut buddy = buddy::BUDDY_ALLOCATOR.lock();
-    for region in memory_regions.iter() {
-        if region.kind == MemoryRegionKind::Usable {
-            buddy.add_region(
-                PhysAddr::new(region.start),
-                PhysAddr::new(region.end)
-            );
-        }
+    for (base, end) in crate::limine::iter_usable_regions() {
+        buddy.add_region(PhysAddr::new(base), PhysAddr::new(end));
     }
     // Initialize bitmap page frame allocator alongside buddy
-    phys::init(memory_regions);
+    phys::init_limine();
 }
 
 
