@@ -306,6 +306,36 @@ impl VirtioGpu {
         let mut rsp2 = [0u8; 24];
         self.submit(&cmd2, &mut rsp2);
     }
+
+    /// Create a new 2D resource and return its resource ID.
+    pub fn create_resource(&mut self, w: u32, h: u32) -> u32 {
+        let rid = {
+            static NEXT_RID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(2); // 1 is framebuffer
+            NEXT_RID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        };
+        let mut cmd = [0u8; 40];
+        cmd[..4].copy_from_slice(&CMD_RESOURCE_CREATE_2D.to_le_bytes());
+        cmd[24..28].copy_from_slice(&rid.to_le_bytes());
+        cmd[28..32].copy_from_slice(&FORMAT_B8G8R8A8_UNORM.to_le_bytes());
+        cmd[32..36].copy_from_slice(&w.to_le_bytes());
+        cmd[36..40].copy_from_slice(&h.to_le_bytes());
+        let mut rsp = [0u8; 24];
+        self.submit(&cmd, &mut rsp);
+        if read_u32(&rsp, HDR_TYPE_OFF) != RESP_OK_NODATA {
+            crate::println!("VirtIO-GPU: create_resource failed");
+        }
+        rid
+    }
+
+    /// Get a pointer to the framebuffer memory.
+    pub fn get_framebuffer() -> Option<*mut u32> {
+        let guard = GPU.lock();
+        if let Some(gpu) = guard.as_ref() {
+            gpu.fb_mem.as_ref().map(|fb| fb.as_ptr() as *mut u32)
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) static GPU: Mutex<Option<VirtioGpu>> = Mutex::new(None);

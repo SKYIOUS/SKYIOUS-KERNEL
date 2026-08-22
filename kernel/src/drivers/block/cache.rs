@@ -67,6 +67,19 @@ impl BlockCache {
     }
 
     pub fn read_sector_cached(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
+        if buf.len() < SECTOR_SIZE { return Err(BlockDeviceError::DeviceError); }
+        // Accept buffers spanning multiple sectors (e.g. FS block reads of
+        // 1024/4096 bytes). Each 512-byte chunk is served via the cache.
+        let n = buf.len() / SECTOR_SIZE;
+        for i in 0..n {
+            let chunk = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
+            self.read_chunk(sector + i as u64, chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Read exactly one sector-sized chunk through the cache.
+    fn read_chunk(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let lines = self.lines.lock();
         // Check cache under lock — no TOCTOU race with eviction
         if let Some(i) = lines.iter().position(|l| l.valid && l.sector == sector) {
@@ -82,6 +95,17 @@ impl BlockCache {
     }
 
     pub fn write_sector_cached(&self, sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
+        if buf.len() < SECTOR_SIZE { return Err(BlockDeviceError::InvalidSector); }
+        let n = buf.len() / SECTOR_SIZE;
+        for i in 0..n {
+            let chunk = &buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
+            self.write_chunk(sector + i as u64, chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Write exactly one sector-sized chunk through the cache.
+    fn write_chunk(&self, sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let mut lines = self.lines.lock();
         // Check cache under lock — no TOCTOU race with eviction
         if let Some(i) = lines.iter().position(|l| l.valid && l.sector == sector) {

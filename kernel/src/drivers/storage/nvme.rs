@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use alloc::boxed::Box;
 use crate::sync::IrqSafeMutex as Mutex;
 use core::alloc::Layout;
+use crate::hal::dma::{DmaBuf, PooledDma};
 use x86_64::VirtAddr;
 
 /// NVMe register layout (BAR0/1 MMIO)
@@ -67,31 +68,6 @@ struct NvmeCqe {
     sq_id: u16,
     cid: u16,
     status: u16,
-}
-
-struct DmaBuf {
-    virt: *mut u8,
-    phys: u64,
-    layout: Layout,
-}
-
-impl DmaBuf {
-    fn new(size: usize) -> Self {
-        let layout = Layout::from_size_align(size, 4096).unwrap();
-        let virt = unsafe { alloc::alloc::alloc_zeroed(layout) };
-        let phys = crate::memory::virt_to_phys_dma(VirtAddr::new(virt as u64)).as_u64();
-        DmaBuf { virt, phys, layout }
-    }
-
-    fn phys(&self) -> u64 { self.phys }
-    fn as_ptr(&self) -> *const u8 { self.virt }
-    fn as_mut_ptr(&mut self) -> *mut u8 { self.virt }
-}
-
-impl Drop for DmaBuf {
-    fn drop(&mut self) {
-        unsafe { alloc::alloc::dealloc(self.virt, self.layout); }
-    }
 }
 
 struct RingBuf {
@@ -287,7 +263,7 @@ impl NvmeController {
     }
 
     fn identify_nsid(&mut self) -> u32 {
-        let buf = DmaBuf::new(4096);
+        let buf = match DmaBuf::new(4096) { Some(b) => b, None => return 0 };
         if !self.admin_cmd(ADMIN_IDENTIFY, 0, buf.phys(), 0, 1, 0, 0) {
             return 0;
         }
@@ -295,7 +271,7 @@ impl NvmeController {
     }
 
     fn identify_ns(&mut self, nsid: u32) -> u64 {
-        let buf = DmaBuf::new(4096);
+        let buf = match DmaBuf::new(4096) { Some(b) => b, None => return 0 };
         if !self.admin_cmd(ADMIN_IDENTIFY, nsid, buf.phys(), 0, 0, 0, 0) {
             return 0;
         }
@@ -312,7 +288,7 @@ struct NvmeDisk {
 
 impl BlockDevice for NvmeDisk {
     fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
-        let dma = DmaBuf::new(4096);
+        let dma = PooledDma::alloc(4096).ok_or(BlockDeviceError::ReadError)?;
         if !self.ctrl.io_cmd(IO_READ, self.ctrl.nsid, dma.phys(), sector, 1) {
             return Err(BlockDeviceError::ReadError);
         }
@@ -322,7 +298,7 @@ impl BlockDevice for NvmeDisk {
     }
 
     fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
-        let mut dma = DmaBuf::new(4096);
+        let mut dma = PooledDma::alloc(4096).ok_or(BlockDeviceError::WriteError)?;
         let len = core::cmp::min(buf.len(), 512);
         unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), dma.as_mut_ptr(), len); }
         if !self.ctrl.io_cmd(IO_WRITE, self.ctrl.nsid, dma.phys(), sector, 1) {

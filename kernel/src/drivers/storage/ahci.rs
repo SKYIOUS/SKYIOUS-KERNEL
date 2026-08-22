@@ -85,10 +85,10 @@ pub struct HbaCmdTable {
 
 #[repr(C)]
 pub struct HbaPrdtEntry {
-    pub dba: u32,       // Data Base Address
-    pub dbau: u32,      // Data Base Address Upper 32-bits
-    pub rsv0: u32,
-    pub dbc: u32,       // Byte count, 4M max, interrupt = 1
+    pub dba: u32,       // Data Base Address (offset 0x00)
+    pub dbau: u32,      // Data Base Address Upper 32-bits (offset 0x04)
+    pub dbc: u32,       // Byte count (bits 21:0), I bit (bit 31) = interrupt on completion (offset 0x08)
+    pub rsv0: u32,      // Reserved (offset 0x0C)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -361,7 +361,7 @@ impl AhciPort {
     cmd_tbl.prdt_entry[0].dba = dma_phys as u32;
     cmd_tbl.prdt_entry[0].dbau = (dma_phys >> 32) as u32;
     cmd_tbl.prdt_entry[0].dbc = (total_len - 1) as u32;
-    cmd_tbl.prdt_entry[0].rsv0 = 1;
+    cmd_tbl.prdt_entry[0].rsv0 = 0;
     
     // Setup Command FIS
     let fis = unsafe { &mut *(cmd_tbl.cfis.as_mut_ptr() as *mut FisRegH2D) };
@@ -448,7 +448,7 @@ impl AhciPort {
         cmd_tbl.prdt_entry[0].dba = buf_phys.as_u64() as u32;
         cmd_tbl.prdt_entry[0].dbau = (buf_phys.as_u64() >> 32) as u32;
         cmd_tbl.prdt_entry[0].dbc = 511; // 512 bytes - 1
-        cmd_tbl.prdt_entry[0].rsv0 = 1;
+        cmd_tbl.prdt_entry[0].rsv0 = 0;
 
         let fis = unsafe { &mut *(cmd_tbl.cfis.as_mut_ptr() as *mut FisRegH2D) };
         fis.fis_type = 0x27;
@@ -550,7 +550,7 @@ pub fn write(&mut self, start_lba: u64, sectors: u32, buf: &[u8]) -> bool {
     cmd_tbl.prdt_entry[0].dba = dma_phys as u32;
     cmd_tbl.prdt_entry[0].dbau = (dma_phys >> 32) as u32;
     cmd_tbl.prdt_entry[0].dbc = (total_len - 1) as u32;
-    cmd_tbl.prdt_entry[0].rsv0 = 1;
+    cmd_tbl.prdt_entry[0].rsv0 = 0;
     
     let fis = unsafe { &mut *(cmd_tbl.cfis.as_mut_ptr() as *mut FisRegH2D) };
     fis.fis_type = 0x27;

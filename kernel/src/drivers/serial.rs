@@ -19,6 +19,10 @@ const FIFO_CONFIG: u8 = 0xC7;
 const MODEM_CONFIG: u8 = 0x0B;
 const TX_READY: u8 = 0x20;
 const RX_READY: u8 = 0x01;
+/// ~1ms of port reads at typical emulation speed; real 16550s never hit this.
+const TX_TIMEOUT_SPINS: u32 = 1_000_000;
+
+static TX_DROPPED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static SERIAL_PORT: AtomicU16 = AtomicU16::new(COM1);
@@ -81,6 +85,10 @@ fn com_port() -> u16 {
 }
 
 /// Write a single character to the serial port
+// ponytail: bounded LSR spin — a wedged QEMU pipe/backend gateways a
+// real UART into freeze-forever. On timeout the byte is dropped; the
+// next healthy tick shows the drop counter. Upgrade to IRQ-driven TX if
+// real hardware ever wedges its 16550.
 pub fn putc(c: u8) {
     if !INITIALIZED.load(core::sync::atomic::Ordering::Relaxed) {
         return;
@@ -89,9 +97,21 @@ pub fn putc(c: u8) {
     let mut lsr = Port::<u8>::new(port + LINE_STATUS);
     let mut data = Port::<u8>::new(port + DATA);
     unsafe {
-        while lsr.read() & TX_READY == 0 {}
+        let mut spins = 0u32;
+        while lsr.read() & TX_READY == 0 {
+            spins += 1;
+            if spins > TX_TIMEOUT_SPINS {
+                TX_DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
         data.write(c);
     }
+}
+
+/// Number of putc bytes dropped on TX stall
+pub fn tx_dropped() -> u32 {
+    TX_DROPPED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Read a single character from the serial port
