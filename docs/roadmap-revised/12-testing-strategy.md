@@ -43,11 +43,8 @@ Infrastructure:
   scripts/qemu_test.sh   → Linux/macOS test runner
   .github/workflows/     → CI matrix (debug/release × 1/4 CPUs)
 
-Note: QEMU boot tests require the `bootloader` crate (v0.11) to build
-UEFI-bootable disk images. This works on Linux CI but has a known
-incompatibility with Windows nightly toolchains (the bootloader's build.rs
-uses `-Zbuild-std=core` which conflicts with the parent build's core/alloc
-due to shared target directories). Use Linux runners for QEMU integration.
+Boot images use the Limine bootloader (pre-built binaries, no source compilation
+required). Build with: `./scripts/build_limine_image.sh`
 ```
 
 ### Layer 4: Stress
