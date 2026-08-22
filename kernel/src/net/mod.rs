@@ -54,9 +54,9 @@ pub fn init() {
 
         // ponytail: IFACE_MAX_ADDR_COUNT now 4 (set via SMOLTCP_IFACE_MAX_ADDR_COUNT env var)
         iface.update_ip_addrs(|addrs| {
-            addrs.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 15)), 24)).unwrap();
+            addrs.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 15)), 24)).ok();
             // IPv6 loopback
-            addrs.push(IpCidr::new(IpAddress::Ipv6(Ipv6Address::LOOPBACK), 128)).unwrap();
+            addrs.push(IpCidr::new(IpAddress::Ipv6(Ipv6Address::LOOPBACK), 128)).ok();
             // IPv6 link-local from MAC (modified EUI-64)
             let eui64 = mac_to_eui64(&mac);
             let ll = Ipv6Address::new(
