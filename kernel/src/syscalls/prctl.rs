@@ -109,7 +109,7 @@ pub fn sys_prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64
         }
 
         PR_GET_SECCOMP => {
-            let seccomp = proc.seccomp.lock();
+            let _sec_guard = proc.security.lock(); let seccomp = &_sec_guard.seccomp;
             seccomp.mode as u64
         }
 

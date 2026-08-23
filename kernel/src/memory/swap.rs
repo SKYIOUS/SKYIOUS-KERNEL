@@ -155,7 +155,7 @@ pub fn try_evict_one_page() -> bool {
         None => return false,
     };
 
-    let vmas = proc.vmas.lock();
+    let vmas = proc.memory.lock().vmas.clone();
     for vma in vmas.iter() {
         if vma.start >= 0xFFFF_8000_0000_0000 {
             continue;

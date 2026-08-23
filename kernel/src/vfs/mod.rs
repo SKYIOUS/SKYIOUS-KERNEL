@@ -199,6 +199,9 @@ impl VfsManager {
 
         // Sort mounts by path length descending so longest matches take priority
         self.mounts.sort_by(|a, b| b.path.len().cmp(&a.path.len()));
+
+        // Invalidate cache: a new mount may shadow previously-cached paths
+        self.mount_cache.clear();
     }
 
     const MAX_SYMLINK_DEPTH: usize = 40;
@@ -214,17 +217,7 @@ impl VfsManager {
         let cwd = {
             let proc_lock = crate::task::process::CURRENT_PROCESS.lock();
             if let Some(ref proc) = *proc_lock {
-                let tl = proc.cwd.try_lock();
-                match tl {
-                    Some(g) => {
-                        let s = g.clone();
-                        drop(g);
-                        s
-                    }
-                    None => {
-                        String::from("/")
-                    }
-                }
+                proc.files.lock().cwd.clone()
             } else {
                 String::from("/")
             }
@@ -334,7 +327,9 @@ impl VfsManager {
             path_fixed.pop();
         }
 
-        self.mount_cache.remove(&path_fixed);
+        // Invalidate cache: removing a mount invalidates all cached paths
+        // that may have resolved through it
+        self.mount_cache.clear();
         let pos = self.mounts.iter().position(|m| m.path == path_fixed).ok_or(())?;
         self.mounts.remove(pos);
         Ok(())

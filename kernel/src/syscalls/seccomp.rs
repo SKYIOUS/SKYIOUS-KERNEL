@@ -341,7 +341,7 @@ pub fn sys_seccomp(op: u32, flags: u32, user_insns: *const u8) -> u64 {
 
     // Can only set seccomp once per process (no going back)
     {
-        let seccomp = proc.seccomp.lock();
+        let _sec_guard = proc.security.lock(); let seccomp = &_sec_guard.seccomp;
         if seccomp.mode != SECCOMP_MODE_DISABLED {
             return errno::Errno::EINVAL as u64;
         }
@@ -350,7 +350,7 @@ pub fn sys_seccomp(op: u32, flags: u32, user_insns: *const u8) -> u64 {
     match op {
         1 => {
             // SECCOMP_SET_MODE_STRICT
-            let mut seccomp = proc.seccomp.lock();
+            let seccomp = &mut proc.security.lock().seccomp;
             seccomp.mode = SECCOMP_MODE_STRICT;
             crate::serial_write("[SECCOMP] Strict mode enabled for pid=");
             crate::serial_write(&alloc::format!("{}\n", proc.id));
@@ -404,7 +404,7 @@ pub fn sys_seccomp(op: u32, flags: u32, user_insns: *const u8) -> u64 {
                 filter.push(SeccompBpfInstruction { code, jt, jf, k });
             }
 
-            let mut seccomp = proc.seccomp.lock();
+            let seccomp = &mut proc.security.lock().seccomp;
             seccomp.mode = SECCOMP_MODE_FILTER;
             seccomp.filter = filter;
             if flags & 0x02 != 0 {
@@ -443,7 +443,7 @@ pub fn check_syscall(nr: u64, args: &[u64; 6]) -> bool {
         None => return true, // No process = allow
     };
 
-    let seccomp = proc.seccomp.lock();
+    let _sec_guard = proc.security.lock(); let seccomp = &_sec_guard.seccomp;
     match seccomp.mode {
         SECCOMP_MODE_DISABLED => true,
         SECCOMP_MODE_STRICT => SeccompState::check_strict(nr),
@@ -455,7 +455,7 @@ pub fn check_syscall(nr: u64, args: &[u64; 6]) -> bool {
                 SECCOMP_RET_KILL_PROCESS => {
                     crate::serial_write("[SECCOMP] Killed process syscall=");
                     crate::serial_write(&alloc::format!("{} pid={}\n", nr, proc.id));
-                    drop(seccomp);
+                    drop(_sec_guard);
                     drop(lock);
                     super::process::sys_exit(0x19 + 128); // SIGSYS
                     false

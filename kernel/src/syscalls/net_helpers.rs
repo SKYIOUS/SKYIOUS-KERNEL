@@ -237,7 +237,7 @@ where
 {
     let process_lock = crate::task::process::CURRENT_PROCESS.lock();
     if let Some(ref process) = *process_lock {
-        let fd_table = process.fd_table.lock();
+        let fd_table = process.files.lock().fd_table.clone();
         if (sockfd as usize) < fd_table.len() {
             if let Some(crate::task::process::FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
                 return Some(f(handle).unwrap_or_else(|e| e.into()));

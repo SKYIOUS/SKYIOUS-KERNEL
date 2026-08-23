@@ -88,7 +88,7 @@ pub fn open_file(path: &str, flags: i32, mode: u32) -> u64 {
             if (fd as i64) >= 0 {
                 if node.is_dir() { store_dir_path(&p, fd, path); }
                 if (flags & O_CLOEXEC) != 0 {
-                    let mut fd_flags = p.fd_flags.lock();
+                    let mut fd_flags = p.files.lock().fd_flags.clone();
                     if (fd as usize) >= fd_flags.len() { fd_flags.resize(fd as usize + 1, 0); }
                     fd_flags[fd as usize] |= 0x80000;
                 }
@@ -125,7 +125,7 @@ pub fn open_file(path: &str, flags: i32, mode: u32) -> u64 {
             if let Some(p) = get_current_process() {
                 let fd = add_fd(&p, new_node as Arc<dyn VfsNode>, flags);
                 if (fd as i64) >= 0 && (flags & O_CLOEXEC) != 0 {
-                    let mut fd_flags = p.fd_flags.lock();
+                    let mut fd_flags = p.files.lock().fd_flags.clone();
                     if (fd as usize) >= fd_flags.len() { fd_flags.resize(fd as usize + 1, 0); }
                     fd_flags[fd as usize] |= 0x80000;
                 }
@@ -164,7 +164,7 @@ pub fn sys_close(fd: u64) -> u64 {
         match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64, }
     };
     let mut found = false;
-    let mut fd_table = process.fd_table.lock();
+    let mut fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) < fd_table.len() {
         if let Some(ref desc) = fd_table[fd as usize] {
             if let FileDescriptor::Socket(handle, _stype) = desc {
@@ -182,7 +182,7 @@ pub fn sys_close(fd: u64) -> u64 {
         fd_table[fd as usize] = None;
     }
     drop(fd_table);
-    let mut flags = process.fd_flags.lock();
+    let mut flags = process.files.lock().fd_flags.clone();
     if (fd as usize) < flags.len() { flags[fd as usize] = 0; }
     drop(flags);
     if found { 0 } else { errno::Errno::EBADF as u64 }
@@ -193,12 +193,12 @@ pub fn sys_close(fd: u64) -> u64 {
 pub fn sys_dup(old_fd: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
-        let mut fd_table = p.fd_table.lock();
+        let mut fd_table = p.files.lock().fd_table.clone();
         if old_fd as usize >= fd_table.len() || fd_table[old_fd as usize].is_none() {
             return errno::Errno::EBADF as u64;
         }
         let old_desc = fd_table[old_fd as usize].clone().unwrap();
-        let mut flags = p.fd_flags.lock();
+        let mut flags = p.files.lock().fd_flags.clone();
         for (i, slot) in fd_table.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(old_desc);
@@ -217,14 +217,14 @@ pub fn sys_dup(old_fd: u64) -> u64 {
 pub fn sys_dup2(old_fd: u64, new_fd: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
-        let mut fd_table = p.fd_table.lock();
+        let mut fd_table = p.files.lock().fd_table.clone();
         if old_fd as usize >= fd_table.len() || fd_table[old_fd as usize].is_none() {
             return errno::Errno::EBADF as u64;
         }
         let old_desc = fd_table[old_fd as usize].clone();
-        let old_flags = { let flags = p.fd_flags.lock(); if (old_fd as usize) < flags.len() { flags[old_fd as usize] } else { 0 } };
+        let old_flags = { let flags = p.files.lock().fd_flags.clone(); if (old_fd as usize) < flags.len() { flags[old_fd as usize] } else { 0 } };
         if new_fd as usize >= fd_table.len() { fd_table.resize(new_fd as usize + 1, None); }
-        let mut flags = p.fd_flags.lock();
+        let mut flags = p.files.lock().fd_flags.clone();
         if flags.len() < fd_table.len() { flags.resize(fd_table.len(), 0); }
         fd_table[new_fd as usize] = old_desc;
         flags[new_fd as usize] = old_flags & !0x80000;
@@ -238,14 +238,14 @@ pub fn sys_dup2(old_fd: u64, new_fd: u64) -> u64 {
 pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
-        let mut fd_table = p.fd_table.lock();
+        let mut fd_table = p.files.lock().fd_table.clone();
         if fd as usize >= fd_table.len() || fd_table[fd as usize].is_none() {
             return errno::Errno::EBADF as u64;
         }
         match cmd {
             F_DUPFD => {
                 let desc = fd_table[fd as usize].clone().unwrap();
-                let mut flags = p.fd_flags.lock();
+                let mut flags = p.files.lock().fd_flags.clone();
                 for (i, slot) in fd_table.iter_mut().enumerate() {
                     if slot.is_none() && i as u64 > arg {
                         *slot = Some(desc);
@@ -258,16 +258,16 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
                 flags.push(0);
                 (fd_table.len() - 1) as u64
             }
-            F_GETFD => { let flags = p.fd_flags.lock(); if (fd as usize) < flags.len() && flags[fd as usize] & 0x80000 != 0 { 1 } else { 0 } }
+            F_GETFD => { let flags = p.files.lock().fd_flags.clone(); if (fd as usize) < flags.len() && flags[fd as usize] & 0x80000 != 0 { 1 } else { 0 } }
             F_SETFD => {
-                let mut flags = p.fd_flags.lock();
+                let mut flags = p.files.lock().fd_flags.clone();
                 if (fd as usize) >= flags.len() { flags.resize(fd as usize + 1, 0); }
                 if arg & 1 != 0 { flags[fd as usize] |= 0x80000; } else { flags[fd as usize] &= !0x80000; }
                 0
             }
-            F_GETFL => { let flags = p.fd_flags.lock(); if (fd as usize) < flags.len() { flags[fd as usize] } else { 0 } }
+            F_GETFL => { let flags = p.files.lock().fd_flags.clone(); if (fd as usize) < flags.len() { flags[fd as usize] } else { 0 } }
             F_SETFL => {
-                let mut flags = p.fd_flags.lock();
+                let mut flags = p.files.lock().fd_flags.clone();
                 if fd as usize >= flags.len() { flags.resize(fd as usize + 1, 0); }
                 flags[fd as usize] = arg & 0xFFFF;
                 0
@@ -335,7 +335,7 @@ pub fn sys_faccessat(dirfd: i64, pathname_ptr: *const u8, mode: i32, flags: i32)
 pub fn sys_getcwd(buf: *mut u8, size: usize) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     if let Some(ref process) = *process_lock {
-        let cwd = process.cwd.lock();
+        let cwd = process.files.lock().cwd.clone();
         if cwd.len() + 1 > size { return errno::Errno::ERANGE as u64; }
         unsafe { core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf, cwd.len()); *buf.add(cwd.len()) = 0; }
         return buf as u64;
@@ -355,11 +355,11 @@ pub fn sys_chdir(path_ptr: *const u8) -> u64 {
         if let Some(ref process) = *process_lock {
             let mut new_cwd = String::from(path_str);
             if !new_cwd.starts_with('/') {
-                let cur_cwd = process.cwd.lock();
-                if *cur_cwd == "/" { new_cwd = alloc::format!("/{}", new_cwd); } else { new_cwd = alloc::format!("{}/{}", cur_cwd, new_cwd); }
+                let cur_cwd = process.files.lock().cwd.clone();
+                if cur_cwd == "/" { new_cwd = alloc::format!("/{}", new_cwd); } else { new_cwd = alloc::format!("{}/{}", cur_cwd, new_cwd); }
             }
             if new_cwd.len() > 1 && new_cwd.ends_with('/') { new_cwd.pop(); }
-            *process.cwd.lock() = new_cwd;
+            process.files.lock().cwd = new_cwd;
             return 0;
         }
     }

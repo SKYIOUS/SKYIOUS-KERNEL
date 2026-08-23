@@ -101,7 +101,7 @@ pub fn _verify_user_ptr(addr: u64, len: usize) -> Result<(), crate::syscalls::er
     let proc = proc.as_ref().ok_or(crate::syscalls::errno::Errno::EFAULT)?;
     let end = addr.checked_add(len as u64).ok_or(crate::syscalls::errno::Errno::EFAULT)?;
     
-    let vmas = proc.vmas.lock();
+    let vmas = proc.memory.lock().vmas.clone();
     for vma in vmas.iter() {
         if addr >= vma.start && end <= vma.end {
             return Ok(());

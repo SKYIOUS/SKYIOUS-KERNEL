@@ -378,13 +378,13 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
         let child_pid = Process::next_id();
         let mut child_process = Process::new(child_pid, Some(parent_id), child_as);
         {
-            let parent_vmas = parent.vmas.lock();
-            child_process.vmas = Mutex::new(parent_vmas.clone());
+            let parent_vmas = parent.memory.lock().vmas.clone();
+            child_process.memory.lock().vmas = parent_vmas;
         }
         child_process.entry_point = parent.entry_point;
-        *child_process.fd_table.lock() = parent.fd_table.lock().clone();
-        *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
-        *child_process.dir_fds.lock() = parent.dir_fds.lock().clone();
+        child_process.files.lock().fd_table = parent.files.lock().fd_table.clone();
+        child_process.files.lock().fd_flags = parent.files.lock().fd_flags.clone();
+        child_process.files.lock().dir_fds = parent.files.lock().dir_fds.clone();
         child_process.clone_credentials_from(parent);
         {
             let p_id = parent.identity.lock();
@@ -395,7 +395,7 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
         }
         // Copy the brk pointer: the child heap region must mirror the parent
         // or demand-paging of inherited brk pages SIGSEGVs.
-        *child_process.brk.lock() = *parent.brk.lock();
+        child_process.memory.lock().brk = parent.memory.lock().brk;
         let child_arc = Arc::new(child_process);
         crate::serial_write("[FORK] process cloned\n");
 
@@ -452,13 +452,13 @@ pub fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: 
 
         let mut child_process = Process::new(child_pid, Some(parent.id), child_as);
         {
-            let parent_vmas = parent.vmas.lock();
-            child_process.vmas = Mutex::new(parent_vmas.clone());
+            let parent_vmas = parent.memory.lock().vmas.clone();
+            child_process.memory.lock().vmas = parent_vmas;
         }
         child_process.entry_point = parent.entry_point;
-        *child_process.fd_table.lock() = parent.fd_table.lock().clone();
-        *child_process.fd_flags.lock() = parent.fd_flags.lock().clone();
-        *child_process.dir_fds.lock() = parent.dir_fds.lock().clone();
+        child_process.files.lock().fd_table = parent.files.lock().fd_table.clone();
+        child_process.files.lock().fd_flags = parent.files.lock().fd_flags.clone();
+        child_process.files.lock().dir_fds = parent.files.lock().dir_fds.clone();
         *child_process.signal_handlers.lock() = *parent.signal_handlers.lock();
         child_process.clone_credentials_from(parent);
         {
@@ -677,7 +677,7 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *c
     static EXEC_LOCK: crate::sync::IrqSafeMutex<()> = crate::sync::IrqSafeMutex::new(());
     let exec_guard = EXEC_LOCK.lock();
     let (old_fd_table, old_fd_flags) = crate::task::process::CURRENT_PROCESS.lock()
-        .as_ref().map(|p| (p.fd_table.lock().clone(), p.fd_flags.lock().clone()))
+        .as_ref().map(|p| (p.files.lock().fd_table.clone(), p.files.lock().fd_flags.clone()))
         .unwrap_or_default();
 
     // 4. Load ELF into new AddressSpace
@@ -707,8 +707,8 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *c
             }
         }
     }
-    *process.fd_table.lock() = new_fd_table;
-    *process.fd_flags.lock() = old_fd_flags;
+    process.files.lock().fd_table = new_fd_table;
+    process.files.lock().fd_flags = old_fd_flags;
 
     let entry = process.entry_point;
     let process_arc = Arc::new(process);

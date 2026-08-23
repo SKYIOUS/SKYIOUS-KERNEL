@@ -46,7 +46,7 @@ pub fn sys_statfs(path_ptr: *const u8, statfs_buf: *mut u8) -> u64 {
 pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
@@ -96,7 +96,7 @@ pub fn sys_fstatat(dirfd: i64, pathname_ptr: *const u8, stat_buf: *mut crate::vf
     };
     if (flags & AT_EMPTY_PATH) != 0 && path_str.is_empty() {
         let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
-        let fd_table = process.fd_table.lock();
+        let fd_table = process.files.lock().fd_table.clone();
         if (dirfd as usize) >= fd_table.len() {
             drop(fd_table);
             if let Some(entry) = process.handle_table.lock().get(dirfd as u64) {
@@ -170,7 +170,7 @@ pub fn sys_chmod(path_ptr: *const u8, mode: u32) -> u64 {
 pub fn sys_fchmod(fd: u64, mode: u32) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
@@ -195,7 +195,7 @@ pub fn sys_chown(path_ptr: *const u8, uid: u32, gid: u32) -> u64 {
 pub fn sys_fchown(fd: u64, uid: u32, gid: u32) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
@@ -451,7 +451,7 @@ pub fn sys_truncate(path_ptr: *const u8, len: i64) -> u64 {
 pub fn sys_ftruncate(fd: u64, len: i64) -> u64 {
     let proc = CURRENT_PROCESS.lock();
     if let Some(ref p) = *proc {
-        let fd_table = p.fd_table.lock();
+        let fd_table = p.files.lock().fd_table.clone();
         if let Some(Some(desc)) = fd_table.get(fd as usize) {
             match desc {
                 FileDescriptor::File { node, .. } => { let n = node.clone(); drop(fd_table); drop(proc); if n.truncate(len).is_ok() { 0 } else { errno::Errno::EIO as u64 } }

@@ -84,7 +84,6 @@ pub fn test_cow() {
     use crate::memory::paging::AddressSpace;
     use x86_64::structures::paging::{PageTableFlags, Page, Size4KiB, Mapper, FrameAllocator};
     use alloc::sync::Arc;
-    use crate::sync::IrqSafeMutex as Mutex;
     use crate::memory::buddy::BuddyFrameAllocator;
 
     println!("[TEST] Copy-on-Write...");
@@ -120,10 +119,10 @@ pub fn test_cow() {
 
     println!("[TEST] Cloning Address Space (COW)...");
     let child_as = parent.address_space.clone_cow(&mut frame_allocator).expect("Failed to clone AS");
-    let mut child = Process::new(11, None, child_as);
+    let child = Process::new(11, None, child_as);
     {
-        let parent_vmas = parent.vmas.lock();
-        child.vmas = Mutex::new(parent_vmas.clone());
+        let parent_vmas = parent.memory.lock().vmas.clone();
+        child.memory.lock().vmas = parent_vmas;
     }
     let parent_arc = Arc::new(parent);
     let child_arc = Arc::new(child);

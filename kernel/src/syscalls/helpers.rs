@@ -116,8 +116,8 @@ pub fn check_file_owner(node: &Arc<dyn VfsNode>) -> bool {
 pub fn normalize_path(path_str: &str, process: &Arc<crate::task::process::Process>) -> String {
     let mut new_path = String::from(path_str);
     if !new_path.starts_with('/') {
-        let cur_cwd = process.cwd.lock();
-        if *cur_cwd == "/" {
+        let cur_cwd = process.files.lock().cwd.clone();
+        if cur_cwd == "/" {
             new_path = alloc::format!("/{}", new_path);
         } else {
             new_path = alloc::format!("{}/{}", cur_cwd, new_path);
@@ -138,7 +138,7 @@ pub fn resolve_path_at(dirfd: i64, pathname: &str, process: &Arc<crate::task::pr
     match dirfd {
         AT_FDCWD => Ok(normalize_path(pathname, process)),
         fd => {
-            let dir_fds = process.dir_fds.lock();
+            let dir_fds = process.files.lock().dir_fds.clone();
             match dir_fds.get(&(fd as usize)) {
                 Some(dir_path) => {
                     if dir_path.ends_with('/') {
@@ -157,7 +157,7 @@ pub fn resolve_path_at(dirfd: i64, pathname: &str, process: &Arc<crate::task::pr
 pub fn store_dir_path(process: &Arc<crate::task::process::Process>, fd: u64, path_str: &str) {
     if (fd as i64) < 0 { return; }
     let abs_path = normalize_path(path_str, process);
-    process.dir_fds.lock().insert(fd as usize, abs_path);
+    process.files.lock().dir_fds.insert(fd as usize, abs_path);
 }
 
 /// Write the `syscall`/`sysret` MSRs (STAR, LSTAR, SFMask) for the current CPU.
@@ -198,7 +198,7 @@ pub fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -
     // stdio fds 0-2 in fd_table, so without this the first open returned fd
     // 0 and read/write hit the tty instead of the opened file (e.g. the
     // /ctl/sys/mem/free read came back empty for exactly this reason).
-    let mut ft = process.fd_table.lock();
+    let mut ft = process.files.lock().fd_table.clone();
     let limit = core::cmp::max(ht.len(), ft.len());
     let mut idx = 0usize;
     while idx < limit && (ht.is_valid(idx as u64) || ft.get(idx).map_or(false, |s| s.is_some())) {
@@ -210,7 +210,7 @@ pub fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -
     // Keep fd_flags in lockstep so read/write access-mode checks see the
     // O_ACCMODE bits; sys_openat ORs O_CLOEXEC in afterwards.
     drop(ft);
-    let mut ffl = process.fd_flags.lock();
+    let mut ffl = process.files.lock().fd_flags.clone();
     if ffl.len() <= idx { ffl.resize(idx + 1, 0); }
     ffl[idx] = open_flags as u64;
     idx as u64

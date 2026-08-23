@@ -231,6 +231,7 @@ fn kernel_main() -> ! {
     serial_write("[BOOT] frame tracker init...\n");
     let max_phys = crate::limine::max_physical_address();
     memory::frame_info::init(max_phys);
+    memory::phys::snapshot_baseline();
     serial_write("[BOOT] -> VAHI Frame Tracker: OK\n");
 
     test_memory_allocations();
@@ -349,88 +350,11 @@ extern "C" fn run_async_tasks() -> ! {
     // ponytail: kernel shell disabled — it writes directly to the framebuffer,
     // clobbering the GUI compositor's rendered output. The GUI handles keyboard.
     let _ = executor.spawn(Task::new(network_poll_task()));
-    let _ = executor.spawn(Task::new(gui_refresh_task()));
+    let _ = executor.spawn(Task::new(gui::input::gui_refresh_task()));
     executor.run();
 }
 
-pub async fn gui_refresh_task() {
-    use pc_keyboard::{Keyboard, layouts, ScancodeSet1, HandleControl};
-    use crate::task::keyboard::try_pop_scancode;
 
-    // 100Hz tick / 30 FPS = 3.33, floor to 3
-    const TICKS_PER_FRAME: u64 = 3;
-    let mut last_frame_tick: u64 = 0;
-    let mut kbd = Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore);
-
-    loop {
-        // Drain any pending scancodes
-        while let Some(scancode) = try_pop_scancode() {
-            // Track modifier keys via raw scancodes (make codes)
-            {
-                let mut comp = crate::gui::COMPOSITOR.lock();
-                match scancode {
-                    0x38 => { comp.alt_held = true; }      // Left Alt make
-                    0xB8 => { comp.alt_held = false; }      // Left Alt break
-                    0xE0 => { /* Extended prefix — next byte is the real scancode */ }
-                    0x5B => { comp.super_held = true; }     // Left Win make (after 0xE0)
-                    0xDB => { comp.super_held = false; }    // Left Win break (after 0xE0)
-                    // Alt+Tab: confirm selection when Alt is released
-                    _ if !comp.alt_held && comp.alt_tab_active => {
-                        if comp.alt_tab_index < comp.windows.len() {
-                            let idx = comp.alt_tab_index;
-                            comp.windows[idx].minimized = false;
-                            let w = comp.windows.remove(idx);
-                            comp.windows.push(w);
-                        }
-                        comp.alt_tab_active = false;
-                    }
-                    _ => {}
-                }
-            }
-            if let Ok(Some(key_event)) = kbd.add_byte(scancode) {
-                if let Some(key) = kbd.process_keyevent(key_event) {
-                    let mut comp = crate::gui::COMPOSITOR.lock();
-                    comp.handle_keyboard(key);
-                }
-            }
-        }
-
-        // Use the 100Hz tick counter directly (not hal::timer::get_ticks which may be in microseconds)
-        let now = crate::interrupts::get_ticks();
-
-        // Diagnostic: print once at ~1s after first frame, then every 500 ticks
-        if now > 100 {
-            static DIAG_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-            if !DIAG_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                let irq = crate::drivers::mouse::MOUSE_IRQ_COUNT.load(core::sync::atomic::Ordering::Relaxed);
-                let bytes = crate::drivers::mouse::MOUSE_IRQ_BYTES.load(core::sync::atomic::Ordering::Relaxed);
-                let cx = crate::drivers::mouse::CURSOR_X.load(core::sync::atomic::Ordering::Relaxed);
-                let cy = crate::drivers::mouse::CURSOR_Y.load(core::sync::atomic::Ordering::Relaxed);
-                crate::serial_write(&alloc::format!("[MOUSE-DIAG] irq={} bytes={} pos=({},{})\n", irq, bytes, cx, cy));
-            }
-        }
-
-        if now.wrapping_sub(last_frame_tick) >= TICKS_PER_FRAME {
-            last_frame_tick = now;
-            let (x, y, buttons, scroll, mouse_x, mouse_y) = {
-                use core::sync::atomic::Ordering;
-                let x = crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed) as usize;
-                let y = crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed) as usize;
-                let buttons = crate::drivers::mouse::CURSOR_BUTTONS.load(Ordering::Relaxed);
-                let scroll = crate::drivers::mouse::CURSOR_SCROLL.swap(0, Ordering::Relaxed);
-                (x, y, buttons, scroll, x, y)
-            };
-            let mut comp = crate::gui::COMPOSITOR.lock();
-            comp.handle_mouse(x, y, buttons);
-            if scroll != 0 {
-                comp.handle_scroll(scroll);
-            }
-            comp.render(mouse_x, mouse_y);
-        }
-        // Yield to scheduler
-        crate::task::YieldNow::new().await;
-    }
-}
 
 #[cfg(feature = "net")]
 pub async fn network_poll_task() {
@@ -525,7 +449,7 @@ pub fn spawn_userspace_app(path: &'static str) {
                         let tty_node = crate::vfs::VFS.lock().resolve_path("/dev/tty0");
                         if let Some(tty) = tty_node {
                             use crate::task::process::FileDescriptor;
-                            let mut fd_table = process_arc.fd_table.lock();
+                            let mut fd_table = process_arc.files.lock().fd_table.clone();
                             fd_table.resize(3, None);
                             fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
                             fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });

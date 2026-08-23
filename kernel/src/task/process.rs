@@ -87,24 +87,49 @@ pub struct ResourceLimits {
     pub rlim_cur: [i64; 16],
     pub rlim_max: [i64; 16],
 }
+// ─── Process sub-structs ───────────────────────────────────────
+// Group related fields behind a single Mutex on Process.
+// Access pattern: process.memory.lock().brk, process.files.lock().fd_table, etc.
+
+/// Memory-related process state: VMAs, brk, swap map.
+pub struct ProcessMemory {
+    pub brk: u64,
+    pub vmas: Vec<Vma>,
+    /// virt_page_addr → (device_idx, slot_idx) for swapped-out pages
+    pub swap_map: hashbrown::HashMap<u64, (usize, usize)>,
+}
+
+/// File-descriptor-related process state: fd table, flags, cwd, dir fds.
+pub struct ProcessFiles {
+    pub fd_table: Vec<Option<FileDescriptor>>,
+    pub fd_flags: Vec<u64>,
+    pub cwd: String,
+    /// Map from directory fd to its normalized absolute path (for *at syscalls)
+    pub dir_fds: HashMap<usize, String>,
+}
+
+/// Security-related process state: seccomp, landlock, namespaces.
+pub struct ProcessSecurity {
+    pub seccomp: crate::syscalls::seccomp::SeccompState,
+    pub landlock: crate::syscalls::landlock::LandlockState,
+    pub namespaces: crate::syscalls::namespaces::NamespaceSet,
+    /// Landlock rulesets indexed by fd number
+    pub landlock_fds: hashbrown::HashMap<usize, crate::syscalls::landlock::LandlockRuleset>,
+    /// Namespace references indexed by fd number (for setns)
+    pub namespace_fds: hashbrown::HashMap<usize, crate::syscalls::namespaces::NamespaceType>,
+}
+
 pub struct Process {
     pub id: u64,
     pub parent_id: Option<u64>,
     #[allow(dead_code)]
     pub tgid: u64,
     pub address_space: AddressSpace,
-    pub vmas: Mutex<Vec<Vma>>,
     pub entry_point: u64,
-    pub fd_table: Mutex<Vec<Option<FileDescriptor>>>,
-    pub fd_flags: Mutex<Vec<u64>>,
     pub handle_table: Mutex<HandleTable>,
     pub handle_audit_id_counter: AtomicU64,
     pub exit_code: Mutex<Option<i32>>,
     pub children: Mutex<Vec<u64>>,
-    pub brk: Mutex<u64>,
-    pub cwd: Mutex<String>,
-    /// Map from directory fd to its normalized absolute path (for *at syscalls)
-    pub dir_fds: Mutex<HashMap<usize, String>>,
     pub signals: Mutex<crate::syscalls::signal::SignalState>,
     pub signal_handlers: Mutex<[u64; 32]>,
     pub signal_restorers: Mutex<[u64; 32]>,
@@ -124,20 +149,8 @@ pub struct Process {
     pub cstime: core::sync::atomic::AtomicU64,
     pub boot_ticks: u64,
     pub groups: crate::sync::IrqSafeMutex<alloc::vec::Vec<u32>>,
-    /// virt_page_addr → (device_idx, slot_idx) for swapped-out pages
-    pub swap_map: crate::sync::IrqSafeMutex<hashbrown::HashMap<u64, (usize, usize)>>,
     /// Process/thread name (up to 15 chars + null)
     pub name: crate::sync::IrqSafeMutex<String>,
-    /// Seccomp filtering state
-    pub seccomp: crate::sync::IrqSafeMutex<crate::syscalls::seccomp::SeccompState>,
-    /// Landlock LSM state
-    pub landlock: crate::sync::IrqSafeMutex<crate::syscalls::landlock::LandlockState>,
-    /// Namespace set (PID, Mount, Net, IPC, UTS, User)
-    pub namespaces: crate::sync::IrqSafeMutex<crate::syscalls::namespaces::NamespaceSet>,
-    /// Landlock rulesets indexed by fd number
-    pub landlock_fds: crate::sync::IrqSafeMutex<hashbrown::HashMap<usize, crate::syscalls::landlock::LandlockRuleset>>,
-    /// Namespace references indexed by fd number (for setns)
-    pub namespace_fds: crate::sync::IrqSafeMutex<hashbrown::HashMap<usize, crate::syscalls::namespaces::NamespaceType>>,
     /// Whether exec can gain new privileges
     pub no_new_privs: core::sync::atomic::AtomicBool,
     /// Whether core dumps are enabled
@@ -148,6 +161,10 @@ pub struct Process {
     pub timerslack: core::sync::atomic::AtomicU64,
     /// Cgroup path (e.g. "/", "/system.slice/docker.service")
     pub cgroup_path: crate::sync::IrqSafeMutex<String>,
+    // ─── Sub-structs (single Mutex each) ─────────────────────────
+    pub memory: Mutex<ProcessMemory>,
+    pub files: Mutex<ProcessFiles>,
+    pub security: Mutex<ProcessSecurity>,
 }
 
 // ─── sigaltstack / itimerval / tms types ─────────────────────────
@@ -350,17 +367,11 @@ impl Process {
             parent_id,
             tgid: id,
             address_space,
-            vmas: Mutex::new(Vec::new()),
             entry_point: 0,
-            fd_table: Mutex::new(Vec::new()),
-            fd_flags: Mutex::new(Vec::new()),
             handle_table: Mutex::new(HandleTable::new()),
             handle_audit_id_counter: AtomicU64::new(1),
             exit_code: Mutex::new(None),
             children: Mutex::new(Vec::new()),
-            brk: Mutex::new(0),
-            cwd: Mutex::new(String::from("/")),
-            dir_fds: Mutex::new(hashbrown::HashMap::new()),
             signals: Mutex::new(crate::syscalls::signal::SignalState::new()),
             signal_handlers: Mutex::new([0; 32]),
             signal_restorers: Mutex::new([0; 32]),
@@ -386,30 +397,43 @@ impl Process {
             cstime: core::sync::atomic::AtomicU64::new(0),
             boot_ticks: crate::interrupts::get_ticks(),
             groups: crate::sync::IrqSafeMutex::new(alloc::vec::Vec::new()),
-            swap_map: crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new()),
             name: crate::sync::IrqSafeMutex::new(String::from("init")),
-            seccomp: crate::sync::IrqSafeMutex::new(crate::syscalls::seccomp::SeccompState::default()),
-            landlock: crate::sync::IrqSafeMutex::new(crate::syscalls::landlock::LandlockState::default()),
-            namespaces: crate::sync::IrqSafeMutex::new(crate::syscalls::namespaces::NamespaceSet::default()),
-            landlock_fds: crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new()),
-            namespace_fds: crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new()),
             no_new_privs: core::sync::atomic::AtomicBool::new(false),
             dumpable: core::sync::atomic::AtomicBool::new(true),
             child_subreaper: core::sync::atomic::AtomicBool::new(false),
             timerslack: core::sync::atomic::AtomicU64::new(0),
             cgroup_path: crate::sync::IrqSafeMutex::new(String::from("/")),
+            // Sub-structs
+            memory: Mutex::new(ProcessMemory {
+                brk: 0,
+                vmas: Vec::new(),
+                swap_map: hashbrown::HashMap::new(),
+            }),
+            files: Mutex::new(ProcessFiles {
+                fd_table: Vec::new(),
+                fd_flags: Vec::new(),
+                cwd: String::from("/"),
+                dir_fds: hashbrown::HashMap::new(),
+            }),
+            security: Mutex::new(ProcessSecurity {
+                seccomp: crate::syscalls::seccomp::SeccompState::default(),
+                landlock: crate::syscalls::landlock::LandlockState::default(),
+                namespaces: crate::syscalls::namespaces::NamespaceSet::default(),
+                landlock_fds: hashbrown::HashMap::new(),
+                namespace_fds: hashbrown::HashMap::new(),
+            }),
         }
     }
 
     pub fn add_vma(&self, new_vma: Vma) {
-        let mut vmas = self.vmas.lock();
-        vmas.push(new_vma);
-        vmas.sort_by(|a, b| a.start.cmp(&b.start));
-        self.merge_vmas_inner(&mut vmas);
+        let mut mem = self.memory.lock();
+        mem.vmas.push(new_vma);
+        mem.vmas.sort_by(|a, b| a.start.cmp(&b.start));
+        Self::merge_vmas_inner(&mut mem.vmas);
     }
 
     /// Merge overlapping and adjacent VMAs with compatible flags and file backing.
-    fn merge_vmas_inner(&self, vmas: &mut Vec<Vma>) {
+    fn merge_vmas_inner(vmas: &mut Vec<Vma>) {
         let mut i = 0;
         while i + 1 < vmas.len() {
             let same_backing = vmas[i].file_handle == vmas[i + 1].file_handle
@@ -429,7 +453,8 @@ impl Process {
     /// Remove or trim VMAs that intersect [start, end).
     /// Returns the number of pages removed from the page table (caller must handle that).
     pub fn remove_vma_range(&self, start: u64, end: u64) {
-        let mut vmas = self.vmas.lock();
+        let mut mem = self.memory.lock();
+        let vmas = &mut mem.vmas;
         let mut i = 0;
         while i < vmas.len() {
             let v = &vmas[i];
@@ -464,15 +489,15 @@ impl Process {
 
     /// Coalesce the entire VMA list (merges any adjacent/overlapping VMAs with matching flags).
     pub fn merge_all_vmas(&self) {
-        let mut vmas = self.vmas.lock();
-        if vmas.is_empty() { return; }
-        vmas.sort_by(|a, b| a.start.cmp(&b.start));
-        self.merge_vmas_inner(&mut vmas);
+        let mut mem = self.memory.lock();
+        if mem.vmas.is_empty() { return; }
+        mem.vmas.sort_by(|a, b| a.start.cmp(&b.start));
+        Self::merge_vmas_inner(&mut mem.vmas);
     }
 
     pub fn find_vma(&self, addr: u64) -> Option<Vma> {
-        let vmas = self.vmas.lock();
-        vmas.iter().find(|vma| addr >= vma.start && addr < vma.end).cloned()
+        let mem = self.memory.lock();
+        mem.vmas.iter().find(|vma| addr >= vma.start && addr < vma.end).cloned()
     }
 
     pub fn load_elf(elf_data: &[u8], mut address_space: AddressSpace) -> Result<Self, &'static str> {
@@ -504,7 +529,7 @@ impl Process {
         process.merge_all_vmas();
         crate::serial_write("[load_elf] merge_all_vmas completed\n");
 
-        let vmas = process.vmas.lock();
+        let vmas = process.memory.lock().vmas.clone();
         let mut initial_brk = 0;
         for vma in vmas.iter() {
             if vma.end > initial_brk {
@@ -514,7 +539,7 @@ impl Process {
         drop(vmas);
         // Page align the initial break
         let initial_brk = (initial_brk + 4095) & !4095;
-        *process.brk.lock() = initial_brk;
+        process.memory.lock().brk = initial_brk;
         crate::serial_write("[load_elf] initial_brk configured, returning process\n");
         Ok(process)
     }
@@ -811,6 +836,28 @@ impl Process {
         unsafe { *k_ptr = argv.len() as u64; }
 
         Ok(current_rsp)
+    }
+
+    /// Perform the exit bookkeeping for a fault-killed process.
+    /// Records exit code 139 (SIGSEGV), raises SIGCHLD on the parent,
+    /// and marks the current thread as Exited. Called from exception
+    /// handlers in IRQ context — no allocation, only VMA/sched locks.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn kill_from_fault(&self) -> ! {
+        *self.exit_code.lock() = Some(139); // SIGSEGV (128+11)
+        if let Some(ppid) = self.parent_id {
+            let table = crate::task::process::PROCESS_TABLE.lock();
+            if let Some(parent) = table.get(&ppid) {
+                parent.signals.lock().raise(crate::syscalls::signal::Signal::SIGCHLD);
+            }
+        }
+        crate::task::scheduler::with_current_thread(|thread| {
+            thread.status = crate::task::thread::ThreadStatus::Exited;
+        });
+        crate::task::scheduler::schedule();
+        loop {
+            x86_64::instructions::interrupts::enable_and_hlt();
+        }
     }
 }
 

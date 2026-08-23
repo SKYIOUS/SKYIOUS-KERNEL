@@ -25,7 +25,7 @@ struct LinuxDirent64 { d_ino: u64, d_off: u64, d_reclen: u16, d_type: u8 }
 
 pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
     let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, ref offset }) => {
@@ -115,7 +115,7 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
     let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
     let mut data = alloc::vec![0u8; count];
     if unsafe { user_access::copy_from_user(&mut data, buf) }.is_err() { return errno::Errno::EFAULT as u64; }
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, ref offset }) => {
@@ -165,7 +165,7 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
 pub fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, offset: ref file_off }) => {
@@ -188,12 +188,12 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
 
 pub fn sys_brk(addr: u64) -> u64 {
     let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
-    let current_brk = *process.brk.lock();
+    let current_brk = process.memory.lock().brk;
     if addr == 0 { return current_brk; }
     if addr > current_brk {
         process.add_vma(crate::task::process::Vma { start: current_brk, end: addr, flags: PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE, _name: "brk", file_handle: None, file_offset: 0, is_shared: false, shm_id: None });
     }
-    *process.brk.lock() = addr;
+    process.memory.lock().brk = addr;
     addr
 }
 
@@ -215,7 +215,7 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
         }
     }
     let alloc_addr = if addr == 0 {
-        let brk = *process.brk.lock();
+        let brk = process.memory.lock().brk;
         let align = 0x1000_0000u64;
         (brk + align - 1) & !(align - 1)
     } else { addr };
@@ -241,7 +241,7 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> u64 {
     let mut new_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if prot & 2 != 0 { new_flags |= PageTableFlags::WRITABLE; }
     if prot & 4 == 0 { new_flags |= PageTableFlags::NO_EXECUTE; }
-    let mut vmas = process.vmas.lock();
+    let mut vmas = process.memory.lock().vmas.clone();
     for vma in vmas.iter_mut() {
         if vma.start < aligned_end && vma.end > aligned_addr {
             vma.flags = new_flags;
@@ -256,7 +256,7 @@ pub fn sys_getdents64(fd: u64, buf: *mut u8, len: usize) -> u64 {
     let _vfs = VFS.lock();
     let proc = CURRENT_PROCESS.lock();
     let node = if let Some(ref p) = *proc {
-        let fd_table = p.fd_table.lock();
+        let fd_table = p.files.lock().fd_table.clone();
         if let Some(Some(FileDescriptor::File { node, .. })) = fd_table.get(fd as usize) { node.clone() } else { return errno::Errno::EBADF as u64; }
     } else { return errno::Errno::EBADF as u64 };
     if !node.is_dir() { return errno::Errno::ENOTDIR as u64; }
@@ -293,7 +293,7 @@ pub fn sys_ioctl(fd: u64, request: u64, argp: *mut u8) -> u64 {
     const TCSETS: u64 = 0x5402;
     const FIONBIO: u64 = 0x5421;
     let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     match fd_table[fd as usize] {
         Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => {
@@ -335,7 +335,7 @@ pub fn sys_ioctl(fd: u64, request: u64, argp: *mut u8) -> u64 {
 
 pub fn sys_fallocate(fd: u64, mode: i32, offset: i64, len: i64) -> u64 {
     let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => { match node.fallocate(mode, offset, len) { Ok(()) => 0, Err(_) => errno::Errno::ENOSPC as u64 } }
@@ -345,7 +345,7 @@ pub fn sys_fallocate(fd: u64, mode: i32, offset: i64, len: i64) -> u64 {
 
 pub fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: *mut u64, count: u64) -> u64 {
     let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (out_fd as usize) >= fd_table.len() || (in_fd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
     let start_offset = if !offset_ptr.is_null() { let slice = unsafe { core::slice::from_raw_parts(offset_ptr as *const u8, 8) }; u64::from_ne_bytes(slice.try_into().unwrap_or([0; 8])) } else { 0 };
     let buf_size = core::cmp::min(count, 4096) as usize;

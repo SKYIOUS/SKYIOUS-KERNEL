@@ -341,7 +341,7 @@ pub fn sys_shmdt(shmaddr: *const u8) -> u64 {
 
     // Find the VMA
     let vma = {
-        let vmas = process.vmas.lock();
+        let vmas = process.memory.lock().vmas.clone();
         match vmas.iter().find(|v| v.start == addr) {
             Some(v) => v.clone(),
             None => return errno::Errno::EINVAL as u64,
@@ -543,7 +543,7 @@ pub fn sys_memfd_create(name_ptr: *const u8, flags: u32) -> u64 {
     };
 
     let fd_obj = FileDescriptor::File { node, offset: crate::sync::IrqSafeMutex::new(0) };
-    let mut fd_table = process.fd_table.lock();
+    let mut fd_table = process.files.lock().fd_table.clone();
     let fd = {
         let mut slot = None;
         for (i, s) in fd_table.iter_mut().enumerate() {
@@ -564,7 +564,7 @@ pub fn sys_memfd_create(name_ptr: *const u8, flags: u32) -> u64 {
 
     // MFD_CLOEXEC
     if (flags & 0x0001) != 0 {
-        let mut fd_flags = process.fd_flags.lock();
+        let mut fd_flags = process.files.lock().fd_flags.clone();
         if fd >= fd_flags.len() { fd_flags.resize(fd + 1, 0); }
         fd_flags[fd] |= 0x80000; // FD_CLOEXEC
     }

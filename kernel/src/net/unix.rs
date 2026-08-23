@@ -466,7 +466,7 @@ pub fn sys_socketpair(domain: u64, type_: u64, _protocol: u64, sv: *mut i32) -> 
         socks.insert(h2, sock2);
     }
     let process = crate::syscalls::get_current_process().ok_or(Errno::ESRCH)?;
-    let mut fd_table = process.fd_table.lock();
+    let mut fd_table = process.files.lock().fd_table.clone();
     let find_free = |table: &mut Vec<Option<crate::task::process::FileDescriptor>>| -> Option<u32> {
         for (i, slot) in table.iter_mut().enumerate() {
             if slot.is_none() {

@@ -107,7 +107,7 @@ impl CtlFs {
             let table = crate::task::process::PROCESS_TABLE.lock();
             let mut out = alloc::format!("{:>6} {}\n", "PID", "CWD");
             for (pid, proc) in table.iter() {
-                out.push_str(&alloc::format!("{:6} {}\n", pid, *proc.cwd.lock()));
+                out.push_str(&alloc::format!("{:6} {}\n", pid, proc.files.lock().cwd));
             }
             out.into_bytes()
         }));

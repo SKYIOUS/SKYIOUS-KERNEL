@@ -107,7 +107,7 @@ fn read_proc_status(pid: u64) -> String {
         let ppid = proc.parent_id.unwrap_or(0);
         let uid = proc.creds.lock().uid;
         let gid = proc.creds.lock().gid;
-        let vsize = proc.vmas.lock().iter().map(|v| v.end - v.start).sum::<u64>();
+        let vsize = proc.memory.lock().vmas.iter().map(|v| v.end - v.start).sum::<u64>();
 
         let mut s = String::new();
         s.push_str("Name:\tinit\n");

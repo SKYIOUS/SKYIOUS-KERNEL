@@ -97,7 +97,7 @@ pub fn set_oom_score_adj(pid: u64, adj: i32) -> Result<(), crate::syscalls::errn
 /// Counts mapped user pages from the process's VMA list.
 /// This is an approximation — exact RSS would require page table walks.
 pub fn estimate_process_rss(proc: &crate::task::process::Process) -> u64 {
-    let vmas = proc.vmas.lock();
+    let vmas = proc.memory.lock().vmas.clone();
     let mut rss_bytes: u64 = 0;
 
     for vma in vmas.iter() {
@@ -281,7 +281,7 @@ fn kill_victim(pid: u64) {
 
     // Free swap mappings
     {
-        let mut swap_map = proc.swap_map.lock();
+        let mut swap_map = proc.memory.lock().swap_map.clone();
         for (_, &(dev_idx, slot_idx)) in swap_map.iter() {
             crate::memory::swap::free_swap_slot(dev_idx, slot_idx);
         }
@@ -290,7 +290,7 @@ fn kill_victim(pid: u64) {
 
     // Free all mapped user pages
     {
-        let vmas = proc.vmas.lock();
+        let vmas = proc.memory.lock().vmas.clone();
         for vma in vmas.iter() {
             if vma.start >= 0xFFFF_8000_0000_0000 {
                 continue;
@@ -338,7 +338,7 @@ fn kill_victim(pid: u64) {
 
     // Close all file descriptors
     {
-        let mut fd_table = proc.fd_table.lock();
+        let mut fd_table = proc.files.lock().fd_table.clone();
         for fd_opt in fd_table.iter_mut() {
             fd_opt.take();
         }

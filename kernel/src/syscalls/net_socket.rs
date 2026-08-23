@@ -21,7 +21,7 @@ pub fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
         };
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let mut fd_table = process.fd_table.lock();
+            let mut fd_table = process.files.lock().fd_table.clone();
             let fd_obj = FileDescriptor::UnixSocket(handle, crate::task::process::SocketType::Unix);
             for (i, slot) in fd_table.iter_mut().enumerate() {
                 if slot.is_none() {
@@ -90,7 +90,7 @@ pub fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
             else { crate::task::process::SocketType::Udp };
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let mut fd_table = process.fd_table.lock();
+            let mut fd_table = process.files.lock().fd_table.clone();
             let fd_obj = FileDescriptor::Socket(handle, socket_type);
             for (i, slot) in fd_table.iter_mut().enumerate() {
                 if slot.is_none() {
@@ -123,7 +123,7 @@ pub fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
 
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let fd_table = process.fd_table.lock();
+            let fd_table = process.files.lock().fd_table.clone();
             if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
             if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
                 let pid = process.id;
@@ -175,7 +175,7 @@ pub fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
 
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let fd_table = process.fd_table.lock();
+            let fd_table = process.files.lock().fd_table.clone();
             if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
             if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
                 let mut sockets = crate::net::SOCKETS.lock();
@@ -235,7 +235,7 @@ pub fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
     {
         let process_lock = CURRENT_PROCESS.lock();
         let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
-        let fd_table = process.fd_table.lock();
+        let fd_table = process.files.lock().fd_table.clone();
         if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
         if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
             if stype != crate::task::process::SocketType::Tcp {
@@ -265,7 +265,7 @@ pub fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 
     {
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let fd_table = process.fd_table.lock();
+            let fd_table = process.files.lock().fd_table.clone();
             if (sockfd as usize) < fd_table.len() {
                 if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
                     drop(fd_table);
@@ -276,7 +276,7 @@ pub fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 
                     let fd_obj = FileDescriptor::UnixSocket(new_handle, crate::task::process::SocketType::Unix);
                     let process_lock2 = CURRENT_PROCESS.lock();
                     if let Some(ref process2) = *process_lock2 {
-                        let mut fd_table2 = process2.fd_table.lock();
+                        let mut fd_table2 = process2.files.lock().fd_table.clone();
                         for (i, slot) in fd_table2.iter_mut().enumerate() {
                             if slot.is_none() {
                                 *slot = Some(fd_obj);
@@ -303,7 +303,7 @@ pub fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 
             let process_lock = CURRENT_PROCESS.lock();
             match *process_lock { Some(ref p) => p.clone(), None => return errno::Errno::ESRCH as u64 }
         };
-        let mut fd_table = process.fd_table.lock();
+        let mut fd_table = process.files.lock().fd_table.clone();
         if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
 
         let (handle, local_port) = match fd_table[sockfd as usize] {
@@ -377,7 +377,7 @@ pub fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, ad
     {
         let process_lock = CURRENT_PROCESS.lock();
         let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
-        let fd_table = process.fd_table.lock();
+        let fd_table = process.files.lock().fd_table.clone();
         if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
 
         if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
@@ -416,7 +416,7 @@ pub fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addr
 
     let process_lock = CURRENT_PROCESS.lock();
     let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
 
     if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {

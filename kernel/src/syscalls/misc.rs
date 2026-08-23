@@ -51,7 +51,7 @@ pub fn sys_getpeername(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
     {
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let fd_table = process.fd_table.lock();
+            let fd_table = process.files.lock().fd_table.clone();
             if (sockfd as usize) < fd_table.len() {
                 if let Some(FileDescriptor::UnixSocket(handle, _stype)) = fd_table[sockfd as usize] {
                     drop(fd_table);
@@ -69,7 +69,7 @@ pub fn sys_getpeername(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
     {
         let process_lock = CURRENT_PROCESS.lock();
         let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
-        let fd_table = process.fd_table.lock();
+        let fd_table = process.files.lock().fd_table.clone();
         if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
 
         if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
@@ -122,7 +122,7 @@ pub fn sys_select(nfds: u64, readfds: *mut u64, writefds: *mut u64, exceptfds: *
         Some(ref p) => p.clone(),
         None => return errno::Errno::ESRCH as u64,
     };
-    let fd_table = process.fd_table.lock();
+    let fd_table = process.files.lock().fd_table.clone();
     let mut ready_count;
     let deadline = if !timeout.is_null() {
         let mut tv_sec = 0u64;
@@ -248,7 +248,7 @@ pub fn sys_poll(fds: *const u8, nfds: usize, timeout_ms: i32) -> u64 {
         poll_count += 1;
         if poll_count > 1000 { break; }
 
-        let fd_table = process.fd_table.lock();
+        let fd_table = process.files.lock().fd_table.clone();
         let mut ready = 0usize;
         for (fd, events, revents) in poll_fds.iter_mut() {
             if *fd < 0 { continue; }
@@ -379,7 +379,7 @@ pub fn sys_eventfd2(initval: u32, flags: i32) -> u64 {
     }));
 
     let fd_obj = FileDescriptor::EventFd(data);
-    let mut fd_table = process.fd_table.lock();
+    let mut fd_table = process.files.lock().fd_table.clone();
     for (i, slot) in fd_table.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(fd_obj);

@@ -166,7 +166,7 @@ fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<
     match tty_node {
         Some(tty) => {
             use crate::task::process::FileDescriptor;
-            let mut fd_table = process.fd_table.lock();
+            let mut fd_table = process.files.lock().fd_table.clone();
             fd_table.resize(3, None);
             fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
             fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
@@ -175,7 +175,7 @@ fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<
             // Keep fd_flags in lockstep with fd_table — exec/fork clone both,
             // and a short flags vector makes dup2/fcntl index out of bounds.
             // Access-mode bits (0=O_RDONLY, 1=O_WRONLY): fd0 read, fd1/fd2 write.
-            *process.fd_flags.lock() = alloc::vec![0u64, 1, 1];
+            process.files.lock().fd_flags = alloc::vec![0u64, 1, 1];
             BootLogger::info(ctx, "stdin/stdout/stderr -> /dev/tty0");
         }
         None => {

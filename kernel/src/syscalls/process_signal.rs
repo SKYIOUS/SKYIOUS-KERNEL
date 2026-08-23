@@ -132,7 +132,7 @@ pub fn sys_kill(pid: i64, sig: u32) -> u64 {
         let sig_num = sig as u32;
         let sender_uid = get_current_euid();
         {
-            let fd_table = proc.fd_table.lock();
+            let fd_table = proc.files.lock().fd_table.clone();
             for (_fd, entry) in fd_table.iter().enumerate() {
                 if let Some(crate::task::process::FileDescriptor::SignalFd(ref handle)) = entry {
                     let fds = SIGNAL_FDS.lock();
@@ -275,7 +275,7 @@ pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
 
     if fd != u64::MAX && fd != 0 {
         // Update existing signalfd
-        let fd_table = process.fd_table.lock();
+        let fd_table = process.files.lock().fd_table.clone();
         if (fd as usize) >= fd_table.len() {
             return errno::Errno::EBADF as u64;
         }
@@ -305,7 +305,7 @@ pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
     SIGNAL_FDS.lock().insert(handle, data.clone());
 
     let fd_obj = crate::task::process::FileDescriptor::SignalFd(handle);
-    let mut fd_table = process.fd_table.lock();
+    let mut fd_table = process.files.lock().fd_table.clone();
     for (i, slot) in fd_table.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(fd_obj);

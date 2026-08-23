@@ -84,7 +84,7 @@ pub fn sys_epoll_create1(flags: i32) -> u64 {
     // Register as a file descriptor in the current process
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref proc) = *lock {
-        let mut fd_table = proc.fd_table.lock();
+        let mut fd_table = proc.files.lock().fd_table.clone();
         let fd_num = find_free_fd(&fd_table);
         if fd_num >= fd_table.len() {
             fd_table.resize(fd_num + 1, None);
@@ -265,7 +265,7 @@ pub fn sys_epoll_wait(epfd: u64, events_ptr: *mut u8, maxevents: i32, timeout_ms
     };
     drop(proc_lock2);
 
-    let fd_table = proc2.fd_table.lock();
+    let fd_table = proc2.files.lock().fd_table.clone();
 
     for entry in &entries {
         let fd = entry.fd;

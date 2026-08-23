@@ -149,7 +149,7 @@ pub fn ps(out: &mut dyn FnMut(&str)) {
     out("PID  UID  CWD\n");
     let table = crate::task::process::PROCESS_TABLE.lock();
     for (pid, proc) in table.iter() {
-        let cwd = proc.cwd.lock();
+        let cwd = proc.files.lock().cwd.clone();
         let uid = proc.creds.lock().uid;
         out(&format!("{:3}  {:3}  {}\n", pid, uid, cwd));
     }

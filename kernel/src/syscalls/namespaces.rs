@@ -271,7 +271,7 @@ pub fn sys_unshare(flags: u64) -> u64 {
 
     // Hold the namespaces lock once for the entire operation
     {
-        let ns = proc.namespaces.lock();
+        let _ns_guard = proc.security.lock(); let ns = &_ns_guard.namespaces;
 
         if flags & CLONE_NEWPID != 0 {
             let parent_id = ns.pid_ns.lock().id;
@@ -332,7 +332,7 @@ pub fn sys_setns(fd: u64, nstype: u64) -> u64 {
 
     // Look up the namespace type from namespace_fds
     let ns_type = {
-        let ns_fds = proc.namespace_fds.lock();
+        let _nfd_guard = proc.security.lock(); let ns_fds = &_nfd_guard.namespace_fds;
         match ns_fds.get(&(fd as usize)) {
             Some(t) => *t,
             None => return errno::Errno::EBADF as u64,
@@ -365,7 +365,7 @@ pub fn sys_setns(fd: u64, nstype: u64) -> u64 {
 /// Clone with namespace flags — creates new namespaces for the child.
 /// Called from sys_clone when CLONE_NEW* flags are set.
 pub fn clone_namespaces(parent: &crate::task::process::Process, child: &crate::task::process::Process, clone_flags: u64) {
-    let parent_ns = parent.namespaces.lock();
-    let mut child_ns = child.namespaces.lock();
+    let _pns_guard = parent.security.lock(); let parent_ns = &_pns_guard.namespaces;
+    let mut _cns_guard = child.security.lock(); let child_ns = &mut _cns_guard.namespaces;
     *child_ns = parent_ns.clone_with_flags(clone_flags, child.id);
 }

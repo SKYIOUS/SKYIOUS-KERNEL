@@ -1,4 +1,5 @@
 //! Input handling — mouse and keyboard dispatch for the compositor.
+//! Also hosts the async refresh loop that drives the GUI tick.
 
 use super::*;
 use super::window;
@@ -341,5 +342,73 @@ impl Compositor {
                 }
             }
         }
+    }
+}
+
+/// Async task that drives the GUI refresh loop.
+/// Polls keyboard scancodes, mouse state, and composites at ~30 FPS.
+pub async fn gui_refresh_task() {
+    use pc_keyboard::{Keyboard, layouts, ScancodeSet1, HandleControl};
+    use crate::task::keyboard::try_pop_scancode;
+
+    // 100Hz tick / 30 FPS = 3.33, floor to 3
+    const TICKS_PER_FRAME: u64 = 3;
+    let mut last_frame_tick: u64 = 0;
+    let mut kbd = Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore);
+
+    loop {
+        // Drain any pending scancodes
+        while let Some(scancode) = try_pop_scancode() {
+            // Track modifier keys via raw scancodes (make codes)
+            {
+                let mut comp = crate::gui::COMPOSITOR.lock();
+                match scancode {
+                    0x38 => { comp.alt_held = true; }      // Left Alt make
+                    0xB8 => { comp.alt_held = false; }      // Left Alt break
+                    0xE0 => { /* Extended prefix — next byte is the real scancode */ }
+                    0x5B => { comp.super_held = true; }     // Left Win make (after 0xE0)
+                    0xDB => { comp.super_held = false; }    // Left Win break (after 0xE0)
+                    // Alt+Tab: confirm selection when Alt is released
+                    _ if !comp.alt_held && comp.alt_tab_active => {
+                        if comp.alt_tab_index < comp.windows.len() {
+                            let idx = comp.alt_tab_index;
+                            comp.windows[idx].minimized = false;
+                            let w = comp.windows.remove(idx);
+                            comp.windows.push(w);
+                        }
+                        comp.alt_tab_active = false;
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(Some(key_event)) = kbd.add_byte(scancode) {
+                if let Some(key) = kbd.process_keyevent(key_event) {
+                    let mut comp = crate::gui::COMPOSITOR.lock();
+                    comp.handle_keyboard(key);
+                }
+            }
+        }
+
+        let now = crate::interrupts::get_ticks();
+
+        if now.wrapping_sub(last_frame_tick) >= TICKS_PER_FRAME {
+            last_frame_tick = now;
+            let (x, y, buttons, scroll, mouse_x, mouse_y) = {
+                use core::sync::atomic::Ordering;
+                let x = crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed) as usize;
+                let y = crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed) as usize;
+                let buttons = crate::drivers::mouse::CURSOR_BUTTONS.load(Ordering::Relaxed);
+                let scroll = crate::drivers::mouse::CURSOR_SCROLL.swap(0, Ordering::Relaxed);
+                (x, y, buttons, scroll, x, y)
+            };
+            let mut comp = crate::gui::COMPOSITOR.lock();
+            comp.handle_mouse(x, y, buttons);
+            if scroll != 0 {
+                comp.handle_scroll(scroll);
+            }
+            comp.render(mouse_x, mouse_y);
+        }
+        // Yield to scheduler
+        crate::task::YieldNow::new().await;
     }
 }

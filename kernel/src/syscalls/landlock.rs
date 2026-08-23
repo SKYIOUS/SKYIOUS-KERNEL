@@ -214,14 +214,14 @@ pub fn sys_landlock_create_ruleset(
     };
 
     // Allocate a real fd from the fd_table
-    let mut ft = proc.fd_table.lock();
+    let mut ft = proc.files.lock().fd_table.clone();
     let fd_num = ft.len();
     ft.push(None); // placeholder — Landlock fds don't have VFS nodes
     drop(ft);
 
     // Store the ruleset in the landlock_fds map keyed by fd number
-    proc.landlock_fds.lock().insert(fd_num, ruleset);
-    proc.landlock.lock().active = true;
+    proc.security.lock().landlock_fds.insert(fd_num, ruleset);
+    proc.security.lock().landlock.active = true;
 
     crate::serial_write("[LANDLOCK] Created ruleset fd=");
     crate::serial_write(&format!("{} handled=0x{:x}\n", fd_num, handled_access_fs));
@@ -263,13 +263,13 @@ pub fn sys_landlock_add_rule(
         };
 
         // Look up the fd in dir_fds (directory fds store their path)
-        let dir_fds = proc.dir_fds.lock();
+        let dir_fds = proc.files.lock().dir_fds.clone();
         match dir_fds.get(&(parent_fd as usize)) {
             Some(p) => p.clone(),
             None => {
                 // Fallback: check fd_table for a File descriptor with a node
                 drop(dir_fds);
-                let ft = proc.fd_table.lock();
+                let ft = proc.files.lock().fd_table.clone();
                 if (parent_fd as usize) < ft.len() {
                     if let Some(crate::task::process::FileDescriptor::File { ref node, .. }) = ft[parent_fd as usize] {
                         // Try to get path from VfsNode name; fall back to "/"
@@ -298,7 +298,7 @@ pub fn sys_landlock_add_rule(
         Some(ref p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
-    let mut ll_fds = proc.landlock_fds.lock();
+    let mut _lfd_guard = proc.security.lock(); let ll_fds = &mut _lfd_guard.landlock_fds;
     let ruleset = match ll_fds.get_mut(&(ruleset_fd as usize)) {
         Some(r) => r,
         None => return errno::Errno::EBADF as u64,
@@ -328,7 +328,7 @@ pub fn sys_landlock_restrict_self(ruleset_fd: u64, flags: u32) -> u64 {
 
     // Lock the ruleset from landlock_fds and clone into LandlockState for enforcement
     let ruleset_clone = {
-        let mut ll_fds = proc.landlock_fds.lock();
+        let mut _lfd_guard = proc.security.lock(); let ll_fds = &mut _lfd_guard.landlock_fds;
         let ruleset = match ll_fds.get_mut(&(ruleset_fd as usize)) {
             Some(r) => r,
             None => return errno::Errno::EBADF as u64,
@@ -341,7 +341,7 @@ pub fn sys_landlock_restrict_self(ruleset_fd: u64, flags: u32) -> u64 {
     };
 
     // Push into LandlockState for enforcement by check_fs_access
-    let mut ll = proc.landlock.lock();
+    let mut _lck_guard = proc.security.lock(); let ll = &mut _lck_guard.landlock;
     let rule_count = ruleset_clone.rules.len();
     ll.rulesets.push(ruleset_clone);
     ll.active = true;
@@ -360,7 +360,7 @@ pub fn check_fs_access(path: &str, access: u64) -> bool {
         None => return true,
     };
 
-    let ll = proc.landlock.lock();
+    let _lck_guard = proc.security.lock(); let ll = &_lck_guard.landlock;
     ll.check_access(path, access)
 }
 

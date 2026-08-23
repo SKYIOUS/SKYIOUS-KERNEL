@@ -416,7 +416,7 @@ pub fn sys_openpty() -> u64 {
     };
     let proc_lock = CURRENT_PROCESS.lock();
     if let Some(ref proc) = *proc_lock {
-        let mut ft = proc.fd_table.lock();
+        let mut ft = proc.files.lock().fd_table.clone();
         let m = ft.iter().position(|f| f.is_none()).unwrap_or(ft.len());
         if m >= 256 { return errno::Errno::ENFILE as u64; }
         if m == ft.len() { ft.push(None); }

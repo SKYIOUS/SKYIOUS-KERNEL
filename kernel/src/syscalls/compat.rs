@@ -28,7 +28,7 @@ pub fn sys_readv(fd: u64, iov_ptr: *const u8, iovcnt: i64) -> u64 {
     };
     drop(proc_lock);
 
-    let fd_table = proc.fd_table.lock();
+    let fd_table = proc.files.lock().fd_table.clone();
     if fd as usize >= fd_table.len() {
         return errno::Errno::EBADF as u64;
     }
@@ -104,7 +104,7 @@ pub fn sys_writev(fd: u64, iov_ptr: *const u8, iovcnt: i64) -> u64 {
     };
     drop(proc_lock);
 
-    let fd_table = proc.fd_table.lock();
+    let fd_table = proc.files.lock().fd_table.clone();
     if fd as usize >= fd_table.len() {
         return errno::Errno::EBADF as u64;
     }
@@ -202,7 +202,7 @@ pub fn sys_pipe2(fds_ptr: *mut u32, flags: i32) -> u64 {
 
     // Apply flags (O_CLOEXEC)
     if (flags & 0x80000) != 0 {
-        let mut fd_flags = proc.fd_flags.lock();
+        let mut fd_flags = proc.files.lock().fd_flags.clone();
         if fd_flags.len() <= r_fd as usize { fd_flags.resize(r_fd as usize + 1, 0); }
         if fd_flags.len() <= w_fd as usize { fd_flags.resize(w_fd as usize + 1, 0); }
         fd_flags[r_fd as usize] |= 0x80000;
@@ -240,7 +240,7 @@ pub fn sys_dup3(old_fd: u64, new_fd: u64, flags: i32) -> u64 {
 
     // First, close new_fd if it's open (like dup2)
     {
-        let fd_table = proc.fd_table.lock();
+        let fd_table = proc.files.lock().fd_table.clone();
         if old_fd as usize >= fd_table.len() || fd_table[old_fd as usize].is_none() {
             return errno::Errno::EBADF as u64;
         }
@@ -254,7 +254,7 @@ pub fn sys_dup3(old_fd: u64, new_fd: u64, flags: i32) -> u64 {
 
     // Apply flags
     if (flags & 0x80000) != 0 {
-        let mut fd_flags = proc.fd_flags.lock();
+        let mut fd_flags = proc.files.lock().fd_flags.clone();
         if fd_flags.len() <= new_fd as usize {
             fd_flags.resize(new_fd as usize + 1, 0);
         }
@@ -275,7 +275,7 @@ pub fn sys_pread64(fd: u64, buf_ptr: *mut u8, count: usize, offset: u64) -> u64 
     };
     drop(proc_lock);
 
-    let fd_table = proc.fd_table.lock();
+    let fd_table = proc.files.lock().fd_table.clone();
     if fd as usize >= fd_table.len() {
         return errno::Errno::EBADF as u64;
     }
@@ -320,7 +320,7 @@ pub fn sys_pwrite64(fd: u64, buf_ptr: *const u8, count: usize, offset: u64) -> u
     };
     drop(proc_lock);
 
-    let fd_table = proc.fd_table.lock();
+    let fd_table = proc.files.lock().fd_table.clone();
     if fd as usize >= fd_table.len() {
         return errno::Errno::EBADF as u64;
     }
