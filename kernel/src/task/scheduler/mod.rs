@@ -38,6 +38,22 @@ use crate::task::thread::{Thread, ThreadId};
 use alloc::boxed::Box;
 use core::sync::atomic::AtomicBool;
 
+// ─── Scheduling policy constants ────────────────────────────────
+pub const SCHED_NORMAL: u32 = 0;
+pub const SCHED_FIFO: u32 = 1;
+pub const SCHED_RR: u32 = 2;
+pub const SCHED_BATCH: u32 = 3;
+
+/// Returns true if the scheduling class is real-time (FIFO or RR).
+pub fn is_realtime(class: u32) -> bool {
+    class == SCHED_FIFO || class == SCHED_RR
+}
+
+/// Returns true if `candidate_class` should preempt `current_class`.
+pub fn should_preempt(current_class: u32, candidate_class: u32) -> bool {
+    is_realtime(candidate_class) && !is_realtime(current_class)
+}
+
 // ─── Statics ────────────────────────────────────────────────────
 
 /// When set, no CPU runs the scheduler (checked by `schedule()`/`try_schedule()`).
@@ -56,6 +72,10 @@ lazy_static::lazy_static! {
 }
 
 pub static GLOBAL: GlobalScheduler = GlobalScheduler::new();
+
+// ─── Per-CPU Run Queues (additive SMP infrastructure) ─────────
+
+
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -227,36 +247,146 @@ impl PerCpuScheduler {
     pub fn pick_next(&mut self) -> Option<Box<Thread>> {
         self.flush_ready_queues();
 
+        let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
+
         // 1. Global pending queue first
         if let Some(t) = GLOBAL.pending_queue.try_lock().and_then(|mut q| q.pop_front()) {
             return Some(t);
         }
 
-        // 2. Stride heap
-        #[cfg(feature = "verification")]
-        let snapshot_passes: alloc::vec::Vec<u64> = self.stride_heap.iter().map(|p| (&*p.0).pass).collect();
-        if let Some(PassOrd(t)) = self.stride_heap.pop() {
-            #[cfg(feature = "verification")]
-            Self::check_pick_invariants("scheduler::pick_next", t.pass, &snapshot_passes);
-            return Some(t);
+        // 2. RT threads have strict priority over SCHED_OTHER.
+        //    Search all priority levels for RT threads (FIFO=1, RR=2).
+        //    RT threads with higher rt_priority (1-99) run first.
+        let mut best_level: Option<usize> = None;
+        let mut best_idx: Option<usize> = None;
+        let mut best_policy: u32 = 0;
+        let mut best_rt_prio: u32 = 0;
+        for level in (0..8).rev() {
+            for idx in 0..self.ready_queues[level].len() {
+                let t = &self.ready_queues[level][idx];
+                if t.policy == 0 { continue; } // Not RT
+                if t.affinity_mask & (1u64 << current_cpu) == 0 { continue; }
+                let dominates = match best_level {
+                    None => true,
+                    Some(_) => {
+                        if t.policy == 1 && best_policy != 1 {
+                            true // FIFO dominates RR
+                        } else if t.policy == best_policy {
+                            t.rt_priority > best_rt_prio
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if dominates {
+                    best_level = Some(level);
+                    best_idx = Some(idx);
+                    best_policy = t.policy;
+                    best_rt_prio = t.rt_priority;
+                }
+            }
+        }
+        if let (Some(level), Some(idx)) = (best_level, best_idx) {
+            if let Some(thread) = self.ready_queues[level].remove(idx) {
+                return Some(thread);
+            }
         }
 
-        // 3. Work stealing
-        let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
+        // 3. SCHED_OTHER stride heap — respect CPU affinity
+        #[cfg(feature = "verification")]
+        let snapshot_passes: alloc::vec::Vec<u64> = self.stride_heap.iter().map(|p| (&*p.0).pass).collect();
+        while let Some(PassOrd(t)) = self.stride_heap.pop() {
+            if t.affinity_mask & (1u64 << current_cpu) != 0 {
+                #[cfg(feature = "verification")]
+                Self::check_pick_invariants("scheduler::pick_next", t.pass, &snapshot_passes);
+                return Some(t);
+            }
+            // Thread not on this CPU — save for later reinsertion
+            self.stride_heap.push(PassOrd(t));
+            break;
+        }
+
+        // 4. Work stealing — steal from other CPUs' RT queues first, then SCHED_OTHER
         for i in 0..MAX_CPUS {
             if i == current_cpu { continue; }
             if let Some(mut other) = PER_CPU[i].try_lock() {
                 other.flush_ready_queues();
+                // Steal RT threads first — find best candidate by index
+                let mut steal_level: Option<usize> = None;
+                let mut steal_idx: Option<usize> = None;
+                let mut steal_prio: u32 = 0;
+                for level in (0..8).rev() {
+                    for idx in 0..other.ready_queues[level].len() {
+                        let t = &other.ready_queues[level][idx];
+                        if t.policy == 0 { continue; }
+                        if t.affinity_mask & (1u64 << current_cpu) == 0 { continue; }
+                        if steal_level.is_none() || t.rt_priority > steal_prio {
+                            steal_level = Some(level);
+                            steal_idx = Some(idx);
+                            steal_prio = t.rt_priority;
+                        }
+                    }
+                }
+                if let (Some(level), Some(idx)) = (steal_level, steal_idx) {
+                    if let Some(thread) = other.ready_queues[level].remove(idx) {
+                        return Some(thread);
+                    }
+                }
+                // Fall back to stride heap
                 #[cfg(feature = "verification")]
                 let stolen_passes: alloc::vec::Vec<u64> = other.stride_heap.iter().map(|p| (&*p.0).pass).collect();
                 if let Some(PassOrd(t)) = other.stride_heap.pop() {
-                    #[cfg(feature = "verification")]
-                    Self::check_pick_invariants("scheduler::pick_next::work_steal", t.pass, &stolen_passes);
-                    return Some(t);
+                    if t.affinity_mask & (1u64 << current_cpu) != 0 {
+                        #[cfg(feature = "verification")]
+                        Self::check_pick_invariants("scheduler::pick_next::work_steal", t.pass, &stolen_passes);
+                        return Some(t);
+                    }
                 }
             }
         }
         None
+    }
+
+    /// Periodic load balancing: redistribute threads from overloaded CPUs to
+    /// underloaded ones. Called from the timer tick every 10 ticks.
+    pub fn load_balance() {
+        let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
+        // Count runnable threads per CPU
+        let mut counts = [0usize; MAX_CPUS];
+        for i in 0..MAX_CPUS {
+            if let Some(sched) = PER_CPU[i].try_lock() {
+                counts[i] = sched.stride_heap.len();
+            }
+        }
+        let total: usize = counts.iter().sum();
+        if total < 2 { return; }
+        let avg = total / MAX_CPUS;
+        // If this CPU has more than avg+2 threads, try to push to a CPU with fewer
+        if let Some(mut sched) = PER_CPU[current_cpu].try_lock() {
+            if sched.stride_heap.len() > avg + 2 {
+                for target in 0..MAX_CPUS {
+                    if target == current_cpu { continue; }
+                    if counts[target] >= avg { continue; }
+                    if let Some(mut target_sched) = PER_CPU[target].try_lock() {
+                        // Steal one non-RT thread from this CPU's stride heap.
+                        // RT threads (FIFO/RR) stay on their CPU — migrating them
+                        // can break latency guarantees.
+                        if let Some(PassOrd(t)) = sched.stride_heap.pop() {
+                            if is_realtime(t.sched_class) {
+                                // Put RT thread back — don't migrate it.
+                                sched.stride_heap.push(PassOrd(t));
+                            } else if t.affinity_mask & (1u64 << target) != 0 {
+                                target_sched.stride_heap.push(PassOrd(t));
+                                target_sched.mark_ready_queues_dirty();
+                            } else {
+                                sched.stride_heap.push(PassOrd(t));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -335,7 +465,19 @@ pub(crate) fn route_outgoing(s: &mut PerCpuScheduler, mut switching: Box<Thread>
     } else {
         // Exited: free the dying thread's stack and address space.
         if let Some(ref proc) = switching.process {
-            crate::memory::paging::AddressSpace::destroy(&proc.address_space);
+            // Close all file descriptors (sockets, eventfd, signalfd, etc.)
+            crate::syscalls::process_lifecycle::process_close_all_fds(proc);
+            // Detach shared memory segments
+            crate::syscalls::shm::shm_detach_all(proc);
+            // Clean up POSIX message queue descriptors
+            crate::syscalls::mqueue::mq_close_all(proc.id);
+            // Destroy isolate if present (it calls address_space.destroy internally)
+            if let Some(ref isolate) = proc.isolate {
+                isolate.destroy();
+            } else {
+                // No isolate — destroy address space directly
+                crate::memory::paging::AddressSpace::destroy(&proc.address_space);
+            }
         }
         crate::memory::stack::free_stack(&switching.stack);
     }

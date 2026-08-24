@@ -393,6 +393,45 @@ pub fn sys_shmdt(shmaddr: *const u8) -> u64 {
     0
 }
 
+/// Detach all shared memory segments for a dying process.
+/// Called from the scheduler exit path. Walks VMAs, decrements nattch,
+/// and frees pages for deleted segments with zero attachments.
+pub fn shm_detach_all(proc: &crate::task::process::Process) {
+    // Collect shm IDs under the memory lock, then release it before
+    // acquiring SHM_SEGMENTS.  This matches the lock order used by
+    // sys_shmat: SHM_SEGMENTS → memory.VMAs.
+    let shm_ids: Vec<u32> = {
+        let vmas = proc.memory.lock();
+        vmas.vmas.iter().filter_map(|v| v.shm_id).collect()
+    };
+    if shm_ids.is_empty() { return; }
+
+    // Segments to physically free, collected while holding SHM_SEGMENTS.
+    let mut to_free: Vec<(u32, i32, Vec<u64>)> = Vec::new();
+    {
+        let mut segments = SHM_SEGMENTS.lock();
+        for shm_id in &shm_ids {
+            if let Some(seg) = segments.get_mut(shm_id) {
+                seg.nattch = seg.nattch.saturating_sub(1);
+                seg.dtime = now_ticks();
+                seg.lpid = proc.id;
+                if seg.nattch == 0 && seg.deleted {
+                    to_free.push((*shm_id, seg.key, core::mem::take(&mut seg.pages)));
+                }
+            }
+        }
+        for &(shm_id, _, _) in &to_free {
+            segments.remove(&shm_id);
+        }
+    }
+    for &(_, key, _) in &to_free {
+        SHM_KEY_MAP.lock().remove(&key);
+    }
+    for (_, _, pages) in to_free {
+        free_segment_pages(&pages);
+    }
+}
+
 // ─── sys_shmctl(31) ─────────────────────────────────────────────────
 
 pub fn sys_shmctl(shmid: i32, cmd: i32, buf: *mut u8) -> u64 {

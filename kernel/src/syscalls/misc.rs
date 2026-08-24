@@ -15,6 +15,8 @@ use x86_64::VirtAddr;
 use x86_64::structures::paging::{Page, Size4KiB, Mapper, FrameAllocator, PageTableFlags};
 use crate::gdt;use crate::interrupts::IrqFmtBuf;
 
+use crate::syscalls::user_access;
+
 const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
 const POLLNVAL: i16 = 0x020;
@@ -42,6 +44,77 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
         &ts as *const _ as *const u8, core::mem::size_of::<Timespec>(),
     )) }.is_err() {
         return errno::Errno::EFAULT as u64;
+    }
+    0
+}
+
+pub fn sys_clock_getres(clock_id: u64, res: *mut Timespec) -> u64 {
+    // All clocks report 1ms resolution (100Hz tick)
+    let ts = Timespec { tv_sec: 0, tv_nsec: 1_000_000 };
+    if !res.is_null() {
+        if unsafe { user_access::copy_to_user(res as *mut u8, core::slice::from_raw_parts(
+            &ts as *const _ as *const u8, core::mem::size_of::<Timespec>(),
+        )) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+    0
+}
+
+pub fn sys_clock_nanosleep(clock_id: u64, flags: u64, req_ptr: *const Timespec, rem_ptr: *mut Timespec) -> u64 {
+    const TIMER_ABSTIME: u64 = 1;
+    const CLOCK_MONOTONIC: u64 = 1;
+
+    if req_ptr.is_null() { return errno::Errno::EINVAL as u64; }
+
+    let mut req = Timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { user_access::copy_from_user(
+        core::slice::from_raw_parts_mut(&mut req as *mut _ as *mut u8, core::mem::size_of::<Timespec>()),
+        req_ptr as *const u8,
+    ) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+
+    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1_000_000_000 {
+        return errno::Errno::EINVAL as u64;
+    }
+
+    if crate::task::process::check_signal_interrupt() {
+        if !rem_ptr.is_null() {
+            let _ = unsafe { user_access::copy_to_user(rem_ptr as *mut u8, core::slice::from_raw_parts(
+                &req as *const _ as *const u8, core::mem::size_of::<Timespec>(),
+            )) };
+        }
+        return errno::Errno::EINTR as u64;
+    }
+
+    let req_ns = (req.tv_sec as u64) * 1_000_000_000 + (req.tv_nsec as u64);
+    let ticks_per_ns: u64 = 10_000_000; // 100Hz
+    let sleep_ticks = core::cmp::max(1, req_ns / ticks_per_ns);
+
+    let target_tick = if (flags & TIMER_ABSTIME) != 0 && clock_id == CLOCK_MONOTONIC {
+        // Absolute: ticks already represent monotonic time
+        sleep_ticks
+    } else {
+        crate::interrupts::get_ticks() + sleep_ticks
+    };
+
+    {
+        let mut sched = crate::task::scheduler::this_cpu_sched().lock();
+        if let Some(current) = sched.current_thread.as_mut() {
+            current.status = crate::task::thread::ThreadStatus::Blocked;
+            current.sleep_until = Some(target_tick);
+        }
+    }
+
+    crate::task::scheduler::schedule();
+
+    // Return remaining time in rem if requested
+    if !rem_ptr.is_null() {
+        let zero = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = unsafe { user_access::copy_to_user(rem_ptr as *mut u8, core::slice::from_raw_parts(
+            &zero as *const _ as *const u8, core::mem::size_of::<Timespec>(),
+        )) };
     }
     0
 }
@@ -162,6 +235,9 @@ pub fn sys_select(nfds: u64, readfds: *mut u64, writefds: *mut u64, exceptfds: *
                         fds.get(handle).map(|d| !d.lock().pending.is_empty()).unwrap_or(false)
                     }
                     FileDescriptor::EventFd(data) => data.lock().counter > 0,
+                    FileDescriptor::TimerFd(data) => data.lock().expirations > 0,
+                    FileDescriptor::IoUringFd(data) => data.lock().peek_cqes() > 0,
+                    FileDescriptor::InotifyFd { instance_key, .. } => crate::syscalls::inotify::inotify_has_events(*instance_key),
                 },
                 None => false,
             };
@@ -298,6 +374,17 @@ pub fn sys_poll(fds: *const u8, nfds: usize, timeout_ms: i32) -> u64 {
                     if *events & POLLIN != 0 && counter > 0 { *revents |= POLLIN; }
                     if *events & POLLOUT != 0 { *revents |= POLLOUT; }
                 }
+                Some(FileDescriptor::TimerFd(data)) => {
+                    let expirations = data.lock().expirations;
+                    if *events & POLLIN != 0 && expirations > 0 { *revents |= POLLIN; }
+                }
+                Some(FileDescriptor::IoUringFd(data)) => {
+                    let pending = data.lock().peek_cqes();
+                    if *events & POLLIN != 0 && pending > 0 { *revents |= POLLIN; }
+                }
+                Some(FileDescriptor::InotifyFd { instance_key, .. }) => {
+                    if *events & POLLIN != 0 && crate::syscalls::inotify::inotify_has_events(*instance_key) { *revents |= POLLIN; }
+                }
                 None => { *revents |= POLLNVAL; }
             }
             if *revents != 0 { ready += 1; }
@@ -364,30 +451,6 @@ pub fn sys_reboot(magic: u64, cmd: u64) -> u64 {
         }
         _ => errno::Errno::EINVAL as u64,
     }
-}
-
-pub fn sys_eventfd2(initval: u32, flags: i32) -> u64 {
-    let process = match get_current_process() {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
-    };
-
-    let data = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(EventFdData {
-        counter: initval as u64,
-        semaphore: (flags & EFD_SEMAPHORE) != 0,
-        nonblock: (flags & EFD_NONBLOCK) != 0,
-    }));
-
-    let fd_obj = FileDescriptor::EventFd(data);
-    let mut fd_table = process.files.lock().fd_table.clone();
-    for (i, slot) in fd_table.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(fd_obj);
-            return i as u64;
-        }
-    }
-    fd_table.push(Some(fd_obj));
-    (fd_table.len() - 1) as u64
 }
 
 pub fn sys_hash(hash_type: u64, password_ptr: *const u8, password_len: u64, salt_out_ptr: *mut u8, _iterations: u64) -> u64 {
@@ -467,4 +530,50 @@ pub fn sys_objmgr_audit(pid: u64, buf: *mut u8, len: usize) -> u64 {
         }
     }
     count as u64
+}
+
+// ── getrandom(2) ─────────────────────────────────────────────────
+
+const GRND_NONBLOCK: u64 = 1;
+
+/// sys_getrandom(buf, count, flags)
+/// Fill `buf` with `count` random bytes. The entropy pool is always
+/// initialized (seeded from RDTSC + RDRAND at boot), so GRND_NONBLOCK
+/// never returns EAGAIN in practice.
+pub fn sys_getrandom(buf: *mut u8, count: usize, flags: u64) -> u64 {
+    if buf.is_null() {
+        return errno::Errno::EINVAL as u64;
+    }
+    // bits 0-1 are the only valid flags
+    if flags & !3 != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    let mut written = 0usize;
+    let mut chunk = [0u8; 64];
+    while written < count {
+        let remaining = count - written;
+        let to_fill = remaining.min(64);
+        let mut i = 0;
+        while i + 8 <= to_fill {
+            let val = crate::crypto::GLOBAL_ENTROPY.get_u64();
+            chunk[i..i + 8].copy_from_slice(&val.to_le_bytes());
+            i += 8;
+        }
+        if i < to_fill {
+            let val = crate::crypto::GLOBAL_ENTROPY.get_u64();
+            let bytes = val.to_le_bytes();
+            for j in i..to_fill {
+                chunk[j] = bytes[j - i];
+            }
+        }
+        let dest = unsafe { buf.add(written) };
+        if unsafe { crate::syscalls::user_access::copy_to_user(dest, &chunk[..to_fill]) }.is_err() {
+            if written == 0 {
+                return errno::Errno::EFAULT as u64;
+            }
+            break;
+        }
+        written += to_fill;
+    }
+    written as u64
 }

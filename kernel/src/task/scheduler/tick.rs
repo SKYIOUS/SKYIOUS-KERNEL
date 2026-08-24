@@ -7,14 +7,56 @@
 
 use super::{this_cpu_sched, GLOBAL};
 
-/// Process timer tick: wake sleeping threads, tick POSIX timers, ITIMER_REAL, accumulate CPU time.
+/// Process timer tick: wake sleeping threads, tick POSIX timers, ITIMER_REAL,
+/// accumulate CPU time, expire RR time slices, trigger periodic load balancing,
+/// and check memory pressure.
 pub fn tick(current_ticks: u64) {
     crate::syscalls::posix_timers::check_posix_timers();
+    crate::syscalls::timerfd::check_timerfds();
 
-    let mut sched = match this_cpu_sched().try_lock() {
-        Some(s) => s,
-        None => return,
-    };
+    // Proactive OOM check: every 100 ticks (~1 second at 100Hz).
+    // Detects memory pressure before allocations fail.
+    if current_ticks % 100 == 0 {
+        crate::task::oom::check_memory_pressure();
+    }
+
+    // Phase 1: Scheduler tick — wake sleeping threads, manage RR quanta,
+    // accumulate CPU time. Lock is released at end of block.
+    {
+        let mut sched = match this_cpu_sched().try_lock() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // RR time slice management: decrement quantum for the running RR thread.
+        // When it expires, preemption is triggered by try_schedule().
+        if let Some(ref mut cur) = sched.current_thread {
+            if cur.policy == 2 /* SCHED_RR */ {
+                if cur.rr_time_slice > 0 {
+                    cur.rr_time_slice -= 1;
+                    if cur.rr_time_slice == 0 {
+                        // Quantum expired — reset for next run and force preemption
+                        cur.rr_time_slice = 4; // 4 ticks = 40ms at 100 Hz
+                        crate::task::scheduler::try_schedule();
+                        return;
+                    }
+                }
+            }
+        }
+
+        run_tick_inner(&mut sched, current_ticks);
+    } // sched lock released here
+
+    // Phase 2: Load balancing (every 10 ticks, no scheduler lock held)
+    if current_ticks % 10 == 0 {
+        super::PerCpuScheduler::load_balance();
+    }
+
+    // Phase 3: ITIMER_REAL processing (no scheduler lock held)
+    tick_itimers();
+}
+
+fn run_tick_inner(sched: &mut crate::sync::IrqSafeMutexGuard<'_, super::PerCpuScheduler>, current_ticks: u64) {
 
     if let Some(mut sleep) = GLOBAL.sleep_queue.try_lock() {
         // Rotate in place instead of draining into a new VecDeque: queue
@@ -53,8 +95,11 @@ pub fn tick(current_ticks: u64) {
             proc.utime.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
-    drop(sched);
+}
 
+/// Process ITIMER_REAL for every process. Runs after the scheduler lock
+/// is released to avoid holding two locks simultaneously.
+fn tick_itimers() {
     // Decrement ITIMER_REAL for every process. Fixed stack array instead of a
     // Vec: IRQ context must not allocate.
     let mut itimer_pids: [u64; 64] = [0; 64];
@@ -89,6 +134,10 @@ pub fn tick(current_ticks: u64) {
                 if let Some(mut sig) = proc.signals.try_lock() {
                     sig.raise(crate::syscalls::signal::Signal::_SIGALRM);
                 }
+                // Route SIGALRM to signalfd instances
+                crate::task::process::route_signal_to_signalfd(
+                    proc.id, 14, crate::task::process::SI_TIMER, 0, 0, 0,
+                );
                 let wakeable = GLOBAL.block_queue.try_lock().is_some()
                     && GLOBAL.futex_queue.try_lock().is_some()
                     && this_cpu_sched().try_lock().is_some();

@@ -123,8 +123,14 @@ fn state_create_address_space(ctx: &mut BootContext, session: &mut BootSession) 
     let elf_data = ctx.elf_data.as_ref().ok_or(BootError::InitNotFound)?;
     let address_space = crate::memory::paging::AddressSpace::new(&mut frame_allocator)
         .ok_or(BootError::AddressSpaceCreationFailed)?;
-    let process = Process::load_elf(elf_data, address_space)
+    let mut process = Process::load_elf(elf_data, address_space)
         .map_err(|_| BootError::InvalidElf)?;
+    // Force PID 1 — Process::load_elf assigns next_id() (100+), but
+    // the kernel's first userspace process must be PID 1 (init).
+    process.id = 1;
+    process.tgid = 1;
+    process.identity.lock().pgid = 1;
+    process.identity.lock().session = 1;
     session.entry_point = process.entry_point;
     *BOOT_PROCESS.lock() = Some(Arc::new(process));
     BootLogger::info(ctx, &alloc::format!("PID 1 ELF loaded, entry=0x{:x}", session.entry_point));
@@ -141,7 +147,14 @@ fn state_map_stack(ctx: &mut BootContext, session: &mut BootSession) -> Result<B
     // CreateAddressSpace and shares the kernel higher-half mapping.
     unsafe { process.address_space.activate(); }
     let argv = alloc::vec![alloc::string::String::from("/bin/init")];
-    let user_rsp = process.setup_user_stack(&argv)
+    // Standard init environment — libc/musl/glibc all need these.
+    let envp = alloc::vec![
+        alloc::string::String::from("HOME=/"),
+        alloc::string::String::from("PATH=/bin:/sbin:/usr/bin:/usr/sbin"),
+        alloc::string::String::from("TERM=linux"),
+    ];
+    let entry = process.entry_point;
+    let user_rsp = process.setup_user_stack(&argv, &envp, entry, &[])
         .map_err(|_| BootError::StackAllocationFailed)?;
     session.user_rsp = user_rsp;
     BootLogger::info(ctx, &alloc::format!("User stack at 0x{:x}", user_rsp));
