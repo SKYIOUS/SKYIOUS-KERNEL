@@ -85,6 +85,7 @@ class FAT32Image:
         self.fat = [0] * (self.total_clusters + 2)
         self.fat[0] = 0x0FFFFFF8  # media type
         self.fat[1] = 0x0FFFFFFF  # end-of-chain
+        self.fat[ROOT_DIR_CLUSTER] = 0x0FFFFFFF  # root directory end-of-chain
 
         # ROOT_DIR_CLUSTER (2) is reserved for the root directory
         self.next_free_cluster = ROOT_DIR_CLUSTER + 1
@@ -361,62 +362,65 @@ class GPTDiskImage:
 
         entries = bytearray(128 * GPT_ENTRY_SIZE)
 
-        def make_entry(type_guid, name_str, start, end):
+        def make_entry(type_guid, name_str, start, end, attrs=0):
             e = bytearray(GPT_ENTRY_SIZE)
             e[0:16] = efi_guid_str_to_bytes(type_guid)
             e[16:32] = uuid.uuid4().bytes
             struct.pack_into('<Q', e, 32, start)
             struct.pack_into('<Q', e, 40, end)
-            struct.pack_into('<Q', e, 48, 0)
+            struct.pack_into('<Q', e, 48, attrs)
             name_utf16 = name_str.encode('utf-16-le')[:72]
             e[56:56 + len(name_utf16)] = name_utf16
             return e
 
+        # ESP: attribute bit 0 = required for boot (EFI_SPEC_PART_ATTR_EFI_SYSTEM_PARTITION)
+        ESP_ATTR = 0x1
         entries[0:GPT_ENTRY_SIZE] = make_entry(BIOS_BOOT_PARTITION_GUID, 'BIOS Boot',
                                                 self.bios_start_lba, self.bios_end_lba)
         entries[GPT_ENTRY_SIZE:2 * GPT_ENTRY_SIZE] = make_entry(EFI_SYSTEM_PARTITION_GUID, 'EFI System',
-                                                                 self.esp_start_lba, self.esp_end_lba)
+                                                                 self.esp_start_lba, self.esp_end_lba, ESP_ATTR)
 
+        # Write entries to primary location (LBA 2)
+        self.disk[2 * SECTOR_SIZE:(2 + num_entry_sectors) * SECTOR_SIZE] = entries
+        # Write entries to backup location (end of disk)
         self.disk[entries_lba * SECTOR_SIZE:(entries_lba + num_entry_sectors) * SECTOR_SIZE] = entries
 
-        # Primary GPT header
-        header = bytearray(SECTOR_SIZE)
-        header[0:8] = b'EFI PART'
-        struct.pack_into('<I', header, 8, 0x00010000)
-        struct.pack_into('<I', header, 12, 92)
-        struct.pack_into('<Q', header, 24, 1)
-        struct.pack_into('<Q', header, 32, header_lba)
-        struct.pack_into('<Q', header, 40, entries_lba)
-        struct.pack_into('<Q', header, 48, entries_lba - 1)
-        header[56:72] = efi_guid_str_to_bytes(EFI_SYSTEM_PARTITION_GUID)
-        struct.pack_into('<Q', header, 72, entries_lba)
-        struct.pack_into('<I', header, 80, 128)
-        struct.pack_into('<I', header, 84, GPT_ENTRY_SIZE)
+        # ── Primary GPT header (LBA 1) ──
+        primary_header = bytearray(SECTOR_SIZE)
+        primary_header[0:8] = b'EFI PART'
+        struct.pack_into('<I', primary_header, 8, 0x00010000)
+        struct.pack_into('<I', primary_header, 12, 92)
+        # GPT header layout:
+        #  24: my_lba,  32: alt_lba,  40: first_usable,  48: last_usable
+        #  56-71: disk GUID,  72: entries_lba,  80: num_entries,  84: entry_size
+        #  88: entries CRC32
+        struct.pack_into('<Q', primary_header, 24, 1)           # my_lba = 1
+        struct.pack_into('<Q', primary_header, 32, header_lba)  # alt_lba = backup
+        struct.pack_into('<Q', primary_header, 40, 34)          # first_usable_lba
+        struct.pack_into('<Q', primary_header, 48, entries_lba - 1) # last_usable_lba
+        primary_header[56:72] = efi_guid_str_to_bytes(EFI_SYSTEM_PARTITION_GUID)
+        struct.pack_into('<Q', primary_header, 72, 2)           # partition entries LBA
+        struct.pack_into('<I', primary_header, 80, 128)         # num entries
+        struct.pack_into('<I', primary_header, 84, GPT_ENTRY_SIZE) # entry size
+        struct.pack_into('<I', primary_header, 16, 0)
+        struct.pack_into('<I', primary_header, 88, 0)
+        struct.pack_into('<I', primary_header, 16, gpt_crc32(bytes(primary_header[:92])))
+        struct.pack_into('<I', primary_header, 88, gpt_crc32(bytes(entries)))
+        self.disk[1 * SECTOR_SIZE:2 * SECTOR_SIZE] = primary_header
 
-        # CRC of header (with field zeroed)
-        struct.pack_into('<I', header, 16, 0)
-        struct.pack_into('<I', header, 88, 0)
-        struct.pack_into('<I', header, 16, gpt_crc32(bytes(header[:92])))
-        struct.pack_into('<I', header, 88, gpt_crc32(bytes(entries)))
-
-        self.disk[header_lba * SECTOR_SIZE:(header_lba + 1) * SECTOR_SIZE] = header
-
-        # Backup: entries at sector 2, header at sector 1
-        backup_entries_lba = 2
-        self.disk[backup_entries_lba * SECTOR_SIZE:(backup_entries_lba + num_entry_sectors) * SECTOR_SIZE] = entries
-
-        backup_header = bytearray(header)
-        struct.pack_into('<Q', backup_header, 24, header_lba)
-        struct.pack_into('<Q', backup_header, 32, 1)
-        struct.pack_into('<Q', backup_header, 40, 34)
-        struct.pack_into('<Q', backup_header, 48, entries_lba - 1)
-        struct.pack_into('<Q', backup_header, 72, backup_entries_lba)
+        # ── Backup GPT header (last LBA) ──
+        backup_header = bytearray(primary_header)
+        struct.pack_into('<Q', backup_header, 24, header_lba)  # my_lba = backup
+        struct.pack_into('<Q', backup_header, 32, 1)           # alt_lba = primary
+        struct.pack_into('<Q', backup_header, 40, 34)          # first_usable_lba
+        struct.pack_into('<Q', backup_header, 48, entries_lba - 1) # last_usable_lba
+        backup_header[56:72] = efi_guid_str_to_bytes(EFI_SYSTEM_PARTITION_GUID)
+        struct.pack_into('<Q', backup_header, 72, entries_lba)  # entries at end
         struct.pack_into('<I', backup_header, 16, 0)
         struct.pack_into('<I', backup_header, 88, 0)
         struct.pack_into('<I', backup_header, 16, gpt_crc32(bytes(backup_header[:92])))
         struct.pack_into('<I', backup_header, 88, gpt_crc32(bytes(entries)))
-
-        self.disk[1 * SECTOR_SIZE:2 * SECTOR_SIZE] = backup_header
+        self.disk[header_lba * SECTOR_SIZE:(header_lba + 1) * SECTOR_SIZE] = backup_header
 
     def build_fat32_esp(self, files: dict) -> bytes:
         fat = FAT32Image(self.esp_size // SECTOR_SIZE)
