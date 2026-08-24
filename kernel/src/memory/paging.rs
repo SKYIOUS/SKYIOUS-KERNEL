@@ -10,10 +10,49 @@ use x86_64::{
 };
 use crate::memory;
 
+/// Isolation mode for a process's address space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationMode {
+    /// Normal process — full access to own virtual memory.
+    Normal,
+    /// Sandboxed — restricted to specific memory regions via seccomp/landlock.
+    Sandboxed,
+    /// Kernel-only — restricted to kernel mappings (for kthreads).
+    KernelOnly,
+}
+
+/// Statistics for Copy-on-Write operations on an address space.
+/// Uses atomics for safe access through Arc<Process>.
+#[derive(Debug)]
+pub struct CowStats {
+    /// Number of COW faults resolved.
+    pub cow_faults: core::sync::atomic::AtomicU64,
+    /// Number of pages copied due to COW.
+    pub pages_copied: core::sync::atomic::AtomicU64,
+    /// Number of in-place promotions (single reference, no copy needed).
+    pub in_place_promotions: core::sync::atomic::AtomicU64,
+}
+
+impl CowStats {
+    pub const fn new() -> Self {
+        CowStats {
+            cow_faults: core::sync::atomic::AtomicU64::new(0),
+            pages_copied: core::sync::atomic::AtomicU64::new(0),
+            in_place_promotions: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
 /// Represents a virtual address space (a process's page table).
 pub struct AddressSpace {
     /// The physical address of the Level 4 Page Table.
     pml4_frame: PhysFrame,
+    /// Isolation mode for this address space.
+    pub isolation_mode: IsolationMode,
+    /// CoW operation statistics.
+    pub cow_stats: CowStats,
+    /// Total user-space pages mapped (for monitoring).
+    pub user_page_count: u64,
 }
 
 impl AddressSpace {
@@ -43,7 +82,12 @@ impl AddressSpace {
             new_pml4[i] = current_pml4[i].clone();
         }
 
-        Some(AddressSpace { pml4_frame })
+        Some(AddressSpace {
+            pml4_frame,
+            isolation_mode: IsolationMode::Normal,
+            cow_stats: CowStats::new(),
+            user_page_count: 0,
+        })
     }
 
     /// Activates this address space by switching CR3.
@@ -104,7 +148,12 @@ impl AddressSpace {
         #[cfg(feature = "smp")]
         crate::smp::broadcast_tlb_flush(0);
 
-        Some(AddressSpace { pml4_frame: new_pml4_frame })
+        Some(AddressSpace {
+            pml4_frame: new_pml4_frame,
+            isolation_mode: IsolationMode::Normal,
+            cow_stats: CowStats::new(),
+            user_page_count: 0,
+        })
     }
 
     fn clone_recursive(
@@ -291,6 +340,16 @@ impl AddressSpace {
             
             // Refcount management
             memory::frame_info::decrement(old_frame.start_address());
+
+            // Update CoW stats (atomically — safe through Arc)
+            let proc_id = crate::task::process::CURRENT_PROCESS.lock().as_ref().map(|p| p.id);
+            if let Some(pid) = proc_id {
+                if let Some(proc) = crate::task::process::PROCESS_TABLE.lock().get(&pid) {
+                    use core::sync::atomic::Ordering;
+                    proc.address_space.cow_stats.cow_faults.fetch_add(1, Ordering::Relaxed);
+                    proc.address_space.cow_stats.pages_copied.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         } else {
             // Only one reference remains, just make it writable
             let mut new_flags = flags;
@@ -300,6 +359,16 @@ impl AddressSpace {
             new_flags = PageTableFlags::from_bits_truncate(bits);
             
             entry.set_flags(new_flags);
+
+            // Update CoW stats (in-place promotion, atomically)
+            let proc_id = crate::task::process::CURRENT_PROCESS.lock().as_ref().map(|p| p.id);
+            if let Some(pid) = proc_id {
+                if let Some(proc) = crate::task::process::PROCESS_TABLE.lock().get(&pid) {
+                    use core::sync::atomic::Ordering;
+                    proc.address_space.cow_stats.cow_faults.fetch_add(1, Ordering::Relaxed);
+                    proc.address_space.cow_stats.in_place_promotions.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
 
         use x86_64::instructions::tlb;

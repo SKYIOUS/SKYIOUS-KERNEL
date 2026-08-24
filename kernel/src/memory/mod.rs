@@ -13,6 +13,7 @@ pub mod frame_info;
 pub mod stack;
 pub mod phys;
 pub mod swap;
+pub mod isolate;
 #[cfg(not(target_arch = "aarch64"))]
 pub mod virt;
 #[cfg(target_arch = "aarch64")]

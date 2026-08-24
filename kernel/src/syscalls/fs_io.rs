@@ -88,22 +88,115 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             if let Some(data) = sig_fds.get(&handle) {
                 let mut d = data.lock();
                 if let Some(info) = d.pending.pop_front() {
-                    let sig_info = crate::task::process::SignalFdInfo { signo: info.signo, pid: info.pid, uid: info.uid };
-                    let bytes = unsafe { core::slice::from_raw_parts(&sig_info as *const _ as *const u8, core::mem::size_of::<crate::task::process::SignalFdInfo>()) };
+                    // Write the full 128-byte signalfd_siginfo struct to userspace
+                    let bytes = unsafe { core::slice::from_raw_parts(&info as *const _ as *const u8, core::mem::size_of::<crate::task::process::SignalFdInfo>()) };
                     if unsafe { user_access::copy_to_user(buf, bytes) }.is_err() { return errno::Errno::EFAULT as u64; }
                     core::mem::size_of::<crate::task::process::SignalFdInfo>() as u64
-                } else { errno::Errno::EAGAIN as u64 }
+                } else {
+                    if d.nonblock { errno::Errno::EAGAIN as u64 } else { errno::Errno::EAGAIN as u64 }
+                }
             } else { errno::Errno::EBADF as u64 }
         },
         Some(FileDescriptor::EventFd(ref data_arc)) => {
             let d_arc = data_arc.clone();
             drop(fd_table);
-            let mut d = d_arc.lock();
-            let val = d.counter;
-            if d.semaphore { if val > 0 { d.counter -= 1; } else { return errno::Errno::EAGAIN as u64; } } else { d.counter = 0; }
-            let bytes = val.to_ne_bytes();
-            if unsafe { user_access::copy_to_user(buf, &bytes) }.is_err() { return errno::Errno::EFAULT as u64; }
-            8
+            // Loop: block until counter > 0 (or nonblock → EAGAIN)
+            loop {
+                let (key, nonblock) = {
+                    let mut d = d_arc.lock();
+                    if d.counter > 0 {
+                        let val = if d.semaphore {
+                            d.counter -= 1;
+                            1u64
+                        } else {
+                            let v = d.counter;
+                            d.counter = 0;
+                            v
+                        };
+                        drop(d);
+                        let bytes = val.to_ne_bytes();
+                        if unsafe { user_access::copy_to_user(buf, &bytes) }.is_err() {
+                            return errno::Errno::EFAULT as u64;
+                        }
+                        return 8;
+                    }
+                    let key = d.key;
+                    let nb = d.nonblock;
+                    drop(d);
+                    (key, nb)
+                };
+                if nonblock {
+                    return errno::Errno::EAGAIN as u64;
+                }
+                // Check for pending signals before blocking
+                if crate::syscalls::signal::has_pending_signal() {
+                    return errno::Errno::EINTR as u64;
+                }
+                crate::task::scheduler::block_on_pipe(key);
+            }
+        },
+        Some(FileDescriptor::TimerFd(ref tfd_arc)) => {
+            let d_arc = tfd_arc.clone();
+            drop(fd_table);
+            // Loop: block until expirations > 0 (or nonblock → EAGAIN)
+            loop {
+                let (key, nonblock) = {
+                    let mut d = d_arc.lock();
+                    if d.expirations > 0 {
+                        let exp = d.expirations;
+                        d.expirations = 0;
+                        drop(d);
+                        let bytes = exp.to_ne_bytes();
+                        if unsafe { user_access::copy_to_user(buf, &bytes) }.is_err() {
+                            return errno::Errno::EFAULT as u64;
+                        }
+                        return 8;
+                    }
+                    let key = d.key;
+                    let nb = d.nonblock;
+                    drop(d);
+                    (key, nb)
+                };
+                if nonblock {
+                    return errno::Errno::EAGAIN as u64;
+                }
+                // Check for pending signals before blocking
+                if crate::syscalls::signal::has_pending_signal() {
+                    return errno::Errno::EINTR as u64;
+                }
+                crate::task::scheduler::block_on_pipe(key);
+            }
+        },
+        Some(FileDescriptor::InotifyFd { instance_key, .. }) => {
+            let key = instance_key;
+            drop(fd_table);
+            match super::inotify::inotify_read(key, unsafe {
+                core::slice::from_raw_parts_mut(buf, count)
+            }) {
+                Ok(n) => n as u64,
+                Err(e) => e as u64,
+            }
+        },
+        Some(FileDescriptor::IoUringFd(ref inst_arc)) => {
+            drop(fd_table);
+            let mut inst = inst_arc.lock();
+            if inst.peek_cqes() == 0 {
+                return errno::Errno::EAGAIN as u64;
+            }
+            let max_cqes = count / core::mem::size_of::<crate::syscalls::io_uring::IoCqe>();
+            let mut cqe_buf = alloc::vec![crate::syscalls::io_uring::IoCqe::default(); max_cqes];
+            let n = inst.drain_cqes(&mut cqe_buf);
+            if n == 0 {
+                return errno::Errno::EAGAIN as u64;
+            }
+            let bytes = n * core::mem::size_of::<crate::syscalls::io_uring::IoCqe>();
+            let src = unsafe {
+                core::slice::from_raw_parts(cqe_buf.as_ptr() as *const u8, bytes)
+            };
+            if unsafe { user_access::copy_to_user(buf, src) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            bytes as u64
         },
         None => errno::Errno::EBADF as u64,
     }
@@ -122,7 +215,15 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             let mut off = offset.lock();
             let pos = *off;
             match node.write(&data) {
-                Ok(()) => { *off = pos + count; count as u64 }
+                Ok(()) => {
+                    *off = pos + count;
+                    // Fire inotify IN_MODIFY event for the file
+                    if let Ok(st) = node.stat() {
+                        let path = alloc::format!("/fd/{}", fd);
+                        super::inotify::inotify_emit(&path, super::inotify::IN_MODIFY, 0, "");
+                    }
+                    count as u64
+                }
                 Err(_) => errno::Errno::EIO as u64,
             }
         },
@@ -152,9 +253,37 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             drop(fd_table);
             let mut d = d_arc.lock();
             let val = u64::from_ne_bytes(data[..8].try_into().unwrap_or([0; 8]));
-            if val == u64::MAX { return errno::Errno::EINVAL as u64; }
-            d.counter = d.counter.saturating_add(val);
+            // eventfd treats UINT64_MAX as an invalid write (EINVAL per man page)
+            if val == u64::MAX {
+                return errno::Errno::EINVAL as u64;
+            }
+            // Overflow check: counter + val must not exceed EFD_MAX (0xFFFF_FFFF_FFFF_FFFE)
+            if val > crate::task::process::EFD_MAX || d.counter > crate::task::process::EFD_MAX - val {
+                return errno::Errno::EFBIG as u64;
+            }
+            d.counter += val;
+            let key = d.key;
+            drop(d);
+            // Wake any threads blocked reading from this eventfd
+            crate::task::scheduler::wake_pipe(key);
             8
+        },
+        Some(FileDescriptor::IoUringFd(ref inst_arc)) => {
+            // write() on io_uring fd submits SQEs (alternative to io_uring_enter)
+            let sqe_size = core::mem::size_of::<crate::syscalls::io_uring::IoSqEntry>();
+            let n_sqes = count / sqe_size;
+            if n_sqes == 0 {
+                return errno::Errno::EINVAL as u64;
+            }
+            let mut inst = inst_arc.lock();
+            let sqes = unsafe {
+                core::slice::from_raw_parts(buf as *const crate::syscalls::io_uring::IoSqEntry, n_sqes)
+            };
+            let submitted = inst.submit_sqes(sqes);
+            if submitted > 0 {
+                inst.process_all();
+            }
+            (submitted * sqe_size) as u64
         },
         _ => errno::Errno::EINVAL as u64,
     }
@@ -223,12 +352,39 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
     if prot & 2 != 0 { page_flags |= PageTableFlags::WRITABLE; }
     if prot & 4 == 0 { page_flags |= PageTableFlags::NO_EXECUTE; }
     let is_shared = flags & 0x02 != 0;
-    process.add_vma(crate::task::process::Vma { start: alloc_addr, end: alloc_addr + len, flags: page_flags, _name: "mmap", file_handle: if fd != u64::MAX { Some(fd) } else { None }, file_offset: offset, is_shared, shm_id: None });
-    alloc_addr
+    // Delegate to isolate if present, otherwise use legacy VMA path
+    if process.isolate.is_some() {
+        use crate::memory::isolate::{VmFlags, BackingStore};
+        let mut vm_flags = VmFlags::READ | VmFlags::USER;
+        if prot & 2 != 0 { vm_flags |= VmFlags::WRITE; }
+        if prot & 4 != 0 { vm_flags |= VmFlags::EXEC; }
+        if is_shared { vm_flags |= VmFlags::SHARED; }
+        let backing = if fd != u64::MAX {
+            BackingStore::File { inode: fd, offset }
+        } else {
+            BackingStore::Anonymous
+        };
+        let result = if addr == 0 {
+            process.isolate.as_mut().unwrap().mmap_anonymous(len as usize, vm_flags, &mut crate::memory::buddy::BuddyFrameAllocator)
+        } else {
+            process.isolate.as_mut().unwrap().mmap_at(addr, len as usize, vm_flags, backing, &mut crate::memory::buddy::BuddyFrameAllocator)
+        };
+        match result {
+            Some(v) => v,
+            None => errno::Errno::ENOMEM as u64,
+        }
+    } else {
+        process.add_vma(crate::task::process::Vma { start: alloc_addr, end: alloc_addr + len, flags: page_flags, _name: "mmap", file_handle: if fd != u64::MAX { Some(fd) } else { None }, file_offset: offset, is_shared, shm_id: None });
+        alloc_addr
+    }
 }
 
 pub fn sys_munmap(addr: u64, len: u64) -> u64 {
     let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
+    if process.isolate.is_some() {
+        // Delegate to isolate which handles page table cleanup
+        process.isolate.as_mut().unwrap().munmap(addr, len as usize);
+    }
     process.remove_vma_range(addr, addr + len);
     0
 }
@@ -241,10 +397,21 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> u64 {
     let mut new_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if prot & 2 != 0 { new_flags |= PageTableFlags::WRITABLE; }
     if prot & 4 == 0 { new_flags |= PageTableFlags::NO_EXECUTE; }
-    let mut vmas = process.memory.lock().vmas.clone();
-    for vma in vmas.iter_mut() {
-        if vma.start < aligned_end && vma.end > aligned_addr {
-            vma.flags = new_flags;
+    // Delegate to isolate if present
+    if process.isolate.is_some() {
+        use crate::memory::isolate::VmFlags;
+        let mut vm_flags = VmFlags::READ | VmFlags::USER;
+        if prot & 2 != 0 { vm_flags |= VmFlags::WRITE; }
+        if prot & 4 != 0 { vm_flags |= VmFlags::EXEC; }
+        process.isolate.as_mut().unwrap().mprotect(addr, vm_flags);
+    }
+    // Update legacy VMA flags (must write back, not just modify a clone)
+    {
+        let mut mem = process.memory.lock();
+        for vma in mem.vmas.iter_mut() {
+            if vma.start < aligned_end && vma.end > aligned_addr {
+                vma.flags = new_flags;
+            }
         }
     }
     0

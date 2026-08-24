@@ -50,6 +50,12 @@ pub enum FileDescriptor {
     PtySlave { _idx: usize, pair: alloc::sync::Arc<crate::sync::IrqSafeMutex<crate::pty::PtyPair>> },
     SignalFd(u64),
     EventFd(alloc::sync::Arc<crate::sync::IrqSafeMutex<EventFdData>>),
+    TimerFd(alloc::sync::Arc<crate::sync::IrqSafeMutex<TimerFdData>>),
+    InotifyFd {
+        instance_key: u64,
+        _instance: alloc::sync::Arc<crate::sync::IrqSafeMutex<crate::syscalls::inotify::InotifyInstance>>,
+    },
+    IoUringFd(alloc::sync::Arc<crate::sync::IrqSafeMutex<crate::syscalls::io_uring::IoUringInstance>>),
 }
 
 impl Clone for FileDescriptor {
@@ -62,6 +68,9 @@ impl Clone for FileDescriptor {
             FileDescriptor::PtySlave { _idx, pair } => FileDescriptor::PtySlave { _idx: *_idx, pair: pair.clone() },
             FileDescriptor::SignalFd(h) => FileDescriptor::SignalFd(*h),
             FileDescriptor::EventFd(d) => FileDescriptor::EventFd(d.clone()),
+            FileDescriptor::TimerFd(d) => FileDescriptor::TimerFd(d.clone()),
+            FileDescriptor::InotifyFd { instance_key, _instance } => FileDescriptor::InotifyFd { instance_key: *instance_key, _instance: _instance.clone() },
+            FileDescriptor::IoUringFd(d) => FileDescriptor::IoUringFd(d.clone()),
         }
     }
 }
@@ -165,6 +174,8 @@ pub struct Process {
     pub memory: Mutex<ProcessMemory>,
     pub files: Mutex<ProcessFiles>,
     pub security: Mutex<ProcessSecurity>,
+    /// Isolate-based virtual memory: wraps AddressSpace with region tracking.
+    pub isolate: Option<crate::memory::isolate::Isolate>,
 }
 
 // ─── sigaltstack / itimerval / tms types ─────────────────────────
@@ -218,10 +229,49 @@ pub struct SignalFdData {
     pub cloexec: bool,
 }
 
+/// Linux-compatible signalfd_siginfo (128 bytes).
+/// Matches the kernel's struct signalfd_siginfo layout exactly.
+#[repr(C)]
 pub struct SignalFdInfo {
-    pub signo: u32,
-    pub pid: u32,
-    pub uid: u32,
+    pub ssi_signo: u32,     //  0: Signal number
+    pub ssi_errno: i32,     //  4: Errno associated with signal
+    pub ssi_code: i32,      //  8: Signal code (SI_USER, SI_TIMER, etc.)
+    pub ssi_pid: u32,       // 12: Sender PID
+    pub ssi_uid: u32,       // 16: Sender UID
+    pub ssi_fd: i32,        // 20: File descriptor (for SIGIO/SIGPOLL)
+    pub ssi_tid: u32,       // 24: Kernel thread ID (for POSIX timer signals)
+    pub ssi_band: u32,      // 28: Band event (for SIGIO/SIGPOLL)
+    pub ssi_overrun: u32,   // 32: Timer overrun count
+    pub ssi_sigval: u64,    // 36: Signal value (sival_int / sival_ptr)
+    pub ssi_status: i32,    // 44: Exit status or signal value (for CLD_EXITED/sigchld)
+    pub ssi_int: i32,       // 48: Integer signal value
+    pub ssi_ptr: u64,       // 52: Pointer signal value
+    pub ssi_utime: u64,     // 60: User CPU time consumed
+    pub ssi_stime: u64,     // 68: System CPU time consumed
+    pub ssi_addr: u64,      // 76: Address that caused fault (SIGBUS/SIGSEGV)
+    pub ssi_addr_lsb: u16,  // 84: LSB of faulting address
+    pub _pad1: u16,         // 86: padding
+    pub ssi_sys_private: u32, // 88: Private, kernel-internal
+    pub ssi_call_addr: u64, // 92: Syscall instruction address
+    pub ssi_sys_call: u32,  //100: Syscall number
+    pub ssi_arch: u32,      //104: Architecture of the syscall
+    pub ssi_pad: [u8; 24],  //108: Padding to 128 bytes
+}
+
+impl SignalFdInfo {
+    /// Create a new zeroed SignalFdInfo with padding zeroed.
+    pub fn new() -> Self {
+        Self {
+            ssi_signo: 0, ssi_errno: 0, ssi_code: 0,
+            ssi_pid: 0, ssi_uid: 0, ssi_fd: 0, ssi_tid: 0,
+            ssi_band: 0, ssi_overrun: 0, ssi_sigval: 0,
+            ssi_status: 0, ssi_int: 0, ssi_ptr: 0,
+            ssi_utime: 0, ssi_stime: 0, ssi_addr: 0,
+            ssi_addr_lsb: 0, _pad1: 0, ssi_sys_private: 0,
+            ssi_call_addr: 0, ssi_sys_call: 0, ssi_arch: 0,
+            ssi_pad: [0u8; 24],
+        }
+    }
 }
 
 // ─── eventfd types ──────────────────────────────────────────────
@@ -235,6 +285,29 @@ pub struct EventFdData {
     pub counter: u64,
     pub semaphore: bool,
     pub nonblock: bool,
+    /// Unique key for blocking/wake via the scheduler's block_queue.
+    pub key: u64,
+}
+
+/// TimerFd state: a file descriptor that becomes readable when a timer fires.
+/// Used by epoll-based servers (nginx, redis, systemd) for periodic/one-shot timers.
+pub struct TimerFdData {
+    /// Clock ID: 0 = CLOCK_REALTIME, 1 = CLOCK_MONOTONIC, 4 = CLOCK_BOOTTIME
+    pub clock_id: u32,
+    /// TFD_NONBLOCK flag
+    pub nonblock: bool,
+    /// Initial interval (nanoseconds). 0 = one-shot.
+    pub it_interval_ns: u64,
+    /// Current expiration time relative to clock (nanoseconds).
+    pub it_value_ns: u64,
+    /// Number of times the timer has fired since last read (summed into read value).
+    pub expirations: u64,
+    /// Absolute tick at which the timer next fires (derived from it_value_ns + clock).
+    pub wake_tick: u64,
+    /// Whether the timer is currently armed
+    pub armed: bool,
+    /// Unique key for blocking/wake via the scheduler's block_queue.
+    pub key: u64,
 }
 
 /// All POSIX credentials in one struct — single-lock snapshot.
@@ -311,6 +384,66 @@ lazy_static::lazy_static! {
     /// Global signalfd registry: fd_handle → SignalFdData.
     pub static ref SIGNAL_FDS: crate::sync::IrqSafeMutex<hashbrown::HashMap<u64, alloc::sync::Arc<crate::sync::IrqSafeMutex<SignalFdData>>>> =
         crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new());
+}
+
+/// Signal code constants (matching Linux)
+pub const SI_USER: i32 = 0;
+pub const SI_KERNEL: i32 = 0x80;
+pub const SI_TIMER: i32 = -2;
+pub const SI_CHILD: i32 = -11;
+pub const SI_ASYNCIO: i32 = -4;
+pub const SI_SIGIO: i32 = -5;
+pub const SI_TKILL: i32 = -6;
+pub const SI_DETHREAD: i32 = -7;
+pub const SI_ASYNCNL: i32 = -60;
+pub const SI_MESGQ: i32 = -13;
+
+/// Route a signal to all signalfd instances owned by a process.
+///
+/// Called from every signal-raising path. For each signalfd whose mask
+/// includes the signal, pushes a SignalFdInfo with full context.
+///
+/// `process_id` - target process PID
+/// `signo` - signal number (1-31)
+/// `code` - signal code (SI_USER, SI_TIMER, etc.)
+/// `sender_pid` - PID of the sender (0 for kernel signals)
+/// `sender_uid` - UID of the sender
+/// `sigval` - signal value (sival_int / sival_ptr)
+pub fn route_signal_to_signalfd(
+    process_id: u64,
+    signo: u32,
+    code: i32,
+    sender_pid: u64,
+    sender_uid: u32,
+    sigval: u64,
+) {
+    let table = PROCESS_TABLE.lock();
+    let proc = match table.get(&process_id) {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    drop(table);
+
+    let sig_bit = 1u64 << (signo - 1);
+    let fd_table = proc.files.lock().fd_table.clone();
+
+    for (_fd, entry) in fd_table.iter().enumerate() {
+        if let Some(FileDescriptor::SignalFd(handle)) = entry {
+            let fds = SIGNAL_FDS.lock();
+            if let Some(data_arc) = fds.get(handle) {
+                let mut data = data_arc.lock();
+                if (data.mask & sig_bit) != 0 {
+                    let mut info = SignalFdInfo::new();
+                    info.ssi_signo = signo;
+                    info.ssi_code = code;
+                    info.ssi_pid = sender_pid as u32;
+                    info.ssi_uid = sender_uid;
+                    info.ssi_sigval = sigval;
+                    data.pending.push_back(info);
+                }
+            }
+        }
+    }
 }
 
 impl Process {
@@ -422,6 +555,7 @@ impl Process {
                 landlock_fds: hashbrown::HashMap::new(),
                 namespace_fds: hashbrown::HashMap::new(),
             }),
+            isolate: None, // Initialized later when address space is ready
         }
     }
 
@@ -736,32 +870,28 @@ impl Process {
         ((hi as u64) << 32) | (lo as u64)
     }
 
-    /// PHASE D2: User stack setup in execve
-    /// Maps the user stack at a randomized location and populates argc/argv.
+    /// User stack setup for execve.
+    /// Lays out the Linux ABI: argc | argv | NULL | envp | NULL | auxv | NULL.
     /// Returns Err on OOM (partial frames are freed).
-    pub fn setup_user_stack(&self, argv: &[alloc::string::String]) -> Result<u64, ()> {
-                        use x86_64::structures::paging::{Mapper, Page, Size4KiB, PageTableFlags, FrameAllocator};
-                        use crate::memory::buddy::BuddyFrameAllocator;
+    pub fn setup_user_stack(&self, argv: &[String], envp: &[String], elf_entry: u64, elf_data: &[u8]) -> Result<u64, ()> {
+        use x86_64::structures::paging::{Mapper, Page, Size4KiB, FrameAllocator};
+        use crate::memory::buddy::BuddyFrameAllocator;
         let mut frame_allocator = BuddyFrameAllocator;
         let mut mapper = unsafe { self.address_space.mapper().expect("Failed to get mapper for stack setup") };
 
-        // ASLR: randomize stack base in a 64MB range just below the old hardcoded address.
-        // Old: 0x7FFF_FFFF_E000. New: 0x7FFF_F000_0000 + random * 4096 (up to 0xFFF pages)
+        // ASLR: randomize stack base in a 64MB range.
         let stack_random = (Self::aslr_entropy() & 0xFFF) * 4096;
         let stack_top_addr = 0x7FFF_F000_0000u64 + stack_random;
-        // 8 MiB (Linux default RLIMIT_STACK): 64 KB was too small — GUI apps
-        // (ade Desktop::new) use ~44 KB frames alone and overflowed it.
-        let stack_pages = 2048; // 8 MB
-        
+        let stack_pages = 2048; // 8 MiB
+
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 
-        // Pre-allocate all frames before mapping so OOM is handled atomically
-        let mut frames = alloc::vec::Vec::with_capacity(stack_pages);
+        // Pre-allocate all frames before mapping so OOM is handled atomically.
+        let mut frames = Vec::with_capacity(stack_pages);
         for _ in 0..stack_pages {
             match frame_allocator.allocate_frame() {
                 Some(frame) => frames.push(frame),
                 None => {
-                    // Free any frames already allocated
                     for f in &frames {
                         crate::memory::frame_info::decrement(f.start_address());
                     }
@@ -771,15 +901,15 @@ impl Process {
         }
 
         for (i, frame) in frames.into_iter().enumerate() {
-             let page_addr = stack_top_addr - (i as u64 + 1) * 4096;
-             let page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(page_addr));
-             unsafe {
-                 mapper.map_to(page, frame, flags, &mut frame_allocator).expect("map_to failed").flush();
-             }
-             crate::memory::frame_info::increment(frame.start_address());
+            let page_addr = stack_top_addr - (i as u64 + 1) * 4096;
+            let page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(page_addr));
+            unsafe {
+                mapper.map_to(page, frame, flags, &mut frame_allocator).expect("map_to failed").flush();
+            }
+            crate::memory::frame_info::increment(frame.start_address());
         }
 
-        // Add VMA for user stack
+        // Add VMA for user stack.
         self.add_vma(Vma {
             start: stack_top_addr - (stack_pages as u64) * 4096,
             end: stack_top_addr,
@@ -791,52 +921,137 @@ impl Process {
             shm_id: None,
         });
 
-        // Copy strings to the top of the stack
-        let mut current_rsp = stack_top_addr;
-        let mut arg_ptrs = Vec::new();
+        // Parse ELF to get PHDR address for AT_PHDR auxv.
+        // For a static ELF, program headers live within the first PT_LOAD segment.
+        // AT_PHDR = entry_point + file_offset_of_phdrs (standard ELF layout).
+        let mut phdr_addr = 0u64;
+        let mut phdr_count = 0u64;
+        let mut phdr_entry_size = 0u64;
+        if let Ok(elf) = ElfFile::new(elf_data) {
+            phdr_count = elf.header.pt2.ph_count() as u64;
+            phdr_entry_size = elf.header.pt2.ph_entry_size() as u64;
+            phdr_addr = elf_entry.wrapping_add(elf.header.pt2.phoff());
+        }
 
-        for arg in argv.iter().rev() {
-            let bytes = arg.as_bytes();
-            current_rsp -= (bytes.len() + 1) as u64; // +1 for null terminator
-            let virt = x86_64::VirtAddr::new(current_rsp);
-            
-            // Map virtual to physical for direct writing
-            let phys = crate::memory::virt_to_phys(virt).ok_or(())?;
-            let offset = crate::memory::physical_memory_offset();
-            let k_ptr = (offset + phys.as_u64()) as *mut u8;
-            
+        // Helper: write a u64 to the user stack and advance RSP.
+        let mut rsp = stack_top_addr;
+        let mut push_u64 = |val: u64, rsp: &mut u64| -> Result<(), ()> {
+            *rsp -= 8;
+            let v = x86_64::VirtAddr::new(*rsp);
+            let p = crate::memory::virt_to_phys(v).ok_or(())?;
+            let k = (crate::memory::physical_memory_offset() + p.as_u64()) as *mut u64;
+            unsafe { *k = val; }
+            Ok(())
+        };
+        // Helper: write a byte slice (null-terminated) to stack, return user pointer.
+        let mut push_str = |s: &[u8], rsp: &mut u64| -> Result<u64, ()> {
+            let len = s.len() as u64;
+            *rsp -= len + 1;
+            let v = x86_64::VirtAddr::new(*rsp);
+            let p = crate::memory::virt_to_phys(v).ok_or(())?;
+            let k = (crate::memory::physical_memory_offset() + p.as_u64()) as *mut u8;
             unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), k_ptr, bytes.len());
-                *k_ptr.add(bytes.len()) = 0;
+                core::ptr::copy_nonoverlapping(s.as_ptr(), k, s.len());
+                *k.add(s.len()) = 0;
             }
-            arg_ptrs.push(current_rsp);
+            Ok(*rsp)
+        };
+
+        // Layout (grows downward from stack_top_addr):
+        //   string data: argv[i], envp[i]
+        //   [alignment padding]
+        //   argv pointers + NULL terminator
+        //   envp pointers + NULL terminator
+        //   auxv entries + AT_NULL
+        //   argc
+
+        // ── Push argv strings (reversed, then reversed pointers below) ──
+        let mut argv_ptrs = Vec::with_capacity(argv.len());
+        for arg in argv.iter().rev() {
+            argv_ptrs.push(push_str(arg.as_bytes(), &mut rsp)?);
+        }
+        argv_ptrs.reverse();
+
+        // ── Push envp strings ──
+        let mut envp_ptrs = Vec::with_capacity(envp.len());
+        for e in envp.iter().rev() {
+            envp_ptrs.push(push_str(e.as_bytes(), &mut rsp)?);
+        }
+        envp_ptrs.reverse();
+
+        // Align RSP to 16 bytes.
+        rsp &= !0xF;
+
+        // ── argv pointer array + NULL ──
+        push_u64(0, &mut rsp)?; // NULL terminator
+        for &ptr in argv_ptrs.iter().rev() {
+            push_u64(ptr, &mut rsp)?;
+        }
+        let _argv_start = rsp;
+
+        // ── envp pointer array + NULL ──
+        push_u64(0, &mut rsp)?; // NULL terminator
+        for &ptr in envp_ptrs.iter().rev() {
+            push_u64(ptr, &mut rsp)?;
         }
 
-        // Align RSP
-        current_rsp &= !0xF;
-        
-        // Push argv pointers (null terminated)
-        current_rsp -= 8; // NULL
-        
-        for ptr in arg_ptrs {
-            current_rsp -= 8;
-            let virt = x86_64::VirtAddr::new(current_rsp);
-            let phys = crate::memory::virt_to_phys(virt).ok_or(())?;
-            let k_ptr = (crate::memory::physical_memory_offset() + phys.as_u64()) as *mut u64;
-            unsafe { *k_ptr = ptr; }
+        // ── auxv ──
+        // First write AT_RANDOM data (16 random bytes) below the pointer array.
+        rsp -= 16;
+        {
+            let random = Self::aslr_entropy();
+            let mut rand_buf = [0u8; 16];
+            rand_buf[..8].copy_from_slice(&random.to_le_bytes());
+            rand_buf[8..16].copy_from_slice(&random.wrapping_mul(0x9E3779B9).to_le_bytes());
+            let v = x86_64::VirtAddr::new(rsp);
+            let p = crate::memory::virt_to_phys(v).ok_or(())?;
+            let k = (crate::memory::physical_memory_offset() + p.as_u64()) as *mut u8;
+            unsafe { core::ptr::copy_nonoverlapping(rand_buf.as_ptr(), k, 16); }
         }
-        
-        let _argv_start = current_rsp;
+        let random_bytes_addr = rsp; // pointer to the 16 random bytes
 
-        // Push argc
-        current_rsp -= 8;
-        let virt = x86_64::VirtAddr::new(current_rsp);
-        let phys = crate::memory::virt_to_phys(virt).ok_or(())?;
-        let k_ptr = (crate::memory::physical_memory_offset() + phys.as_u64()) as *mut u64;
-        unsafe { *k_ptr = argv.len() as u64; }
+        // AT_NULL (sentinel, pushed first = lowest address)
+        push_u64(0, &mut rsp)?; // type = AT_NULL
+        push_u64(0, &mut rsp)?; // value = 0
+        // AT_RANDOM
+        push_u64(25, &mut rsp)?; // type = AT_RANDOM
+        push_u64(random_bytes_addr, &mut rsp)?; // value = pointer to random bytes
+        // AT_PLATFORM
+        push_u64(15, &mut rsp)?; // type = AT_PLATFORM
+        push_u64(0, &mut rsp)?; // value = NULL (no platform string)
+        // AT_CLKTCK
+        push_u64(17, &mut rsp)?; // type
+        push_u64(100, &mut rsp)?; // value = 100 Hz
+        // AT_PAGESZ
+        push_u64(6, &mut rsp)?; // type
+        push_u64(4096, &mut rsp)?; // value
+        // AT_HWCAP
+        push_u64(16, &mut rsp)?; // type
+        push_u64(0, &mut rsp)?; // value
+        // AT_FLAGS
+        push_u64(3, &mut rsp)?; // type
+        push_u64(0, &mut rsp)?; // value
+        // AT_ENTRY
+        push_u64(9, &mut rsp)?; // type
+        push_u64(elf_entry, &mut rsp)?; // value
+        // AT_BASE (interpreter base, 0 for static)
+        push_u64(7, &mut rsp)?; // type
+        push_u64(0, &mut rsp)?; // value = no interpreter loaded yet
+        // AT_PHNUM / AT_PHENT / AT_PHDR
+        push_u64(5, &mut rsp)?; // type = AT_PHNUM
+        push_u64(phdr_count, &mut rsp)?;
+        push_u64(4, &mut rsp)?; // type = AT_PHENT
+        push_u64(phdr_entry_size, &mut rsp)?;
+        push_u64(33, &mut rsp)?; // type = AT_PHDR
+        push_u64(phdr_addr, &mut rsp)?;
 
-        Ok(current_rsp)
+        // ── argc ──
+        push_u64(argv.len() as u64, &mut rsp)?;
+
+        Ok(rsp)
     }
+
+
 
     /// Perform the exit bookkeeping for a fault-killed process.
     /// Records exit code 139 (SIGSEGV), raises SIGCHLD on the parent,
@@ -849,6 +1064,7 @@ impl Process {
             let table = crate::task::process::PROCESS_TABLE.lock();
             if let Some(parent) = table.get(&ppid) {
                 parent.signals.lock().raise(crate::syscalls::signal::Signal::SIGCHLD);
+                route_signal_to_signalfd(parent.id, 17, SI_CHILD, self.id, 0, 0);
             }
         }
         crate::task::scheduler::with_current_thread(|thread| {
@@ -870,6 +1086,7 @@ pub fn kill_process(pid: u64) {
         crate::println!("[OOM] Killed process pid={}", pid);
         if let Some(parent) = proc.parent_id.and_then(|ppid| table.get(&ppid)) {
             parent.signals.lock().raise(crate::syscalls::signal::Signal::SIGCHLD);
+            route_signal_to_signalfd(parent.id, 17, SI_CHILD, pid, 0, 0);
         }
         table.remove(&pid);
     }

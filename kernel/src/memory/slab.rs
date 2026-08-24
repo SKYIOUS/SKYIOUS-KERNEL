@@ -1,11 +1,22 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
+use core::ptr::NonNull;
 use linked_list_allocator::LockedHeap;
 
 /// The block sizes to use.
 /// Must be powers of 2 because they are also used as alignment (except for very small ones).
 /// Extended to include smaller sizes for better memory efficiency.
 const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+
+/// Slab cache statistics for monitoring allocation patterns.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SlabStats {
+    pub total_allocs: u64,
+    pub total_deallocs: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub active_bytes: u64,
+}
 
 /// A node in the linked list of blocks.
 struct ListNode {
@@ -16,6 +27,7 @@ pub struct FixedSizeBlockAllocator {
     list_heads: [Option<&'static mut ListNode>; BLOCK_SIZES.len()],
     fallback_allocator: LockedHeap,
     poison_on_free: bool, // Configurable memory poisoning
+    stats: SlabStats,
 }
 
 impl FixedSizeBlockAllocator {
@@ -26,6 +38,13 @@ impl FixedSizeBlockAllocator {
             list_heads: [EMPTY; BLOCK_SIZES.len()],
             fallback_allocator: LockedHeap::empty(),
             poison_on_free: true,
+            stats: SlabStats {
+                total_allocs: 0,
+                total_deallocs: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+                active_bytes: 0,
+            },
         }
     }
 
@@ -37,6 +56,13 @@ impl FixedSizeBlockAllocator {
             list_heads: [EMPTY; BLOCK_SIZES.len()],
             fallback_allocator: LockedHeap::empty(),
             poison_on_free: poison,
+            stats: SlabStats {
+                total_allocs: 0,
+                total_deallocs: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+                active_bytes: 0,
+            },
         }
     }
 
@@ -51,6 +77,26 @@ impl FixedSizeBlockAllocator {
             Ok(ptr) => ptr.as_ptr(),
             Err(_) => ptr::null_mut(),
         }
+    }
+
+    /// Get current slab allocator statistics.
+    pub fn stats(&self) -> SlabStats {
+        self.stats
+    }
+
+    /// Get the number of free blocks in each size class.
+    pub fn free_counts(&self) -> [usize; BLOCK_SIZES.len()] {
+        let mut counts = [0usize; BLOCK_SIZES.len()];
+        for (i, head) in self.list_heads.iter().enumerate() {
+            let mut count = 0;
+            let mut current = head;
+            while let Some(node) = current {
+                count += 1;
+                current = &node.next;
+            }
+            counts[i] = count;
+        }
+        counts
     }
 }
 
@@ -81,33 +127,46 @@ impl<A> Locked<A> {
 unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut allocator = self.lock();
+        allocator.stats.total_allocs += 1;
         match list_index(&layout) {
             Some(index) => {
                 match allocator.list_heads[index].take() {
                     Some(node) => {
                         allocator.list_heads[index] = node.next.take();
+                        allocator.stats.cache_hits += 1;
+                        allocator.stats.active_bytes += BLOCK_SIZES[index] as u64;
                         node as *mut ListNode as *mut u8
                     }
                     None => {
                         // No free block in list, allocate a new block from fallback
                         let block_size = BLOCK_SIZES[index];
-                        // try to allocate a block with alignment of block_size
                         let block_layout = Layout::from_size_align(block_size, block_size)
                             .expect("Invalid block size/alignment in slab allocator");
-                        allocator.fallback_alloc(block_layout)
+                        let ptr = allocator.fallback_alloc(block_layout);
+                        if !ptr.is_null() {
+                            allocator.stats.cache_misses += 1;
+                            allocator.stats.active_bytes += block_size as u64;
+                        }
+                        ptr
                     }
                 }
             }
-            None => allocator.fallback_alloc(layout),
+            None => {
+                let ptr = allocator.fallback_alloc(layout);
+                if !ptr.is_null() {
+                    allocator.stats.cache_misses += 1;
+                    allocator.stats.active_bytes += layout.size() as u64;
+                }
+                ptr
+            }
         }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let mut allocator = self.lock();
+        allocator.stats.total_deallocs += 1;
         match list_index(&layout) {
             Some(index) => {
-                // SAFETY: ptr is a valid pointer from a previous alloc() call with matching layout.
-                // BLOCK_SIZES[index] is the actual allocated size.
                 if allocator.poison_on_free {
                     let poison = core::slice::from_raw_parts_mut(ptr, BLOCK_SIZES[index]);
                     for b in poison.iter_mut() { *b = 0xDE; }
@@ -118,16 +177,15 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
                 let new_node_ptr = ptr as *mut ListNode;
                 new_node_ptr.write(new_node);
                 allocator.list_heads[index] = Some(&mut *new_node_ptr);
+                allocator.stats.active_bytes = allocator.stats.active_bytes.saturating_sub(BLOCK_SIZES[index] as u64);
             }
             None => {
-                // SAFETY: ptr is a valid pointer from a previous alloc() call with matching layout.
                 if allocator.poison_on_free {
-                    // ponytail: cap poison at 1 MiB; large frees (32MB ramdisks) would
-                    // otherwise hold the allocator lock for seconds on slow hosts.
                     let cap = layout.size().min(1024 * 1024);
                     let poison = core::slice::from_raw_parts_mut(ptr, cap);
                     for b in poison.iter_mut() { *b = 0xDE; }
                 }
+                allocator.stats.active_bytes = allocator.stats.active_bytes.saturating_sub(layout.size() as u64);
                 allocator.fallback_allocator.lock().deallocate(
                     NonNull::new(ptr).expect("Deallocating null pointer in slab fallback"),
                     layout
@@ -137,4 +195,3 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
     }
 }
 
-use core::ptr::NonNull;

@@ -59,18 +59,46 @@ pub fn sys_uname(buf: *mut UtsName) -> u64 {
 }
 
 pub fn sys_exit(status: u64) -> u64 {
-    let (parent_pid, clear_tid) = {
+    let (parent_pid, clear_tid, child_pid) = {
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
+            // PID 1 exit is fatal — no init means the system is dead.
+            if process.id == 1 {
+                panic!("PID 1 (init) exited with status {}. No init process = system dead.", status);
+            }
             *process.exit_code.lock() = Some(status as i32);
             if status != 42 {
                 crate::println!("[PROCESS] Pid {} exited with status {}", process.id, status);
             }
-            (process.parent_id, *process.clear_child_tid.lock())
+            (process.parent_id, *process.clear_child_tid.lock(), process.id)
         } else {
-            (None, 0)
+            (None, 0, 0)
         }
     };
+    
+    // Reparent orphaned children to PID 1 (init reaps them via wait4).
+    // If PID 1 doesn't exist yet (very early boot), children become orphans
+    // with parent_id = None and will be cleaned up on next wait4(-1).
+    {
+        let mut table = crate::task::process::PROCESS_TABLE.lock();
+        // Collect this process's children before removing it.
+        let orphans: Vec<u64> = if let Some(proc) = table.get(&child_pid) {
+            proc.children.lock().drain(..).collect()
+        } else {
+            Vec::new()
+        };
+        for &orphan_pid in &orphans {
+            if let Some(orphan) = table.get_mut(&orphan_pid) {
+                orphan.parent_id = Some(1);
+            }
+        }
+        // Remove this process from its parent's children list.
+        if let Some(ppid) = parent_pid {
+            if let Some(parent) = table.get(&ppid) {
+                parent.children.lock().retain(|&p| p != child_pid);
+            }
+        }
+    }
     
     // Clear child tid and wake futex (for pthread_join)
     if clear_tid != 0 {
@@ -84,6 +112,10 @@ pub fn sys_exit(status: u64) -> u64 {
         let table = crate::task::process::PROCESS_TABLE.lock();
         if let Some(parent) = table.get(&ppid) {
             parent.signals.lock().raise(crate::syscalls::signal::Signal::SIGCHLD);
+            // Route SIGCHLD to signalfd instances
+            crate::task::process::route_signal_to_signalfd(
+                parent.id, 17, crate::task::process::SI_CHILD, child_pid, 0, 0,
+            );
         }
         drop(table);
     }
@@ -108,6 +140,42 @@ pub fn sys_set_tid_address(tidptr: *const u32) -> u64 {
     } else {
         0
     }
+}
+
+/// Close all file descriptors for a dying process.
+/// Called from the scheduler's exit path before freeing the address space.
+pub fn process_close_all_fds(proc: &crate::task::process::Process) {
+    // Drain the fd table under the lock so no stale entries remain.
+    let descs: alloc::vec::Vec<FileDescriptor> = {
+        let mut files = proc.files.lock();
+        files.fd_table.drain(..).flatten().collect()
+    };
+    for desc in descs {
+        match desc {
+            #[cfg(feature = "net")]
+            FileDescriptor::Socket(handle, _stype) => {
+                super::net_helpers::remove_from_reuseport(proc.id, handle);
+                super::net_helpers::tcp_stats_remove(proc.id, handle);
+                crate::net::SOCKETS.lock().remove(handle);
+            }
+            FileDescriptor::UnixSocket(handle, _) => {
+                crate::net::unix::cleanup_unix_socket(handle);
+            }
+            FileDescriptor::SignalFd(handle) => {
+                super::SIGNAL_FDS.lock().remove(&handle);
+            }
+            FileDescriptor::InotifyFd { instance_key, .. } => {
+                super::inotify::inotify_close(instance_key);
+            }
+            FileDescriptor::EventFd(data)
+            | FileDescriptor::TimerFd(data)
+            | FileDescriptor::IoUringFd(data) => {
+                crate::task::scheduler::wake_pipe(data.lock().key);
+            }
+            _ => {} // File, PtyMaster, PtySlave — dropped by Arc refcount
+        }
+    }
+    proc.files.lock().fd_flags.clear();
 }
 
 pub fn sys_exit_group(status: u64) -> u64 {
@@ -194,8 +262,11 @@ pub fn sys_sched_yield() -> u64 {
         let mut sched = scheduler::this_cpu_sched().lock();
         sched.prepare_switch_tls()
     };
-    if let Some((old_ptr, new_sp, new_fs)) = switch {
-        crate::task::thread::switch_thread(old_ptr, new_sp, new_fs);
+    if let Some((old_ptr, new_sp, new_fs, old_fpu, new_fpu)) = switch {
+        #[cfg(target_arch = "x86_64")]
+        crate::task::thread::switch_thread(old_ptr, new_sp, new_fs, old_fpu, new_fpu);
+        #[cfg(target_arch = "aarch64")]
+        crate::hal::cpu::switch_thread(old_ptr, new_sp, new_fs);
         // The yielded thread was parked in `switching_old` by
         // prepare_switch; the post-switch drain doesn't run inside a
         // syscall (we return to userland directly), so reclaim it here.
@@ -227,30 +298,49 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
     if size < 8 { return errno::Errno::EINVAL as u64; }
 
     let policy = unsafe { *(attr_ptr.add(4) as *const u32) };
-    if policy != 0 { return errno::Errno::EINVAL as u64; } // Only SCHED_OTHER
+    // Validate policy: 0=SCHED_NORMAL, 1=SCHED_FIFO, 2=SCHED_RR, 3=SCHED_BATCH
+    if policy > 3 { return errno::Errno::EINVAL as u64; }
 
-    let nice = if size >= 12 {
+    let nice_or_rt_prio = if size >= 12 {
         unsafe { *(attr_ptr.add(8) as *const i32) }
     } else {
         0
     };
 
-    // Map nice [-20..19] to priority [0..7]
-    let priority = if nice <= -15 { 7u8 }
-        else if nice <= -10 { 6u8 }
-        else if nice <= -5  { 5u8 }
-        else if nice <= 0   { 4u8 }
-        else if nice <= 5   { 3u8 }
-        else if nice <= 10  { 2u8 }
-        else if nice <= 15  { 1u8 }
-        else { 0u8 };
+    // Map scheduling policy to priority and RT fields
+    let (priority, rt_priority, rr_quantum) = if policy == 1 || policy == 2 {
+        // SCHED_FIFO / SCHED_RR: rt_priority 1-99
+        let rt_prio = (nice_or_rt_prio as u32).clamp(1, 99);
+        let quantum = if policy == 2 { 4u32 } else { 0u32 }; // 4 ticks for RR
+        // RT threads go to priority level 7 (highest) for queue ordering
+        (7u8, rt_prio, quantum)
+    } else {
+        // SCHED_NORMAL (0) / SCHED_BATCH (3): map nice [-20..19] to priority [0..7]
+        let nice = nice_or_rt_prio;
+        let p = if nice <= -15 { 7u8 }
+            else if nice <= -10 { 6u8 }
+            else if nice <= -5  { 5u8 }
+            else if nice <= 0   { 4u8 }
+            else if nice <= 5   { 3u8 }
+            else if nice <= 10  { 2u8 }
+            else if nice <= 15  { 1u8 }
+            else { 0u8 };
+        (p, 0u32, 0u32)
+    };
 
-    // Update current thread priority if it belongs to the target process
+    // Update current thread if it belongs to the target process
     let mut sched = crate::task::scheduler::this_cpu_sched().lock();
     if let Some(ref mut cur) = sched.current_thread {
         if let Some(ref p) = cur.process {
             if p.id == proc.id {
+                cur.policy = policy;
+                cur.rt_priority = rt_priority;
+                cur.rr_time_slice = rr_quantum;
                 cur.priority = priority;
+                cur.sched_class = policy;
+                if policy == 1 || policy == 2 {
+                    cur.stride = 0; // RT threads don't use stride
+                }
             }
         }
     }
@@ -261,7 +351,12 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
     for t in pend.iter_mut() {
         if let Some(ref p) = t.process {
             if p.id == proc.id {
+                t.policy = policy;
+                t.rt_priority = rt_priority;
+                t.rr_time_slice = rr_quantum;
                 t.priority = priority;
+                t.sched_class = policy;
+                if policy == 1 || policy == 2 { t.stride = 0; }
             }
         }
     }
@@ -317,6 +412,118 @@ pub fn sys_sched_getattr(pid: i64, attr_ptr: *mut u8, size: u64, _flags: u64) ->
             return errno::Errno::EFAULT as u64;
         }
     }
+    0
+}
+
+/// sched_setaffinity(pid, cpusetsize, mask)
+/// Sets the CPU affinity mask for a thread/process.
+pub fn sys_sched_setaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
+    let target = if pid == 0 {
+        let lock = crate::task::process::CURRENT_PROCESS.lock();
+        match *lock {
+            Some(ref p) => p.clone(),
+            None => return errno::Errno::ESRCH as u64,
+        }
+    } else {
+        let table = crate::task::process::PROCESS_TABLE.lock();
+        match table.get(&(pid as u64)) {
+            Some(p) => p.clone(),
+            None => return errno::Errno::ESRCH as u64,
+        }
+    };
+
+    // cpusetsize must be at least 8 bytes (64-bit mask)
+    if cpusetsize < 8 { return errno::Errno::EINVAL as u64; }
+    if mask_ptr == 0 { return errno::Errno::EFAULT as u64; }
+
+    let mut mask: u64 = 0;
+    let mask_slice = unsafe {
+        core::slice::from_raw_parts_mut(&mut mask as *mut u64 as *mut u8, 8)
+    };
+    if unsafe { user_access::copy_from_user(mask_slice, mask_ptr as *const u8) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+
+    // Mask must have at least one bit set
+    if mask == 0 { return errno::Errno::EINVAL as u64; }
+
+    // Limit to MAX_CPUS
+    let max_mask = (1u64 << crate::task::scheduler::MAX_CPUS) - 1;
+    mask &= max_mask;
+    if mask == 0 { return errno::Errno::EINVAL as u64; }
+
+    // Update current thread if it belongs to this process
+    {
+        let mut sched = crate::task::scheduler::this_cpu_sched().lock();
+        if let Some(ref mut cur) = sched.current_thread {
+            if let Some(ref p) = cur.process {
+                if p.id == target.id {
+                    cur.affinity_mask = mask;
+                }
+            }
+        }
+    }
+
+    // Update all threads in pending queue
+    {
+        let mut pend = crate::task::scheduler::GLOBAL.pending_queue.lock();
+        for t in pend.iter_mut() {
+            if let Some(ref p) = t.process {
+                if p.id == target.id {
+                    t.affinity_mask = mask;
+                }
+            }
+        }
+    }
+
+    0
+}
+
+/// sched_getaffinity(pid, cpusetsize, mask)
+/// Gets the CPU affinity mask for a thread/process.
+pub fn sys_sched_getaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
+    if cpusetsize < 8 { return errno::Errno::EINVAL as u64; }
+    if mask_ptr == 0 { return errno::Errno::EFAULT as u64; }
+
+    let target = if pid == 0 {
+        let lock = crate::task::process::CURRENT_PROCESS.lock();
+        match *lock {
+            Some(ref p) => p.clone(),
+            None => return errno::Errno::ESRCH as u64,
+        }
+    } else {
+        let table = crate::task::process::PROCESS_TABLE.lock();
+        match table.get(&(pid as u64)) {
+            Some(p) => p.clone(),
+            None => return errno::Errno::ESRCH as u64,
+        }
+    };
+
+    // Try to get from current thread first
+    let mask = {
+        let sched = crate::task::scheduler::this_cpu_sched().lock();
+        if let Some(ref cur) = sched.current_thread {
+            if let Some(ref p) = cur.process {
+                if p.id == target.id {
+                    cur.affinity_mask
+                } else {
+                    0xFFFFFFFFFFFFFFFF
+                }
+            } else {
+                0xFFFFFFFFFFFFFFFF
+            }
+        } else {
+            0xFFFFFFFFFFFFFFFF
+        }
+    };
+
+    let max_mask = (1u64 << crate::task::scheduler::MAX_CPUS) - 1;
+    let final_mask = mask & max_mask;
+
+    if unsafe { user_access::copy_to_user(mask_ptr as *mut u8, core::slice::from_raw_parts(&final_mask as *const u64 as *const u8, 8)) }.is_err() {
+        return errno::Errno::EFAULT as u64;
+    }
+
     0
 }
 
@@ -380,6 +587,13 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
         {
             let parent_vmas = parent.memory.lock().vmas.clone();
             child_process.memory.lock().vmas = parent_vmas;
+        }
+        // Clone isolate for CoW virtual memory tracking
+        if let Some(ref parent_isolate) = parent.isolate {
+            child_process.isolate = parent_isolate.clone_cow(
+                child_pid,
+                &mut crate::memory::buddy::BuddyFrameAllocator,
+            );
         }
         child_process.entry_point = parent.entry_point;
         child_process.files.lock().fd_table = parent.files.lock().fd_table.clone();
@@ -454,6 +668,13 @@ pub fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: 
         {
             let parent_vmas = parent.memory.lock().vmas.clone();
             child_process.memory.lock().vmas = parent_vmas;
+        }
+        // Clone isolate for CoW virtual memory tracking
+        if let Some(ref parent_isolate) = parent.isolate {
+            child_process.isolate = parent_isolate.clone_cow(
+                child_pid,
+                &mut BuddyFrameAllocator,
+            );
         }
         child_process.entry_point = parent.entry_point;
         child_process.files.lock().fd_table = parent.files.lock().fd_table.clone();
@@ -596,10 +817,10 @@ pub fn sys_getpid() -> u64 {
     }
 }
 
-pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const *const u8, _regs_ptr: *mut u64) -> u64 {
+pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *const *const u8, _regs_ptr: *mut u64) -> u64 {
     use crate::syscalls::user_access;
     
-    // 1. Copy path and argv from user space
+    // 1. Copy path, argv, and envp from user space
     let path = match unsafe { user_access::read_user_string(path_ptr, 256) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
@@ -611,6 +832,7 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *c
         return errno::Errno::EACCES as u64;
     }
 
+    // Read argv
     let mut argv = Vec::new();
     if !argv_ptr.is_null() {
         let mut i = 0;
@@ -628,7 +850,29 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *c
                 break;
             }
             i += 1;
-            if i > 64 { break; } // Limit args
+            if i > 64 { break; }
+        }
+    }
+
+    // Read envp (same pattern as argv)
+    let mut envp = Vec::new();
+    if !envp_ptr.is_null() {
+        let mut i = 0;
+        loop {
+            let mut ptr: *const u8 = core::ptr::null();
+            unsafe {
+                if user_access::copy_from_user(core::slice::from_raw_parts_mut(&mut ptr as *mut _ as *mut u8, 8), envp_ptr.add(i) as *const u8).is_err() {
+                    break;
+                }
+            }
+            if ptr.is_null() { break; }
+            if let Ok(s) = unsafe { user_access::read_user_string(ptr, 1024) } {
+                envp.push(s);
+            } else {
+                break;
+            }
+            i += 1;
+            if i > 256 { break; }
         }
     }
 
@@ -717,8 +961,8 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *c
     // so virt_to_phys can find the freshly-mapped pages.
     unsafe { process_arc.address_space.activate(); }
 
-    // 4. Setup user stack
-    let user_rsp = match process_arc.setup_user_stack(&argv) {
+    // 4. Setup user stack with argc/argv/envp/auxv
+    let user_rsp = match process_arc.setup_user_stack(&argv, &envp, entry, &elf_data) {
         Ok(rsp) => rsp,
         Err(()) => {
             crate::serial_write("[EXEC] OOM: failed to allocate user stack\n");

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -38,6 +38,80 @@ pub fn is_initialized() -> bool {
 
 pub fn total_free_frames() -> usize {
     crate::memory::buddy::BUDDY_ALLOCATOR.lock().count_free_pages()
+}
+
+// ---------------------------------------------------------------------------
+// Memory leak auditing
+// ---------------------------------------------------------------------------
+
+/// High-water mark: lowest number of free frames seen (i.e., peak usage)
+static FREE_FRAME_HWM: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Low-water mark: highest number of free frames seen (i.e., minimum usage)
+static FREE_FRAME_LWM: AtomicUsize = AtomicUsize::new(0);
+/// Snapshot at last audit checkpoint
+static FREE_FRAME_BASELINE: AtomicUsize = AtomicUsize::new(0);
+
+/// Take a memory snapshot. Call at boot (after allocator init) to set baseline.
+pub fn snapshot_baseline() {
+    let free = total_free_frames();
+    FREE_FRAME_BASELINE.store(free, Ordering::Relaxed);
+    FREE_FRAME_HWM.store(free, Ordering::Relaxed);
+    FREE_FRAME_LWM.store(free, Ordering::Relaxed);
+}
+
+/// Reset watermarks for a new measurement window.
+pub fn reset_watermarks() {
+    let free = total_free_frames();
+    FREE_FRAME_HWM.store(free, Ordering::Relaxed);
+    FREE_FRAME_LWM.store(free, Ordering::Relaxed);
+    FREE_FRAME_BASELINE.store(free, Ordering::Relaxed);
+}
+
+/// Update high/low water marks. Call periodically or after stress operations.
+pub fn update_watermarks() {
+    let free = total_free_frames();
+    FREE_FRAME_HWM.fetch_min(free, Ordering::Relaxed);
+    FREE_FRAME_LWM.fetch_max(free, Ordering::Relaxed);
+}
+
+/// Get the current memory audit snapshot.
+pub fn audit_snapshot() -> MemoryAudit {
+    let free = total_free_frames();
+    let baseline = FREE_FRAME_BASELINE.load(Ordering::Relaxed);
+    let hwm = FREE_FRAME_HWM.load(Ordering::Relaxed);
+    let lwm = FREE_FRAME_LWM.load(Ordering::Relaxed);
+    MemoryAudit {
+        free_frames: free,
+        baseline_frames: baseline,
+        peak_usage_frames: if baseline != usize::MAX { baseline.saturating_sub(hwm) } else { 0 },
+        current_leak: if baseline != usize::MAX { baseline.saturating_sub(free) } else { 0 },
+        min_free: lwm,
+    }
+}
+
+/// Memory audit snapshot
+pub struct MemoryAudit {
+    pub free_frames: usize,
+    pub baseline_frames: usize,
+    pub peak_usage_frames: usize,
+    pub current_leak: usize,
+    pub min_free: usize,
+}
+
+impl MemoryAudit {
+    pub fn report(&self) {
+        crate::serial_write(&alloc::format!(
+            "[MEM-AUDIT] free={} baseline={} peak_usage={} current_leak={} min_free={}\n",
+            self.free_frames, self.baseline_frames, self.peak_usage_frames,
+            self.current_leak, self.min_free
+        ));
+    }
+
+    pub fn has_leak(&self) -> bool {
+        // A leak is suspicious if we've lost more than 64 frames (256 KiB) from baseline
+        // and haven't recovered. Allow some slack for caches and buffers.
+        self.current_leak > 64
+    }
 }
 
 // ponytail: naive test, does not exhaust the allocator

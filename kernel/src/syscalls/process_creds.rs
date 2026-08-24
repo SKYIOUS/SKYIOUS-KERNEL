@@ -511,3 +511,107 @@ pub fn sys_setresgid(rgid: u32, egid: u32, sgid: u32) -> u64 {
     creds.fsgid = creds.egid;
     0
 }
+
+// ─── getrusage ────────────────────────────────────────────────────
+
+/// Linux struct timeval { long tv_sec; long tv_usec; } — 8 bytes each on x86_64.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+/// Linux struct rusage — 136 bytes on x86_64.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Rusage {
+    ru_utime: Timeval,       //  0
+    ru_stime: Timeval,       // 16
+    ru_maxrss: i64,          // 32
+    ru_ixrss: i64,           // 40
+    ru_idrss: i64,           // 48
+    ru_isrss: i64,           // 56
+    ru_minflt: i64,          // 64
+    ru_majflt: i64,          // 72
+    ru_nswap: i64,           // 80
+    ru_inblock: i64,         // 88
+    ru_oublock: i64,         // 96
+    ru_msgsnd: i64,          //104
+    ru_msgrcv: i64,          //112
+    ru_nsignals: i64,        //120
+    ru_nvcsw: i64,           //128
+    ru_nivcsw: i64,          //136
+}  // total: 144 bytes
+
+impl Default for Rusage {
+    fn default() -> Self {
+        Self {
+            ru_utime: Timeval::default(),
+            ru_stime: Timeval::default(),
+            ru_maxrss: 0, ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
+            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
+            ru_inblock: 0, ru_oublock: 0,
+            ru_msgsnd: 0, ru_msgrcv: 0, ru_nsignals: 0,
+            ru_nvcsw: 0, ru_nivcsw: 0,
+        }
+    }
+}
+
+/// getrusage(who, rusage) → 0 on success.
+///
+/// who: 0 = RUSAGE_SELF, 1 = RUSAGE_CHILDREN.
+pub fn sys_getrusage(who: u64, rusage_ptr: *mut u8) -> u64 {
+    if rusage_ptr.is_null() {
+        return errno::Errno::EINVAL as u64;
+    }
+
+    const RUSAGE_SELF: u64 = 0;
+    const RUSAGE_CHILDREN: u64 = 1;
+
+    let proc_lock = CURRENT_PROCESS.lock();
+    let proc = match proc_lock.as_ref() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    let mut ru = Rusage::default();
+
+    match who {
+        RUSAGE_SELF => {
+            let uticks = proc.utime.load(core::sync::atomic::Ordering::Relaxed);
+            let sticks = proc.stime.load(core::sync::atomic::Ordering::Relaxed);
+            // Convert clock ticks (100 Hz) to timeval
+            ru.ru_utime.tv_sec = (uticks / 100) as i64;
+            ru.ru_utime.tv_usec = ((uticks % 100) * 10_000) as i64;
+            ru.ru_stime.tv_sec = (sticks / 100) as i64;
+            ru.ru_stime.tv_usec = ((sticks % 100) * 10_000) as i64;
+            // Max RSS in kilobytes
+            let mem = proc.memory.lock();
+            let vsize_kb = mem.vmas.iter().map(|v| (v.end - v.start) / 1024).sum::<u64>();
+            ru.ru_maxrss = vsize_kb as i64;
+        }
+        RUSAGE_CHILDREN => {
+            let cuticks = proc.cutime.load(core::sync::atomic::Ordering::Relaxed);
+            let csticks = proc.cstime.load(core::sync::atomic::Ordering::Relaxed);
+            ru.ru_utime.tv_sec = (cuticks / 100) as i64;
+            ru.ru_utime.tv_usec = ((cuticks % 100) * 10_000) as i64;
+            ru.ru_stime.tv_sec = (csticks / 100) as i64;
+            ru.ru_stime.tv_usec = ((csticks % 100) * 10_000) as i64;
+        }
+        _ => {
+            return errno::Errno::EINVAL as u64;
+        }
+    }
+
+    drop(proc_lock);
+
+    unsafe {
+        if user_access::copy_to_user(rusage_ptr,
+            core::slice::from_raw_parts(&ru as *const _ as *const u8, core::mem::size_of::<Rusage>())
+        ).is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+    0
+}
