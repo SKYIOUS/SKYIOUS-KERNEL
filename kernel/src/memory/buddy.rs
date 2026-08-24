@@ -60,6 +60,7 @@ impl BuddyAllocator {
     pub fn allocate_frame(&mut self) -> Option<PhysFrame> {
         // Try normal allocation first
         if let Some(addr) = self.allocate_contiguous(0) {
+            crate::memory::frame_info::track_alloc();
             return Some(PhysFrame::containing_address(addr));
         }
         // If swap devices exist, try evicting a page and retry
@@ -98,6 +99,7 @@ impl BuddyAllocator {
     }
 
     pub fn deallocate_frame(&mut self, frame: PhysFrame) {
+        crate::memory::frame_info::track_dealloc();
         self.deallocate_at_order(frame.start_address(), 0);
     }
 

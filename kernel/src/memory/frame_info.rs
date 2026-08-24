@@ -1,5 +1,6 @@
 use x86_64::PhysAddr;
 use crate::sync::IrqSafeMutex as Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 struct RefCountTable {
     counts: &'static mut [u16],
@@ -82,4 +83,35 @@ pub fn count(phys: PhysAddr) -> u16 {
         if i < refcounts.counts.len() { return refcounts.counts[i]; }
     }
     1
+}
+
+// ── Page-frame high-water-mark tracking ──────────────────────────────
+
+static ALLOCATED_FRAMES: AtomicU64 = AtomicU64::new(0);
+static HIGH_WATER_MARK: AtomicU64 = AtomicU64::new(0);
+
+/// Record a frame allocation. Called from buddy allocator.
+pub fn track_alloc() {
+    let cur = ALLOCATED_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    // CAS loop for high-water mark — only one thread can set a new max.
+    loop {
+        let old = HIGH_WATER_MARK.load(Ordering::Relaxed);
+        if cur <= old { break; }
+        if HIGH_WATER_MARK.compare_exchange_weak(old, cur, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            break;
+        }
+    }
+}
+
+/// Record a frame deallocation. Called from buddy allocator.
+pub fn track_dealloc() {
+    ALLOCATED_FRAMES.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Get current allocation stats: (allocated, high_water_mark).
+pub fn frame_stats() -> (u64, u64) {
+    (
+        ALLOCATED_FRAMES.load(Ordering::Relaxed),
+        HIGH_WATER_MARK.load(Ordering::Relaxed),
+    )
 }
