@@ -186,6 +186,9 @@ Completed this session:
 - Signal delivery: default restorer trampoline, FPU state save/restore, signal mask blocking
 - getrandom(2): RDRAND+TSC+SHA-256 entropy, GRND_NONBLOCK/GRND_RANDOM flags, i386 compat
 - Resource leak audit: FD cleanup on process exit, shm_detach_all, e1000 IRQ-context format! removal
+- main.rs decomposition: panic handler extracted to panic_handler.rs (613→434 lines)
+- Frame tracking: high-water-mark allocation tracking in frame_info.rs + buddy allocator
+- 100-boot stress test: tests/boot_stress_100.ps1 with configurable SMP/timeout
 
 ## Conventions & gotchas
 - **Allocator**: `linked_list_allocator` crate, heap at fixed address. `alloc_error_handler` triggers OOM killer.
