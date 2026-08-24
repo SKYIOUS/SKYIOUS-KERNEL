@@ -11,8 +11,8 @@ const LINE_STATUS: u16 = 5;
 
 /// Serial port configuration constants
 const COM1: u16 = 0x3F8;
-const BAUD_9600_LOW: u8 = 0x0C;
-const BAUD_9600_HIGH: u8 = 0x00;
+const BAUD_115200_LOW: u8 = 0x01;
+const BAUD_115200_HIGH: u8 = 0x00;
 const DLAB_ENABLE: u8 = 0x80;
 const LINE_CONFIG_8N1: u8 = 0x03;
 const FIFO_CONFIG: u8 = 0xC7;
@@ -44,11 +44,11 @@ pub fn init(port: u16) -> Result<(), ()> {
         // Set DLAB to configure baud rate
         line.write(DLAB_ENABLE);
 
-        // Baud rate divisor: 115200 / 9600 = 12
+        // Baud rate divisor: 115200 / 115200 = 1
         let mut data = Port::<u8>::new(base + DATA);
         let mut intr2 = Port::<u8>::new(base + INTR_EN);
-        data.write(BAUD_9600_LOW);
-        intr2.write(BAUD_9600_HIGH);
+        data.write(BAUD_115200_LOW);
+        intr2.write(BAUD_115200_HIGH);
 
         // 8 bits, no parity, 1 stop bit
         line.write(LINE_CONFIG_8N1);

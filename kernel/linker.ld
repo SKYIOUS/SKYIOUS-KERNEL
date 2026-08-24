@@ -31,6 +31,11 @@ SECTIONS
         *(.got .got.*)
     }
 
+    .limine_requests : ALIGN(8)
+    {
+        KEEP(*(.limine_requests))
+    }
+
     /DISCARD/ :
     {
         *(.hash)

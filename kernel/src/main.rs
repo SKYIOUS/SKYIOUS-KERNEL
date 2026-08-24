@@ -100,6 +100,7 @@ mod selftest;
 pub mod hypervisor;
 pub mod boot;
 pub mod limine;
+pub mod limine_marker;
 
 use core::panic::PanicInfo;
 use crate::arch::Arch;
@@ -108,6 +109,13 @@ use crate::arch::Arch;
 /// Reads all boot information from Limine static requests.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
+    crate::limine::prevent_stripping();
+    // Ultra-early COM1 probe: if Limine loaded us, this byte appears on serial.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'K',
+            options(nostack, nomem, preserves_flags));
+    }
     kernel_main()
 }
 

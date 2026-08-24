@@ -9,27 +9,43 @@ use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 // ── Limine static requests ──────────────────────────────────────────
 
 /// Base revision request: we use revision 3 (64-bit physical addresses).
+#[used]
+#[link_section = ".limine_requests"]
 pub static BASE_REVISION: BaseRevision = BaseRevision::with_revision(3);
 
 /// Higher Half Direct Map: provides the physical→virtual offset.
+#[used]
+#[link_section = ".limine_requests"]
 pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 /// Memory map: provides usable/reserved memory regions.
+#[used]
+#[link_section = ".limine_requests"]
 pub static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 
 /// Framebuffer: provides linear framebuffer info.
+#[used]
+#[link_section = ".limine_requests"]
 pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 /// RSDP: provides ACPI RSDP physical address.
+#[used]
+#[link_section = ".limine_requests"]
 pub static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 /// Boot modules: provides ramdisk/initrd data.
+#[used]
+#[link_section = ".limine_requests"]
 pub static MODULES_REQUEST: ModulesRequest = ModulesRequest::new();
 
 /// Requests start marker.
+#[used]
+#[link_section = ".limine_requests"]
 pub static _START: RequestsStartMarker = RequestsStartMarker::new();
 
 /// Requests end marker.
+#[used]
+#[link_section = ".limine_requests"]
 pub static _END: RequestsEndMarker = RequestsEndMarker::new();
 
 // ── Accessor functions ─────────────────────────────────────────────
@@ -91,3 +107,20 @@ pub fn iter_usable_regions() -> impl Iterator<Item = (u64, u64)> {
         .filter(|e| is_usable(e))
         .map(|e| (e.base, e.base + e.length))
 }
+
+/// Prevent LTO from stripping Limine request statics.
+/// Limine scans the raw binary for magic bytes; if these are stripped,
+/// the kernel page-faults immediately (no higher-half mapping).
+#[inline(never)]
+pub fn prevent_stripping() {
+    use core::hint::black_box;
+    black_box(&BASE_REVISION);
+    black_box(&HHDM_REQUEST);
+    black_box(&MEMMAP_REQUEST);
+    black_box(&FRAMEBUFFER_REQUEST);
+    black_box(&RSDP_REQUEST);
+    black_box(&MODULES_REQUEST);
+    black_box(&_START);
+    black_box(&_END);
+}
+
