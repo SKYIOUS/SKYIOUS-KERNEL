@@ -36,9 +36,9 @@ pub fn handle_panic(info: &PanicInfo) -> ! {
     }
     if let Some(tid) = crate::task::scheduler::with_current_thread(|t| {
         let pid = t.process.as_ref().map(|p| p.id).unwrap_or(0);
-        (t.id, pid)
+        (t._id, pid)
     }) {
-        crate::serial_write(&alloc::format!("[PANIC] Thread: {}, PID: {}\n", tid.0, tid.1));
+        crate::serial_write(&alloc::format!("[PANIC] Thread: {:?}, PID: {}\n", tid.0, tid.1));
     }
 
     // ── 3. Register dump ──
@@ -70,34 +70,34 @@ pub fn handle_panic(info: &PanicInfo) -> ! {
     crate::serial_write("         SYSTEM HALTED\n");
     crate::serial_write("========================================\n");
 
-    loop { crate::arch::CurrentArch::halt(); }
+    loop { x86_64::instructions::hlt(); }
 }
 
 /// Dump x86_64 general-purpose and control registers.
 #[cfg(target_arch = "x86_64")]
 fn dump_registers_x86_64() {
     unsafe {
-        let (rax, rbx, rcx, rdx);
+        let (rax, rbx, rcx, rdx): (u64, u64, u64, u64);
         core::arch::asm!("mov {}, rax", out(reg) rax);
         core::arch::asm!("mov {}, rbx", out(reg) rbx);
         core::arch::asm!("mov {}, rcx", out(reg) rcx);
         core::arch::asm!("mov {}, rdx", out(reg) rdx);
-        let (rsi, rdi, rbp, rsp);
+        let (rsi, rdi, rbp, rsp): (u64, u64, u64, u64);
         core::arch::asm!("mov {}, rsi", out(reg) rsi);
         core::arch::asm!("mov {}, rdi", out(reg) rdi);
         core::arch::asm!("mov {}, rbp", out(reg) rbp);
         core::arch::asm!("mov {}, rsp", out(reg) rsp);
-        let (r8, r9, r10, r11);
+        let (r8, r9, r10, r11): (u64, u64, u64, u64);
         core::arch::asm!("mov {}, r8",  out(reg) r8);
         core::arch::asm!("mov {}, r9",  out(reg) r9);
         core::arch::asm!("mov {}, r10", out(reg) r10);
         core::arch::asm!("mov {}, r11", out(reg) r11);
-        let (r12, r13, r14, r15);
+        let (r12, r13, r14, r15): (u64, u64, u64, u64);
         core::arch::asm!("mov {}, r12", out(reg) r12);
         core::arch::asm!("mov {}, r13", out(reg) r13);
         core::arch::asm!("mov {}, r14", out(reg) r14);
         core::arch::asm!("mov {}, r15", out(reg) r15);
-        let rip: u64 = unsafe { *rbp.add(1) as u64 };
+        let rip: u64 = *((rbp as *const u64).add(1));
         let rflags: u64;
         core::arch::asm!("pushfq; pop {}", out(reg) rflags);
         let cr2: u64;

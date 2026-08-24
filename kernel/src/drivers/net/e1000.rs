@@ -3,7 +3,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use smoltcp::phy::{Device, DeviceCapabilities, RxToken, TxToken, ChecksumCapabilities};
 use smoltcp::time::Instant;
-use crate::hal::dma::DmaBuf;
 
 /// EEPROM signature for detection.
 const EEPROM_SIG: u16 = 0xBEEB;
@@ -489,7 +488,7 @@ impl E1000 {
 
     /// Write link status to serial without heap allocation.
     fn write_link_status(link_up: bool, speed_mbps: u32) {
-        let dir = if link_up { b"UP" } else { b"DOWN" };
+        let dir: &[u8] = if link_up { b"UP" } else { b"DOWN" };
         let mut buf = [0u8; 48];
         let mut pos = 0;
         for &b in b"[E1000] Link " { buf[pos] = b; pos += 1; }

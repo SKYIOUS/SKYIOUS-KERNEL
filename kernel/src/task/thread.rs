@@ -68,7 +68,6 @@ pub unsafe fn restore_fpu(buf: &FpuArea) {
 #[cfg(target_arch = "x86_64")]
 pub fn detect_xsave() {
     unsafe {
-        let mut eax: u32;
         let mut ecx: u32;
         core::arch::asm!(
             "push rbx",
@@ -76,7 +75,7 @@ pub fn detect_xsave() {
             "cpuid",
             "pop rbx",
             lateout("ecx") ecx,
-            lateout("eax") eax,
+            out("eax") _,
             out("edx") _,
             options(nostack, preserves_flags)
         );

@@ -388,7 +388,7 @@ struct JournalEntryHeader {
 
 /// Start a journal transaction. Returns the header block number (txn id).
 pub fn journal_begin(fs: &Arc<Mutex<SkyFS>>) -> Result<u64, ()> {
-    let mut fs_lock = fs.lock();
+    let fs_lock = fs.lock();
     let j_start = fs_lock.sb.journal_start;
     let j_blocks = fs_lock.sb.journal_blocks;
     let mut dev = fs_lock.device.lock();
@@ -430,7 +430,7 @@ pub fn journal_write_entry(
     payload[..hdr_bytes.len()].copy_from_slice(hdr_bytes);
     payload[hdr_bytes.len()..hdr_bytes.len() + data.len()].copy_from_slice(data);
 
-    let mut fs_lock = fs.lock();
+    let fs_lock = fs.lock();
     let j_start = fs_lock.sb.journal_start;
     let j_blocks = fs_lock.sb.journal_blocks;
     let mut dev = fs_lock.device.lock();
@@ -442,12 +442,12 @@ pub fn journal_write_entry(
     let result = Journal::journal_data(&mut *dev, &mut journal, txn, target_fs_block, &payload);
     let mut jlock = fs_lock.journal.lock();
     jlock.next_free = journal.next_free;
-    result
+    result.map(|_| ())
 }
 
 /// Commit a transaction — marks it as committed with a checksum.
 pub fn journal_commit(fs: &Arc<Mutex<SkyFS>>, txn: u64) -> Result<(), ()> {
-    let mut fs_lock = fs.lock();
+    let fs_lock = fs.lock();
     let j_start = fs_lock.sb.journal_start;
     let j_blocks = fs_lock.sb.journal_blocks;
     let mut dev = fs_lock.device.lock();
@@ -458,7 +458,7 @@ pub fn journal_commit(fs: &Arc<Mutex<SkyFS>>, txn: u64) -> Result<(), ()> {
 /// Recover the journal: replay all committed entries, skip incomplete ones.
 /// Called during mount to restore consistency after a crash.
 pub fn skyfs_journal_recover(fs: &Arc<Mutex<SkyFS>>) -> Result<u32, ()> {
-    let mut fs_lock = fs.lock();
+    let fs_lock = fs.lock();
     let j_start = fs_lock.sb.journal_start;
     let j_blocks = fs_lock.sb.journal_blocks;
     let mut dev = fs_lock.device.lock();

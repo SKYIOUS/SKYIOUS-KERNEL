@@ -133,7 +133,7 @@ impl Isolate {
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Option<u64> {
         let page_count = (size + 4095) / 4096;
-        let page_bytes = page_count * 4096;
+        let page_bytes = (page_count * 4096) as u64;
         let base = self.mmap_top.checked_sub(page_bytes)?;
         let result = self.mmap_at(base, size, flags, BackingStore::Anonymous, frame_allocator);
         if result.is_some() {

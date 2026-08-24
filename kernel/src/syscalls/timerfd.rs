@@ -140,9 +140,9 @@ pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_va
     }
 
     let abstime = (flags & TFD_TIMER_ABSTIME) != 0;
-    let it_value_ns = (new_val.it_value_sec as u64) * 1_000_000_000
+    let it_value_ns = ((new_val.it_value_sec as u64) * 1_000_000_000u64)
         .wrapping_add(new_val.it_value_nsec as u64);
-    let it_interval_ns = (new_val.it_interval_sec as u64) * 1_000_000_000
+    let it_interval_ns = ((new_val.it_interval_sec as u64) * 1_000_000_000u64)
         .wrapping_add(new_val.it_interval_nsec as u64);
 
     let proc = match *CURRENT_PROCESS.lock() {

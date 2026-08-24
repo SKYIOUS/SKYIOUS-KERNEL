@@ -262,7 +262,7 @@ pub fn oom_kill_event() -> OomEvent {
             pos = copy_bytes(&mut buf, pos, b"KB from ");
             pos = write_u64(&mut buf, pos, kills as u64);
             pos = copy_bytes(&mut buf, pos, b" kills, ");
-            pos = write_u64(&mut buf, pos, free_pages);
+            pos = write_u64(&mut buf, pos, free_pages as u64);
             pos = copy_bytes(&mut buf, pos, b" pages free\n");
             crate::serial_write(core::str::from_utf8(&buf[..pos]).unwrap_or(""));
             return OomEvent {
@@ -283,7 +283,7 @@ pub fn oom_kill_event() -> OomEvent {
 }
 
 /// Copy a byte slice into buf at offset, return new offset.
-fn copy_bytes(buf: &mut [u8], mut pos: usize, src: &[u8]) -> usize {
+fn copy_bytes(buf: &mut [u8], pos: usize, src: &[u8]) -> usize {
     let n = src.len().min(buf.len() - pos);
     buf[pos..pos + n].copy_from_slice(&src[..n]);
     pos + n

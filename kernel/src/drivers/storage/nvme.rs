@@ -3,9 +3,7 @@ use crate::drivers::block::{BlockDevice, BlockDeviceError, register_block_device
 use alloc::sync::Arc;
 use alloc::boxed::Box;
 use crate::sync::IrqSafeMutex as Mutex;
-use core::alloc::Layout;
 use crate::hal::dma::{DmaBuf, PooledDma};
-use x86_64::VirtAddr;
 
 /// NVMe register layout (BAR0/1 MMIO)
 #[repr(C)]
@@ -123,7 +121,7 @@ impl RingBuf {
 
     fn phys(&self) -> u64 { self.buf.phys() }
     fn entry(&self, index: u32) -> *mut u8 {
-        unsafe { self.buf.as_mut_ptr().add((index % self.num_entries) as usize * self.entry_size) }
+        unsafe { self.buf.as_ptr().add((index % self.num_entries) as usize * self.entry_size) as *mut u8 }
     }
 }
 

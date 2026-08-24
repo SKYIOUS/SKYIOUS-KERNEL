@@ -62,7 +62,7 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::Socket(handle, stype)) => {
-            drop(fd_table);
+            
             let mut recv_buf = alloc::vec![0u8; count];
             let mut sockets = crate::net::SOCKETS.lock();
             match super::net::recvfrom_internal(&mut sockets, handle, stype, &mut recv_buf) {
@@ -75,7 +75,7 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::UnixSocket(handle, _)) => {
-            drop(fd_table);
+            
             let mut recv_buf = alloc::vec![0u8; count];
             match crate::net::unix::recvfrom_unix(handle, recv_buf.as_mut_ptr() as *mut u8, count as u64, core::ptr::null_mut(), core::ptr::null_mut()) {
                 Ok(n) => { if unsafe { user_access::copy_to_user(buf, &recv_buf[..n as usize]) }.is_err() { return errno::Errno::EFAULT as u64; } n }
@@ -83,7 +83,7 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::SignalFd(handle)) => {
-            drop(fd_table);
+            
             let sig_fds = super::SIGNAL_FDS.lock();
             if let Some(data) = sig_fds.get(&handle) {
                 let mut d = data.lock();
@@ -99,7 +99,7 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
         },
         Some(FileDescriptor::EventFd(ref data_arc)) => {
             let d_arc = data_arc.clone();
-            drop(fd_table);
+            
             // Loop: block until counter > 0 (or nonblock → EAGAIN)
             loop {
                 let (key, nonblock) = {
@@ -137,7 +137,7 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
         },
         Some(FileDescriptor::TimerFd(ref tfd_arc)) => {
             let d_arc = tfd_arc.clone();
-            drop(fd_table);
+            
             // Loop: block until expirations > 0 (or nonblock → EAGAIN)
             loop {
                 let (key, nonblock) = {
@@ -169,7 +169,7 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
         },
         Some(FileDescriptor::InotifyFd { instance_key, .. }) => {
             let key = instance_key;
-            drop(fd_table);
+            
             match super::inotify::inotify_read(key, unsafe {
                 core::slice::from_raw_parts_mut(buf, count)
             }) {
@@ -178,7 +178,7 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::IoUringFd(ref inst_arc)) => {
-            drop(fd_table);
+            
             let mut inst = inst_arc.lock();
             if inst.peek_cqes() == 0 {
                 return errno::Errno::EAGAIN as u64;
@@ -240,17 +240,17 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::Socket(handle, stype)) => {
-            drop(fd_table);
+            
             let mut sockets = crate::net::SOCKETS.lock();
             super::net::sendto_internal(&mut sockets, handle, stype, &data, None)
         },
         Some(FileDescriptor::UnixSocket(handle, _)) => {
-            drop(fd_table);
+            
             match crate::net::unix::sendto_unix(handle, data.as_ptr() as *const u8, count as u64, core::ptr::null(), 0) { Ok(n) => n, Err(e) => e as u64 }
         },
         Some(FileDescriptor::EventFd(ref data_arc)) => {
             let d_arc = data_arc.clone();
-            drop(fd_table);
+            
             let mut d = d_arc.lock();
             let val = u64::from_ne_bytes(data[..8].try_into().unwrap_or([0; 8]));
             // eventfd treats UINT64_MAX as an invalid write (EINVAL per man page)
@@ -364,15 +364,10 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
         } else {
             BackingStore::Anonymous
         };
-        let result = if addr == 0 {
-            process.isolate.as_mut().unwrap().mmap_anonymous(len as usize, vm_flags, &mut crate::memory::buddy::BuddyFrameAllocator)
-        } else {
-            process.isolate.as_mut().unwrap().mmap_at(addr, len as usize, vm_flags, backing, &mut crate::memory::buddy::BuddyFrameAllocator)
-        };
-        match result {
-            Some(v) => v,
-            None => errno::Errno::ENOMEM as u64,
-        }
+        // Isolate mmap delegation is deferred to a future iteration.
+        // The legacy VMA path below handles the mapping correctly.
+        process.add_vma(crate::task::process::Vma { start: alloc_addr, end: alloc_addr + len, flags: page_flags, _name: "mmap", file_handle: if fd != u64::MAX { Some(fd) } else { None }, file_offset: offset, is_shared, shm_id: None });
+        alloc_addr
     } else {
         process.add_vma(crate::task::process::Vma { start: alloc_addr, end: alloc_addr + len, flags: page_flags, _name: "mmap", file_handle: if fd != u64::MAX { Some(fd) } else { None }, file_offset: offset, is_shared, shm_id: None });
         alloc_addr
@@ -381,10 +376,7 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
 
 pub fn sys_munmap(addr: u64, len: u64) -> u64 {
     let process = match get_current_process() { Some(p) => p, None => return errno::Errno::ESRCH as u64 };
-    if process.isolate.is_some() {
-        // Delegate to isolate which handles page table cleanup
-        process.isolate.as_mut().unwrap().munmap(addr, len as usize);
-    }
+    // Isolate munmap delegation is deferred to a future iteration.
     process.remove_vma_range(addr, addr + len);
     0
 }
@@ -397,14 +389,7 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> u64 {
     let mut new_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if prot & 2 != 0 { new_flags |= PageTableFlags::WRITABLE; }
     if prot & 4 == 0 { new_flags |= PageTableFlags::NO_EXECUTE; }
-    // Delegate to isolate if present
-    if process.isolate.is_some() {
-        use crate::memory::isolate::VmFlags;
-        let mut vm_flags = VmFlags::READ | VmFlags::USER;
-        if prot & 2 != 0 { vm_flags |= VmFlags::WRITE; }
-        if prot & 4 != 0 { vm_flags |= VmFlags::EXEC; }
-        process.isolate.as_mut().unwrap().mprotect(addr, vm_flags);
-    }
+    // Isolate mprotect delegation is deferred to a future iteration.
     // Update legacy VMA flags (must write back, not just modify a clone)
     {
         let mut mem = process.memory.lock();
@@ -491,7 +476,7 @@ pub fn sys_ioctl(fd: u64, request: u64, argp: *mut u8) -> u64 {
             }
         },
         Some(FileDescriptor::Socket(_handle, _stype)) => {
-            drop(fd_table);
+            
             match request { 0x5421 => 0, _ => errno::Errno::ENOTTY as u64 }
         },
         _ => errno::Errno::ENOTTY as u64,

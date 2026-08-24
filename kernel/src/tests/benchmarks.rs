@@ -9,7 +9,6 @@
 //! - Total elapsed time
 
 use crate::selftest;
-use alloc::sync::Arc;
 
 /// Read the TSC (timestamp counter) directly for high-resolution timing.
 /// Returns raw TSC ticks — convert to microseconds using the TSC frequency.
@@ -355,7 +354,8 @@ fn bench_ctxswitch_via_scheduler() {
     use crate::task::YieldNow;
     // This captures the scheduler readiness check path without actually yielding.
     let mut yield_fut = YieldNow::new();
-    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    use core::future::Future;
+    use core::task::{Context, RawWaker, RawWakerVTable, Waker};
 
     fn noop_waker() -> Waker {
         fn clone(_: *const ()) -> RawWaker { RawWaker::new(core::ptr::null(), &VTABLE) }
@@ -367,7 +367,7 @@ fn bench_ctxswitch_via_scheduler() {
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     // Poll once — YieldNow returns Pending the first time (it yields on first poll)
-    let _ = yield_fut.poll(&mut cx);
+    let _ = core::pin::Pin::new(&mut yield_fut).poll(&mut cx);
 }
 
 // ---------------------------------------------------------------------------

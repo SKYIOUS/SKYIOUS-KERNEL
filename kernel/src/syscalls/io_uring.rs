@@ -17,11 +17,11 @@ use crate::task::process::{CURRENT_PROCESS, FileDescriptor};
 pub const IORING_ENTER_GETEVENTS: u32 = 1;
 
 pub const IORING_REGISTER_BUFFERS: u32 = 0;
-pub const IORING_unregister_BUFFERS: u32 = 1;
+pub const IORING_UNREGISTER_BUFFERS: u32 = 1;
 pub const IORING_REGISTER_FILES: u32 = 2;
-pub const IORING_unregister_FILES: u32 = 3;
+pub const IORING_UNREGISTER_FILES: u32 = 3;
 pub const IORING_REGISTER_EVENTFD: u32 = 4;
-pub const IORING_unregister_EVENTFD: u32 = 5;
+pub const IORING_UNREGISTER_EVENTFD: u32 = 5;
 
 pub const IORING_OP_NOP: u8 = 0;
 pub const IORING_OP_READV: u8 = 1;
@@ -334,14 +334,14 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
             inst.fixed_buffers = iovecs.iter().map(|iov| (iov.addr, iov.len as u32)).collect();
             0
         }
-        IORING_unregister_BUFFERS => { inst.fixed_buffers.clear(); 0 }
+        IORING_UNREGISTER_BUFFERS => { inst.fixed_buffers.clear(); 0 }
         IORING_REGISTER_FILES => {
             if arg == 0 || nr_args == 0 || nr_args > 1024 { return Errno::EINVAL as u64; }
             let fds = unsafe { core::slice::from_raw_parts(arg as *const i32, nr_args as usize) };
             inst.fixed_files = fds.to_vec();
             0
         }
-        IORING_unregister_FILES => { inst.fixed_files.clear(); 0 }
+        IORING_UNREGISTER_FILES => { inst.fixed_files.clear(); 0 }
         IORING_REGISTER_EVENTFD => {
             if arg == 0 { return Errno::EINVAL as u64; }
             let efd_fd = unsafe { core::ptr::read_volatile(arg as *const i32) };
@@ -360,7 +360,7 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
             }
             Errno::EBADF as u64
         }
-        IORING_unregister_EVENTFD => { inst.eventfd = None; 0 }
+        IORING_UNREGISTER_EVENTFD => { inst.eventfd = None; 0 }
         _ => Errno::EINVAL as u64,
     }
 }

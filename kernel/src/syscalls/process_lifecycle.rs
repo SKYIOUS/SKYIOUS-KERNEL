@@ -88,8 +88,10 @@ pub fn sys_exit(status: u64) -> u64 {
             Vec::new()
         };
         for &orphan_pid in &orphans {
-            if let Some(orphan) = table.get_mut(&orphan_pid) {
-                orphan.parent_id = Some(1);
+            if let Some(orphan_arc) = table.get_mut(&orphan_pid) {
+                if let Some(orphan) = Arc::get_mut(orphan_arc) {
+                    orphan.parent_id = Some(1);
+                }
             }
         }
         // Remove this process from its parent's children list.

@@ -13,8 +13,6 @@
 #![cfg_attr(not(target_arch = "aarch64"), feature(abi_x86_interrupt))]
 #![feature(alloc_error_handler)]
 #![deny(warnings)]
-
-mod panic_handler;
 // ponytail: clippy-style lints allowed — zero bug-finding value for kernel code
 #![allow(
     dead_code,
@@ -47,6 +45,7 @@ mod panic_handler;
     clippy::never_loop, clippy::let_and_return
 )]
 
+mod panic_handler;
 extern crate alloc;
 mod memory;
 mod sync;

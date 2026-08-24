@@ -930,12 +930,12 @@ impl Process {
         if let Ok(elf) = ElfFile::new(elf_data) {
             phdr_count = elf.header.pt2.ph_count() as u64;
             phdr_entry_size = elf.header.pt2.ph_entry_size() as u64;
-            phdr_addr = elf_entry.wrapping_add(elf.header.pt2.phoff());
+            phdr_addr = elf_entry.wrapping_add(elf.header.pt2.ph_offset());
         }
 
         // Helper: write a u64 to the user stack and advance RSP.
         let mut rsp = stack_top_addr;
-        let mut push_u64 = |val: u64, rsp: &mut u64| -> Result<(), ()> {
+        let push_u64 = |val: u64, rsp: &mut u64| -> Result<(), ()> {
             *rsp -= 8;
             let v = x86_64::VirtAddr::new(*rsp);
             let p = crate::memory::virt_to_phys(v).ok_or(())?;
@@ -944,7 +944,7 @@ impl Process {
             Ok(())
         };
         // Helper: write a byte slice (null-terminated) to stack, return user pointer.
-        let mut push_str = |s: &[u8], rsp: &mut u64| -> Result<u64, ()> {
+        let push_str = |s: &[u8], rsp: &mut u64| -> Result<u64, ()> {
             let len = s.len() as u64;
             *rsp -= len + 1;
             let v = x86_64::VirtAddr::new(*rsp);

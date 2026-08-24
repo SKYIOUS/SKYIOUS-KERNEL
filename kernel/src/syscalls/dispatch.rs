@@ -451,7 +451,7 @@ fn sys_capset(a: &SyscallArgs) -> u64 { process::sys_capset(a.a1 as *const u8, a
 fn sys_rt_sigprocmask(a: &SyscallArgs) -> u64 { process::sys_sigprocmask(a.a1 as i32, a.a2 as *const u64, a.a3 as *mut u64) }
 fn sys_io_uring_setup(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_setup(a.a1, a.a2) }
 fn sys_io_uring_enter(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_enter(a.a1, a.a2 as u32, a.a3 as u32, a.a4 as u32, a.a5) }
-fn sys_io_uring_register(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_register(a.a1 as u32, a.a2 as u32, a.a3, a.a4 as u32) }
+fn sys_io_uring_register(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_register(a.a1, a.a2 as u32, a.a3, a.a4 as u32) }
 fn sys_bpf(a: &SyscallArgs) -> u64 { crate::ebpf::sys_bpf(a.a1 as u32, a.a2, a.a3, a.a4) }
 fn sys_sync(a: &SyscallArgs) -> u64 { fs::sys_sync() }
 fn sys_reboot(a: &SyscallArgs) -> u64 { misc::sys_reboot(a.a1, a.a2) }

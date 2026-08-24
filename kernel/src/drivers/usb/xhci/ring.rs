@@ -5,7 +5,6 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use x86_64::VirtAddr;
 use crate::hal::dma::DmaBuf;
 
 use super::regs::{

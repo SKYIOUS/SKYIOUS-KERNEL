@@ -190,7 +190,7 @@ pub fn mq_close_all(pid: u64) {
         .map(|(_, d)| d.qname.clone())
         .collect();
     // Remove all fds for this process
-    fds.retain(|(&(p, _), _)| p != pid);
+    fds.retain(|key, _| key.0 != pid);
     // For each affected queue, check if it should be destroyed
     for name in names {
         if !fds.values().any(|f| f.qname == name) {
