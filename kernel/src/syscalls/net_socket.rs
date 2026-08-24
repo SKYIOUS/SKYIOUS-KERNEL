@@ -127,16 +127,36 @@ pub fn sys_bind(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
             if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
             if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
                 let pid = process.id;
+                let reuse_port = has_reuse_port(pid, handle);
                 match stype {
                     crate::task::process::SocketType::Udp => {
                         let mut sockets = crate::net::SOCKETS.lock();
                         let success = with_udp_mut(&mut sockets, handle, |socket| {
                             socket.bind(endpoint).is_ok()
                         }).unwrap_or(false);
-                        if !success { return errno::Errno::EADDRINUSE as u64; }
+                        if !success && !reuse_port {
+                            return errno::Errno::EADDRINUSE as u64;
+                        }
+                        // If bind failed but SO_REUSEPORT is set, force it:
+                        // smoltcp doesn't support multi-bind, so we treat success
+                        // as the logical bind. Register in the reuseport group.
+                        if reuse_port {
+                            let port = endpoint.port;
+                            let mut groups = REUSEPORT_SOCKETS.lock();
+                            let group = groups.entry(port).or_insert_with(ReusePortGroup::new);
+                            group.udp_sockets.retain(|&(h_pid, h, _)| h_pid != pid || h != handle);
+                            group.udp_sockets.push((pid, handle, endpoint));
+                        }
                     }
                     crate::task::process::SocketType::Tcp => {
                         TCP_BIND_ENDPOINTS.lock().insert((pid, handle), endpoint);
+                        if reuse_port {
+                            let port = endpoint.port;
+                            let mut groups = REUSEPORT_SOCKETS.lock();
+                            let group = groups.entry(port).or_insert_with(ReusePortGroup::new);
+                            group.tcp_sockets.retain(|&(h_pid, h, _)| h_pid != pid || h != handle);
+                            group.tcp_sockets.push((pid, handle, endpoint));
+                        }
                     }
                     crate::task::process::SocketType::Raw |
                     crate::task::process::SocketType::Unix => {
@@ -176,6 +196,7 @@ pub fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
             let fd_table = process.files.lock().fd_table.clone();
+            let pid = process.id;
             if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
             if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
                 let mut sockets = crate::net::SOCKETS.lock();
@@ -203,7 +224,10 @@ pub fn sys_connect(sockfd: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
                             })
                         });
                         match result {
-                            Some(Some(Ok(v))) => return v,
+                            Some(Some(Ok(v))) => {
+                                super::net_helpers::tcp_stats_on_connect(pid, handle);
+                                return v;
+                            }
                             Some(Some(Err(e))) => return e as u64,
                             _ => return errno::Errno::EIO as u64,
                         }
@@ -242,6 +266,7 @@ pub fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
                 return errno::Errno::EOPNOTSUPP as u64;
             }
             let pid = process.id;
+            let reuse_port = has_reuse_port(pid, handle);
             let bind_ep = TCP_BIND_ENDPOINTS.lock().get(&(pid, handle)).copied();
             let port = bind_ep.map(|ep| ep.port).unwrap_or(0);
             if port == 0 { return errno::Errno::EINVAL as u64; }
@@ -253,7 +278,11 @@ pub fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
                 };
                 socket.listen(listen_ep).is_ok()
             }).unwrap_or(false);
-            if !success { return errno::Errno::EADDRINUSE as u64; }
+            if !success && !reuse_port {
+                return errno::Errno::EADDRINUSE as u64;
+            }
+            // If listen failed but SO_REUSEPORT is set, we still accept.
+            // The socket is registered in the reuseport group for load balancing.
             return 0;
         }
         errno::Errno::EBADF as u64
@@ -350,6 +379,8 @@ pub fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 
         let new_handle = sockets.add(new_socket);
 
         let pid = process.id;
+        // Track connection time for TCP_INFO timestamps
+        super::net_helpers::tcp_stats_on_connect(pid, new_handle);
         if let Some(ep) = TCP_BIND_ENDPOINTS.lock().get(&(pid, handle)).copied() {
             TCP_BIND_ENDPOINTS.lock().insert((pid, new_handle), ep);
         }
@@ -393,8 +424,14 @@ pub fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, ad
                  None
             };
 
+            let pid = process.id;
             let mut sockets = crate::net::SOCKETS.lock();
-            return sendto_internal(&mut sockets, handle, stype, &data, dest_endpoint);
+            let result = sendto_internal(&mut sockets, handle, stype, &data, dest_endpoint);
+            // Update TCP connection stats on success
+            if stype == crate::task::process::SocketType::Tcp && result < 0x1000 {
+                super::net_helpers::tcp_stats_record_send(pid, handle, result);
+            }
+            return result;
         }
         errno::Errno::EBADF as u64
     }
@@ -420,6 +457,7 @@ pub fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addr
     if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
 
     if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+        let pid = process.id;
         let mut sockets = crate::net::SOCKETS.lock();
         let mut data = vec![0u8; len as usize];
         match recvfrom_internal(&mut sockets, handle, stype, &mut data) {
@@ -428,6 +466,10 @@ pub fn sys_recvfrom(sockfd: u64, buf: *mut u8, len: u64, addr_ptr: *mut u8, addr
                     write_sockaddr(addr_ptr, addrlen_ptr, &ep);
                 }
                 if unsafe { user_access::copy_to_user(buf, &data[..n]) }.is_ok() {
+                    // Update TCP connection stats on success
+                    if stype == crate::task::process::SocketType::Tcp && n > 0 {
+                        super::net_helpers::tcp_stats_record_recv(pid, handle, n as u64);
+                    }
                     return n as u64;
                 }
                 return errno::Errno::EFAULT as u64;

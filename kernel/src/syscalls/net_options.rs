@@ -29,7 +29,26 @@ pub fn sys_setsockopt(sockfd: u64, level: i32, optname: i32, _optval: *const u8,
                     0u64
                 }
                 SO_REUSEPORT => {
-                    // Accept SO_REUSEPORT — allows multiple sockets on same port
+                    // Record SO_REUSEPORT flag for this socket
+                    let (pid, handle) = {
+                        let fd_table = process.files.lock().fd_table.clone();
+                        match fd_table[sockfd as usize] {
+                            Some(FileDescriptor::Socket(h, _)) => (process.id, h),
+                            _ => return errno::Errno::ENOTSOCK as u64,
+                        }
+                    };
+                    // Read optval to determine enable/disable (1 byte)
+                    let enable = if !_optval.is_null() && _optlen > 0 {
+                        let mut val = [0u8; 1];
+                        if unsafe { user_access::copy_from_user(&mut val, _optval) }.is_ok() {
+                            val[0] != 0
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    };
+                    set_reuse_port(pid, handle, enable);
                     0u64
                 }
                 SO_KEEPALIVE => {
@@ -223,8 +242,13 @@ pub fn sys_sendmsg(sockfd: i64, msg: *const msghdr, flags: i32) -> u64 {
         let fd_table = process.files.lock().fd_table.clone();
         if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
         if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+            let pid = process.id;
             let mut sockets = crate::net::SOCKETS.lock();
             let result = sendto_internal(&mut sockets, handle, stype, &combined, dest_endpoint);
+            // Update TCP connection stats on success
+            if stype == crate::task::process::SocketType::Tcp && result < 0x1000 {
+                super::net_helpers::tcp_stats_record_send(pid, handle, result);
+            }
             // Post zero-copy completion notification if applicable
             if zerocopy_registered && result != errno::Errno::EAGAIN as u64 {
                 crate::net::zerocopy::post_zerocopy_completion(
@@ -329,12 +353,18 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
         if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
 
         if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
+            let pid = process.id;
             let mut sockets = crate::net::SOCKETS.lock();
             let (n, meta) = match recvfrom_internal(&mut sockets, handle, stype, &mut recv_buf) {
                 Ok(v) => v,
                 Err(e) => return e,
             };
             drop(sockets);
+
+            // Update TCP connection stats on success
+            if stype == crate::task::process::SocketType::Tcp && n > 0 {
+                super::net_helpers::tcp_stats_record_recv(pid, handle, n as u64);
+            }
 
             let mut offset = 0;
             for iov in &iov_buf {
@@ -592,9 +622,23 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
             },
             IPPROTO_TCP => match optname {
                 TCP_INFO => {
-                    let info = [0u8; 88];
-                    let copy_len = core::cmp::min(len as usize, info.len());
-                    if unsafe { user_access::copy_to_user(optval, &info[..copy_len]) }.is_err() {
+                    let (handle, _) = match socket_stype {
+                        Some(v) => v,
+                        None => return errno::Errno::EINVAL as u64,
+                    };
+                    let pid = {
+                        let process_lock = CURRENT_PROCESS.lock();
+                        match *process_lock { Some(ref p) => p.id, None => 0 }
+                    };
+                    let tcp_info = super::net_helpers::build_tcp_info(pid, handle);
+                    let info_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &tcp_info as *const super::net_helpers::TcpInfo as *const u8,
+                            core::mem::size_of::<super::net_helpers::TcpInfo>(),
+                        )
+                    };
+                    let copy_len = core::cmp::min(len as usize, info_bytes.len());
+                    if unsafe { user_access::copy_to_user(optval, &info_bytes[..copy_len]) }.is_err() {
                         return errno::Errno::EFAULT as u64;
                     }
                     let written = copy_len as u32;

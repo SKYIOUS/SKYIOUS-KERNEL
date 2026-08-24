@@ -60,13 +60,17 @@ pub const SYS_UNLINK: u64 = 87;
 pub const SYS_KILL: u64 = 62;
 pub const SYS_RESOLVE: u64 = 200;
 pub const SYS_FUTEX: u64 = 202;
-pub const SYS_SYSINFO: u64 = 203;
+pub const SYS_SCHED_SETAFFINITY: u64 = 203;
+pub const SYS_SCHED_GETAFFINITY: u64 = 204;
+pub const SYS_SYSINFO: u64 = 205; // moved from 203 to make room for affinity syscalls
 pub const SYS_SCHED_YIELD: u64 = 24;
 pub const SYS_SCHED_SETATTR: u64 = 144;
 pub const SYS_SCHED_GETATTR: u64 = 145;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_IOCTL: u64 = 16;
 pub const SYS_CLOCK_GETTIME: u64 = 228;
+pub const SYS_CLOCK_GETRES: u64 = 229;
+pub const SYS_CLOCK_NANOSLEEP: u64 = 230;
 pub const SYS_MOUNT: u64 = 165;
 pub const SYS_UMOUNT2: u64 = 167;
 pub const SYS_CHMOD: u64 = 90;
@@ -91,6 +95,7 @@ pub const SYS_CAPSET: u64 = 308;
 pub const SYS_SIGPROCMASK: u64 = 309;
 pub const SYS_IO_URING_SETUP: u64 = 425;
 pub const SYS_IO_URING_ENTER: u64 = 426;
+pub const SYS_IO_URING_REGISTER: u64 = 427;
 pub const SYS_BPF: u64 = 321;
 pub const SYS_SYNC: u64 = 36;
 pub const SYS_REBOOT: u64 = 169;
@@ -187,6 +192,10 @@ pub const SYS_PAUSE: u64 = 34;
 pub const SYS_GETITIMER: u64 = 350;
 pub const SYS_SETITIMER: u64 = 351;
 pub const SYS_TIMES: u64 = 352;
+pub const SYS_GETRUSAGE: u64 = 353;
+pub const SYS_TIMERFD_CREATE: u64 = 354;
+pub const SYS_TIMERFD_SETTIME: u64 = 355;
+pub const SYS_TIMERFD_GETTIME: u64 = 356;
 pub const SYS_SIGALTSTACK: u64 = 131;
 pub const SYS_SIGNALFD: u64 = 282;
 pub const SYS_SIGNALFD4: u64 = 289;
@@ -252,3 +261,19 @@ pub const SYS_SETNS: u64 = 464;
 pub const SYS_CGROUP_MKDIR: u64 = 461;
 pub const SYS_CGROUP_WRITE: u64 = 462;
 pub const SYS_CGROUP_READ: u64 = 463;
+
+// POSIX message queues
+pub const SYS_MQ_OPEN: u64 = 240;
+pub const SYS_MQ_CLOSE: u64 = 241;
+pub const SYS_MQ_TIMEDSEND: u64 = 242;
+pub const SYS_MQ_TIMEDRECEIVE: u64 = 243;
+pub const SYS_MQ_UNLINK: u64 = 244;
+
+// inotify syscalls
+pub const SYS_INOTIFY_INIT: u64 = 467;
+pub const SYS_INOTIFY_ADD_WATCH: u64 = 468;
+pub const SYS_INOTIFY_RM_WATCH: u64 = 469;
+
+// mmsg syscalls (batched send/receive)
+pub const SYS_RECVMMSG: u64 = 473;
+pub const SYS_SENDMMSG: u64 = 474;

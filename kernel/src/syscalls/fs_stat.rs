@@ -66,9 +66,9 @@ pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
             if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() { return errno::Errno::EFAULT as u64; }
             0
         },
-        Some(FileDescriptor::SignalFd(_)) | Some(FileDescriptor::EventFd(_)) => {
-            let stat = Stat { st_mode: crate::vfs::_S_IFCHR | 0o600, ..Stat::default() };
-            if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())) }.is_err() { return errno::Errno::EFAULT as u64; }
+        Some(FileDescriptor::TimerFd(_)) | Some(FileDescriptor::SignalFd(_)) | Some(FileDescriptor::EventFd(_)) | Some(FileDescriptor::InotifyFd { .. }) | Some(FileDescriptor::IoUringFd(_)) => {
+            let stat = Stat { st_mode: crate::vfs::_S_IFCHR | 0o644, ..Stat::default() };
+            if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())).is_err() } { return errno::Errno::EFAULT as u64; }
             0
         },
         None => errno::Errno::EBADF as u64,
@@ -125,7 +125,7 @@ pub fn sys_fstatat(dirfd: i64, pathname_ptr: *const u8, stat_buf: *mut crate::vf
                 if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>())) }.is_err() { return errno::Errno::EFAULT as u64; }
                 return 0;
             }
-            Some(FileDescriptor::SignalFd(_)) | Some(FileDescriptor::EventFd(_)) => {
+            Some(FileDescriptor::SignalFd(_)) | Some(FileDescriptor::EventFd(_)) | Some(FileDescriptor::TimerFd(_)) | Some(FileDescriptor::InotifyFd { .. }) | Some(FileDescriptor::IoUringFd(_)) => {
                 let stat = crate::vfs::Stat { st_mode: crate::vfs::_S_IFCHR | 0o600, ..crate::vfs::Stat::default() };
                 if unsafe { user_access::copy_to_user(stat_buf as *mut u8, core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<crate::vfs::Stat>())) }.is_err() { return errno::Errno::EFAULT as u64; }
                 return 0;
@@ -164,7 +164,10 @@ pub fn sys_chmod(path_ptr: *const u8, mode: u32) -> u64 {
     let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } { Ok(s) => s, Err(_) => return errno::Errno::EFAULT as u64 };
     let node = match VFS.lock().resolve_path(&path_str) { Some(n) => n, None => return errno::Errno::ENOENT as u64 };
     if !check_file_owner(&node) { audit_log("CAP_FOWNER", &alloc::format!("chmod({}) DENIED", path_str)); return errno::Errno::EACCES as u64; }
-    if node.chmod(mode).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
+    if node.chmod(mode).is_ok() {
+        super::inotify::inotify_emit(&path_str, super::inotify::IN_ATTRIB, 0, "");
+        0
+    } else { errno::Errno::EPERM as u64 }
 }
 
 pub fn sys_fchmod(fd: u64, mode: u32) -> u64 {
@@ -189,7 +192,10 @@ pub fn sys_chown(path_ptr: *const u8, uid: u32, gid: u32) -> u64 {
     if !check_chown_permission(cur.st_uid, cur.st_gid, uid, gid) { audit_log("CAP_CHOWN", &alloc::format!("chown({}) DENIED", path_str)); return errno::Errno::EPERM as u64; }
     let new_uid = if uid as i32 == -1 { cur.st_uid } else { uid };
     let new_gid = if gid as i32 == -1 { cur.st_gid } else { gid };
-    if node.chown(new_uid, new_gid).is_ok() { 0 } else { errno::Errno::EPERM as u64 }
+    if node.chown(new_uid, new_gid).is_ok() {
+        super::inotify::inotify_emit(&path_str, super::inotify::IN_ATTRIB, 0, "");
+        0
+    } else { errno::Errno::EPERM as u64 }
 }
 
 pub fn sys_fchown(fd: u64, uid: u32, gid: u32) -> u64 {
@@ -309,7 +315,12 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
     if src_parent == dst_parent {
         if let Some(parent) = vfs.resolve_path(src_parent) {
             if !check_node_permission(&parent, 3) { return errno::Errno::EACCES as u64; }
-            if parent.rename(src_name, dst_name).is_ok() { return 0; }
+            if parent.rename(src_name, dst_name).is_ok() {
+            let cookie = ((src_name.len() as u32) << 16) | (dst_name.len() as u32);
+            super::inotify::inotify_emit(&old_path, super::inotify::IN_MOVED_FROM, cookie, src_name);
+            super::inotify::inotify_emit(&new_path, super::inotify::IN_MOVED_TO, cookie, dst_name);
+            return 0;
+        }
         }
     }
     let data = match source_node.read(usize::MAX) { Ok(d) => d, Err(_) => return errno::Errno::EIO as u64 };
@@ -338,7 +349,12 @@ pub fn sys_renameat(olddirfd: i64, old_path_ptr: *const u8, newdirfd: i64, new_p
     if src_parent == dst_parent {
         if let Some(parent) = vfs.resolve_path(src_parent) {
             if !check_node_permission(&parent, 3) { return errno::Errno::EACCES as u64; }
-            if parent.rename(src_name, dst_name).is_ok() { return 0; }
+            if parent.rename(src_name, dst_name).is_ok() {
+            let cookie = ((src_name.len() as u32) << 16) | (dst_name.len() as u32);
+            super::inotify::inotify_emit(&old_path, super::inotify::IN_MOVED_FROM, cookie, src_name);
+            super::inotify::inotify_emit(&new_path, super::inotify::IN_MOVED_TO, cookie, dst_name);
+            return 0;
+        }
         }
     }
     let data = match source_node.read(usize::MAX) { Ok(d) => d, Err(_) => return errno::Errno::EIO as u64 };
@@ -367,6 +383,7 @@ pub fn sys_mkdir(path_ptr: *const u8, mode: u32) -> u64 {
             let raw_mode = if mode == 0 { 0o777 } else { mode };
             let _ = new_node.chmod(raw_mode & !umask_val & 0o777);
             let _ = new_node.chown(euid, egid);
+            super::inotify::inotify_emit(&path_str, super::inotify::IN_CREATE | super::inotify::IN_ISDIR, 0, name);
             return 0;
         }
     }
@@ -389,6 +406,7 @@ pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, mode: u32) -> u64 {
             let raw_mode = if mode == 0 { 0o777 } else { mode };
             let _ = new_node.chmod(raw_mode & !umask_val & 0o777);
             let _ = new_node.chown(euid, egid);
+            super::inotify::inotify_emit(&path_str, super::inotify::IN_CREATE | super::inotify::IN_ISDIR, 0, name);
             return 0;
         }
     }
@@ -404,7 +422,10 @@ pub fn sys_unlink(path_ptr: *const u8) -> u64 {
         if !check_node_permission(&parent_node, 3) { return errno::Errno::EACCES as u64; }
         let subj = crate::security::current_subject();
         if !crate::security::hook_file_unlink(&subj, &path_str) { return errno::Errno::EACCES as u64; }
-        if parent_node.unlink(name).is_ok() { return 0; }
+        if parent_node.unlink(name).is_ok() {
+            super::inotify::inotify_emit(&path_str, super::inotify::IN_DELETE, 0, name);
+            return 0;
+        }
     }
     errno::Errno::EIO as u64
 }

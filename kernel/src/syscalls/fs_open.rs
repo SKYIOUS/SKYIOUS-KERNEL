@@ -169,13 +169,37 @@ pub fn sys_close(fd: u64) -> u64 {
         if let Some(ref desc) = fd_table[fd as usize] {
             if let FileDescriptor::Socket(handle, _stype) = desc {
                 #[cfg(feature = "net")]
-                { crate::net::SOCKETS.lock().remove(*handle); }
+                {
+                    // Clean up SO_REUSEPORT group membership
+                    super::net_helpers::remove_from_reuseport(process.id, *handle);
+                    // Clean up TCP connection stats
+                    super::net_helpers::tcp_stats_remove(process.id, *handle);
+                    crate::net::SOCKETS.lock().remove(*handle);
+                }
             }
             if let FileDescriptor::UnixSocket(handle, _) = desc {
                 crate::net::unix::cleanup_unix_socket(*handle);
             }
             if let FileDescriptor::SignalFd(handle) = desc {
                 super::SIGNAL_FDS.lock().remove(handle);
+            }
+            if let FileDescriptor::InotifyFd { instance_key, .. } = desc {
+                super::inotify::inotify_close(*instance_key);
+            }
+            if let FileDescriptor::EventFd(data) = desc {
+                // Wake any threads blocked reading so they see the fd is gone
+                let key = data.lock().key;
+                crate::task::scheduler::wake_pipe(key);
+            }
+            if let FileDescriptor::TimerFd(data) = desc {
+                // Wake any threads blocked reading so they see the fd is gone
+                let key = data.lock().key;
+                crate::task::scheduler::wake_pipe(key);
+            }
+            if let FileDescriptor::IoUringFd(data) = desc {
+                // Wake any threads blocked waiting on completions
+                let key = data.lock().key;
+                crate::task::scheduler::wake_pipe(key);
             }
             found = true;
         }

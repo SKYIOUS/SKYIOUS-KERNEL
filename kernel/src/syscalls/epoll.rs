@@ -95,6 +95,7 @@ pub fn sys_epoll_create1(flags: i32) -> u64 {
                 counter: epoll_key,
                 semaphore: false,
                 nonblock: false,
+                key: 0, // epoll placeholder — not used for blocking
             },
         ))));
         // Map this fd to the epoll key
@@ -211,10 +212,117 @@ pub fn sys_epoll_ctl(epfd: u64, op: i32, fd: i32, event_ptr: *const u8) -> u64 {
     0
 }
 
+/// Perform a single readiness scan on the epoll instance.
+/// Returns (ready_events, ready_data) for all ready FDs.
+fn poll_readiness(
+    instance: &alloc::sync::Arc<crate::sync::IrqSafeMutex<EpollInstance>>,
+) -> (Vec<u32>, Vec<u64>) {
+    let mut ready_events: Vec<u32> = Vec::new();
+    let mut ready_data: Vec<u64> = Vec::new();
+
+    let inst = instance.lock();
+    let entries: alloc::vec::Vec<EpollEntry> = inst.entries.values().cloned().collect();
+    drop(inst);
+
+    let proc_lock = CURRENT_PROCESS.lock();
+    let proc = match proc_lock.as_ref() {
+        Some(p) => p.clone(),
+        None => return (ready_events, ready_data),
+    };
+    drop(proc_lock);
+
+    let fd_table = proc.files.lock().fd_table.clone();
+
+    for entry in &entries {
+        let fd = entry.fd;
+        if fd < 0 || fd as usize >= fd_table.len() {
+            continue;
+        }
+
+        if let Some(ref fd_entry) = fd_table[fd as usize] {
+            let mut revents: u32 = 0;
+
+            match fd_entry {
+                FileDescriptor::File { node, .. } => {
+                    let stat = node.stat().unwrap_or_default();
+                    let mode = stat.st_mode;
+                    if mode & 0o170000 == 0o100000 {
+                        if (entry.events & EPOLLIN) != 0 {
+                            revents |= EPOLLIN | EPOLLRDNORM;
+                        }
+                        if (entry.events & EPOLLOUT) != 0 {
+                            revents |= EPOLLOUT | EPOLLWRNORM;
+                        }
+                    } else {
+                        if (entry.events & EPOLLIN) != 0 {
+                            revents |= EPOLLIN | EPOLLRDNORM;
+                        }
+                    }
+                }
+                FileDescriptor::Socket(..) | FileDescriptor::UnixSocket(..) => {
+                    if (entry.events & EPOLLIN) != 0 {
+                        revents |= EPOLLIN | EPOLLRDNORM;
+                    }
+                    if (entry.events & EPOLLOUT) != 0 {
+                        revents |= EPOLLOUT | EPOLLWRNORM;
+                    }
+                }
+                FileDescriptor::EventFd(data) => {
+                    let counter = data.lock().counter;
+                    if (entry.events & EPOLLIN) != 0 && counter > 0 {
+                        revents |= EPOLLIN | EPOLLRDNORM;
+                    }
+                }
+                FileDescriptor::TimerFd(data) => {
+                    let expirations = data.lock().expirations;
+                    if (entry.events & EPOLLIN) != 0 && expirations > 0 {
+                        revents |= EPOLLIN | EPOLLRDNORM;
+                    }
+                }
+                FileDescriptor::IoUringFd(data) => {
+                    let pending = data.lock().peek_cqes();
+                    if (entry.events & EPOLLIN) != 0 && pending > 0 {
+                        revents |= EPOLLIN | EPOLLRDNORM;
+                    }
+                }
+                FileDescriptor::SignalFd(..) => {
+                    if (entry.events & EPOLLIN) != 0 {
+                        revents |= EPOLLIN | EPOLLRDNORM;
+                    }
+                }
+                _ => {
+                    if (entry.events & EPOLLIN) != 0 {
+                        revents |= EPOLLIN | EPOLLRDNORM;
+                    }
+                }
+            }
+
+            if (entry.events & EPOLLERR) != 0 {
+                revents |= EPOLLERR;
+            }
+            if (entry.events & EPOLLHUP) != 0 {
+                revents |= EPOLLHUP;
+            }
+
+            if revents != 0 {
+                ready_events.push(revents);
+                ready_data.push(entry.data);
+            }
+        }
+    }
+    drop(fd_table);
+    (ready_events, ready_data)
+}
+
 /// epoll_wait(epfd, events, maxevents, timeout) → number of events
 ///
 /// Waits for events on the epoll instance. Returns the number of file
 /// descriptors that are ready for I/O.
+///
+/// timeout_ms semantics:
+///   -1  = block indefinitely until at least one event is ready
+///    0  = non-blocking: return immediately with whatever is ready
+///   >0  = block for up to timeout_ms milliseconds
 pub fn sys_epoll_wait(epfd: u64, events_ptr: *mut u8, maxevents: i32, timeout_ms: i32) -> u64 {
     if maxevents <= 0 {
         return errno::Errno::EINVAL as u64;
@@ -247,95 +355,80 @@ pub fn sys_epoll_wait(epfd: u64, events_ptr: *mut u8, maxevents: i32, timeout_ms
         return errno::Errno::EINTR as u64;
     }
 
-    // One-pass readiness check: scan all monitored FDs for readiness
-    let mut ready_events: Vec<u32> = Vec::new();
-    let mut ready_data: Vec<u64> = Vec::new();
-    let mut ready_fds: Vec<i32> = Vec::new();
+    // Poll for readiness, potentially blocking with timeout.
+    //
+    // For non-blocking (timeout_ms == 0), we do a single scan.
+    // For blocking (timeout_ms == -1 or > 0), we loop: scan → sleep → rescan.
+    // The scheduler wakes us when sleep_until expires or a signal arrives.
+    let (mut ready_events, mut ready_data) = poll_readiness(&instance);
 
-    let inst = instance.lock();
-    let entries: alloc::vec::Vec<EpollEntry> = inst.entries.values().cloned().collect();
-    drop(inst);
+    if ready_events.is_empty() && timeout_ms != 0 {
+        // Compute the deadline in ticks. Each tick ≈ 10 ms at 100 Hz.
+        let deadline: Option<u64> = if timeout_ms < 0 {
+            None // block indefinitely
+        } else {
+            // Convert ms to ticks (round up so we never under-sleep)
+            let ticks = ((timeout_ms as u64) + 9) / 10;
+            let now = crate::interrupts::get_ticks();
+            Some(now.saturating_add(ticks))
+        };
 
-    let proc_lock2 = CURRENT_PROCESS.lock();
-    let proc2 = match proc_lock2.as_ref() {
-        Some(p) => p.clone(),
-        None => {
-            return errno::Errno::ESRCH as u64;
-        }
-    };
-    drop(proc_lock2);
-
-    let fd_table = proc2.files.lock().fd_table.clone();
-
-    for entry in &entries {
-        let fd = entry.fd;
-        if fd < 0 || fd as usize >= fd_table.len() {
-            continue;
-        }
-
-        if let Some(ref fd_entry) = fd_table[fd as usize] {
-            let mut revents: u32 = 0;
-
-            match fd_entry {
-                FileDescriptor::File { node, .. } => {
-                    // Check if the file node has data available or can accept data
-                    let stat = node.stat().unwrap_or_default();
-                    let mode = stat.st_mode;
-
-                    // For regular files, always report ready (non-blocking)
-                    if mode & 0o170000 == 0o100000 {
-                        // Regular file
-                        if (entry.events & EPOLLIN) != 0 {
-                            revents |= EPOLLIN | EPOLLRDNORM;
-                        }
-                        if (entry.events & EPOLLOUT) != 0 {
-                            revents |= EPOLLOUT | EPOLLWRNORM;
-                        }
+        // Spin-block loop: sleep → rescan until events or timeout.
+        // Cap each sleep to at most 4 ticks (40 ms) to stay responsive
+        // to external wakeups (e.g. a pipe writer signals readiness).
+        const MAX_SLEEP_TICKS: u64 = 4;
+        loop {
+            let wake_tick = match deadline {
+                Some(dl) => {
+                    let now = crate::interrupts::get_ticks();
+                    if now >= dl {
+                        // Deadline already passed; do one final non-blocking scan.
+                        break;
                     }
-                    // For pipes/char devices, check if data is available
-                    else {
-                        // Device or pipe — assume readable if EPOLLIN requested
-                        if (entry.events & EPOLLIN) != 0 {
-                            revents |= EPOLLIN | EPOLLRDNORM;
-                        }
-                    }
+                    Some(core::cmp::min(dl, now + MAX_SLEEP_TICKS))
                 }
-                FileDescriptor::Socket(..) | FileDescriptor::UnixSocket(..) => {
-                    if (entry.events & EPOLLIN) != 0 {
-                        revents |= EPOLLIN | EPOLLRDNORM;
-                    }
-                    if (entry.events & EPOLLOUT) != 0 {
-                        revents |= EPOLLOUT | EPOLLWRNORM;
-                    }
+                None => {
+                    // Infinite wait — sleep for MAX_SLEEP_TICKS, then rescan.
+                    let now = crate::interrupts::get_ticks();
+                    Some(now + MAX_SLEEP_TICKS)
                 }
-                FileDescriptor::EventFd(..) | FileDescriptor::SignalFd(..) => {
-                    if (entry.events & EPOLLIN) != 0 {
-                        revents |= EPOLLIN | EPOLLRDNORM;
-                    }
-                }
-                _ => {
-                    if (entry.events & EPOLLIN) != 0 {
-                        revents |= EPOLLIN | EPOLLRDNORM;
-                    }
+            };
+
+            // Park the current thread in the sleep queue.
+            {
+                let mut sched = crate::task::scheduler::this_cpu_sched().lock();
+                if let Some(current) = sched.current_thread.as_mut() {
+                    current.status = crate::task::thread::ThreadStatus::Blocked;
+                    current.sleep_until = wake_tick;
                 }
             }
+            crate::task::scheduler::schedule();
 
-            // Always report errors
-            if (entry.events & EPOLLERR) != 0 {
-                revents |= EPOLLERR;
-            }
-            if (entry.events & EPOLLHUP) != 0 {
-                revents |= EPOLLHUP;
+            // Woken — check for signals first
+            if crate::syscalls::check_signal_interrupt() {
+                return errno::Errno::EINTR as u64;
             }
 
-            if revents != 0 {
-                ready_events.push(revents);
-                ready_data.push(entry.data);
-                ready_fds.push(fd);
+            // Re-check readiness
+            let (ev, data) = poll_readiness(&instance);
+            if !ev.is_empty() {
+                ready_events = ev;
+                ready_data = data;
+                break;
+            }
+
+            // If timed out, do one final scan and return 0 if still empty
+            if let Some(dl) = deadline {
+                let now = crate::interrupts::get_ticks();
+                if now >= dl {
+                    let (ev2, data2) = poll_readiness(&instance);
+                    ready_events = ev2;
+                    ready_data = data2;
+                    break;
+                }
             }
         }
     }
-    drop(fd_table);
 
     let count = core::cmp::min(ready_events.len(), maxevents as usize);
 

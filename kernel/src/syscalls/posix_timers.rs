@@ -300,3 +300,200 @@ pub fn sys_timer_delete(timerid: i32) -> u64 {
         crate::syscalls::errno::Errno::EINVAL as u64
     }
 }
+
+// ─── timerfd syscalls ─────────────────────────────────────────────
+//
+// timerfd_create, timerfd_settime, timerfd_gettime — create a file
+// descriptor that becomes readable when a timer fires. Essential for
+// epoll-based servers (nginx, redis, systemd).
+
+use crate::task::process::{CURRENT_PROCESS, FileDescriptor, TimerFdData};
+use alloc::sync::Arc;
+
+const TFD_CLOEXEC: u32 = 0x80000;
+const TFD_NONBLOCK: u32 = 0x800;
+const TFD_TIMER_ABSTIME: u32 = 1;
+
+/// timerfd_create(clockid, flags) → fd
+///
+/// Creates a timerfd. clockid: 0=CLOCK_REALTIME, 1=CLOCK_MONOTONIC.
+pub fn sys_timerfd_create(clockid: u64, flags: u64) -> u64 {
+    if clockid > 1 {
+        return crate::syscalls::errno::Errno::EINVAL as u64;
+    }
+    let nonblock = (flags & TFD_NONBLOCK as u64) != 0;
+    let _cloexec = (flags & TFD_CLOEXEC as u64) != 0;
+
+    let tfd = Arc::new(Mutex::new(TimerFdData {
+        clock_id: clockid as u32,
+        nonblock,
+        it_interval_ns: 0,
+        it_value_ns: 0,
+        expirations: 0,
+        wake_tick: 0,
+        armed: false,
+        key: 0, // unused in legacy path
+    }));
+
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref proc) = *lock {
+        let mut files = proc.files.lock();
+        let fd_num = find_free_fd(&files.fd_table);
+        if fd_num >= files.fd_table.len() {
+            files.fd_table.resize(fd_num + 1, None);
+        }
+        files.fd_table[fd_num] = Some(FileDescriptor::TimerFd(tfd));
+        fd_num as u64
+    } else {
+        crate::syscalls::errno::Errno::ESRCH as u64
+    }
+}
+
+/// timerfd_settime(fd, flags, new_value, old_value) → 0
+///
+/// Arms or disarms the timerfd.
+/// new_value: pointer to itimerspec { it_interval (sec,nsec), it_value (sec,nsec) }.
+#[repr(C)]
+struct ITimerspec {
+    it_interval_sec: i64,
+    it_interval_nsec: i64,
+    it_value_sec: i64,
+    it_value_nsec: i64,
+}
+
+pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_value_ptr: *mut u8) -> u64 {
+    if new_value_ptr.is_null() {
+        return crate::syscalls::errno::Errno::EINVAL as u64;
+    }
+
+    let mut new_val = ITimerspec { it_interval_sec: 0, it_interval_nsec: 0, it_value_sec: 0, it_value_nsec: 0 };
+    unsafe {
+        if crate::syscalls::user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(&mut new_val as *mut _ as *mut u8, core::mem::size_of::<ITimerspec>()),
+            new_value_ptr,
+        ).is_err() {
+            return crate::syscalls::errno::Errno::EFAULT as u64;
+        }
+    }
+
+    let abstime = (flags & TFD_TIMER_ABSTIME as u64) != 0;
+    let _ = abstime; // TODO: absolute time support
+
+    let it_value_ns = (new_val.it_value_sec as u64) * 1_000_000_000 + (new_val.it_value_nsec as u64);
+    let it_interval_ns = (new_val.it_interval_sec as u64) * 1_000_000_000 + (new_val.it_interval_nsec as u64);
+
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref proc) = *lock {
+        let files = proc.files.lock();
+        if fd as usize >= files.fd_table.len() {
+            return crate::syscalls::errno::Errno::EBADF as u64;
+        }
+        if let Some(FileDescriptor::TimerFd(ref tfd)) = files.fd_table[fd as usize] {
+            // Write old value if requested
+            if !old_value_ptr.is_null() {
+                let mut old = ITimerspec {
+                    it_interval_sec: 0, it_interval_nsec: 0,
+                    it_value_sec: 0, it_value_nsec: 0,
+                };
+                {
+                    let t = tfd.lock();
+                    if t.armed {
+                        old.it_value_sec = (t.it_value_ns / 1_000_000_000) as i64;
+                        old.it_value_nsec = (t.it_value_ns % 1_000_000_000) as i64;
+                        old.it_interval_sec = (t.it_interval_ns / 1_000_000_000) as i64;
+                        old.it_interval_nsec = (t.it_interval_ns % 1_000_000_000) as i64;
+                    }
+                }
+                unsafe {
+                    let _ = crate::syscalls::user_access::copy_to_user(
+                        old_value_ptr,
+                        core::slice::from_raw_parts(&old as *const _ as *const u8, core::mem::size_of::<ITimerspec>()),
+                    );
+                }
+            }
+
+            let mut t = tfd.lock();
+            if it_value_ns == 0 {
+                // Disarm
+                t.armed = false;
+                t.it_value_ns = 0;
+                t.it_interval_ns = 0;
+                t.wake_tick = 0;
+            } else {
+                // Arm
+                let ticks_per_ns: u64 = 100_000_000; // 100 Hz → 10ms per tick
+                let now_ticks = crate::interrupts::get_ticks();
+                let ticks = (it_value_ns + ticks_per_ns - 1) / ticks_per_ns;
+                t.it_value_ns = it_value_ns;
+                t.it_interval_ns = it_interval_ns;
+                t.wake_tick = now_ticks + ticks;
+                t.armed = true;
+            }
+            drop(t);
+            drop(files);
+            drop(lock);
+            0
+        } else {
+            crate::syscalls::errno::Errno::EINVAL as u64
+        }
+    } else {
+        crate::syscalls::errno::Errno::ESRCH as u64
+    }
+}
+
+/// timerfd_gettime(fd, cur_value) → 0
+pub fn sys_timerfd_gettime(fd: u64, cur_value_ptr: *mut u8) -> u64 {
+    if cur_value_ptr.is_null() {
+        return crate::syscalls::errno::Errno::EINVAL as u64;
+    }
+
+    let lock = CURRENT_PROCESS.lock();
+    if let Some(ref proc) = *lock {
+        let files = proc.files.lock();
+        if fd as usize >= files.fd_table.len() {
+            return crate::syscalls::errno::Errno::EBADF as u64;
+        }
+        if let Some(FileDescriptor::TimerFd(ref tfd)) = files.fd_table[fd as usize] {
+            let t = tfd.lock();
+            let mut cur = ITimerspec {
+                it_interval_sec: 0, it_interval_nsec: 0,
+                it_value_sec: 0, it_value_nsec: 0,
+            };
+            if t.armed {
+                let now_ticks = crate::interrupts::get_ticks();
+                let ticks_per_ns: u64 = 100_000_000;
+                let remaining_ticks = t.wake_tick.saturating_sub(now_ticks);
+                let remaining_ns = remaining_ticks * ticks_per_ns;
+                cur.it_value_sec = (remaining_ns / 1_000_000_000) as i64;
+                cur.it_value_nsec = (remaining_ns % 1_000_000_000) as i64;
+                cur.it_interval_sec = (t.it_interval_ns / 1_000_000_000) as i64;
+                cur.it_interval_nsec = (t.it_interval_ns % 1_000_000_000) as i64;
+            }
+            drop(t);
+            drop(files);
+            drop(lock);
+            unsafe {
+                if crate::syscalls::user_access::copy_to_user(
+                    cur_value_ptr,
+                    core::slice::from_raw_parts(&cur as *const _ as *const u8, core::mem::size_of::<ITimerspec>()),
+                ).is_err() {
+                    return crate::syscalls::errno::Errno::EFAULT as u64;
+                }
+            }
+            0
+        } else {
+            crate::syscalls::errno::Errno::EINVAL as u64
+        }
+    } else {
+        crate::syscalls::errno::Errno::ESRCH as u64
+    }
+}
+
+fn find_free_fd(fd_table: &[Option<FileDescriptor>]) -> usize {
+    for (i, slot) in fd_table.iter().enumerate() {
+        if slot.is_none() {
+            return i;
+        }
+    }
+    fd_table.len()
+}

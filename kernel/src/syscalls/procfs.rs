@@ -6,7 +6,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
-use crate::task::process::PROCESS_TABLE;
+use crate::task::process::{PROCESS_TABLE, FileDescriptor};
 use crate::vfs::{VfsNode, Stat};
 
 /// Read /proc/meminfo
@@ -100,29 +100,198 @@ fn read_proc_oom_adj(pid: u64) -> String {
     alloc::format!("{}\n", adj)
 }
 
-/// Read /proc/PID/status (simplified)
+/// Read /proc/cpuinfo — CPU information for userspace tools.
+fn read_cpuinfo() -> String {
+    let mut s = String::new();
+    // Report as a single logical CPU (the BSP).
+    // SMP: iterate APIC IDs when SMP topology enumeration is wired.
+    s.push_str("processor\t: 0\n");
+    s.push_str("vendor_id\t: Vahi CPU\n");
+    s.push_str("cpu family\t: 6\n");
+    s.push_str("model\t\t: 158\n");
+    s.push_str("model name\t: Vahi KVM64\n");
+    s.push_str("stepping\t: 13\n");
+    s.push_str(&alloc::format!("cpu MHz\t\t: {}.000\n", 2400));
+    s.push_str("cache size\t: 16384 KB\n");
+    s.push_str("bogomips\t: 4800.00\n");
+    s.push_str("clflush size\t: 64\n");
+    s.push_str("cache_alignment\t: 64\n");
+    s.push_str("address sizes\t: 46 bits physical, 48 bits virtual\n");
+    s.push_str("flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep \n\t\t");
+    s.push_str("mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 \n\t\t");
+    s.push_str("ht syscall nx pdpe1gb rdtscp lm constant_tsc avx avx2 \n\t\t");
+    s.push_str("fsgsbase bmi1 bmi2 avx512f avx512dq invpcid avx512cd \n\t\t");
+    s.push_str("avx512bw avx512vl xsave xsaveopt avx512_vnni\n");
+    s
+}
+
+/// Read /proc/PID/status — comprehensive process status for ps/top.
 fn read_proc_status(pid: u64) -> String {
     let table = PROCESS_TABLE.lock();
     if let Some(proc) = table.get(&pid) {
         let ppid = proc.parent_id.unwrap_or(0);
         let uid = proc.creds.lock().uid;
         let gid = proc.creds.lock().gid;
-        let vsize = proc.memory.lock().vmas.iter().map(|v| v.end - v.start).sum::<u64>();
+        let mem = proc.memory.lock();
+        let vsize = mem.vmas.iter().map(|v| v.end - v.start).sum::<u64>();
+        drop(mem);
+        let name = proc.name.lock().clone();
+        let utime = proc.utime.load(core::sync::atomic::Ordering::Relaxed);
+        let stime = proc.stime.load(core::sync::atomic::Ordering::Relaxed);
+        let cutime = proc.cutime.load(core::sync::atomic::Ordering::Relaxed);
+        let cstime = proc.cstime.load(core::sync::atomic::Ordering::Relaxed);
+        let children_count = proc.children.lock().len();
+        let threads = 1; // TODO: thread count
 
         let mut s = String::new();
-        s.push_str("Name:\tinit\n");
+        s.push_str(&alloc::format!("Name:\t{}\n", name));
         s.push_str("State:\tS (sleeping)\n");
         s.push_str(&alloc::format!("Tgid:\t{}\n", pid));
         s.push_str(&alloc::format!("Pid:\t{}\n", pid));
         s.push_str(&alloc::format!("PPid:\t{}\n", ppid));
+        s.push_str(&alloc::format!("TracerPid:\t0\n"));
         s.push_str(&alloc::format!("Uid:\t{}\t{}\t{}\t{}\n", uid, uid, uid, uid));
         s.push_str(&alloc::format!("Gid:\t{}\t{}\t{}\t{}\n", gid, gid, gid, gid));
+        s.push_str(&alloc::format!("FDSize:\t{}\n", 256));
+        s.push_str(&alloc::format!("Threads:\t{}\n", threads));
+        s.push_str(&alloc::format!("SigPnd:\t0\n"));
+        s.push_str(&alloc::format!("ShdPnd:\t0\n"));
+        s.push_str(&alloc::format!("SigBlk:\t0\n"));
+        s.push_str(&alloc::format!("SigIgn:\t0\n"));
+        s.push_str(&alloc::format!("SigCgt:\t0\n"));
+        s.push_str("CapInh:\t0000000000000000\n");
+        s.push_str("CapPrm:\t0000000000000000\n");
+        s.push_str("CapEff:\t0000000000000000\n");
+        s.push_str("CapBnd:\t0000000000000000\n");
+        s.push_str("CapAmb:\t0000000000000000\n");
+        s.push_str(&alloc::format!("VmPeak:\t{} kB\n", vsize / 1024));
         s.push_str(&alloc::format!("VmSize:\t{} kB\n", vsize / 1024));
-        s.push_str(&alloc::format!("VmRSS:\t{} kB\n", vsize / 1024));
+        s.push_str("VmLck:\t       0 kB\n");
+        s.push_str("VmPin:\t       0 kB\n");
+        s.push_str("VmHWM:\t       0 kB\n");
+        s.push_str("VmRSS:\t       0 kB\n");
+        s.push_str("VmData:\t       0 kB\n");
+        s.push_str("VmStk:\t       0 kB\n");
+        s.push_str("VmExe:\t       0 kB\n");
+        s.push_str("VmLib:\t       0 kB\n");
+        s.push_str("VmSwap:\t       0 kB\n");
+        s.push_str(&alloc::format!("VmSwap:\t{} kB\n", 0));
+        s.push_str(&alloc::format!("Threads:\t{}\n", threads));
+        s.push_str(&alloc::format!(" voluntary_ctxt_switches:\t0\n"));
+        s.push_str(&alloc::format!(" nonvoluntary_ctxt_switches:\t0\n"));
+        // time fields (in clock ticks, 100 Hz)
+        s.push_str(&alloc::format!("\n utime:\t{}\n", utime));
+        s.push_str(&alloc::format!(" stime:\t{}\n", stime));
+        s.push_str(&alloc::format!(" cutime:\t{}\n", cutime));
+        s.push_str(&alloc::format!(" cstime:\t{}\n", cstime));
+        s.push_str(&alloc::format!(" num_children:\t{}\n", children_count));
         s
     } else {
         String::new()
     }
+}
+
+/// Read /proc/PID/maps — virtual memory maps for pmap/valgrind/debuggers.
+fn read_proc_maps(pid: u64) -> String {
+    let table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get(&pid) {
+        let mem = proc.memory.lock();
+        let mut s = String::new();
+        for vma in &mem.vmas {
+            let perms = {
+                let p = &vma.flags;
+                let mut r = String::new();
+                if p.contains(x86_64::structures::paging::PageTableFlags::PRESENT) {
+                    r.push('r');
+                } else {
+                    r.push('-');
+                }
+                if p.contains(x86_64::structures::paging::PageTableFlags::WRITABLE) {
+                    r.push('w');
+                } else {
+                    r.push('-');
+                }
+                if !p.contains(x86_64::structures::paging::PageTableFlags::NO_EXECUTE) {
+                    r.push('x');
+                } else {
+                    r.push('-');
+                }
+                r.push('p');
+                r
+            };
+            s.push_str(&alloc::format!(
+                "{:016x}-{:016x} {} {:08x} 00:00 0{}\n",
+                vma.start, vma.end, perms, vma.file_offset,
+                if vma.is_shared { " shmem" } else { ""
+            }));
+        }
+        s
+    } else {
+        String::new()
+    }
+}
+
+/// Read /proc/PID/fd/ directory listing — shows open file descriptors.
+fn list_proc_fds(pid: u64) -> Vec<String> {
+    let table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get(&pid) {
+        let files = proc.files.lock();
+        let mut result = Vec::new();
+        for (fd, _entry) in files.fd_table.iter().enumerate() {
+            if _entry.is_some() {
+                result.push(alloc::format!("{}", fd));
+            }
+        }
+        result
+    } else {
+        Vec::new()
+    }
+}
+
+/// Read /proc/PID/fd/N — symlink target description.
+fn read_proc_fd(pid: u64, fd: usize) -> String {
+    let table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get(&pid) {
+        let files = proc.files.lock();
+        if fd < files.fd_table.len() {
+            if let Some(ref entry) = files.fd_table[fd] {
+                match entry {
+                    FileDescriptor::File { node, .. } => {
+                        alloc::format!("/dev/{}", node.name())
+                    }
+                    FileDescriptor::Socket(..) => String::from("socket:"),
+                    FileDescriptor::UnixSocket(..) => String::from("socket:"),
+                    FileDescriptor::PtyMaster { .. } => String::from("/dev/ptmx"),
+                    FileDescriptor::PtySlave { .. } => String::from("/dev/pts/0"),
+                    FileDescriptor::SignalFd(..) => String::from("signalfd"),
+                    FileDescriptor::EventFd(..) => String::from("eventfd"),
+                    FileDescriptor::TimerFd(..) => String::from("timerfd"),
+                    FileDescriptor::InotifyFd { .. } => String::from("inotify"),
+                    FileDescriptor::IoUringFd(..) => String::from("io_uring"),
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    }
+}
+
+/// Read /proc/PID/io — I/O statistics.
+fn read_proc_io(pid: u64) -> String {
+    let _ = pid; // TODO: track per-process I/O counters
+    let mut s = String::new();
+    s.push_str("rchar: 0\n");
+    s.push_str("wchar: 0\n");
+    s.push_str("syscr: 0\n");
+    s.push_str("syscw: 0\n");
+    s.push_str("read_bytes: 0\n");
+    s.push_str("write_bytes: 0\n");
+    s.push_str("cancelled_write_bytes: 0\n");
+    s
 }
 
 /// Read /proc/PID/cmdline
@@ -178,6 +347,7 @@ impl VfsNode for ProcFsNode {
             "/proc/uptime" => read_uptime(),
             "/proc/stat" => read_stat(),
             "/proc/loadavg" => read_loadavg(),
+            "/proc/cpuinfo" => read_cpuinfo(),
             _ => {
                 if self.path.starts_with("/proc/") {
                     let rest = &self.path[6..];
@@ -188,9 +358,23 @@ impl VfsNode for ProcFsNode {
                             match file {
                                 "status" => read_proc_status(pid),
                                 "cmdline" => read_proc_cmdline(pid),
+                                "maps" => read_proc_maps(pid),
                                 "oom_score" => read_proc_oom_score(pid),
                                 "oom_score_adj" => read_proc_oom_adj(pid),
-                                _ => String::new(),
+                                "io" => read_proc_io(pid),
+                                _ => {
+                                    // Check for /proc/PID/fd/N
+                                    if file.starts_with("fd/") {
+                                        let fd_str = &file[3..];
+                                        if let Ok(fd_num) = fd_str.parse::<usize>() {
+                                            read_proc_fd(pid, fd_num)
+                                        } else {
+                                            String::new()
+                                        }
+                                    } else {
+                                        alloc::format!("{} is not an integer\n", file)
+                                    }
+                                }
                             }
                         } else {
                             String::new()
@@ -233,14 +417,13 @@ impl VfsNode for ProcFsNode {
     }
 
     fn children(&self) -> Result<Vec<Arc<dyn VfsNode>>, ()> {
-        let mut entries = Vec::new();
-
-        if self.path == "/proc" || self.path == "/proc/" {
+        let mut entries = Vec::new();        if self.path == "/proc" || self.path == "/proc/" {
             entries.push(Arc::new(ProcFsNode::new("/proc/meminfo")) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new("/proc/version")) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new("/proc/uptime")) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new("/proc/stat")) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new("/proc/loadavg")) as Arc<dyn VfsNode>);
+            entries.push(Arc::new(ProcFsNode::new("/proc/cpuinfo")) as Arc<dyn VfsNode>);
 
             let table = PROCESS_TABLE.lock();
             for pid in table.keys() {
@@ -248,11 +431,21 @@ impl VfsNode for ProcFsNode {
                     &alloc::format!("/proc/{}", pid),
                 )) as Arc<dyn VfsNode>);
             }
-        } else if self.path.starts_with("/proc/") && !self.path[6..].contains('/') {            entries.push(Arc::new(ProcFsNode::new(
+        } else if self.path.starts_with("/proc/") && !self.path[6..].contains('/') {
+            entries.push(Arc::new(ProcFsNode::new(
                     &alloc::format!("{}/status", self.path),
                 )) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new(
                     &alloc::format!("{}/cmdline", self.path),
+                )) as Arc<dyn VfsNode>);
+            entries.push(Arc::new(ProcFsNode::new(
+                    &alloc::format!("{}/maps", self.path),
+                )) as Arc<dyn VfsNode>);
+            entries.push(Arc::new(ProcFsNode::new(
+                    &alloc::format!("{}/io", self.path),
+                )) as Arc<dyn VfsNode>);
+            entries.push(Arc::new(ProcFsNode::new(
+                    &alloc::format!("{}/fd", self.path),
                 )) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new(
                     &alloc::format!("{}/oom_score", self.path),

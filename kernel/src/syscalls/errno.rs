@@ -48,6 +48,10 @@ pub enum Errno {
     ENOTSOCK = -88,     /* Socket operation on non-socket */
     ENOTCONN = -107,    /* Transport endpoint is not connected */
     EIDRM = -43,        /* Identifier removed */
+    ECANCELED = -125,   /* Operation canceled */
+    EOWNERDEAD = -130,  /* Owner died */
+    ENOTRECOVERABLE = -131, /* State not recoverable */
+    EMSGSIZE = -90,     /* Message too long */
 }
 
 impl From<Errno> for u64 {
