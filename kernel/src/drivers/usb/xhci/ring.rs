@@ -6,6 +6,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use x86_64::VirtAddr;
+use crate::hal::dma::DmaBuf;
 
 use super::regs::{
     XhciDeviceContext, XhciTrb,
@@ -25,18 +26,13 @@ pub struct TransferRing {
 }
 
 impl TransferRing {
-    /// Allocate a fresh ring. The last slot is reserved for the Link TRB.
+    /// Allocate a fresh ring using DMA-safe memory. The last slot is reserved for the Link TRB.
     pub fn new() -> Option<Self> {
-        let layout = core::alloc::Layout::from_size_align(RING_SIZE * 16, 64).ok()?;
-        // SAFETY: layout is valid (size nonzero, power-of-two align).
-        let base = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut XhciTrb;
-        if base.is_null() {
-            return None;
-        }
-        let phys = crate::memory::virt_to_phys_dma(VirtAddr::new(base as u64)).as_u64();
-        // The ring's storage outlives the controller; we never free it
-        // individually. Leaking is acceptable for a long-lived kernel device.
-        let _ = layout;
+        let buf = DmaBuf::new(RING_SIZE * 16)?;
+        let base = buf.virt() as *mut XhciTrb;
+        let phys = buf.phys();
+        // Leak the DMA buffer — controller-lifetime allocation.
+        core::mem::forget(buf);
 
         let ring = TransferRing { base, phys, enqueue: 0, cycle: 1 };
         ring.install_link();

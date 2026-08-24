@@ -15,9 +15,14 @@ pub mod ring;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::hal::dma::PooledDma;
+use crate::hal::dma::{PooledDma, DmaBuf};
 use volatile::Volatile;
 use x86_64::VirtAddr;
+
+/// Timeout for controller reset (HCRST) in spin iterations.
+const RESET_TIMEOUT: u32 = 1_000_000;
+/// Timeout for event wait in spin iterations.
+const EVENT_TIMEOUT: u32 = 4_000_000;
 
 use crate::drivers::usb::core::UsbHostController;
 use crate::drivers::usb::{hid, HidEndpoint};
@@ -101,7 +106,12 @@ impl XhciController {
     fn write_doorbell(&self, slot_id: u32, target: u32) {
         // SAFETY: doorbell register at dboff + slot*4.
         let db = (self.base_addr + self.db_offset + (slot_id as usize * 4)) as *mut Volatile<u32>;
-        unsafe { (*db).write(target); }
+        unsafe {
+            (*db).write(target);
+            // Ensure doorbell write is visible to the controller.
+            // Bare-metal: PCI MMIO writes may be posted.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     // ─── Bring-up ────────────────────────────────────────────────────────
@@ -135,44 +145,48 @@ impl XhciController {
 
             // 1) Halt before resetting.
             op.usbcmd.write(0);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             let mut t = 0u32;
             while op.usbsts.read() & (1 << 0) == 0 {
                 core::hint::spin_loop();
                 t += 1;
-                if t > 1_000_000 { break; }
+                if t > RESET_TIMEOUT { break; }
             }
 
             // 2) Reset (HCReset, bit1).
             op.usbcmd.write(1 << 1);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             t = 0;
             while op.usbcmd.read() & (1 << 1) != 0 {
                 core::hint::spin_loop();
                 t += 1;
-                if t > 1_000_000 {
+                if t > RESET_TIMEOUT {
                     crate::println!("XHCI: reset timeout");
                     return;
                 }
             }
+            // Wait for CIN (Controller Not Ready, bit 11) to clear
             t = 0;
             while op.usbsts.read() & (1 << 11) != 0 {
                 core::hint::spin_loop();
                 t += 1;
-                if t > 1_000_000 { break; }
+                if t > RESET_TIMEOUT { break; }
             }
         }
 
-        // 3) DCBAAP — 256 entry physical-pointer table.
-        let layout = core::alloc::Layout::from_size_align(256 * 8, 64).unwrap();
-        let dcbaap = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut u64;
-        let dphys = crate::memory::virt_to_phys_dma(VirtAddr::new(dcbaap as u64)).as_u64();
-        self.dcbaap_base = dcbaap;
+        // 3) DCBAAP — 256 entry physical-pointer table (DMA-safe).
+        let dcbaap_buf = DmaBuf::new(256 * 8).expect("XHCI: DCBAAP alloc failed");
+        let dphys = dcbaap_buf.phys();
+        self.dcbaap_base = dcbaap_buf.virt() as *mut u64;
+        core::mem::forget(dcbaap_buf); // controller-lifetime allocation
         self.op_regs().dcbaap.write(dphys);
 
-        // 4) Command ring.
-        let cmd_layout = core::alloc::Layout::from_size_align(RING_SIZE * 16, 64).unwrap();
-        let cmd_ring = unsafe { alloc::alloc::alloc_zeroed(cmd_layout) } as *mut XhciTrb;
+        // 4) Command ring (DMA-safe).
+        let cmd_buf = DmaBuf::new(RING_SIZE * 16).expect("XHCI: cmd ring alloc failed");
+        let cmd_ring = cmd_buf.virt() as *mut XhciTrb;
         self.cmd_ring_base = cmd_ring;
-        let cphys = crate::memory::virt_to_phys_dma(VirtAddr::new(cmd_ring as u64)).as_u64();
+        let cphys = cmd_buf.phys();
+        core::mem::forget(cmd_buf);
         unsafe {
             let link = cmd_ring.add(RING_SIZE - 1);
             (*link).data = cphys;
@@ -181,15 +195,17 @@ impl XhciController {
         }
         self.op_regs().crcr.write(cphys | 1);
 
-        // 5) Event ring + ERST (one segment).
-        let er_layout = core::alloc::Layout::from_size_align(RING_SIZE * 16, 64).unwrap();
-        let event_ring = unsafe { alloc::alloc::alloc_zeroed(er_layout) } as *mut XhciTrb;
+        // 5) Event ring + ERST (one segment, DMA-safe).
+        let er_buf = DmaBuf::new(RING_SIZE * 16).expect("XHCI: event ring alloc failed");
+        let event_ring = er_buf.virt() as *mut XhciTrb;
         self.event_ring_base = event_ring;
-        let ephys = crate::memory::virt_to_phys_dma(VirtAddr::new(event_ring as u64)).as_u64();
+        let ephys = er_buf.phys();
+        core::mem::forget(er_buf);
 
-        let erst_layout = core::alloc::Layout::from_size_align(16, 64).unwrap();
-        let erst = unsafe { alloc::alloc::alloc_zeroed(erst_layout) } as *mut XhciEventRingSegmentTableEntryEntryCompat;
+        let erst_buf = DmaBuf::new(16).expect("XHCI: ERST alloc failed");
+        let erst = erst_buf.virt() as *mut XhciEventRingSegmentTableEntryEntryCompat;
         self.erst_base = erst;
+        core::mem::forget(erst_buf);
         unsafe {
             (*erst).ba = ephys;
             (*erst).size = RING_SIZE as u32;
@@ -208,6 +224,7 @@ impl XhciController {
         // 6) Set MaxSlotsEn and start the controller (R/S bit0).
         self.op_regs().config.write(self.max_slots as u32);
         self.op_regs().usbcmd.write(1);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         crate::println!("XHCI: started");
 
@@ -626,6 +643,9 @@ impl XhciController {
                 (self.event_ring_base as usize + self.event_ring_index * 16) as u64,
             )).as_u64();
             self.rt_regs().ir[0].erdp.write(erdp);
+            // Acknowledge the interrupt by writing IMAN.IP (bit 1)
+            let iman = self.rt_regs().ir[0].iman.read();
+            self.rt_regs().ir[0].iman.write(iman | (1 << 1));
             Some(trb)
         } else {
             None
@@ -636,16 +656,24 @@ impl XhciController {
         let want = trb_type << 10;
         let expect = waiting_for & !0xF;
         let mut t = 0u32;
-        while t < 4_000_000 {
+        while t < EVENT_TIMEOUT {
             if let Some(ev) = self.poll_event() {
                 if ev.control & (0x3F << 10) == want && ev.data & !0xF == expect {
                     return Some(ev);
+                }
+                // Command/transfer error: check completion code
+                let cc = (ev.status >> 24) & 0xFF;
+                if cc > 1 && cc < 200 {
+                    crate::serial_write(&alloc::format!(
+                        "[XHCI] event error cc={} type={}", cc, (ev.control >> 10) & 0x3F
+                    ));
+                    return None;
                 }
             }
             core::hint::spin_loop();
             t += 1;
         }
-        None
+        None // timeout
     }
 }
 
