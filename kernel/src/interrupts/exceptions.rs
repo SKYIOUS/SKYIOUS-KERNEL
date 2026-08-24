@@ -69,8 +69,9 @@ pub(super) extern "x86-interrupt" fn invalid_opcode_handler(
 pub(super) extern "x86-interrupt" fn device_not_available_handler(
     _stack_frame: InterruptStackFrame)
 {
-    // Clear CR0.TS (Task Switched) — this fires on lazy FPU context switch.
-    // With +soft-float we don't use FPU, but some crates may emit FPU ops.
+    // Clear CR0.TS (Task Switched) — safety net. With eager FPU save/restore
+    // in switch_thread, CR0.TS should already be clear. This catches edge cases
+    // where CR0.TS was set without a proper context switch.
     unsafe {
         core::arch::asm!("clts", options(nostack, nomem));
     }

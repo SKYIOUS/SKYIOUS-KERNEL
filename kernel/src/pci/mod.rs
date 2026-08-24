@@ -99,7 +99,7 @@ pub fn pci_enable_msi(bus: u8, slot: u8, func: u8) -> Option<u8> {
 }
 
 /// Route a PCI device's legacy interrupt through the I/O APIC
-fn pci_route_legacy_irq(bus: u8, slot: u8, _func: u8, pin: u8) -> Option<u8> {
+pub fn pci_route_legacy_irq(bus: u8, slot: u8, _func: u8, pin: u8) -> Option<u8> {
     let vector = crate::apic::msi::alloc()?;
 
     if let Some(map) = crate::acpi::PCI_GSI_MAP.get() {
@@ -144,7 +144,7 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
         if class_code == 0x01 && subclass == 0x08 && prog_if == 0x02 {
             crate::println!("    -> NVMe Controller detected!");
             let bar0 = read_bar64(bus, slot, func, 0x10);
-            crate::drivers::storage::nvme::NvmeController::new(bar_to_virt(bar0));
+            crate::drivers::storage::nvme::NvmeController::new(bar_to_virt(bar0), bus, slot, func);
         }
 
         // AHCI/SATA

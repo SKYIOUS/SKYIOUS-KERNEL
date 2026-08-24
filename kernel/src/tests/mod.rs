@@ -17,6 +17,7 @@ pub mod memory_tests;
 pub mod scheduler_tests;
 pub mod stress;
 pub mod fuzzer;
+pub mod benchmarks;
 #[cfg(not(target_arch = "aarch64"))]
 pub mod sync_tests;
 
@@ -24,41 +25,15 @@ pub mod sync_tests;
 pub type TestFn = fn() -> Result<(), &'static str>;
 
 /// Run all registered tests and print results.
+/// APIC tests are now registered via the selftest framework (register_all).
 pub fn run_all() {
-    crate::serial_write("[TESTS] Starting test suite\n");
-    
-    let tests: &[TestFn] = &[
-        crate::tests::apic_tests::test_msi_alloc,
-        crate::tests::apic_tests::test_msi_alloc_range,
-        crate::tests::apic_tests::test_apic_mode_detect,
-        crate::tests::apic_tests::test_set_tpr,
-    ];
-    
-    let mut passed = 0;
-    let mut failed = 0;
-    
-    for (i, test) in tests.iter().enumerate() {
-        crate::serial_write(&alloc::format!("[TESTS] Running test {}...\n", i));
-        match test() {
-            Ok(_) => {
-                passed += 1;
-                crate::serial_write(&alloc::format!("[TESTS] test {}: PASS\n", i));
-            }
-            Err(e) => {
-                failed += 1;
-                crate::serial_write(&alloc::format!("[TESTS] test {}: FAIL - {}\n", i, e));
-            }
-        }
-    }
-    
-    crate::serial_write(&alloc::format!(
-        "[TESTS] Complete: {} passed, {} failed, {} total\n",
-        passed, failed, tests.len()
-    ));
+    // No-op: all tests run through selftest::run_all() after register_all().
+    // This function exists for backward compatibility with main.rs call sites.
 }
 
 /// Register every suite into the selftest (TAP) framework.
 pub fn register_all() {
+    apic_tests::register();
     ebpf_tests::register();
     skyfs_tests::register();
     new_features::register_all();
@@ -69,6 +44,7 @@ pub fn register_all() {
     scheduler_tests::register();
     stress::register();
     fuzzer::register();
+    benchmarks::register();
     #[cfg(not(target_arch = "aarch64"))]
     sync_tests::register();
 }

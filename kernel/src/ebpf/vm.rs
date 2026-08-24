@@ -167,6 +167,35 @@ impl<'a> EbpfVm<'a> {
                                     let len = regs.r(2) as usize;
                                     super::helpers::bpf_helper_debug_print(stack, msg_off, len);
                                 }
+                                // Helper 5: ktime_get_ns
+                                5 => {
+                                    regs.set_r0(super::helpers::bpf_helper_ktime_get_ns());
+                                }
+                                // Helper 6: get_prandom_u32
+                                6 => {
+                                    regs.set_r0(super::helpers::bpf_helper_get_prandom_u32() as u64);
+                                }
+                                // Helper 7: get_smp_processor_id
+                                7 => {
+                                    regs.set_r0(super::helpers::bpf_helper_get_smp_processor_id());
+                                }
+                                // Helper 8: spin_lock (R1 = lock offset in stack)
+                                8 => {
+                                    let lock_off = regs.r(1) as usize;
+                                    super::helpers::bpf_helper_spin_lock(lock_off, stack);
+                                }
+                                // Helper 9: spin_unlock (R1 = lock offset in stack)
+                                9 => {
+                                    let lock_off = regs.r(1) as usize;
+                                    super::helpers::bpf_helper_spin_unlock(lock_off, stack);
+                                }
+                                // Helper 10: tail_call (R1 = program index)
+                                10 => {
+                                    let prog_idx = regs.r(1) as u32;
+                                    super::helpers::bpf_helper_tail_call(prog_idx);
+                                    // Tail call replaces the current program; return 0
+                                    return 0;
+                                }
                                 _ => {}
                             }
                             pc += 1;

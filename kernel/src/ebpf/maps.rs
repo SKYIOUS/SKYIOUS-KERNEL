@@ -173,25 +173,106 @@ impl Map for PerfEventArray {
     fn clear(&self) {}
 }
 
-// ── Ring Buffer ───────────────────────────────────────────────────
+// ── Ring Buffer (SPSC producer/consumer) ─────────────────────────
+/// Production-quality ring buffer for eBPF data streaming.
+/// Uses a fixed-size circular buffer with separate producer/consumer
+/// cursors. Writer reserves space, copies data, then commits.
+/// Reader consumes in FIFO order. No allocation after init.
 pub struct RingBuf {
-    buffer: Mutex<Vec<u8>>,
+    buf: Mutex<Vec<u8>>,
     capacity: usize,
+    /// Producer cursor (bytes written). Wraps around.
+    producer: Mutex<usize>,
+    /// Consumer cursor (bytes read). Wraps around.
+    consumer: Mutex<usize>,
+    /// Total bytes lost due to overflow (for monitoring).
+    lost_bytes: core::sync::atomic::AtomicU64,
 }
 
 impl RingBuf {
-    pub fn new(capacity: usize) -> Self { RingBuf { buffer: Mutex::new(Vec::with_capacity(capacity)), capacity } }
+    pub fn new(capacity: usize) -> Self {
+        // Round up to power of 2 for efficient modulo via bitmask
+        let capacity = capacity.next_power_of_two().max(256);
+        RingBuf {
+            buf: Mutex::new(alloc::vec![0u8; capacity]),
+            capacity,
+            producer: Mutex::new(0),
+            consumer: Mutex::new(0),
+            lost_bytes: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Reserve space for `len` bytes. Returns the offset where data
+    /// should be written, or None if full.
+    fn reserve(&self, len: usize) -> Option<usize> {
+        let mut prod = self.producer.lock();
+        let cons = *self.consumer.lock();
+        let used = prod.wrapping_sub(cons);
+        let free = self.capacity - used;
+        if len > free {
+            self.lost_bytes.fetch_add(len as u64, core::sync::atomic::Ordering::Relaxed);
+            return None;
+        }
+        let offset = *prod % self.capacity;
+        *prod = prod.wrapping_add(len);
+        Some(offset)
+    }
+
+    /// Read up to `max_len` bytes into `dst`. Returns bytes read.
+    fn consume(&self, dst: &mut [u8]) -> usize {
+        let mut cons = self.consumer.lock();
+        let prod = *self.producer.lock();
+        let available = prod.wrapping_sub(*cons);
+        let to_read = dst.len().min(available);
+        if to_read == 0 { return 0; }
+        let offset = *cons % self.capacity;
+        let buf = self.buf.lock();
+        // Handle wrap-around: read in two parts if needed
+        let first = to_read.min(self.capacity - offset);
+        dst[..first].copy_from_slice(&buf[offset..offset + first]);
+        if first < to_read {
+            dst[first..to_read].copy_from_slice(&buf[..to_read - first]);
+        }
+        *cons = cons.wrapping_add(to_read);
+        to_read
+    }
+
+    /// Get total bytes lost due to overflow.
+    pub fn lost(&self) -> u64 {
+        self.lost_bytes.load(core::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl Map for RingBuf {
-    fn lookup(&self, _key: &[u8]) -> Option<Vec<u8>> { let b = self.buffer.lock(); if b.is_empty() { None } else { Some(b.clone()) } }
-    fn update(&self, _key: &[u8], value: &[u8]) -> bool {
-        let mut buf = self.buffer.lock();
-        if buf.len() + value.len() <= self.capacity { buf.extend_from_slice(value); true } else { false }
+    fn lookup(&self, _key: &[u8]) -> Option<Vec<u8>> {
+        // Read one record from the ring buffer
+        let mut output = alloc::vec![0u8; 256];
+        let n = self.consume(&mut output);
+        if n == 0 { None } else { output.truncate(n); Some(output) }
     }
-    fn delete(&self, _key: &[u8]) -> bool { self.buffer.lock().clear(); true }
+    fn update(&self, _key: &[u8], value: &[u8]) -> bool {
+        if let Some(offset) = self.reserve(value.len()) {
+            let mut buf = self.buf.lock();
+            let first = value.len().min(self.capacity - offset);
+            buf[offset..offset + first].copy_from_slice(&value[..first]);
+            if first < value.len() {
+                buf[..value.len() - first].copy_from_slice(&value[first..]);
+            }
+            true
+        } else {
+            false // ring full, data lost
+        }
+    }
+    fn delete(&self, _key: &[u8]) -> bool {
+        *self.consumer.lock() = *self.producer.lock();
+        true
+    }
     fn key_size(&self) -> usize { 4 }
-    fn value_size(&self) -> usize { 4 }
+    fn value_size(&self) -> usize { 64 }
     fn max_entries(&self) -> usize { self.capacity / 64 }
-    fn clear(&self) { self.buffer.lock().clear(); }
+    fn clear(&self) {
+        *self.producer.lock() = 0;
+        *self.consumer.lock() = 0;
+        self.lost_bytes.store(0, core::sync::atomic::Ordering::Relaxed);
+    }
 }

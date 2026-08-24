@@ -26,6 +26,10 @@ pub fn feed_scancode(scancode: u8) {
                         let proc = crate::task::process::CURRENT_PROCESS.lock();
                         if let Some(ref p) = *proc {
                             p.signals.lock().raise(crate::syscalls::signal::Signal::SIGINT);
+                            // Route SIGINT to signalfd instances
+                            crate::task::process::route_signal_to_signalfd(
+                                p.id, 2, crate::task::process::SI_USER, 0, 0, 0,
+                            );
                         }
                         // Also echo ^C to console
                         let _ = TTY_INPUT.push(b'^');

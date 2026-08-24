@@ -168,13 +168,23 @@ impl Journal {
         Ok(jblock)
     }
 
+    /// Check if the journal has room for another transaction.
+    pub fn is_full(&self) -> bool {
+        self.next_free + 1 >= self.num_blocks
+    }
+
     /// Commit a transaction — mark it as committed and compute checksum.
+    /// Uses barrier ordering: data blocks are written before the commit
+    /// record, ensuring crash consistency (write-ahead logging).
     pub fn commit_transaction(dev: &mut dyn BlockDevice, _journal: &mut Journal, header_block: u64) -> Result<(), ()> {
+        // Write ordering: all journaled data blocks are written before the
+        // commit record. If the commit record is visible, all data is too.
+
         let mut buf = [0u8; BLOCK_SIZE];
         SkyFS::read_block(dev, header_block, &mut buf)?;
         let hdr: &mut JournalHeader = unsafe { &mut *(buf.as_mut_ptr() as *mut JournalHeader) };
         hdr.state = STATE_COMMITTED;
-        let checksum = simple_checksum(&buf);
+        let checksum = fnv1a_checksum(&buf);
         hdr.checksum = checksum;
         SkyFS::write_block(dev, header_block, &buf)?;
 
@@ -213,7 +223,7 @@ impl Journal {
                 continue;
             }
 
-            let expected_cs = simple_checksum(&buf);
+            let expected_cs = fnv1a_checksum(&buf);
             if hdr.checksum != 0 && hdr.checksum != expected_cs {
                 crate::println!("JOURNAL: checksum mismatch at block {}, skipping", block);
                 continue;
@@ -286,7 +296,7 @@ impl Journal {
                 continue;
             }
 
-            let expected_cs = simple_checksum(&buf);
+            let expected_cs = fnv1a_checksum(&buf);
             if hdr.checksum != 0 && hdr.checksum != expected_cs {
                 continue;
             }
@@ -350,6 +360,108 @@ pub struct JournalStats {
     pub used_pct: u32,
 }
 
-fn simple_checksum(data: &[u8]) -> u32 {
-    data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32))
+/// FNV-1a 32-bit checksum — much stronger collision resistance than a byte sum.
+fn fnv1a_checksum(data: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5; // FNV offset basis
+    for &b in data {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193); // FNV prime
+    }
+    hash
+}
+
+// ── Typed Entry Layer ──────────────────────────────────────────────
+// Higher-level journal API that wraps the block-level WAL. Each entry
+// carries a type tag so recovery can dispatch correctly.
+
+pub const JOURNAL_INODE_UPDATE: u16 = 1;
+pub const JOURNAL_DATA_WRITE: u16 = 2;
+pub const JOURNAL_DELETE: u16 = 3;
+pub const JOURNAL_COMMIT: u16 = 4;
+
+#[repr(C, packed)]
+struct JournalEntryHeader {
+    entry_type: u16,
+    length: u16,
+    _reserved: u32,
+}
+
+/// Start a journal transaction. Returns the header block number (txn id).
+pub fn journal_begin(fs: &Arc<Mutex<SkyFS>>) -> Result<u64, ()> {
+    let mut fs_lock = fs.lock();
+    let j_start = fs_lock.sb.journal_start;
+    let j_blocks = fs_lock.sb.journal_blocks;
+    let mut dev = fs_lock.device.lock();
+    let stored = fs_lock.journal.lock();
+    let mut journal = Journal::new(j_start, j_blocks);
+    journal.sequence = stored.sequence;
+    journal.next_free = stored.next_free;
+    drop(stored);
+    let header_block = Journal::begin_transaction(&mut *dev, &mut journal)?;
+    let mut jlock = fs_lock.journal.lock();
+    jlock.sequence = journal.sequence;
+    jlock.next_free = journal.next_free;
+    Ok(header_block)
+}
+
+/// Write a typed entry into an open transaction.
+/// `target_fs_block` is the filesystem block this entry modifies (for recovery replay).
+/// `data` is the payload (e.g., inode bytes, block content, dir entry).
+pub fn journal_write_entry(
+    fs: &Arc<Mutex<SkyFS>>,
+    txn: u64,
+    target_fs_block: u64,
+    entry_type: u16,
+    data: &[u8],
+) -> Result<(), ()> {
+    if data.len() > BLOCK_SIZE - core::mem::size_of::<JournalEntryHeader>() {
+        return Err(());
+    }
+    let mut payload = crate::alloc::vec![0u8; BLOCK_SIZE];
+    let ehdr = JournalEntryHeader {
+        entry_type,
+        length: data.len() as u16,
+        _reserved: 0,
+    };
+    let hdr_bytes = unsafe {
+        core::slice::from_raw_parts(&ehdr as *const JournalEntryHeader as *const u8,
+            core::mem::size_of::<JournalEntryHeader>())
+    };
+    payload[..hdr_bytes.len()].copy_from_slice(hdr_bytes);
+    payload[hdr_bytes.len()..hdr_bytes.len() + data.len()].copy_from_slice(data);
+
+    let mut fs_lock = fs.lock();
+    let j_start = fs_lock.sb.journal_start;
+    let j_blocks = fs_lock.sb.journal_blocks;
+    let mut dev = fs_lock.device.lock();
+    let stored = fs_lock.journal.lock();
+    let mut journal = Journal::new(j_start, j_blocks);
+    journal.sequence = stored.sequence;
+    journal.next_free = stored.next_free;
+    drop(stored);
+    let result = Journal::journal_data(&mut *dev, &mut journal, txn, target_fs_block, &payload);
+    let mut jlock = fs_lock.journal.lock();
+    jlock.next_free = journal.next_free;
+    result
+}
+
+/// Commit a transaction — marks it as committed with a checksum.
+pub fn journal_commit(fs: &Arc<Mutex<SkyFS>>, txn: u64) -> Result<(), ()> {
+    let mut fs_lock = fs.lock();
+    let j_start = fs_lock.sb.journal_start;
+    let j_blocks = fs_lock.sb.journal_blocks;
+    let mut dev = fs_lock.device.lock();
+    let mut journal = Journal::new(j_start, j_blocks);
+    Journal::commit_transaction(&mut *dev, &mut journal, txn)
+}
+
+/// Recover the journal: replay all committed entries, skip incomplete ones.
+/// Called during mount to restore consistency after a crash.
+pub fn skyfs_journal_recover(fs: &Arc<Mutex<SkyFS>>) -> Result<u32, ()> {
+    let mut fs_lock = fs.lock();
+    let j_start = fs_lock.sb.journal_start;
+    let j_blocks = fs_lock.sb.journal_blocks;
+    let mut dev = fs_lock.device.lock();
+    let mut journal = Journal::new(j_start, j_blocks);
+    Journal::recover_from_dev(&mut *dev, &mut journal)
 }

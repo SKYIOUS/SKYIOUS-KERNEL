@@ -10,6 +10,7 @@ pub struct X86_64Arch;
 
 impl Arch for X86_64Arch {
     unsafe fn init_boot() {
+        crate::task::thread::detect_xsave();
         crate::gdt::init();
         crate::interrupts::init_idt();
         unsafe { crate::interrupts::PICS.lock().initialize() };
@@ -82,7 +83,8 @@ impl Arch for X86_64Arch {
     }
 
     unsafe fn switch_thread(old_sp: *mut u64, new_sp: u64, new_fs_base: u64) {
-        crate::task::thread::switch_thread(old_sp, new_sp, new_fs_base)
+        // Arch trait path: no FPU pointers available, pass null
+        crate::task::thread::switch_thread(old_sp, new_sp, new_fs_base, core::ptr::null_mut(), core::ptr::null())
     }
 
     fn read_thread_pointer() -> u64 {

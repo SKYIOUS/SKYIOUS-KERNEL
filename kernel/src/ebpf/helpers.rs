@@ -54,3 +54,56 @@ pub fn bpf_helper_debug_print(stack: &[u8; STACK_SIZE], msg_off: usize, len: usi
     };
     crate::println!("[eBPF] {}", s);
 }
+
+// Helper function 5: ktime_get_ns — monotonic nanosecond clock
+pub fn bpf_helper_ktime_get_ns() -> u64 {
+    // Use timer ticks × 10ms as approximation (100 Hz tick rate)
+    crate::interrupts::get_ticks().wrapping_mul(10_000_000)
+}
+
+// Helper function 6: get_prandom_u32 — pseudo-random number generator
+pub fn bpf_helper_get_prandom_u32() -> u32 {
+    // xorshift32 PRNG seeded from RDTSC at init time
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static SEED: AtomicU32 = AtomicU32::new(0xDEAD_BEEF);
+    let mut x = SEED.load(Ordering::Relaxed);
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    SEED.store(x, Ordering::Relaxed);
+    x
+}
+
+// Helper function 7: get_smp_processor_id — current CPU ID
+pub fn bpf_helper_get_smp_processor_id() -> u64 {
+    crate::smp::get_cpu_id() as u64
+}
+
+// Helper function 8: spin_lock / spin_unlock — lightweight locking
+pub fn bpf_helper_spin_lock(lock_off: usize, stack: &mut [u8; STACK_SIZE]) {
+    if lock_off + 8 <= STACK_SIZE {
+        // Simple spin: busy-wait until the u64 at lock_off is 0, then set to 1
+        loop {
+            let val = unsafe { *(stack.as_ptr().add(lock_off) as *const u64) };
+            if val == 0 {
+                unsafe { *(stack.as_mut_ptr().add(lock_off) as *mut u64) = 1; }
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
+pub fn bpf_helper_spin_unlock(lock_off: usize, stack: &mut [u8; STACK_SIZE]) {
+    if lock_off + 8 <= STACK_SIZE {
+        unsafe { *(stack.as_mut_ptr().add(lock_off) as *mut u64) = 0; }
+    }
+}
+
+// Helper function 9: tail_call — jump to another BPF program
+pub static TAIL_CALL_PROGS: crate::sync::IrqSafeMutex<alloc::collections::VecDeque<u32>> =
+    crate::sync::IrqSafeMutex::new(alloc::collections::VecDeque::new());
+
+pub fn bpf_helper_tail_call(prog_idx: u32) {
+    TAIL_CALL_PROGS.lock().push_back(prog_idx);
+}

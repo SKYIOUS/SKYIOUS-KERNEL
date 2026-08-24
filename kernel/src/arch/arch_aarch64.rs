@@ -74,6 +74,21 @@ impl Arch for AArch64Arch {
     }
 
     unsafe fn switch_thread(old_sp: *mut u64, new_sp: u64, new_fs_base: u64) {
+        // Context frame layout (16 u64s = 128 bytes):
+        //   [0]:   x19  [1]:   x20  [2]:  x21  [3]:  x22
+        //   [4]:   x23  [5]:   x24  [6]:  x25  [7]:  x26
+        //   [8]:   x27  [9]:   x28  [10]: x29  [11]: x30
+        //   [12]:  SP_EL0       [13]: TPIDR_EL0
+        //   [14]:  old_fpu_ptr  [15]: new_fpu_ptr
+        //
+        // `old_sp` is a pointer to Thread.stack_ptr (heap), which holds the
+        // address of the context frame on the stack. We dereference it to get
+        // the actual frame address.
+        let old_frame = *old_sp;
+        let old_fpu = *old_frame.add(14);
+        let new_fpu = *new_sp.add(14);
+
+        // Save old thread's callee-saved regs + system regs
         core::arch::asm!(
             "stp x19, x20, [x0, #0]",
             "stp x21, x22, [x0, #16]",
@@ -81,20 +96,39 @@ impl Arch for AArch64Arch {
             "stp x25, x26, [x0, #48]",
             "stp x27, x28, [x0, #64]",
             "stp x29, x30, [x0, #80]",
-            "msr tpidr_el0, {tpidr}",
-            "mov sp, {new_sp}",
+            "mrs x1, sp_el0",
+            "mrs x2, tpidr_el0",
+            "stp x1, x2, [x0, #96]",
+            in("x0") old_frame,
+        );
+
+        // Save outgoing thread's FPU state
+        if old_fpu != 0 {
+            save_fpu_aarch64(&mut *(old_fpu as *mut AArch64FpuState));
+        }
+
+        // Switch stack pointer
+        core::arch::asm!("mov sp, {p}", p = in(reg) new_sp);
+
+        // Restore new thread's FPU state
+        if new_fpu != 0 {
+            restore_fpu_aarch64(&*(new_fpu as *const AArch64FpuState));
+        }
+
+        // Restore incoming thread's callee-saved regs + system regs
+        core::arch::asm!(
             "ldp x19, x20, [sp, #0]",
             "ldp x21, x22, [sp, #16]",
             "ldp x23, x24, [sp, #32]",
             "ldp x25, x26, [sp, #48]",
             "ldp x27, x28, [sp, #64]",
             "ldp x29, x30, [sp, #80]",
-            "ret",
-            tpidr = in(reg) new_fs_base,
-            new_sp = in(reg) new_sp,
-            in("x0") old_sp,
-            options(noreturn)
-        )
+            "ldp x1, x2, [sp, #96]",
+            "msr sp_el0, x1",
+            "msr tpidr_el0, x2",
+        );
+        // Return via restored x30 (LR)
+        core::arch::asm!("ret", options(noreturn));
     }
 
     fn read_thread_pointer() -> u64 {
@@ -120,6 +154,10 @@ impl Arch for AArch64Arch {
     }
 
     fn init_hal_irq() {
+        // Register this arch implementation as the HAL CPU context
+        // so hal::cpu::switch_thread dispatches to AArch64Arch::switch_thread.
+        static CONTEXT: AArch64Arch = AArch64Arch;
+        crate::hal::cpu::register_cpu_context(&CONTEXT);
     }
 
     fn init_hal_timer() {
@@ -336,6 +374,90 @@ pub extern "C" fn aarch64_default_exception(_frame: *mut u64) {
     unsafe {
         crate::serial_write("[EXCEPTION] unhandled aarch64 exception\n");
     }
+}
+
+/// aarch64 FPU/SIMD state buffer (q0-q31 + FPCR + FPSR = 528 bytes).
+/// 16-byte aligned for STP/LDP of 128-bit Q registers.
+#[repr(C, align(16))]
+pub struct AArch64FpuState {
+    pub data: [u8; 528],
+}
+
+impl AArch64FpuState {
+    pub fn new() -> Self {
+        AArch64FpuState { data: [0u8; 528] }
+    }
+}
+
+/// Save FPU/SIMD state (q0-q31, fpcr, fpsr) into buffer.
+/// # Safety
+/// Buffer must be 16-byte aligned and at least 528 bytes.
+pub unsafe fn save_fpu_aarch64(buf: &mut AArch64FpuState) {
+    let p = buf.data.as_mut_ptr() as *mut u8;
+    core::arch::asm!(
+        "stp  q0,  q1,  [{p}, #(0 * 16)]",
+        "stp  q2,  q3,  [{p}, #(2 * 16)]",
+        "stp  q4,  q5,  [{p}, #(4 * 16)]",
+        "stp  q6,  q7,  [{p}, #(6 * 16)]",
+        "stp  q8,  q9,  [{p}, #(8 * 16)]",
+        "stp  q10, q11, [{p}, #(10 * 16)]",
+        "stp  q12, q13, [{p}, #(12 * 16)]",
+        "stp  q14, q15, [{p}, #(14 * 16)]",
+        "stp  q16, q17, [{p}, #(16 * 16)]",
+        "stp  q18, q19, [{p}, #(18 * 16)]",
+        "stp  q20, q21, [{p}, #(20 * 16)]",
+        "stp  q22, q23, [{p}, #(22 * 16)]",
+        "stp  q24, q25, [{p}, #(24 * 16)]",
+        "stp  q26, q27, [{p}, #(26 * 16)]",
+        "stp  q28, q29, [{p}, #(28 * 16)]",
+        "stp  q30, q31, [{p}, #(30 * 16)]",
+        "mrs  x0, fpcr",
+        "mrs  x1, fpsr",
+        "stp  x0, x1,  [{p}, #(512)]",
+        p = in(reg) p,
+        out("x0") _,
+        out("x1") _,
+        options(nostack)
+    );
+}
+
+/// Restore FPU/SIMD state from buffer.
+/// If the buffer was zero-initialized (new thread), FPCR/FPSR are set to
+/// safe defaults: round-to-nearest, NaN quieting, default NaN mode.
+pub unsafe fn restore_fpu_aarch64(buf: &AArch64FpuState) {
+    let p = buf.data.as_ptr() as *const u8;
+    core::arch::asm!(
+        "ldp  q0,  q1,  [{p}, #(0 * 16)]",
+        "ldp  q2,  q3,  [{p}, #(2 * 16)]",
+        "ldp  q4,  q5,  [{p}, #(4 * 16)]",
+        "ldp  q6,  q7,  [{p}, #(6 * 16)]",
+        "ldp  q8,  q9,  [{p}, #(8 * 16)]",
+        "ldp  q10, q11, [{p}, #(10 * 16)]",
+        "ldp  q12, q13, [{p}, #(12 * 16)]",
+        "ldp  q14, q15, [{p}, #(14 * 16)]",
+        "ldp  q16, q17, [{p}, #(16 * 16)]",
+        "ldp  q18, q19, [{p}, #(18 * 16)]",
+        "ldp  q20, q21, [{p}, #(20 * 16)]",
+        "ldp  q22, q23, [{p}, #(22 * 16)]",
+        "ldp  q24, q25, [{p}, #(24 * 16)]",
+        "ldp  q26, q27, [{p}, #(26 * 16)]",
+        "ldp  q28, q29, [{p}, #(28 * 16)]",
+        "ldp  q30, q31, [{p}, #(30 * 16)]",
+        "ldp  x0, x1,  [{p}, #(512)]",
+        // FPCR: if zero (new thread), use safe default.
+        // FPCR[24] = DN (Default NaN mode), FPCR[23:22] = RMode (00=Round-to-Nearest).
+        // DN=1 ensures all NaN operations produce the default quiet NaN.
+        "tst  x0, x0",
+        "mov  x2, #0x01000000",  // FPCR: DN=1 (bit 24), RMode=00 (RN)
+        "csel x0, x2, x0, eq",   // if FPCR==0, use safe default
+        "msr  fpcr, x0",
+        "msr  fpsr, x1",
+        p = in(reg) p,
+        out("x0") _,
+        out("x1") _,
+        out("x2") _,
+        options(nostack)
+    );
 }
 
 /// aarch64 system tick counter (incremented by timer IRQ).
