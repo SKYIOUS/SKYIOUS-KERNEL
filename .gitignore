@@ -72,3 +72,8 @@ node_modules/
 .cache/
 .cargo/registry/
 .cargo/git/
+
+kernel/vendor/
+test_logs/
+initrd.tar
+*.tar
