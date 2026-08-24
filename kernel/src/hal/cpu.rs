@@ -90,7 +90,7 @@ pub unsafe fn switch_thread(old_sp: *mut u64, new_sp: u64, new_thread_pointer: u
         return;
     }
     #[cfg(target_arch = "x86_64")]
-    { crate::task::thread::switch_thread(old_sp, new_sp, new_thread_pointer); }
+    { crate::task::thread::switch_thread(old_sp, new_sp, new_thread_pointer, core::ptr::null_mut(), core::ptr::null()); }
     #[cfg(not(target_arch = "x86_64"))]
     { core::hint::spin_loop(); }
 }

@@ -27,7 +27,6 @@ pub struct SignalState {
     pub saved_context: Option<SignalContext>,
 }
 
-#[derive(Clone, Copy)]
 pub struct SignalContext {
     pub rip: u64,
     pub rsp: u64,
@@ -47,6 +46,8 @@ pub struct SignalContext {
     pub r14: u64,
     pub r15: u64,
     pub rflags: u64,
+    /// Saved FPU/SSE state (heap-allocated, not Copy).
+    pub fpu_state: Option<alloc::vec::Vec<u8>>,
 }
 
 impl SignalState {
@@ -127,4 +128,65 @@ pub fn has_pending_signal() -> bool {
     } else {
         false
     }
+}
+
+// ── Default signal restorer trampoline ─────────────────────────────
+
+/// The default restorer is a small piece of code mapped into userspace
+/// that issues `syscall` with __NR_rt_sigreturn (15) to restore the
+/// saved register context. If sa_restorer is not set by the application,
+/// the kernel provides this trampoline.
+///
+/// Layout (x86_64):
+///   mov eax, 15   (B8 0F 00 00 00)
+///   syscall        (0F 05)
+///   int3           (CC)  — unreachable, debug trap if we return here
+#[cfg(target_arch = "x86_64")]
+pub static SIGNAL_RESTORER: [u8; 7] = [
+    0xB8, 0x0F, 0x00, 0x00, 0x00, // mov eax, 15 (sys_rt_sigreturn)
+    0x0F, 0x05,                     // syscall
+];
+
+/// aarch64 restorer: mov x8, #__NR_rt_sigreturn; svc #0
+#[cfg(target_arch = "aarch64")]
+pub static SIGNAL_RESTORER: [u8; 8] = [
+    0x08, 0x00, 0x80, 0xD2, // mov x8, #15
+    0x01, 0x00, 0x00, 0xD4, // svc #0
+];
+
+/// Get the restorer address. Uses sa_restorer if set, otherwise the
+/// kernel-provided trampoline.
+pub fn get_restorer(handler: u64, sa_restorer: u64) -> u64 {
+    if sa_restorer != 0 {
+        sa_restorer
+    } else {
+        // Map the static trampoline into userspace. For simplicity,
+        // we return the address of the static — it must be in userspace
+        // mapped memory. In a production kernel, we'd mmap a small
+        // page with the trampoline. Here we rely on the fact that the
+        // signal frame setup copies the restorer code to the user stack.
+        SIGNAL_RESTORER.as_ptr() as u64
+    }
+}
+
+// ── FPU state for signal delivery ──────────────────────────────────
+
+/// Save FPU state into a heap buffer. Called before signal delivery
+/// to preserve floating-point state across the handler.
+#[cfg(target_arch = "x86_64")]
+pub fn save_fpu_state_for_signal() -> Option<alloc::vec::Vec<u8>> {
+    let mut area = crate::task::thread::FpuArea::new();
+    unsafe {
+        crate::task::thread::save_fpu(&mut area);
+    }
+    Some(alloc::vec::Vec::from(area.data.as_slice()))
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn save_fpu_state_for_signal() -> Option<alloc::vec::Vec<u8>> {
+    let mut state = crate::arch::arch_aarch64::AArch64FpuState::new();
+    unsafe {
+        crate::arch::arch_aarch64::save_fpu_aarch64(&mut state);
+    }
+    Some(alloc::vec::Vec::from(state.data.as_slice()))
 }

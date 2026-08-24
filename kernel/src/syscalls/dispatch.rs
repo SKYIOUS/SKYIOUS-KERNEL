@@ -109,7 +109,7 @@ pub struct SyscallArgs {
 pub type SyscallHandler = fn(&SyscallArgs) -> u64;
 
 /// Dispatch table indexed by syscall number. `None` = unknown syscall.
-const TABLE_SIZE: usize = 465;
+const TABLE_SIZE: usize = 475;
 
 /// Build the dispatch table. Called once; the result is cached.
 const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
@@ -136,9 +136,6 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     t[numbers::SYS_PIPE as usize]        = Some(sys_pipe);
     t[numbers::SYS_SELECT as usize]      = Some(sys_select);
     t[numbers::SYS_SCHED_YIELD as usize] = Some(sys_sched_yield);
-    t[numbers::SYS_SHMGET as usize]      = Some(sys_shmget);
-    t[numbers::SYS_SHMAT as usize]       = Some(sys_shmat);
-    t[numbers::SYS_SHMCTL as usize]      = Some(sys_shmctl);
     t[numbers::SYS_DUP as usize]         = Some(sys_dup);
     t[numbers::SYS_DUP2 as usize]        = Some(sys_dup2);
     t[numbers::SYS_PAUSE as usize]       = Some(sys_pause);
@@ -171,7 +168,6 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     t[numbers::SYS_WAIT4 as usize]       = Some(sys_wait4);
     t[numbers::SYS_KILL as usize]        = Some(sys_kill);
     t[numbers::SYS_UNAME as usize]       = Some(sys_uname);
-    t[numbers::SYS_SHMDT as usize]       = Some(sys_shmdt);
 
     // ── Filesystem (72-95) ────────────────────────────────────
     t[numbers::SYS_FCNTL as usize]       = Some(sys_fcntl);
@@ -214,6 +210,8 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     // ── Misc (200+) ───────────────────────────────────────────
     t[numbers::SYS_RESOLVE as usize]     = Some(sys_resolve);
     t[numbers::SYS_FUTEX as usize]       = Some(sys_futex);
+    t[numbers::SYS_SCHED_SETAFFINITY as usize] = Some(sys_sched_setaffinity);
+    t[numbers::SYS_SCHED_GETAFFINITY as usize] = Some(sys_sched_getaffinity);
     t[numbers::SYS_SYSINFO as usize]     = Some(sys_sysinfo);
     t[numbers::SYS_OPENPTY as usize]     = Some(sys_openpty);
     t[numbers::SYS_GETDENTS64 as usize]  = Some(sys_getdents64);
@@ -224,6 +222,8 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     t[numbers::SYS_TIMER_GETOVERRUN as usize]= Some(sys_timer_getoverrun);
     t[numbers::SYS_TIMER_DELETE as usize]    = Some(sys_timer_delete);
     t[numbers::SYS_CLOCK_GETTIME as usize]   = Some(sys_clock_gettime);
+    t[numbers::SYS_CLOCK_GETRES as usize]    = Some(sys_clock_getres);
+    t[numbers::SYS_CLOCK_NANOSLEEP as usize] = Some(sys_clock_nanosleep);
     t[numbers::SYS_EXIT_GROUP as usize]  = Some(sys_exit_group);
     t[numbers::SYS_OPENAT as usize]      = Some(sys_openat);
     t[numbers::SYS_MKDIRAT as usize]     = Some(sys_mkdirat);
@@ -263,12 +263,23 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     t[numbers::SYS_GETITIMER as usize]   = Some(sys_getitimer);
     t[numbers::SYS_SETITIMER as usize]   = Some(sys_setitimer);
     t[numbers::SYS_TIMES as usize]       = Some(sys_times);
+    t[numbers::SYS_GETRUSAGE as usize]   = Some(sys_getrusage);
+    t[numbers::SYS_TIMERFD_CREATE as usize]  = Some(sys_timerfd_create);
+    t[numbers::SYS_TIMERFD_SETTIME as usize] = Some(sys_timerfd_settime);
+    t[numbers::SYS_TIMERFD_GETTIME as usize] = Some(sys_timerfd_gettime);
+    t[numbers::SYS_INOTIFY_INIT as usize]       = Some(sys_inotify_init);
+    t[numbers::SYS_INOTIFY_ADD_WATCH as usize]  = Some(sys_inotify_add_watch);
+    t[numbers::SYS_INOTIFY_RM_WATCH as usize]   = Some(sys_inotify_rm_watch);
+    t[numbers::SYS_RECVMMSG as usize]     = Some(sys_recvmmsg);
+    t[numbers::SYS_SENDMMSG as usize]     = Some(sys_sendmmsg);
     t[numbers::SYS_OBJMGR_ENUM as usize]= Some(sys_objmgr_enum);
     t[numbers::SYS_OBJMGR_AUDIT as usize]= Some(sys_objmgr_audit);
     t[numbers::SYS_DRMCTL as usize]      = Some(sys_drmctl);
     t[numbers::SYS_HASH as usize]        = Some(sys_hash);
+    t[numbers::SYS_GETRANDOM as usize]    = Some(sys_getrandom);
     t[numbers::SYS_IO_URING_SETUP as usize]  = Some(sys_io_uring_setup);
     t[numbers::SYS_IO_URING_ENTER as usize]  = Some(sys_io_uring_enter);
+    t[numbers::SYS_IO_URING_REGISTER as usize] = Some(sys_io_uring_register);
     t[numbers::SYS_EPOLL_CREATE1 as usize]   = Some(sys_epoll_create1);
     t[numbers::SYS_EPOLL_CTL as usize]       = Some(sys_epoll_ctl);
     t[numbers::SYS_EPOLL_WAIT as usize]      = Some(sys_epoll_wait);
@@ -287,8 +298,13 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     t[numbers::SYS_PRCTL as usize]       = Some(sys_prctl);
     t[numbers::SYS_CGROUP_MKDIR as usize]   = Some(sys_cgroup_mkdir);
     t[numbers::SYS_CGROUP_WRITE as usize]   = Some(sys_cgroup_write);
-    t[numbers::SYS_CGROUP_READ as usize]    = Some(sys_cgroup_read);
-    t[numbers::SYS_SETNS as usize]       = Some(sys_setns);
+    t[numbers::SYS_CGROUP_READ as usize]    = Some(sys_cgroup_read);    t[numbers::SYS_SETNS as usize]       = Some(sys_setns);
+    t[numbers::SYS_MQ_OPEN as usize]       = Some(sys_mq_open);
+    t[numbers::SYS_MQ_CLOSE as usize]      = Some(sys_mq_close);
+    t[numbers::SYS_MQ_TIMEDSEND as usize]  = Some(sys_mq_send);
+    t[numbers::SYS_MQ_TIMEDRECEIVE as usize]= Some(sys_mq_receive);
+    t[numbers::SYS_MQ_UNLINK as usize]     = Some(sys_mq_unlink);
+
     t[numbers::SYS_SHMGET as usize]      = Some(sys_shmget);
     t[numbers::SYS_SHMAT as usize]       = Some(sys_shmat);
     t[numbers::SYS_SHMCTL as usize]      = Some(sys_shmctl);
@@ -394,9 +410,13 @@ fn sys_rt_sigreturn(a: &SyscallArgs) -> u64 { process::sys_rt_sigreturn(a.regs) 
 fn sys_sched_yield(a: &SyscallArgs) -> u64 { process::sys_sched_yield() }
 fn sys_sched_setattr(a: &SyscallArgs) -> u64 { process::sys_sched_setattr(a.a1 as i64, a.a2 as *const u8, a.a3) }
 fn sys_sched_getattr(a: &SyscallArgs) -> u64 { process::sys_sched_getattr(a.a1 as i64, a.a2 as *mut u8, a.a3, a.a4) }
+fn sys_sched_setaffinity(a: &SyscallArgs) -> u64 { process::sys_sched_setaffinity(a.a1 as i64, a.a2, a.a3) }
+fn sys_sched_getaffinity(a: &SyscallArgs) -> u64 { process::sys_sched_getaffinity(a.a1 as i64, a.a2, a.a3) }
 fn sys_getdents64(a: &SyscallArgs) -> u64 { fs::sys_getdents64(a.a1, a.a2 as *mut u8, a.a3 as usize) }
 fn sys_ioctl(a: &SyscallArgs) -> u64 { fs::sys_ioctl(a.a1, a.a2, a.a3 as *mut u8) }
 fn sys_clock_gettime(a: &SyscallArgs) -> u64 { misc::sys_clock_gettime(a.a1, a.a2 as *mut Timespec) }
+fn sys_clock_getres(a: &SyscallArgs) -> u64 { misc::sys_clock_getres(a.a1, a.a2 as *mut Timespec) }
+fn sys_clock_nanosleep(a: &SyscallArgs) -> u64 { misc::sys_clock_nanosleep(a.a1, a.a2, a.a3 as *const Timespec, a.a4 as *mut Timespec) }
 fn sys_mount(a: &SyscallArgs) -> u64 { fs::sys_mount(a.a1 as *const u8, a.a2 as *const u8, a.a3 as *const u8, a.a4, a.a5 as *const u8) }
 fn sys_umount2(a: &SyscallArgs) -> u64 { fs::sys_umount2(a.a1 as *const u8, a.a2) }
 fn sys_mkfs(a: &SyscallArgs) -> u64 { fs::sys_mkfs(a.a1 as *const u8, a.a2) }
@@ -410,6 +430,7 @@ fn sys_umask(a: &SyscallArgs) -> u64 { fs::sys_umask(a.a1 as u32) }
 fn sys_getrlimit(a: &SyscallArgs) -> u64 { process::sys_getrlimit(a.a1, a.a2 as *mut u8) }
 fn sys_setrlimit(a: &SyscallArgs) -> u64 { process::sys_setrlimit(a.a1, a.a2 as *const u8) }
 fn sys_prlimit64(a: &SyscallArgs) -> u64 { process::sys_prlimit64(a.a1, a.a2, a.a3 as *const u8, a.a4 as *mut u8) }
+fn sys_getrusage(a: &SyscallArgs) -> u64 { process::sys_getrusage(a.a1, a.a2 as *mut u8) }
 fn sys_arch_prctl(a: &SyscallArgs) -> u64 { process::sys_arch_prctl(a.a1, a.a2) }
 fn sys_select(a: &SyscallArgs) -> u64 { misc::sys_select(a.a1, a.a2 as *mut u64, a.a3 as *mut u64, a.a4 as *mut u64, a.a5 as *const u64) }
 fn sys_poll(a: &SyscallArgs) -> u64 { misc::sys_poll(a.a1 as *const u8, a.a2 as usize, a.a3 as i32) }
@@ -428,13 +449,15 @@ fn sys_setgroups(a: &SyscallArgs) -> u64 { process::sys_setgroups(a.a1 as i64, a
 fn sys_capget(a: &SyscallArgs) -> u64 { process::sys_capget(a.a1 as *mut u8, a.a2 as *mut u8) }
 fn sys_capset(a: &SyscallArgs) -> u64 { process::sys_capset(a.a1 as *const u8, a.a2 as *const u8) }
 fn sys_rt_sigprocmask(a: &SyscallArgs) -> u64 { process::sys_sigprocmask(a.a1 as i32, a.a2 as *const u64, a.a3 as *mut u64) }
-fn sys_io_uring_setup(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_setup(a.a1) }
+fn sys_io_uring_setup(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_setup(a.a1, a.a2) }
 fn sys_io_uring_enter(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_enter(a.a1, a.a2, a.a3, a.a4, a.a5) }
+fn sys_io_uring_register(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_register(a.a1, a.a2, a.a3, a.a4) }
 fn sys_bpf(a: &SyscallArgs) -> u64 { crate::ebpf::sys_bpf(a.a1 as u32, a.a2, a.a3, a.a4) }
 fn sys_sync(a: &SyscallArgs) -> u64 { fs::sys_sync() }
 fn sys_reboot(a: &SyscallArgs) -> u64 { misc::sys_reboot(a.a1, a.a2) }
 fn sys_drmctl(a: &SyscallArgs) -> u64 { gui::sys_drmctl(a.a1, a.a2, a.a3 as *mut u8) }
 fn sys_hash(a: &SyscallArgs) -> u64 { misc::sys_hash(a.a1, a.a2 as *const u8, a.a3, a.a4 as *mut u8, a.a5) }
+fn sys_getrandom(a: &SyscallArgs) -> u64 { misc::sys_getrandom(a.a1 as *mut u8, a.a2 as usize, a.a3) }
 fn sys_statfs(a: &SyscallArgs) -> u64 { fs::sys_statfs(a.a1 as *const u8, a.a2 as *mut u8) }
 fn sys_openpty(a: &SyscallArgs) -> u64 { gui::sys_openpty() }
 fn sys_set_tid_address(a: &SyscallArgs) -> u64 { process::sys_set_tid_address(a.a1 as *const u32) }
@@ -446,16 +469,24 @@ fn sys_sigaltstack(a: &SyscallArgs) -> u64 { process::sys_sigaltstack(a.a1 as *c
 fn sys_getitimer(a: &SyscallArgs) -> u64 { process::sys_getitimer(a.a1, a.a2 as *mut u8) }
 fn sys_setitimer(a: &SyscallArgs) -> u64 { process::sys_setitimer(a.a1, a.a2 as *const u8, a.a3 as *mut u8) }
 fn sys_times(a: &SyscallArgs) -> u64 { process::sys_times(a.a1 as *mut u8) }
-fn sys_signalfd(a: &SyscallArgs) -> u64 { process::sys_signalfd4(a.a1, a.a2 as *const u64, 0) }
-fn sys_signalfd4(a: &SyscallArgs) -> u64 { process::sys_signalfd4(a.a1, a.a2 as *const u64, a.a3 as i32) }
-fn sys_eventfd(a: &SyscallArgs) -> u64 { misc::sys_eventfd2(a.a1 as u32, 0) }
-fn sys_eventfd2(a: &SyscallArgs) -> u64 { misc::sys_eventfd2(a.a1 as u32, a.a2 as i32) }
+fn sys_signalfd(a: &SyscallArgs) -> u64 { process::sys_signalfd(a.a1, a.a2 as *const u64, a.a3) }
+fn sys_signalfd4(a: &SyscallArgs) -> u64 { process::sys_signalfd4(a.a1, a.a2 as *const u64, a.a3, a.a4 as i32) }
+fn sys_eventfd(a: &SyscallArgs) -> u64 { eventfd::sys_eventfd2(a.a1 as u32, 0) }
+fn sys_eventfd2(a: &SyscallArgs) -> u64 { eventfd::sys_eventfd2(a.a1 as u32, a.a2 as i32) }
 fn sys_pause(a: &SyscallArgs) -> u64 { process::sys_pause() }
 fn sys_timer_create(a: &SyscallArgs) -> u64 { posix_timers::sys_timer_create(a.a1 as i32, a.a2 as *const posix_timers::sigevent, a.a3 as *mut i32) }
 fn sys_timer_settime(a: &SyscallArgs) -> u64 { posix_timers::sys_timer_settime(a.a1 as i32, a.a2 as i32, a.a3 as *const posix_timers::itimerspec, a.a4 as *mut posix_timers::itimerspec) }
 fn sys_timer_gettime(a: &SyscallArgs) -> u64 { posix_timers::sys_timer_gettime(a.a1 as i32, a.a2 as *mut posix_timers::itimerspec) }
 fn sys_timer_getoverrun(a: &SyscallArgs) -> u64 { posix_timers::sys_timer_getoverrun(a.a1 as i32) }
 fn sys_timer_delete(a: &SyscallArgs) -> u64 { posix_timers::sys_timer_delete(a.a1 as i32) }
+fn sys_timerfd_create(a: &SyscallArgs) -> u64 { timerfd::sys_timerfd_create(a.a1, a.a2) }
+fn sys_timerfd_settime(a: &SyscallArgs) -> u64 { timerfd::sys_timerfd_settime(a.a1, a.a2, a.a3 as *const u8, a.a4 as *mut u8) }
+fn sys_timerfd_gettime(a: &SyscallArgs) -> u64 { timerfd::sys_timerfd_gettime(a.a1, a.a2 as *mut u8) }
+fn sys_inotify_init(a: &SyscallArgs) -> u64 { inotify::sys_inotify_init(a.a1) }
+fn sys_inotify_add_watch(a: &SyscallArgs) -> u64 { inotify::sys_inotify_add_watch(a.a1, a.a2 as *const u8, a.a3 as u32) }
+fn sys_inotify_rm_watch(a: &SyscallArgs) -> u64 { inotify::sys_inotify_rm_watch(a.a1, a.a3 as u32) }
+fn sys_recvmmsg(a: &SyscallArgs) -> u64 { mmsg::sys_recvmmsg(a.a1, a.a2 as *mut mmsg::mmsghdr, a.a3, a.a4, a.a5 as *const u8) }
+fn sys_sendmmsg(a: &SyscallArgs) -> u64 { mmsg::sys_sendmmsg(a.a1, a.a2 as *mut mmsg::mmsghdr, a.a3, a.a4) }
 fn sys_shmget(a: &SyscallArgs) -> u64 { shm::sys_shmget(a.a1 as i32, a.a2 as usize, a.a3 as i32) }
 fn sys_shmat(a: &SyscallArgs) -> u64 { shm::sys_shmat(a.a1 as i32, a.a2 as *const u8, a.a3 as i32) }
 fn sys_shmctl(a: &SyscallArgs) -> u64 { shm::sys_shmctl(a.a1 as i32, a.a2 as i32, a.a3 as *mut u8) }
@@ -480,8 +511,13 @@ fn sys_seccomp(a: &SyscallArgs) -> u64 { seccomp::sys_seccomp(a.a1 as u32, a.a2 
 fn sys_landlock_create_ruleset(a: &SyscallArgs) -> u64 { landlock::sys_landlock_create_ruleset(a.a1 as *const u8, a.a2 as usize, a.a3 as u32) }
 fn sys_landlock_add_rule(a: &SyscallArgs) -> u64 { landlock::sys_landlock_add_rule(a.a1, a.a2 as u32, a.a3 as *const u8, a.a4 as u32) }
 fn sys_landlock_restrict_self(a: &SyscallArgs) -> u64 { landlock::sys_landlock_restrict_self(a.a1, a.a2 as u32) }
-fn sys_unshare(a: &SyscallArgs) -> u64 { namespaces::sys_unshare(a.a1) }
-fn sys_setns(a: &SyscallArgs) -> u64 { namespaces::sys_setns(a.a1, a.a2) }
+fn sys_unshare(a: &SyscallArgs) -> u64 { namespaces::sys_unshare(a.a1) }fn sys_setns(a: &SyscallArgs) -> u64 { namespaces::sys_setns(a.a1, a.a2) }
+fn sys_mq_open(a: &SyscallArgs) -> u64 { mqueue::mq_open(a.a1 as *const u8, a.a2 as i32, a.a3 as i32, a.a4 as *mut u8) }
+fn sys_mq_close(a: &SyscallArgs) -> u64 { mqueue::mq_close(a.a1 as i32) }
+fn sys_mq_send(a: &SyscallArgs) -> u64 { mqueue::mq_send(a.a1 as i32, a.a2 as *const u8, a.a3 as usize, a.a4 as u32) }
+fn sys_mq_receive(a: &SyscallArgs) -> u64 { mqueue::mq_receive(a.a1 as i32, a.a2 as *mut u8, a.a3 as usize, a.a4 as *mut u32) }
+fn sys_mq_unlink(a: &SyscallArgs) -> u64 { mqueue::mq_unlink(a.a1 as *const u8) }
+
 fn sys_cgroup_mkdir(a: &SyscallArgs) -> u64 { cgroup::sys_cgroup_mkdir(a.a1 as *const u8) }
 fn sys_cgroup_write(a: &SyscallArgs) -> u64 { cgroup::sys_cgroup_write(a.a1 as *const u8, a.a2 as *const u8, a.a3 as *const u8) }
 fn sys_cgroup_read(a: &SyscallArgs) -> u64 { cgroup::sys_cgroup_read(a.a1 as *const u8, a.a2 as *const u8, a.a3 as *mut u8) }
@@ -609,7 +645,8 @@ pub fn do_syscall(
             let sig_bit = available.trailing_zeros();
             let sig_num = sig_bit + 1;
             let handler = process_arc.signal_handlers.lock()[sig_bit as usize];
-            let restorer = process_arc.signal_restorers.lock()[sig_bit as usize];
+            let sa_restorer = process_arc.signal_restorers.lock()[sig_bit as usize];
+            let restorer = super::signal::get_restorer(handler, sa_restorer);
 
             if handler == 1 {
                 signals.pending &= !(1 << sig_bit);
@@ -662,20 +699,42 @@ pub fn do_syscall(
                 (*k_ptr).rsp = old_rsp;
             }
 
-            let ret_phys = match crate::memory::virt_to_phys(x86_64::VirtAddr::new(ret_addr_rsp)) {
-                Some(p) => p,
-                None => {
-                    crate::serial_write("[SIGNAL] invalid user return stack, killing process\n");
-                    sys_exit_inner(128 + sig_num as u64);
-                    unreachable!();
+            // Copy the restorer trampoline code to the user stack.
+            // If sa_restorer was set by the app, we write the pointer.
+            // If using the default trampoline, we copy the actual bytes.
+            {
+                let ret_phys = match crate::memory::virt_to_phys(x86_64::VirtAddr::new(ret_addr_rsp)) {
+                    Some(p) => p,
+                    None => {
+                        crate::serial_write("[SIGNAL] invalid user return stack, killing process\n");
+                        sys_exit_inner(128 + sig_num as u64);
+                        unreachable!();
+                    }
+                };
+                let ret_kptr = (crate::memory::physical_memory_offset() + ret_phys.as_u64()) as *mut u64;
+                if sa_restorer != 0 {
+                    // App provided its own restorer — write the pointer.
+                    unsafe { *ret_kptr = restorer; }
+                } else {
+                    // Kernel default trampoline — copy code bytes to user stack.
+                    let code_ptr = super::signal::SIGNAL_RESTORER.as_ptr() as *const u8;
+                    let code_len = super::signal::SIGNAL_RESTORER.len();
+                    let dst = ret_kptr as *mut u8;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(code_ptr, dst, code_len);
+                    }
                 }
-            };
-            let ret_kptr = (crate::memory::physical_memory_offset() + ret_phys.as_u64()) as *mut u64;
-            unsafe { *ret_kptr = restorer; }
+            }
 
+            // Save FPU state before entering the signal handler.
+            let saved_fpu = super::signal::save_fpu_state_for_signal();
+
+            // Block signals during handler execution (SA_MASK semantics).
             {
                 let mut signals = process_arc.signals.lock();
                 signals.pending &= !(1 << sig_bit);
+                // Block the delivered signal + SA_MASK during handler.
+                signals.blocked |= 1 << sig_bit;
                 signals.saved_context = Some(crate::syscalls::signal::SignalContext {
                     rip: old_rip,
                     rsp: new_rsp,
@@ -696,6 +755,13 @@ pub fn do_syscall(
                     r15: unsafe { *regs_ptr.add(0) },
                     rflags: old_rflags,
                 });
+            }
+
+            // Store FPU state in saved context for rt_sigreturn to restore.
+            if let Some(fpu) = saved_fpu {
+                if let Some(ref mut ctx) = process_arc.signals.lock().saved_context {
+                    ctx.fpu_state = Some(fpu);
+                }
             }
 
             unsafe {

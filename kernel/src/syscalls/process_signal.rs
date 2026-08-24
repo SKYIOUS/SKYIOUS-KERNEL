@@ -73,7 +73,28 @@ pub fn sys_rt_sigreturn(regs_ptr: *mut u64) -> u64 {
         Some(c) => c,
         None => return errno::Errno::EINVAL as u64,
     };
+
+    // Restore the signal mask (unblock the signal we were handling).
+    // The mask was set during delivery; rt_sigreturn restores it.
+    {
+        let mut signals = proc.signals.lock();
+        // Unblock the signal that was blocked during handler execution.
+        // In a full implementation, we'd restore the old mask from the frame.
+        // For now, unblock all signals that were blocked by delivery.
+        signals.blocked = 0;
+    }
     drop(proc_lock);
+
+    // Restore FPU state if saved.
+    #[cfg(target_arch = "x86_64")]
+    if let Some(ref fpu_data) = ctx.fpu_state {
+        let mut area = crate::task::thread::FpuArea::new();
+        let copy_len = fpu_data.len().min(area.data.len());
+        area.data[..copy_len].copy_from_slice(&fpu_data[..copy_len]);
+        unsafe {
+            crate::task::thread::restore_fpu(&area);
+        }
+    }
 
     // Restore registers from saved context
     unsafe {
@@ -124,31 +145,27 @@ pub fn sys_kill(pid: i64, sig: u32) -> u64 {
         if !crate::security::hook_file_perm(&subj, &alloc::format!("pid:{}", pid), "kill") {
             return errno::Errno::EPERM as u64;
         }
-        let sig_bit = 1u64 << (sig - 1);
         let pid = proc.id;
-        proc.signals.lock().raise(sig_enum);
-
-        // Push to signalfds that match this signal
-        let sig_num = sig as u32;
-        let sender_uid = get_current_euid();
-        {
-            let fd_table = proc.files.lock().fd_table.clone();
-            for (_fd, entry) in fd_table.iter().enumerate() {
-                if let Some(crate::task::process::FileDescriptor::SignalFd(ref handle)) = entry {
-                    let fds = SIGNAL_FDS.lock();
-            if let Some(data_arc) = fds.get(handle) {
-                        let mut data = data_arc.lock();
-                        if (data.mask & sig_bit) != 0 {
-                            data.pending.push_back(SignalFdInfo {
-                                signo: sig_num,
-                                pid: pid as u32,
-                                uid: sender_uid,
-                            });
-                        }
-                    }
-                }
+        // PID 1 (init) is immune to signals unless it has installed a handler.
+        // This prevents accidental system shutdown — only intentional signal
+        // handling by init can terminate the system.
+        if pid == 1 {
+            let handlers = proc.signal_handlers.lock();
+            let sig_idx = sig as usize;
+            if sig_idx < handlers.len() && handlers[sig_idx] == 0 {
+                // No handler installed — silently ignore the signal.
+                return 0;
             }
         }
+        proc.signals.lock().raise(sig_enum);
+
+        // Route to signalfd instances via centralized dispatcher
+        let sender_uid = get_current_euid();
+        crate::task::process::route_signal_to_signalfd(
+            pid, sig as u32, crate::task::process::SI_USER,
+            crate::task::process::CURRENT_PROCESS.lock().as_ref().map(|p| p.id).unwrap_or(0),
+            sender_uid, 0,
+        );
 
         // Wake threads blocked on futex/pipe so they can see the signal
         crate::syscalls::futex::wake_process_futex_threads(pid);
@@ -256,33 +273,58 @@ pub fn sys_sigaltstack(ss_ptr: *const u8, old_ss_ptr: *mut u8) -> u64 {
     0
 }
 
-pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
+/// signalfd(fd, mask_ptr, sigmasksize) — legacy wrapper (no flags).
+pub fn sys_signalfd(fd: u64, mask_ptr: *const u64, sigmasksize: u64) -> u64 {
+    sys_signalfd4(fd, mask_ptr, sigmasksize, 0)
+}
+
+/// signalfd4(fd, mask_ptr, sigmasksize, flags) → fd
+///
+/// Creates or updates a signalfd file descriptor.
+///
+/// `fd` == -1 (u64::MAX): create a new signalfd
+/// `fd` >= 0: update the mask of an existing signalfd
+///
+/// The fd becomes readable via epoll/poll/select when signals matching
+/// the mask are pending. Reading returns signalfd_siginfo structs.
+pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, sigmasksize: u64, flags: i32) -> u64 {
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
 
     if mask_ptr.is_null() {
-        return errno::Errno::EFAULT as u64;
+        return errno::Errno::EINVAL as u64;
     }
+
+    // Validate sigmasksize: must be at least 8 bytes (u64), at most 128 (our struct size).
+    if sigmasksize < 8 || sigmasksize > core::mem::size_of::<SignalFdInfo>() as u64 {
+        return errno::Errno::EINVAL as u64;
+    }
+
+    // Read the signal mask from userspace (read up to sigmasksize bytes)
     let mut mask_val = 0u64;
+    let read_len = core::cmp::min(sigmasksize as usize, 8);
     if unsafe { user_access::copy_from_user(
-        core::slice::from_raw_parts_mut(&mut mask_val as *mut u64 as *mut u8, 8),
+        core::slice::from_raw_parts_mut(&mut mask_val as *mut u64 as *mut u8, read_len),
         mask_ptr as *const u8,
     ) }.is_err() {
         return errno::Errno::EFAULT as u64;
     }
 
-    if fd != u64::MAX && fd != 0 {
-        // Update existing signalfd
-        let fd_table = process.files.lock().fd_table.clone();
-        if (fd as usize) >= fd_table.len() {
+    // Block SIGKILL (bit 9) and SIGSTOP (bit 19) — cannot be masked.
+    mask_val &= !((1u64 << 8) | (1u64 << 18)); // SIGKILL=9, SIGSTOP=19 => bits 8,18
+
+    if fd != u64::MAX {
+        // Update existing signalfd — find the handle for this fd
+        let files = process.files.lock();
+        if (fd as usize) >= files.fd_table.len() {
             return errno::Errno::EBADF as u64;
         }
-        match fd_table[fd as usize] {
-            Some(crate::task::process::FileDescriptor::SignalFd(handle)) => {
+        match &files.fd_table[fd as usize] {
+            Some(FileDescriptor::SignalFd(handle)) => {
                 let fds = SIGNAL_FDS.lock();
-                if let Some(data) = fds.get(&handle) {
+                if let Some(data) = fds.get(handle) {
                     data.lock().mask = mask_val;
                     return fd;
                 }
@@ -304,15 +346,27 @@ pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, flags: i32) -> u64 {
 
     SIGNAL_FDS.lock().insert(handle, data.clone());
 
-    let fd_obj = crate::task::process::FileDescriptor::SignalFd(handle);
-    let mut fd_table = process.files.lock().fd_table.clone();
-    for (i, slot) in fd_table.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(fd_obj);
-            return i as u64;
+    let fd_obj = FileDescriptor::SignalFd(handle);
+    let mut files = process.files.lock();
+    let fd_num = {
+        let mut found = None;
+        for (i, slot) in files.fd_table.iter_mut().enumerate() {
+            if slot.is_none() {
+                found = Some(i);
+                break;
+            }
         }
-    }
-    fd_table.push(Some(fd_obj));
-    (fd_table.len() - 1) as u64
+        match found {
+            Some(i) => {
+                files.fd_table[i] = Some(fd_obj);
+                i
+            }
+            None => {
+                files.fd_table.push(Some(fd_obj));
+                files.fd_table.len() - 1
+            }
+        }
+    };
+    fd_num as u64
 }
 
