@@ -39,7 +39,7 @@ jobs:
         run: cargo build --release --features self_test
 
       - name: Build with all features
-        run: cargo build --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification"
+        run: cargo build --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu"
 
   build-aarch64:
     runs-on: ubuntu-latest

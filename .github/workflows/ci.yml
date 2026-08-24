@@ -41,7 +41,7 @@ jobs:
         run: cargo build --features "smp,net"
 
       - name: Build (all features, no default)
-        run: cargo build --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification"
+        run: cargo build --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu"
 
       - name: Check (self_test feature compiles in bin mode)
         run: cargo check --features self_test

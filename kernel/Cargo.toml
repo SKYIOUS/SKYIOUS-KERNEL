@@ -66,3 +66,6 @@ rustflags = ["-Z", "stack-protector=strong"]
 # build-std extern like every other crate in this kernel.
 [patch.crates-io]
 hashbrown = { path = "vendor/hashbrown" }
+
+[build-dependencies]
+bootloader-boot-config = "0.11"

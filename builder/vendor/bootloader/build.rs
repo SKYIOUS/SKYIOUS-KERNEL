@@ -8,13 +8,12 @@ fn main() {
     #[cfg(not(feature = "bios"))]
     fn bios_main() {}
 
-    // Spawn two threads to build the uefi and bios code concurrently.
-    let uefi_main_handle = std::thread::spawn(uefi_main);
-    let bios_main_handle = std::thread::spawn(bios_main);
-
-    // Wait for the threads to finish.
-    uefi_main_handle.join().unwrap();
-    bios_main_handle.join().unwrap();
+    // Local workaround (not upstream): run the uefi and bios nested cargo
+    // installs sequentially. Running them concurrently makes concurrent
+    // -Zbuild-std passes race on shared registry state, producing spurious
+    // E0463 (can't find crate for core/std) failures inside lock_api.
+    uefi_main();
+    bios_main();
 }
 
 #[cfg(feature = "bios")]

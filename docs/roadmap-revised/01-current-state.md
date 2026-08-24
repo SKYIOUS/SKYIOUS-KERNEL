@@ -31,7 +31,8 @@
 | Context switch | ✅ Working | `task/thread.rs` | Callee-saved register save/restore |
 | Fork | ✅ Exists | `syscalls/process_lifecycle.rs` | CoW address space clone |
 | Execve | ✅ Exists | `syscalls/process_lifecycle.rs` | ELF loading works |
-| Signal handling | ✅ Exists | `syscalls/process_signal.rs` | rt_sigaction, rt_sigreturn, kill |
+| Signal handling | ✅ Exists | `syscalls/process_signal.rs` | rt_sigaction, rt_sigreturn, kill, sigprocmask, pause, sigaltstack |
+| signalfd4 | ✅ Exists | `syscalls/process_signal.rs` | Full 128-byte signalfd_siginfo, centralized signal routing to signalfd, fd=-1 create semantics |
 | Credentials | ✅ Exists | `syscalls/process_creds.rs` | uid/gid, capabilities, resource limits |
 
 ### VFS
@@ -52,6 +53,10 @@
 | Unix sockets | ✅ Working | `net/unix.rs` | |
 | DHCP | ✅ Working | `net/dhcp.rs` | |
 | DNS | ✅ Working | `net/dns.rs` | |
+| sendmmsg | ✅ Working | `syscalls/mmsg.rs` | Batched send: multiple messages per syscall, up to 1024 | 
+| recvmmsg | ✅ Working | `syscalls/mmsg.rs` | Batched receive: multiple messages per syscall, up to 1024 |
+| SO_REUSEPORT | ✅ Working | `syscalls/net_helpers.rs` | Multiple sockets on same port, kernel-level load balancing (consistent hash TCP, round-robin UDP), group registry |
+| TCP_INFO | ✅ Working | `syscalls/net_helpers.rs` | Full 120-byte tcp_info via getsockopt: state (direct enum match), RTT/RTO/ATO in µs, MSS, bytes_acked/received, segs_out/in, total_retrans, reordering, ssthresh, timestamps from connect/accept, CA state. connect/accept/sent/recv all tracked. |
 
 ### Security
 | Component | Status | File | Notes |
@@ -74,9 +79,12 @@
 | Component | Status | File | Notes |
 |-----------|--------|------|-------|
 | Stride scheduler | ✅ Working | `task/scheduler.rs` | Proportional-share |
-| SCHED_FIFO | ✅ Working | `task/thread.rs` | Real-time FIFO |
-| SCHED_RR | ✅ Working | `task/thread.rs` | Real-time round-robin |
-| CPU affinity | ✅ Working | `task/thread.rs` | 64-bit mask |
+| SCHED_FIFO | ✅ Working | `task/scheduler/mod.rs` | RT priority 1–99, strict priority over SCHED_OTHER |
+| SCHED_RR | ✅ Working | `task/scheduler/tick.rs` | RR quantum 4 ticks (40ms), preempted on expiry |
+| CPU affinity | ✅ Working | `task/thread.rs` | 64-bit mask, respected by pick_next + work stealing |
+| SMP load balance | ✅ Working | `task/scheduler/tick.rs` | Periodic every 10 ticks, pushes from overloaded CPUs |
+| sched_setaffinity | ✅ Working | `syscalls/process_lifecycle.rs` | Syscall 203 |
+| sched_getaffinity | ✅ Working | `syscalls/process_lifecycle.rs` | Syscall 204 |
 
 ### IPC
 | Component | Status | File | Notes |
@@ -107,16 +115,17 @@
 | VM | ✅ Working | `ebpf/vm.rs` | Full instruction set |
 | JIT compiler | ✅ Working | `ebpf/jit.rs` | x86_64 native code generation |
 | Verifier | ✅ Working | `ebpf/verifier.rs` | Safety checks |
-| Helpers | ✅ Working | `ebpf/helpers.rs` | Map lookup, pid, ticks, debug print |
+| Helpers | ✅ Working | `ebpf/helpers.rs` | Map lookup, pid, ticks, ktime, PRNG, CPU ID, spin lock/unlock, tail call |
+| Ring buffer | ✅ Working | `ebpf/maps.rs` | SPSC circular buffer, reserve/commit, overflow tracking |
 
 ### Drivers
 | Driver | Status | Notes |
 |--------|--------|-------|
 | Serial (16550A) | ✅ Working | |
 | AHCI/SATA | ✅ Working | |
-| NVMe | ✅ Working | With DMA pool |
+| NVMe | ✅ Working | SMART health, flush, sector-size detection, controller reset, DMA pool |
 | VirtIO (block, net, GPU) | ✅ Working | |
-| E1000 | ✅ Working | |
+| E1000 | ✅ Working | Interrupt coalescing, RX/TX statistics, link status tracking |
 | XHCI (USB 3.0) | ✅ Working | With pending_dma pool |
 | PS/2 Mouse/Keyboard | ✅ Working | |
 | HDA Audio | ✅ Working | |
@@ -134,10 +143,14 @@
 | execve | ✅ Full implementation: path, perms, setuid, FD_CLOEXEC | **Phase 1 DONE** |
 | Userspace init | ✅ Boot state machine, 8 states, `jump_to_usermode()` | **Phase 1 DONE** |
 | initrd | ✅ 163 statically-linked binaries in `kernel/initrd.tar` | **Phase 1 DONE** |
-| Signal delivery | ✅ rt_sigaction, signal frame setup, restorer | **Phase 1 DONE** |
+| Signal delivery | ✅ rt_sigaction, signal frame setup, restorer, centralized signalfd routing | **Phase 1 DONE** |
+| signalfd4 | ✅ Full 128-byte signalfd_siginfo, fd=-1 semantics, sigmasksize validation, epoll/poll readable | **Phase 1 DONE** |
 | Linux emulation | ✅ Detects Linux ELF, maps syscalls to Vahi | **Phase 1 DONE** |
-| procfs | ✅ `syscalls/procfs.rs` exists | Phase 2 DONE |
-| epoll | ✅ `syscalls/epoll.rs` exists | Phase 2 DONE |
+| procfs | ✅ `syscalls/procfs.rs` — /proc/meminfo, /proc/version, /proc/uptime, /proc/stat, /proc/loadavg, /proc/cpuinfo, /proc/pid/status (full), /proc/pid/maps, /proc/pid/fd, /proc/pid/io, /proc/pid/cmdline, /proc/pid/oom_score | Phase 2 DONE |
+| epoll | ✅ `syscalls/epoll.rs` exists — timed blocking with proper timeout_ms semantics | Phase 2 DONE |
+| getrusage | ✅ `syscalls/process_creds.rs` — RUSAGE_SELF + RUSAGE_CHILDREN | Phase 2 DONE |
+| timerfd | ✅ `syscalls/posix_timers.rs` — create/settime/gettime, epoll-integrated | Phase 2 DONE |
+| inotify | ✅ `syscalls/inotify.rs` — init/add_watch/rm_watch, VFS event hooks, epoll/poll readable | Phase 2 DONE |
 | writev/readv | ✅ Standalone syscalls | Phase 2 DONE |
 | madvise | ✅ Implemented | Phase 2 DONE |
 | pread/pwrite | ✅ Added to emulation | Phase 2 DONE |
