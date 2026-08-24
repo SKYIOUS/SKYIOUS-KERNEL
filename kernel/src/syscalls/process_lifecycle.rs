@@ -167,9 +167,13 @@ pub fn process_close_all_fds(proc: &crate::task::process::Process) {
             FileDescriptor::InotifyFd { instance_key, .. } => {
                 super::inotify::inotify_close(instance_key);
             }
-            FileDescriptor::EventFd(data)
-            | FileDescriptor::TimerFd(data)
-            | FileDescriptor::IoUringFd(data) => {
+            FileDescriptor::EventFd(data) => {
+                crate::task::scheduler::wake_pipe(data.lock().key);
+            }
+            FileDescriptor::TimerFd(data) => {
+                crate::task::scheduler::wake_pipe(data.lock().key);
+            }
+            FileDescriptor::IoUringFd(data) => {
                 crate::task::scheduler::wake_pipe(data.lock().key);
             }
             _ => {} // File, PtyMaster, PtySlave — dropped by Arc refcount

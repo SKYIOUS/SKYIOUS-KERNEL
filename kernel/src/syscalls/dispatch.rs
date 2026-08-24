@@ -450,8 +450,8 @@ fn sys_capget(a: &SyscallArgs) -> u64 { process::sys_capget(a.a1 as *mut u8, a.a
 fn sys_capset(a: &SyscallArgs) -> u64 { process::sys_capset(a.a1 as *const u8, a.a2 as *const u8) }
 fn sys_rt_sigprocmask(a: &SyscallArgs) -> u64 { process::sys_sigprocmask(a.a1 as i32, a.a2 as *const u64, a.a3 as *mut u64) }
 fn sys_io_uring_setup(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_setup(a.a1, a.a2) }
-fn sys_io_uring_enter(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_enter(a.a1, a.a2, a.a3, a.a4, a.a5) }
-fn sys_io_uring_register(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_register(a.a1, a.a2, a.a3, a.a4) }
+fn sys_io_uring_enter(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_enter(a.a1, a.a2 as u32, a.a3 as u32, a.a4 as u32, a.a5) }
+fn sys_io_uring_register(a: &SyscallArgs) -> u64 { io_uring::sys_io_uring_register(a.a1 as u32, a.a2 as u32, a.a3, a.a4 as u32) }
 fn sys_bpf(a: &SyscallArgs) -> u64 { crate::ebpf::sys_bpf(a.a1 as u32, a.a2, a.a3, a.a4) }
 fn sys_sync(a: &SyscallArgs) -> u64 { fs::sys_sync() }
 fn sys_reboot(a: &SyscallArgs) -> u64 { misc::sys_reboot(a.a1, a.a2) }
@@ -712,7 +712,7 @@ pub fn do_syscall(
                     }
                 };
                 let ret_kptr = (crate::memory::physical_memory_offset() + ret_phys.as_u64()) as *mut u64;
-                if sa_restorer != 0 {
+                if restorer != crate::syscalls::signal::SIGNAL_RESTORER.as_ptr() as u64 {
                     // App provided its own restorer — write the pointer.
                     unsafe { *ret_kptr = restorer; }
                 } else {
@@ -754,6 +754,7 @@ pub fn do_syscall(
                     r14: unsafe { *regs_ptr.add(1) },
                     r15: unsafe { *regs_ptr.add(0) },
                     rflags: old_rflags,
+                    fpu_state: None,
                 });
             }
 

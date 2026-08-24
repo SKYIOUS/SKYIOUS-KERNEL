@@ -11,15 +11,27 @@ use crate::memory::paging::AddressSpace;
 
 // ── Flags & backing store ─────────────────────────────────────────
 
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct VmFlags: u32 {
-        const READ    = 0x1;
-        const WRITE   = 0x2;
-        const EXEC    = 0x4;
-        const USER    = 0x8;
-        const SHARED  = 0x10;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmFlags(u32);
+
+impl VmFlags {
+    pub const READ:   Self = Self(0x1);
+    pub const WRITE:  Self = Self(0x2);
+    pub const EXEC:   Self = Self(0x4);
+    pub const USER:   Self = Self(0x8);
+    pub const SHARED: Self = Self(0x10);
+
+    pub fn contains(self, other: Self) -> bool { (self.0 & other.0) == other.0 }
+    pub fn bits(self) -> u32 { self.0 }
+}
+
+impl core::ops::BitOr for VmFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+}
+
+impl core::ops::BitOrAssign for VmFlags {
+    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
 }
 
 impl VmFlags {

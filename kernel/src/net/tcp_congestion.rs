@@ -208,9 +208,9 @@ fn update_rtt(s: &mut TcpCongestionState, rtt_ms: u64) {
             s.srtt_us - rtt_us
         };
         // RTTVAR = (3/4) * RTTVAR + (1/4) * |diff|
-        s.rttvar_us = ((BETA - 1) * s.rttvar_us + diff) / BETA;
+        s.rttvar_us = (((BETA - 1) as u64) * s.rttvar_us + diff) / (BETA as u64);
         // SRTT = (7/8) * SRTT + (1/8) * R
-        s.srtt_us = ((ALPHA - 1) * s.srtt_us + rtt_us) / ALPHA;
+        s.srtt_us = (((ALPHA - 1) as u64) * s.srtt_us + rtt_us) / (ALPHA as u64);
     }
     // RTO = SRTT + 4 * RTTVAR, clamped to [200ms, 60s].
     let rto_us = s.srtt_us.saturating_add(4 * s.rttvar_us);

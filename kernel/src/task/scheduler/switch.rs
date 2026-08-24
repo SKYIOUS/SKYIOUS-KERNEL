@@ -225,7 +225,6 @@ pub fn schedule() {
                 if cur.status == crate::task::thread::ThreadStatus::Running {
                     drop(s);
                     restore_if(saved);
-                    }
                     return;
                 }
                 if cur.status == crate::task::thread::ThreadStatus::Blocked {

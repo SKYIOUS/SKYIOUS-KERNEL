@@ -501,6 +501,22 @@ pub(crate) fn route_switching_old(s: &mut PerCpuScheduler) {
     }
 }
 
+/// Yield the current thread, allowing other threads to run.
+pub fn yield_now() {
+    if let Some(mut sched) = PER_CPU[0].try_lock() {
+        if let Some(current) = sched.current_thread.as_mut() {
+            current.status = crate::task::thread::ThreadStatus::Ready;
+            let p_idx = (current.priority as usize).min(7);
+            if let Some(mut taken) = sched.pick_next() {
+                taken.status = crate::task::thread::ThreadStatus::Ready;
+                let p = (taken.priority as usize).min(7);
+                sched.ready_queues[p].push_back(taken);
+                sched.mark_ready_queues_dirty();
+            }
+        }
+    }
+}
+
 pub fn init() {
     crate::println!("Scheduler: Initializing Thread Engine...");
     GLOBAL.pending_queue.lock().reserve(64);

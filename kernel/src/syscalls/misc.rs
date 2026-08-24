@@ -79,7 +79,7 @@ pub fn sys_clock_nanosleep(clock_id: u64, flags: u64, req_ptr: *const Timespec, 
         return errno::Errno::EINVAL as u64;
     }
 
-    if crate::task::process::check_signal_interrupt() {
+    if crate::syscalls::check_signal_interrupt() {
         if !rem_ptr.is_null() {
             let _ = unsafe { user_access::copy_to_user(rem_ptr as *mut u8, core::slice::from_raw_parts(
                 &req as *const _ as *const u8, core::mem::size_of::<Timespec>(),

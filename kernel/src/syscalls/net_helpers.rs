@@ -9,6 +9,13 @@ use smoltcp::socket::{Socket, tcp, udp};
 use smoltcp::wire::IpEndpoint;
 use smoltcp::iface::SocketHandle;
 
+/// Extract a numeric ID from a smoltcp SocketHandle.
+/// smoltcp 0.10 wraps `usize` privately; Display gives `#N`.
+fn socket_handle_id(h: &SocketHandle) -> usize {
+    let s = alloc::format!("{}", h);
+    s.trim_start_matches('#').parse::<usize>().unwrap_or(0)
+}
+
 // ─── Address family constants ─────────────────────────────────────
 
 pub(crate) const AF_INET: u16 = 2;
@@ -191,7 +198,7 @@ pub(crate) fn tcp_stats_on_connect(pid: u64, handle: SocketHandle) {
     let entry = stats.entry((pid, handle)).or_insert_with(TcpConnectionStats::default);
     entry.connect_tick = tick;
     // Initialize congestion control for this connection.
-    crate::net::tcp_congestion::create(handle.id(), 1460);
+    crate::net::tcp_congestion::create(socket_handle_id(&handle), 1460);
 }
 
 /// Record bytes sent and segment count for a TCP connection.
@@ -217,7 +224,7 @@ pub(crate) fn tcp_stats_record_recv(pid: u64, handle: SocketHandle, bytes: u64) 
 /// Remove TCP stats entry when socket is closed.
 pub(crate) fn tcp_stats_remove(pid: u64, handle: SocketHandle) {
     TCP_STATS.lock().remove(&(pid, handle));
-    crate::net::tcp_congestion::remove(handle.id());
+    crate::net::tcp_congestion::remove(socket_handle_id(&handle));
 }
 
 /// Build a Linux-compatible tcp_info from the smoltcp socket state + tracked stats.
@@ -491,7 +498,7 @@ pub(crate) fn sendto_internal(
         }
         crate::task::process::SocketType::Tcp => {
             // Congestion control: limit send to cwnd budget.
-            let budget = crate::net::tcp_congestion::send_budget(handle.id());
+            let budget = crate::net::tcp_congestion::send_budget(socket_handle_id(&handle));
             if budget == 0 {
                 return errno::Errno::EAGAIN as u64;
             }
@@ -505,7 +512,7 @@ pub(crate) fn sendto_internal(
                         (n, true)
                     });
                     if result.unwrap_or(false) {
-                        crate::net::tcp_congestion::on_send(handle.id(), send_len as u32);
+                        crate::net::tcp_congestion::on_send(socket_handle_id(&handle), send_len as u32);
                         return send_len as u64;
                     }
                 }
