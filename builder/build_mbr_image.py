@@ -168,7 +168,8 @@ def main():
     else:
         initrd_data = None
 
-    # Create FAT32: 32MB ESP
+    # Partition geometry: ESP starts at sector 2048 (1 MiB alignment), 32 MiB total.
+    esp_start = 2048
     esp_sectors = 32 * 1024 * 1024 // SECTOR  # 32MB
     fat = FAT32(esp_sectors, hidden=esp_start)
 
@@ -188,8 +189,7 @@ def main():
     fat32_data = fat.finalize()
     print(f'FAT32: {len(fat32_data)} bytes ({len(fat32_data) / 1024 / 1024:.1f} MiB)')
 
-    # Build MBR disk: 32MB ESP + headers
-    esp_start = 2048
+    # Build MBR disk: ESP + headers + trailing space
     disk_sectors = esp_start + esp_sectors + 2048  # extra trailing space
     disk = bytearray(disk_sectors * SECTOR)
 

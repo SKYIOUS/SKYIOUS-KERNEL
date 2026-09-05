@@ -280,8 +280,11 @@ def build_image(kernel_path, output_path, esp_mb=64):
 
     # Write MBR partition table entry
     mbr = bytearray(SECTOR_SIZE)
-    # Partition 1: FAT32/LBA (type 0x0C) at LBA part_start
-    mbr[446 + 4] = 0x0C  # Type: FAT32 LBA
+    # Partition 1: FAT16/LBA (type 0x0E) at LBA part_start.
+    # The on-disk filesystem is FAT16 (Fat16Image), so the MBR type must
+    # match; 0x0C (FAT32 LBA) would mis-identify the partition to strict
+    # readers and break some boot loaders.
+    mbr[446 + 4] = 0x0E  # Type: FAT16 LBA
     struct.pack_into('<I', mbr, 446 + 8, part_start)  # LBA start
     struct.pack_into('<I', mbr, 446 + 12, part_sectors)  # LBA count
     struct.pack_into('<H', mbr, 510, 0xAA55)  # Boot signature
