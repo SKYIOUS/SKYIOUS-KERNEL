@@ -100,3 +100,16 @@ initrd.tar
 *_fs_stress*
 *_iommu_fix*
 qemu-stderr*.log
+
+# Builder crate build cache
+builder-target/
+
+# Boot image binary directory
+bin/
+
+# All QEMU / debug logs (catch-all; specific patterns above take precedence)
+*.log
+
+# QEMU process ID + screen capture
+qemu.pid
+limine-screen.ppm
