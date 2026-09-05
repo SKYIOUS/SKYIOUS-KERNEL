@@ -76,8 +76,8 @@ fn test_alloc_dealloc_churn() -> Result<(), &'static str> {
 
 /// Stress test: Fragmented allocation pattern
 fn test_fragmented_alloc() -> Result<(), &'static str> {
-    use alloc::vec::Vec;
     use alloc::boxed::Box;
+    use alloc::vec::Vec;
 
     // Allocate many small buffers
     let mut small: Vec<Box<[u8; 64]>> = Vec::new();
@@ -221,8 +221,8 @@ fn test_fd_alloc_free_pattern() -> Result<(), &'static str> {
 
 /// Stress test: Pipe-like data transfer (simulated)
 fn test_pipe_throughput() -> Result<(), &'static str> {
-    use alloc::vec::Vec;
     use alloc::collections::VecDeque;
+    use alloc::vec::Vec;
 
     // Simulate pipe buffer operations
     let mut pipe_buf: VecDeque<Vec<u8>> = VecDeque::new();
@@ -252,8 +252,8 @@ fn test_pipe_throughput() -> Result<(), &'static str> {
 
 /// Stress test: Socket-like message passing (simulated)
 fn test_socket_msg_passing() -> Result<(), &'static str> {
-    use alloc::vec::Vec;
     use alloc::collections::VecDeque;
+    use alloc::vec::Vec;
 
     // Simulate socket send/recv buffer
     let mut send_buf: VecDeque<Vec<u8>> = VecDeque::new();
@@ -298,7 +298,10 @@ fn test_inode_churn() -> Result<(), &'static str> {
 
     // Create 1000 inodes
     for i in 0..1000 {
-        inodes.push(FakeInode { ino: i, refcount: 1 });
+        inodes.push(FakeInode {
+            ino: i,
+            refcount: 1,
+        });
     }
 
     // Drop every third inode
@@ -318,7 +321,10 @@ fn test_inode_churn() -> Result<(), &'static str> {
 
     // Recreate dropped inodes
     for i in 0..334 {
-        inodes.push(FakeInode { ino: 1000 + i as u64, refcount: 1 });
+        inodes.push(FakeInode {
+            ino: 1000 + i as u64,
+            refcount: 1,
+        });
     }
 
     if inodes.len() != 1000 {
@@ -352,6 +358,85 @@ fn test_path_resolution_stress() -> Result<(), &'static str> {
 // Registration
 // ---------------------------------------------------------------------------
 
+/// Stress test: Real fork/exec/exit lifecycle cycle
+/// Creates N child processes with CoW address spaces, registers them,
+/// clones their fd tables, then cleans up — all through the real kernel
+/// process management code paths.
+fn test_fork_exec_exit_cycle() -> Result<(), &'static str> {
+    use crate::memory::buddy::BuddyFrameAllocator;
+    use crate::memory::paging::AddressSpace;
+    use crate::task::process::{Process, PROCESS_TABLE};
+    use alloc::sync::Arc;
+
+    let num_children = 10;
+    let mut created: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
+    // Create a parent process
+    let mut fa = BuddyFrameAllocator;
+    let parent_aspace = AddressSpace::new(&mut fa).ok_or("parent aspace failed")?;
+    let parent_pid = Process::next_id();
+    let parent = Arc::new(Process::new(parent_pid, None, parent_aspace));
+    Process::register(parent.clone());
+    created.push(parent_pid);
+
+    // Simulate fork: create N children with CoW address spaces
+    for _ in 0..num_children {
+        let child_aspace = parent
+            .address_space
+            .clone_cow(&mut fa)
+            .ok_or("clone_cow failed")?;
+        let child_pid = Process::next_id();
+        let child = Arc::new(Process::new(child_pid, Some(parent_pid), child_aspace));
+        Process::register(child.clone());
+        created.push(child_pid);
+
+        // Simulate exec: clone fd table from parent
+        let (cloned_table, cloned_flags) = {
+            let parent_files = parent.files.lock();
+            (parent_files.fd_table.clone(), parent_files.fd_flags.clone())
+        };
+        {
+            let mut child_files = child.files.lock();
+            child_files.fd_table = cloned_table;
+            child_files.fd_flags = cloned_flags;
+        }
+    }
+
+    // Verify all children are in the process table
+    {
+        let table = PROCESS_TABLE.lock();
+        for pid in &created {
+            if table.get(pid).is_none() {
+                return Err("child not found in process table");
+            }
+        }
+    }
+
+    // Test complete — verify counts match
+    let final_count = {
+        let table = PROCESS_TABLE.lock();
+        let mut found = 0;
+        for pid in &created {
+            if table.get(pid).is_some() {
+                found += 1;
+            }
+        }
+        found
+    };
+    if final_count != created.len() {
+        return Err("process count mismatch at end");
+    }
+    // Cleanup: remove test processes from the table without signaling
+    // (kill_process sends SIGCHLD which deadlocks without CURRENT_PROCESS)
+    {
+        let mut table = PROCESS_TABLE.lock();
+        for pid in &created {
+            table.remove(pid);
+        }
+    }
+    Ok(())
+}
+
 pub fn register() {
     // SMP stress
     selftest::register("stress::lock_contention", test_lock_contention);
@@ -364,6 +449,7 @@ pub fn register() {
 
     // Process churn
     selftest::register("stress::pid_churn", test_pid_churn);
+    selftest::register("stress::fork_exec_exit_cycle", test_fork_exec_exit_cycle);
 
     // FD exhaustion
     selftest::register("stress::fd_table_growth", test_fd_table_growth);
@@ -375,5 +461,8 @@ pub fn register() {
 
     // Filesystem stress
     selftest::register("stress::inode_churn", test_inode_churn);
-    selftest::register("stress::path_resolution_stress", test_path_resolution_stress);
+    selftest::register(
+        "stress::path_resolution_stress",
+        test_path_resolution_stress,
+    );
 }

@@ -1,31 +1,35 @@
-#![allow(unused_imports, unused_variables, dead_code, unused_doc_comments)]
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::objects::KernelObject;
-use crate::vfs::{VFS, VfsNode, Stat};
-use crate::sync::IrqSafeMutex as Mutex;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::vec;
-use x86_64::VirtAddr;
-use x86_64::structures::paging::{Page, Size4KiB, Mapper, FrameAllocator, PageTableFlags};
-use crate::gdt;
-use crate::interrupts::IrqFmtBuf;
+#![allow(unused_imports)]
 use super::errno;
 use super::numbers;
+use crate::gdt;
+use crate::interrupts::IrqFmtBuf;
+use crate::objects::KernelObject;
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::Process;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use crate::vfs::{Stat, VfsNode, VFS};
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
+use x86_64::VirtAddr;
 
 pub const CAP_CHOWN: u64 = 1 << 0;
 pub const CAP_DAC_OVERRIDE: u64 = 1 << 1;
 pub const CAP_DAC_READ_SEARCH: u64 = 1 << 2;
 pub const CAP_FOWNER: u64 = 1 << 3;
-#[allow(dead_code)] pub const CAP_FSETID: u64 = 1 << 4;
+#[allow(dead_code)]
+pub const CAP_FSETID: u64 = 1 << 4;
 pub const CAP_KILL: u64 = 1 << 5;
 pub const CAP_SETUID: u64 = 1 << 6;
 pub const CAP_SETGID: u64 = 1 << 7;
-#[allow(dead_code)] pub const CAP_SETPCAP: u64 = 1 << 8;
-#[allow(dead_code)] pub const CAP_NET_BIND_SERVICE: u64 = 1 << 10;
-#[allow(dead_code)] pub const CAP_NET_ADMIN: u64 = 1 << 12;
+#[allow(dead_code)]
+pub const CAP_SETPCAP: u64 = 1 << 8;
+#[allow(dead_code)]
+pub const CAP_NET_BIND_SERVICE: u64 = 1 << 10;
+#[allow(dead_code)]
+pub const CAP_NET_ADMIN: u64 = 1 << 12;
 pub const CAP_NET_RAW: u64 = 1 << 13;
 pub const CAP_SYS_ADMIN: u64 = 1 << 21;
 pub const CAP_SYS_BOOT: u64 = 1 << 22;
@@ -39,20 +43,26 @@ pub const AT_EACCESS: i32 = 0x200;
 pub const AT_SYMLINK_FOLLOW: i32 = 0x400;
 
 /// Check if the current process has the given capability in its effective set.
+///
+/// Resolves the process per-CPU (see `get_current_process`) instead of
+/// locking the global mirror: callers may legitimately hold CURRENT_PROCESS
+/// (or be inside any guard) — a nested acquisition of the non-reentrant
+/// IrqSafeMutex would self-deadlock (the 2026-09-04 bug family).
 pub fn has_capability(cap_bit: u64) -> bool {
-    let lock = CURRENT_PROCESS.lock();
-    lock.as_ref().is_some_and(|p| {
-        let cred = p.creds.lock();
-        cred.euid == 0 || (cred.cap_effective & cap_bit) != 0
-    })
+    match get_current_process() {
+        Some(p) => {
+            let cred = p.creds.lock();
+            cred.euid == 0 || (cred.cap_effective & cap_bit) != 0
+        }
+        None => false,
+    }
 }
 
 /// Log a security-relevant event to serial for audit trail.
+///
+/// Same re-lock-free discipline as `has_capability`.
 pub fn audit_log(event: &str, detail: &str) {
-    let pid = {
-        let lock = CURRENT_PROCESS.lock();
-        lock.as_ref().map(|p| p.id).unwrap_or(0)
-    };
+    let pid = get_current_process().map(|p| p.id).unwrap_or(0);
     crate::serial_write("[AUDIT] ");
     crate::serial_write(event);
     crate::serial_write(" pid=");
@@ -64,15 +74,15 @@ pub fn audit_log(event: &str, detail: &str) {
 }
 
 /// Get euid for the current process. Returns 0 (root) if no process.
+/// Re-lock-free like `has_capability` (callable under any guard).
 pub fn get_current_euid() -> u32 {
-    let lock = CURRENT_PROCESS.lock();
-    lock.as_ref().map_or(0, |p| p.creds.lock().euid)
+    get_current_process().map_or(0, |p| p.creds.lock().euid)
 }
 
 /// Get egid for the current process. Returns 0 (root) if no process.
+/// Re-lock-free like `has_capability` (callable under any guard).
 pub fn get_current_egid() -> u32 {
-    let lock = CURRENT_PROCESS.lock();
-    lock.as_ref().map_or(0, |p| p.creds.lock().egid)
+    get_current_process().map_or(0, |p| p.creds.lock().egid)
 }
 
 /// Check if the current process can access a file with given mode/uid/gid.
@@ -82,12 +92,20 @@ pub fn check_file_permission(st_mode: u32, st_uid: u32, st_gid: u32, need: u32) 
     let euid = get_current_euid();
     let egid = get_current_egid();
     // CAP_DAC_OVERRIDE: bypass DAC entirely (rwx)
-    if has_capability(CAP_DAC_OVERRIDE) { return true; }
+    if has_capability(CAP_DAC_OVERRIDE) {
+        return true;
+    }
     // CAP_DAC_READ_SEARCH: bypass DAC for read/search only
-    if has_capability(CAP_DAC_READ_SEARCH) && (need & 2) == 0 { return true; }
-    let bits = if euid == st_uid { (st_mode >> 6) & 7 }
-               else if egid == st_gid { (st_mode >> 3) & 7 }
-               else { st_mode & 7 };
+    if has_capability(CAP_DAC_READ_SEARCH) && (need & 2) == 0 {
+        return true;
+    }
+    let bits = if euid == st_uid {
+        (st_mode >> 6) & 7
+    } else if egid == st_gid {
+        (st_mode >> 3) & 7
+    } else {
+        st_mode & 7
+    };
     (bits & need) == need
 }
 
@@ -104,7 +122,9 @@ pub fn check_node_permission(node: &Arc<dyn VfsNode>, need: u32) -> bool {
 pub fn check_file_owner(node: &Arc<dyn VfsNode>) -> bool {
     let euid = get_current_euid();
     // CAP_FOWNER: bypass ownership checks for permission-changing ops
-    if has_capability(CAP_FOWNER) { return true; }
+    if has_capability(CAP_FOWNER) {
+        return true;
+    }
     if let Ok(stat) = node.stat() {
         euid == stat.st_uid
     } else {
@@ -131,7 +151,11 @@ pub fn normalize_path(path_str: &str, process: &Arc<crate::task::process::Proces
 
 /// Resolve a path relative to a dirfd (or AT_FDCWD for cwd).
 /// Returns the absolute path string.
-pub fn resolve_path_at(dirfd: i64, pathname: &str, process: &Arc<crate::task::process::Process>) -> Result<alloc::string::String, errno::Errno> {
+pub fn resolve_path_at(
+    dirfd: i64,
+    pathname: &str,
+    process: &Arc<crate::task::process::Process>,
+) -> Result<alloc::string::String, errno::Errno> {
     if pathname.starts_with('/') {
         return Ok(alloc::string::String::from(pathname));
     }
@@ -155,7 +179,9 @@ pub fn resolve_path_at(dirfd: i64, pathname: &str, process: &Arc<crate::task::pr
 
 /// Helper: store a directory's normalized path in dir_fds when a directory fd is created.
 pub fn store_dir_path(process: &Arc<crate::task::process::Process>, fd: u64, path_str: &str) {
-    if (fd as i64) < 0 { return; }
+    if (fd as i64) < 0 {
+        return;
+    }
     let abs_path = normalize_path(path_str, process);
     process.files.lock().dir_fds.insert(fd as usize, abs_path);
 }
@@ -167,15 +193,60 @@ pub fn store_dir_path(process: &Arc<crate::task::process::Process>, fd: u64, pat
 /// from STAR and jumps to LSTAR=0 (fetch at address 0).
 pub(crate) const MAX_IO_CHUNK: usize = 1 << 20;
 
+/// Resolve the process a syscall is running on behalf of.
+///
+/// Per-CPU ground truth first: `CURRENT_PROCESS` is a global mirror rewritten
+/// by every context switch on every CPU (`task/scheduler/switch.rs`), so under
+/// SMP it can name a thread that just switched on a DIFFERENT CPU. A syscall
+/// that mutates that "current" process (brk/mmap/munmap/mprotect) would then
+/// corrupt the wrong process's VMA list — the SMP spawn race that made freshly
+/// exec'd services SIGSEGV on their first heap write (their own brk/mmap
+/// landed on a sibling's list). This CPU's `current_thread.process` is the
+/// same rule `page_fault.rs` and `sys_fork` already use. Fall back to the
+/// global only when no thread is current here (idle/boot) or a caller already
+/// holds the per-CPU sched lock (try_lock failed).
 pub fn get_current_process() -> Option<Arc<Process>> {
+    if let Some(sched) = crate::task::scheduler::this_cpu_sched().try_lock() {
+        if let Some(p) = sched
+            .current_thread
+            .as_ref()
+            .and_then(|t| t.process.clone())
+        {
+            return Some(p);
+        }
+    }
     CURRENT_PROCESS.lock().as_ref().map(|p| p.clone())
 }
 
-
+/// IRQ-safe current-process resolution (invariant I4).
+///
+/// Same per-CPU-first rule as `get_current_process`, but the fallback
+/// TRY-locks the global mirror and returns `None` if both are contended —
+/// never blocks. For IRQ/fault context (keyboard Ctrl+C, timers) where a
+/// blocking acquisition on either lock could freeze the CPU.
+pub fn try_get_current_process() -> Option<Arc<Process>> {
+    if let Some(sched) = crate::task::scheduler::this_cpu_sched().try_lock() {
+        if let Some(p) = sched
+            .current_thread
+            .as_ref()
+            .and_then(|t| t.process.clone())
+        {
+            return Some(p);
+        }
+    }
+    match CURRENT_PROCESS.try_lock() {
+        Some(lock) => lock.as_ref().map(|p| p.clone()),
+        None => None,
+    }
+}
 
 /// Add a file descriptor via the Object Manager (bind-time security).
 pub fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -> u64 {
-    let type_id = if node.is_dir() { crate::objects::TYPE_DIR } else { crate::objects::TYPE_FILE };
+    let type_id = if node.is_dir() {
+        crate::objects::TYPE_DIR
+    } else {
+        crate::objects::TYPE_FILE
+    };
     let obj = crate::vfs::VfsObject::new(node.clone(), type_id);
     let access = match open_flags & 3 {
         1 => crate::objects::security::ACCESS_WRITE,
@@ -186,8 +257,21 @@ pub fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -
     // Bind-time security check (mirrors HandleTable::insert).
     let cred = crate::objects::current_credentials();
     {
-        let sec = obj.header().security.lock();
-        if !crate::objects::security::access_check(&cred, &sec, access) {
+        let sec = obj.header.security.lock();
+        // VfsObject uses vahi_objects::SecurityDescriptor — use crate's access_check.
+        if !vahi_objects::security::access_check(
+            &vahi_objects::security::Credentials {
+                uid: cred.uid,
+                gid: cred.gid,
+                euid: cred.euid,
+                egid: cred.egid,
+                fsuid: cred.fsuid,
+                fsgid: cred.fsgid,
+                cap_effective: cred.cap_effective,
+            },
+            &*sec,
+            access,
+        ) {
             return errno::Errno::EACCES as u64;
         }
     }
@@ -205,13 +289,20 @@ pub fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -
         idx += 1;
     }
     ht.insert_at(idx as u64, obj, access, open_flags as u64);
-    if ft.len() <= idx { ft.resize(idx + 1, None); }
-    ft[idx] = Some(FileDescriptor::File { node, offset: crate::sync::IrqSafeMutex::new(0) });
+    if ft.len() <= idx {
+        ft.resize(idx + 1, None);
+    }
+    ft[idx] = Some(FileDescriptor::File {
+        node,
+        offset: crate::sync::IrqSafeMutex::new(0),
+    });
     // Keep fd_flags in lockstep so read/write access-mode checks see the
     // O_ACCMODE bits; sys_openat ORs O_CLOEXEC in afterwards.
     drop(ft);
     let mut ffl = process.files.lock().fd_flags.clone();
-    if ffl.len() <= idx { ffl.resize(idx + 1, 0); }
+    if ffl.len() <= idx {
+        ffl.resize(idx + 1, 0);
+    }
     ffl[idx] = open_flags as u64;
     idx as u64
 }

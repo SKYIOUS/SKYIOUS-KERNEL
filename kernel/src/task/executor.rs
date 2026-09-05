@@ -1,8 +1,8 @@
 use super::{Task, TaskId};
-use hashbrown::HashMap;
 use alloc::sync::Arc;
 use core::task::{Context, Poll, Waker};
 use crossbeam_queue::ArrayQueue;
+use hashbrown::HashMap;
 
 pub struct Executor {
     tasks: HashMap<TaskId, Task>,
@@ -24,7 +24,9 @@ impl Executor {
         if self.tasks.insert(task_id, task).is_some() {
             return Err("task with same ID already in tasks");
         }
-        self.ready_queue.push(task_id).map_err(|_| "ready queue full")
+        self.ready_queue
+            .push(task_id)
+            .map_err(|_| "ready queue full")
     }
 
     pub fn run(&mut self) -> ! {
@@ -40,7 +42,8 @@ impl Executor {
                 Some(task) => task,
                 None => continue, // task no longer exists
             };
-            let waker = self.waker_cache
+            let waker = self
+                .waker_cache
                 .entry(task_id)
                 .or_insert_with(|| TaskWaker::new(task_id, self.ready_queue.clone()));
             let mut context = Context::from_waker(waker);

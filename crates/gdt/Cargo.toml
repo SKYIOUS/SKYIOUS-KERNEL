@@ -1,0 +1,12 @@
+[package]
+name = "vahi-gdt"
+version.workspace = true
+edition.workspace = true
+description = "GDT/IDT/TSS management for Vahi kernel"
+
+[dependencies]
+spin = "0.9"
+x86_64 = "0.14"
+
+[features]
+default = []

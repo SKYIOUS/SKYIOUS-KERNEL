@@ -5,7 +5,7 @@
 //! and logs every state change.
 
 use crate::boot::{
-    BootState, BootError, BootEvent, BootWarning, BootContext, BootSession, logger::BootLogger,
+    logger::BootLogger, BootContext, BootError, BootEvent, BootSession, BootState, BootWarning,
 };
 
 /// Run the boot state machine to completion.
@@ -54,10 +54,12 @@ pub fn run_boot() -> ! {
                 // Validate transition
                 let valid = state.valid_next();
                 if !valid.contains(&next_state) && next_state != BootState::Failed {
-                    BootLogger::error(&ctx, &alloc::format!(
-                        "Invalid boot transition: {:?} → {:?}", state, next_state
-                    ));
-                    ctx.trace.push(BootEvent::Error(BootError::UserspaceEntryFailed));
+                    BootLogger::error(
+                        &ctx,
+                        &alloc::format!("Invalid boot transition: {:?} → {:?}", state, next_state),
+                    );
+                    ctx.trace
+                        .push(BootEvent::Error(BootError::UserspaceEntryFailed));
                     panic!("Invalid boot state transition");
                 }
                 ctx.trace.push(BootEvent::Exit(state));
@@ -79,9 +81,9 @@ pub fn run_boot() -> ! {
     }
 }
 
-use alloc::sync::Arc;
 use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::Process;
+use alloc::sync::Arc;
 
 static BOOT_PROCESS: Mutex<Option<Arc<Process>>> = Mutex::new(None);
 
@@ -93,7 +95,8 @@ fn state_locate_init(ctx: &mut BootContext) -> Result<BootState, BootError> {
     let search_paths = ["/bin/init", "/init", "/sbin/init"];
     let vfs_mgr = crate::vfs::VFS.lock();
     for path in &search_paths {
-        ctx.init_paths_tried.push(alloc::string::String::from(*path));
+        ctx.init_paths_tried
+            .push(alloc::string::String::from(*path));
         BootLogger::info(ctx, &alloc::format!("Looking for {}", path));
         if let Some(node) = vfs_mgr.resolve_path(path) {
             if let Ok(data) = node.read(usize::MAX) {
@@ -108,7 +111,10 @@ fn state_locate_init(ctx: &mut BootContext) -> Result<BootState, BootError> {
     Err(BootError::InitNotFound)
 }
 
-fn state_parse_elf(ctx: &mut BootContext, _session: &mut BootSession) -> Result<BootState, BootError> {
+fn state_parse_elf(
+    ctx: &mut BootContext,
+    _session: &mut BootSession,
+) -> Result<BootState, BootError> {
     let elf_data = ctx.elf_data.as_ref().ok_or(BootError::InitNotFound)?;
     if elf_data.len() < 64 || &elf_data[..4] != b"\x7fELF" {
         return Err(BootError::InvalidElf);
@@ -117,35 +123,50 @@ fn state_parse_elf(ctx: &mut BootContext, _session: &mut BootSession) -> Result<
     Ok(BootState::CreateAddressSpace)
 }
 
-fn state_create_address_space(ctx: &mut BootContext, session: &mut BootSession) -> Result<BootState, BootError> {
+fn state_create_address_space(
+    ctx: &mut BootContext,
+    session: &mut BootSession,
+) -> Result<BootState, BootError> {
     use crate::memory::buddy::BuddyFrameAllocator;
     let mut frame_allocator = BuddyFrameAllocator;
     let elf_data = ctx.elf_data.as_ref().ok_or(BootError::InitNotFound)?;
     let address_space = crate::memory::paging::AddressSpace::new(&mut frame_allocator)
         .ok_or(BootError::AddressSpaceCreationFailed)?;
-    let mut process = Process::load_elf(elf_data, address_space)
-        .map_err(|_| BootError::InvalidElf)?;
+    let mut process =
+        Process::load_elf(elf_data, address_space).map_err(|_| BootError::InvalidElf)?;
     // Force PID 1 — Process::load_elf assigns next_id() (100+), but
     // the kernel's first userspace process must be PID 1 (init).
     process.id = 1;
     process.tgid = 1;
     process.identity.lock().pgid = 1;
     process.identity.lock().session = 1;
+    // Set Linux emulation mode for musl-linked binaries
+    crate::emulation::set_emulation(&process, elf_data);
     session.entry_point = process.entry_point;
     *BOOT_PROCESS.lock() = Some(Arc::new(process));
-    BootLogger::info(ctx, &alloc::format!("PID 1 ELF loaded, entry=0x{:x}", session.entry_point));
+    BootLogger::info(
+        ctx,
+        &alloc::format!("PID 1 ELF loaded, entry=0x{:x}", session.entry_point),
+    );
     Ok(BootState::MapStack)
 }
 
-fn state_map_stack(ctx: &mut BootContext, session: &mut BootSession) -> Result<BootState, BootError> {
+fn state_map_stack(
+    ctx: &mut BootContext,
+    session: &mut BootSession,
+) -> Result<BootState, BootError> {
     let process_guard = BOOT_PROCESS.lock();
-    let process = process_guard.as_ref().ok_or(BootError::StackAllocationFailed)?;
+    let process = process_guard
+        .as_ref()
+        .ok_or(BootError::StackAllocationFailed)?;
     // Activate the process address space BEFORE mapping the user stack, so
     // virt_to_phys (which walks the active tables) can translate the stack
     // pages setup_user_stack maps into the process's own page tables.
     // SAFETY: the address space was fully set up by Process::load_elf() in
     // CreateAddressSpace and shares the kernel higher-half mapping.
-    unsafe { process.address_space.activate(); }
+    unsafe {
+        process.address_space.activate();
+    }
     let argv = alloc::vec![alloc::string::String::from("/bin/init")];
     // Standard init environment — libc/musl/glibc all need these.
     let envp = alloc::vec![
@@ -154,16 +175,22 @@ fn state_map_stack(ctx: &mut BootContext, session: &mut BootSession) -> Result<B
         alloc::string::String::from("TERM=linux"),
     ];
     let entry = process.entry_point;
-    let user_rsp = process.setup_user_stack(&argv, &envp, entry, &[])
+    let user_rsp = process
+        .setup_user_stack(&argv, &envp, entry, &[])
         .map_err(|_| BootError::StackAllocationFailed)?;
     session.user_rsp = user_rsp;
     BootLogger::info(ctx, &alloc::format!("User stack at 0x{:x}", user_rsp));
     Ok(BootState::CreatePid1)
 }
 
-fn state_create_pid1(ctx: &mut BootContext, _session: &BootSession) -> Result<BootState, BootError> {
+fn state_create_pid1(
+    ctx: &mut BootContext,
+    _session: &BootSession,
+) -> Result<BootState, BootError> {
     let mut process_guard = BOOT_PROCESS.lock();
-    let process = process_guard.take().ok_or(BootError::StackAllocationFailed)?;
+    let process = process_guard
+        .take()
+        .ok_or(BootError::StackAllocationFailed)?;
     let pid = process.id;
     Process::register(process.clone());
     *process_guard = Some(process);
@@ -172,19 +199,33 @@ fn state_create_pid1(ctx: &mut BootContext, _session: &BootSession) -> Result<Bo
     Ok(BootState::SetupConsole)
 }
 
-fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<BootState, BootError> {
+fn state_setup_console(
+    ctx: &mut BootContext,
+    _session: &BootSession,
+) -> Result<BootState, BootError> {
     let process_guard = BOOT_PROCESS.lock();
-    let process = process_guard.as_ref().ok_or(BootError::ConsoleUnavailable)?;
+    let process = process_guard
+        .as_ref()
+        .ok_or(BootError::ConsoleUnavailable)?;
     let tty_node = crate::vfs::VFS.lock().resolve_path("/dev/tty0");
     match tty_node {
         Some(tty) => {
             use crate::task::process::FileDescriptor;
             let mut fd_table = process.files.lock().fd_table.clone();
             fd_table.resize(3, None);
-            fd_table[0] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
-            fd_table[1] = Some(FileDescriptor::File { node: tty.clone(), offset: crate::sync::IrqSafeMutex::new(0) });
-            fd_table[2] = Some(FileDescriptor::File { node: tty, offset: crate::sync::IrqSafeMutex::new(0) });
-            drop(fd_table);
+            fd_table[0] = Some(FileDescriptor::File {
+                node: tty.clone(),
+                offset: crate::sync::IrqSafeMutex::new(0),
+            });
+            fd_table[1] = Some(FileDescriptor::File {
+                node: tty.clone(),
+                offset: crate::sync::IrqSafeMutex::new(0),
+            });
+            fd_table[2] = Some(FileDescriptor::File {
+                node: tty,
+                offset: crate::sync::IrqSafeMutex::new(0),
+            });
+            process.files.lock().fd_table = fd_table;
             // Keep fd_flags in lockstep with fd_table — exec/fork clone both,
             // and a short flags vector makes dup2/fcntl index out of bounds.
             // Access-mode bits (0=O_RDONLY, 1=O_WRONLY): fd0 read, fd1/fd2 write.
@@ -192,8 +233,12 @@ fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<
             BootLogger::info(ctx, "stdin/stdout/stderr -> /dev/tty0");
         }
         None => {
-            ctx.trace.push(BootEvent::Warning(BootWarning::ConsoleUnavailable));
-            BootLogger::warn(ctx, "/dev/tty0 not found — init runs with no stdin/stdout/stderr");
+            ctx.trace
+                .push(BootEvent::Warning(BootWarning::ConsoleUnavailable));
+            BootLogger::warn(
+                ctx,
+                "/dev/tty0 not found — init runs with no stdin/stdout/stderr",
+            );
         }
     }
     crate::task::scheduler::with_current_thread(|thread| {
@@ -206,13 +251,24 @@ fn state_setup_console(ctx: &mut BootContext, _session: &BootSession) -> Result<
 fn state_enter_userspace(ctx: &BootContext, session: &BootSession) -> Result<BootState, BootError> {
     crate::boot::store_trace(ctx.trace.clone(), ctx.init_paths_tried.clone());
     let process_guard = BOOT_PROCESS.lock();
-    let process = process_guard.as_ref().ok_or(BootError::UserspaceEntryFailed)?;
+    let process = process_guard
+        .as_ref()
+        .ok_or(BootError::UserspaceEntryFailed)?;
     *crate::task::process::CURRENT_PROCESS.lock() = Some(process.clone());
     BootLogger::info(ctx, "Activating address space");
     // SAFETY: The address space was fully set up by Process::load_elf() in state CreateAddressSpace
     // and contains the init binary with proper page tables. No other CPU is using it.
-    unsafe { process.address_space.activate(); }
-    BootLogger::info(ctx, &alloc::format!("Jumping to userspace entry=0x{:x} rsp=0x{:x}", session.entry_point, session.user_rsp));
+    unsafe {
+        process.address_space.activate();
+    }
+    BootLogger::info(
+        ctx,
+        &alloc::format!(
+            "Jumping to userspace entry=0x{:x} rsp=0x{:x}",
+            session.entry_point,
+            session.user_rsp
+        ),
+    );
     // SAFETY: All prerequisite setup is complete — valid ELF loaded into the address space,
     // user stack mapped with argv, PID 1 registered in the process table, and the address
     // space activated. This function diverges (never returns).

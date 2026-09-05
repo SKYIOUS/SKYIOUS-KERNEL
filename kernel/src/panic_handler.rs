@@ -5,6 +5,10 @@
 use core::panic::PanicInfo;
 
 /// Full panic handler body: message → CPU info → registers → backtrace → halt.
+///
+/// Every diagnostic here goes through `serial_fmt` (stack buffer, no heap
+/// allocation): a panic caused by allocation failure must still print its
+/// message instead of recursing on `alloc::format!` (AGENTS.md rule 9).
 pub fn handle_panic(info: &PanicInfo) -> ! {
     crate::serial_write("\n========================================\n");
     crate::serial_write("           KERNEL PANIC\n");
@@ -12,33 +16,37 @@ pub fn handle_panic(info: &PanicInfo) -> ! {
 
     // ── 1. Panic message ──
     {
-        let msg = info.message();
-        let panic_str = alloc::format!("{:?}", msg);
+        // `PanicMessage` is Display — format into the stack buffer, no alloc.
         crate::serial_write("[PANIC] ");
-        crate::serial_write(&panic_str);
+        crate::interrupts::serial_fmt(format_args!("{}", info.message()));
         crate::serial_write("\n");
     }
     if let Some(loc) = info.location() {
-        crate::serial_write(&alloc::format!("[PANIC] at {}:{}\n", loc.file(), loc.line()));
+        crate::interrupts::serial_fmt(format_args!("[PANIC] at {}:{}\n", loc.file(), loc.line()));
     }
 
     // ── 2. CPU & process info ──
     #[cfg(target_arch = "x86_64")]
     {
         let cpu = crate::apic::current_lapic_id();
-        crate::serial_write(&alloc::format!("[PANIC] CPU: {}\n", cpu));
+        crate::interrupts::serial_fmt(format_args!("[PANIC] CPU: {}\n", cpu));
     }
     #[cfg(target_arch = "aarch64")]
     {
         let mpidr: u64;
-        unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr); }
-        crate::serial_write(&alloc::format!("[PANIC] CPU: {}\n", mpidr & 0xFF));
+        unsafe {
+            core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr);
+        }
+        crate::interrupts::serial_fmt(format_args!("[PANIC] CPU: {}\n", mpidr & 0xFF));
     }
     if let Some(tid) = crate::task::scheduler::with_current_thread(|t| {
         let pid = t.process.as_ref().map(|p| p.id).unwrap_or(0);
         (t._id, pid)
     }) {
-        crate::serial_write(&alloc::format!("[PANIC] Thread: {:?}, PID: {}\n", tid.0, tid.1));
+        crate::interrupts::serial_fmt(format_args!(
+            "[PANIC] Thread: {:?}, PID: {}\n",
+            tid.0, tid.1
+        ));
     }
 
     // ── 3. Register dump ──
@@ -55,13 +63,13 @@ pub fn handle_panic(info: &PanicInfo) -> ! {
         if let Some(events) = trace {
             crate::serial_write("[PANIC] Boot trace:\n");
             for event in events {
-                crate::serial_write(&alloc::format!("  {:?}\n", event));
+                crate::interrupts::serial_fmt(format_args!("  {:?}\n", event));
             }
         }
         if let Some(p) = paths {
             crate::serial_write("[PANIC] Init paths searched:\n");
             for path in p {
-                crate::serial_write(&alloc::format!("  {}\n", path));
+                crate::interrupts::serial_fmt(format_args!("  {}\n", path));
             }
         }
     });
@@ -70,7 +78,9 @@ pub fn handle_panic(info: &PanicInfo) -> ! {
     crate::serial_write("         SYSTEM HALTED\n");
     crate::serial_write("========================================\n");
 
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// Dump x86_64 general-purpose and control registers.
@@ -106,20 +116,25 @@ fn dump_registers_x86_64() {
         core::arch::asm!("mov {}, cr3", out(reg) cr3);
 
         crate::serial_write("[PANIC] Registers:\n");
-        crate::serial_write(&alloc::format!(
-            "  RAX={:016x} RBX={:016x} RCX={:016x} RDX={:016x}\n", rax, rbx, rcx, rdx));
-        crate::serial_write(&alloc::format!(
-            "  RSI={:016x} RDI={:016x} RBP={:016x} RSP={:016x}\n", rsi, rdi, rbp, rsp));
-        crate::serial_write(&alloc::format!(
-            "  R8 ={:016x} R9 ={:016x} R10={:016x} R11={:016x}\n", r8, r9, r10, r11));
-        crate::serial_write(&alloc::format!(
-            "  R12={:016x} R13={:016x} R14={:016x} R15={:016x}\n", r12, r13, r14, r15));
-        crate::serial_write(&alloc::format!(
-            "  RIP={:016x} RFLAGS={:016x}\n", rip, rflags));
-        crate::serial_write(&alloc::format!(
-            "  CR2={:016x} (page fault addr)\n", cr2));
-        crate::serial_write(&alloc::format!(
-            "  CR3={:016x} (page table root)\n", cr3));
+        crate::interrupts::serial_fmt(format_args!(
+            "  RAX={:016x} RBX={:016x} RCX={:016x} RDX={:016x}\n",
+            rax, rbx, rcx, rdx
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  RSI={:016x} RDI={:016x} RBP={:016x} RSP={:016x}\n",
+            rsi, rdi, rbp, rsp
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  R8 ={:016x} R9 ={:016x} R10={:016x} R11={:016x}\n",
+            r8, r9, r10, r11
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  R12={:016x} R13={:016x} R14={:016x} R15={:016x}\n",
+            r12, r13, r14, r15
+        ));
+        crate::interrupts::serial_fmt(format_args!("  RIP={:016x} RFLAGS={:016x}\n", rip, rflags));
+        crate::interrupts::serial_fmt(format_args!("  CR2={:016x} (page fault addr)\n", cr2));
+        crate::interrupts::serial_fmt(format_args!("  CR3={:016x} (page table root)\n", cr3));
     }
 }
 
@@ -159,19 +174,33 @@ fn dump_registers_aarch64() {
         core::arch::asm!("mrs {}, ttbr1_el1", out(reg) ttbr1_el1);
 
         crate::serial_write("[PANIC] Registers:\n");
-        crate::serial_write(&alloc::format!(
-            "  X0={:016x} X1={:016x} X2={:016x} X3={:016x}\n", x0, x1, x2, x3));
-        crate::serial_write(&alloc::format!(
-            "  X4={:016x} X5={:016x} X6={:016x} X7={:016x}\n", x4, x5, x6, x7));
-        crate::serial_write(&alloc::format!(
-            "  X8={:016x} X9={:016x} X10={:016x} X11={:016x}\n", x8, x9, x10, x11));
-        crate::serial_write(&alloc::format!(
-            "  X29(FP)={:016x} X30(LR)={:016x}\n", x29, x30));
-        crate::serial_write(&alloc::format!(
-            "  SP={:016x} ELR_EL1={:016x} (PC)\n", sp, elr_el1));
-        crate::serial_write(&alloc::format!(
-            "  SPSR_EL1={:016x} ESR_EL1={:016x}\n", spsr_el1, esr_el1));
-        crate::serial_write(&alloc::format!(
-            "  TTBR0_EL1={:016x} (user) TTBR1_EL1={:016x} (kernel)\n", ttbr0_el1, ttbr1_el1));
+        crate::interrupts::serial_fmt(format_args!(
+            "  X0={:016x} X1={:016x} X2={:016x} X3={:016x}\n",
+            x0, x1, x2, x3
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  X4={:016x} X5={:016x} X6={:016x} X7={:016x}\n",
+            x4, x5, x6, x7
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  X8={:016x} X9={:016x} X10={:016x} X11={:016x}\n",
+            x8, x9, x10, x11
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  X29(FP)={:016x} X30(LR)={:016x}\n",
+            x29, x30
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  SP={:016x} ELR_EL1={:016x} (PC)\n",
+            sp, elr_el1
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  SPSR_EL1={:016x} ESR_EL1={:016x}\n",
+            spsr_el1, esr_el1
+        ));
+        crate::interrupts::serial_fmt(format_args!(
+            "  TTBR0_EL1={:016x} (user) TTBR1_EL1={:016x} (kernel)\n",
+            ttbr0_el1, ttbr1_el1
+        ));
     }
 }

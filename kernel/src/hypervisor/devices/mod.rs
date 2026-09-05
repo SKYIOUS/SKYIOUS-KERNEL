@@ -17,10 +17,10 @@ pub enum VirtDeviceType {
     Kvmi,
 }
 
+pub mod pic;
+pub mod uart;
 pub mod virtio_block;
 pub mod virtio_net;
-pub mod uart;
-pub mod pic;
 
 /// Trait for virtual device emulation.
 pub trait VirtDevice: Send + Sync {

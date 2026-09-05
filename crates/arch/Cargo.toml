@@ -1,0 +1,15 @@
+[package]
+name = "vahi-arch"
+version = "0.3.0"
+edition = "2021"
+description = "Architecture-specific code for the Vahi kernel (x86_64, aarch64)"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+spin = "0.9.8"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "0.14.2"
+pic8259 = "0.10.1"
+pc-keyboard = "0.5.1"
+acpi = "4.1.1"

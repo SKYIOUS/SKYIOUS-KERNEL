@@ -4,9 +4,9 @@
 //! do not support APIC. The virtual PIC maps guest interrupt requests
 //! to the VCPU's interrupt injection mechanism.
 
+use crate::hypervisor::devices::{VirtDevice, VirtDeviceType};
 use alloc::vec::Vec;
 use x86_64::PhysAddr;
-use crate::hypervisor::devices::{VirtDevice, VirtDeviceType};
 
 const PIC1_BASE: u16 = 0x20;
 const PIC2_BASE: u16 = 0xA0;
@@ -14,10 +14,10 @@ const PIT_BASE: u16 = 0x40;
 
 /// Virtual PIC/PIT.
 pub struct PicPit {
-    pub pic1_imr: u8,   // Interrupt mask register (PIC1)
+    pub pic1_imr: u8, // Interrupt mask register (PIC1)
     pub pic2_imr: u8,
-    pub pic1_irr: u8,   // Interrupt request register
-    pub pic1_isr: u8,   // In-service register
+    pub pic1_irr: u8, // Interrupt request register
+    pub pic1_isr: u8, // In-service register
     pub pic2_irr: u8,
     pub pic2_isr: u8,
     pub pit_counter: u32,

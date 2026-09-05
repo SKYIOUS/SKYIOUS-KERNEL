@@ -1,7 +1,7 @@
-use pc_keyboard::{Keyboard, ScancodeSet1, HandleControl, layouts, DecodedKey};
-use crossbeam_queue::ArrayQueue;
 use crate::sync::IrqSafeMutex as Mutex;
+use crossbeam_queue::ArrayQueue;
 use lazy_static::lazy_static;
+use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 
 const TTY_BUF_SIZE: usize = 4096;
 
@@ -22,13 +22,23 @@ pub fn feed_scancode(scancode: u8) {
             match key {
                 DecodedKey::Unicode(c) => {
                     if c == '\u{3}' {
-                        // Ctrl+C — deliver SIGINT to current foreground process
-                        let proc = crate::task::process::CURRENT_PROCESS.lock();
-                        if let Some(ref p) = *proc {
-                            p.signals.lock().raise(crate::syscalls::signal::Signal::SIGINT);
+                        // Ctrl+C — deliver SIGINT to current foreground process.
+                        // Keyboard IRQ context (I4): resolve per-CPU without
+                        // blocking and try-lock every acquisition — a blocking
+                        // lock here could freeze the CPU.
+                        let proc = crate::syscalls::helpers::try_get_current_process();
+                        if let Some(p) = proc {
+                            if let Some(mut sig) = p.signals.try_lock() {
+                                sig.raise(crate::syscalls::signal::Signal::SIGINT);
+                            }
                             // Route SIGINT to signalfd instances
-                            crate::task::process::route_signal_to_signalfd(
-                                p.id, 2, crate::task::process::SI_USER, 0, 0, 0,
+                            crate::task::process::route_signal_to_signalfd_for(
+                                &p,
+                                2,
+                                crate::task::process::SI_USER,
+                                0,
+                                0,
+                                0,
                             );
                         }
                         // Also echo ^C to console

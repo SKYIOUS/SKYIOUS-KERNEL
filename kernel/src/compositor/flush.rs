@@ -23,17 +23,22 @@ pub fn gui_flush_async(window_id: u64) -> FlushResult {
 
     // Mark window dirty in compositor
     let mut comp = crate::gui::COMPOSITOR.lock();
-    if let Some(win) = comp.windows.iter_mut().find(|w| {
-        w.gpu_surface.map_or(false, |rid| rid as u64 == window_id)
-    }) {
+    if let Some(win) = comp
+        .windows
+        .iter_mut()
+        .find(|w| w.gpu_surface.map_or(false, |rid| rid as u64 == window_id))
+    {
         win.dirty = true;
     }
     drop(comp);
 
     let cmd = crate::drivers::gpu::ring::GpuCommand {
         opcode: crate::drivers::gpu::ring::GpuOpcode::Flip as u32,
-        flags: 0, payload_offset: 0, payload_len: 0,
-        fence_id: 0, reserved: [0; 8],
+        flags: 0,
+        payload_offset: 0,
+        payload_len: 0,
+        fence_id: 0,
+        reserved: [0; 8],
     };
     match COMMAND_RING.submit(&cmd, &[]) {
         Ok(fence) => {

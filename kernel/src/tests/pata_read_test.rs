@@ -11,7 +11,9 @@ pub fn test_pata_mbr_sig() -> Result<(), &'static str> {
     drop(devices);
 
     let mut buf = [0u8; 512];
-    dev.lock().read_sector(0, &mut buf).map_err(|_| "read failed")?;
+    dev.lock()
+        .read_sector(0, &mut buf)
+        .map_err(|_| "read failed")?;
 
     if buf[510] == 0x55 && buf[511] == 0xAA {
         crate::serial_write("[TEST] pata_mbr_sig: PASS (MBR signature valid)\n");

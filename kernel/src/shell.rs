@@ -1,8 +1,7 @@
-#![allow(dead_code)]
 pub mod commands;
 
-use crate::println;
 use crate::print;
+use crate::println;
 use crate::vga_buffer::{self, Color};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -44,7 +43,8 @@ impl Shell {
                 self.history_index = self.history.len();
                 self.prompt();
             }
-            '\u{0008}' => { // Backspace
+            '\u{0008}' => {
+                // Backspace
                 if !self.command_buffer.is_empty() {
                     self.command_buffer.pop();
                     print!("\u{0008}");
@@ -99,9 +99,9 @@ impl Shell {
     }
 
     pub async fn run(&mut self) {
-        use futures_util::stream::StreamExt;
         use crate::task::keyboard::ScancodeStream;
-        use pc_keyboard::{Keyboard, layouts, ScancodeSet1, HandleControl, DecodedKey};
+        use futures_util::stream::StreamExt;
+        use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 
         let mut scancodes = ScancodeStream::new();
         let mut keyboard = Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore);
@@ -126,7 +126,9 @@ impl Shell {
 
     fn execute_command(&self) {
         let command = self.command_buffer.trim();
-        if command.is_empty() { return; }
+        if command.is_empty() {
+            return;
+        }
 
         let mut parts = command.split_whitespace();
         let cmd = parts.next().unwrap_or("");

@@ -1,6 +1,5 @@
 use crate::gui::drawing;
 
-
 pub struct FileManagerWidget {
     pub current_path: alloc::string::String,
     entries: alloc::vec::Vec<(alloc::string::String, bool)>,
@@ -23,7 +22,11 @@ impl FileManagerWidget {
 
     pub fn refresh(&mut self) {
         self.entries.clear();
-        let path = if self.current_path.is_empty() { "/" } else { &self.current_path };
+        let path = if self.current_path.is_empty() {
+            "/"
+        } else {
+            &self.current_path
+        };
         if let Some(node) = crate::vfs::VFS.lock().resolve_path(path) {
             if node.is_dir() {
                 if let Ok(children) = node.children() {
@@ -38,7 +41,8 @@ impl FileManagerWidget {
             }
         }
         if self.entries.is_empty() {
-            self.entries.push((alloc::string::String::from("(empty)"), false));
+            self.entries
+                .push((alloc::string::String::from("(empty)"), false));
         }
     }
 
@@ -49,7 +53,9 @@ impl FileManagerWidget {
     }
 
     pub fn navigate_up(&mut self) {
-        if self.current_path == "/" { return; }
+        if self.current_path == "/" {
+            return;
+        }
         let parent = if self.current_path.ends_with('/') {
             let trimmed = &self.current_path[..self.current_path.len() - 1];
             match trimmed.rfind('/') {
@@ -67,7 +73,10 @@ impl FileManagerWidget {
     }
 
     pub fn navigate_into(&mut self, name: &str) {
-        if name == ".." { self.navigate_up(); return; }
+        if name == ".." {
+            self.navigate_up();
+            return;
+        }
         let new_path = if self.current_path == "/" {
             alloc::format!("/{}", name)
         } else {
@@ -78,7 +87,9 @@ impl FileManagerWidget {
 
     pub fn handle_click(&mut self, _mx: usize, my: usize) -> bool {
         let path_bar_height = 16usize;
-        if my < path_bar_height { return false; }
+        if my < path_bar_height {
+            return false;
+        }
         let list_y = my.saturating_sub(path_bar_height);
         let line_h = 12usize;
         let clicked_idx = list_y / line_h + self.scroll_offset;
@@ -93,26 +104,65 @@ impl FileManagerWidget {
         false
     }
 
-    pub fn render(&self, pixel_buffer: &mut [u32], pw: usize, ph: usize, start_x: usize, start_y: usize, content_w: usize, _content_h: usize) {
+    pub fn render(
+        &self,
+        pixel_buffer: &mut [u32],
+        pw: usize,
+        ph: usize,
+        start_x: usize,
+        start_y: usize,
+        content_w: usize,
+        _content_h: usize,
+    ) {
         let path_bar_height = 16usize;
         // Draw path bar
-        drawing::draw_rect(pixel_buffer, pw, ph, start_x, start_y, content_w, path_bar_height, 0xFF252526);
+        drawing::draw_rect(
+            pixel_buffer,
+            pw,
+            ph,
+            start_x,
+            start_y,
+            content_w,
+            path_bar_height,
+            0xFF252526,
+        );
         let path_display = if self.current_path.len() > 40 {
-            alloc::format!("...{}", &self.current_path[self.current_path.len().saturating_sub(37)..])
+            alloc::format!(
+                "...{}",
+                &self.current_path[self.current_path.len().saturating_sub(37)..]
+            )
         } else {
             self.current_path.clone()
         };
-        drawing::draw_string(pixel_buffer, pw, ph, start_x + 2, start_y + 4, &path_display, 0xFF007ACC);
+        drawing::draw_string(
+            pixel_buffer,
+            pw,
+            ph,
+            start_x + 2,
+            start_y + 4,
+            &path_display,
+            0xFF007ACC,
+        );
 
         // Separator
-        drawing::draw_line_h(pixel_buffer, pw, ph, start_x, start_y + path_bar_height, content_w, 0xFF333333);
+        drawing::draw_line_h(
+            pixel_buffer,
+            pw,
+            ph,
+            start_x,
+            start_y + path_bar_height,
+            content_w,
+            0xFF333333,
+        );
 
         // List entries
         let list_start_y = start_y + path_bar_height + 1;
         let line_h = 12usize;
         for i in 0..self.height_chars.saturating_sub(1) {
             let idx = self.scroll_offset + i;
-            if idx >= self.entries.len() { break; }
+            if idx >= self.entries.len() {
+                break;
+            }
             let (ref name, is_dir) = &self.entries[idx];
             let ly = list_start_y + i * line_h;
             let color = if *is_dir { 0xFF007ACC } else { 0xFFCCCCCC };
@@ -126,30 +176,46 @@ impl FileManagerWidget {
 
         // Scroll indicators
         if self.scroll_offset > 0 {
-            drawing::draw_string(pixel_buffer, pw, ph, start_x + content_w - 12, start_y + path_bar_height + 2, "^", 0xFF888888);
+            drawing::draw_string(
+                pixel_buffer,
+                pw,
+                ph,
+                start_x + content_w - 12,
+                start_y + path_bar_height + 2,
+                "^",
+                0xFF888888,
+            );
         }
-        let max_offset = self.entries.len().saturating_sub(self.height_chars.saturating_sub(2));
+        let max_offset = self
+            .entries
+            .len()
+            .saturating_sub(self.height_chars.saturating_sub(2));
         if self.scroll_offset < max_offset {
             let bottom_y = start_y + _content_h - 12;
-            drawing::draw_string(pixel_buffer, pw, ph, start_x + content_w - 12, bottom_y, "^", 0xFF888888);
+            drawing::draw_string(
+                pixel_buffer,
+                pw,
+                ph,
+                start_x + content_w - 12,
+                bottom_y,
+                "^",
+                0xFF888888,
+            );
         }
     }
 
     pub fn handle_scroll(&mut self, delta: i8) {
-        let max_offset = self.entries.len().saturating_sub(self.height_chars.saturating_sub(2));
+        let max_offset = self
+            .entries
+            .len()
+            .saturating_sub(self.height_chars.saturating_sub(2));
         if delta > 0 {
-            self.scroll_offset = self.scroll_offset.saturating_add(delta as usize).min(max_offset);
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add(delta as usize)
+                .min(max_offset);
         } else {
             self.scroll_offset = self.scroll_offset.saturating_sub((-delta) as usize);
         }
     }
 }
-
-
-
-
-
-
-
-
-

@@ -1,89 +1,58 @@
-﻿use x86_64::instructions::port::Port;
+//! PCI bus enumeration and device initialization.
+//!
+//! Pure config-space access is provided by `vahi-pci`.
+//! This module owns the boot-path enumeration that initializes drivers.
 
-pub fn read_config_u32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
-    let address: u32 = ((bus as u32) << 16) | ((slot as u32) << 11) |
-                       ((func as u32) << 8) | (offset as u32 & 0xFC) | 0x80000000;
+pub use vahi_pci::*;
 
-    let mut config_addr = Port::new(0xCF8);
-    let mut config_data: Port<u32> = Port::new(0xCFC);
-
-    unsafe {
-        config_addr.write(address);
-        config_data.read()
-    }
-}
-
-pub fn read_config_u16(bus: u8, slot: u8, func: u8, offset: u8) -> u16 {
-    (read_config_u32(bus, slot, func, offset) >> ((offset & 2) * 8)) as u16
-}
-
-pub fn read_config_u8(bus: u8, slot: u8, func: u8, offset: u8) -> u8 {
-    (read_config_u32(bus, slot, func, offset) >> ((offset & 3) * 8)) as u8
-}
-
-pub fn write_config_u32(bus: u8, slot: u8, func: u8, offset: u8, value: u32) {
-    let address: u32 = ((bus as u32) << 16) | ((slot as u32) << 11) |
-                       ((func as u32) << 8) | (offset as u32 & 0xFC) | 0x80000000;
-
-    let mut config_addr = Port::new(0xCF8);
-    let mut config_data: Port<u32> = Port::new(0xCFC);
-
-    unsafe {
-        config_addr.write(address);
-        config_data.write(value);
-    }
-}
-
-pub fn write_config_u16(bus: u8, slot: u8, func: u8, offset: u8, value: u16) {
-    let shift = (offset & 2) * 8;
-    let mask = 0xFFFFu32 << shift;
-    let aligned = read_config_u32(bus, slot, func, offset);
-    write_config_u32(bus, slot, func, offset, (aligned & !mask) | ((value as u32) << shift));
-}
-
-pub fn read_bar64(bus: u8, slot: u8, func: u8, bar_offset: u8) -> u64 {
-    let lo = read_config_u32(bus, slot, func, bar_offset);
-    if lo & 0x6 == 0x4 {
-        let hi = read_config_u32(bus, slot, func, bar_offset + 4) as u64;
-        (hi << 32) | (lo as u64 & 0xFFFFFFF0)
-    } else {
-        (lo & 0xFFFFFFF0) as u64
-    }
-}
+use vahi_apic::msi;
+use vahi_limine::hhdm_offset;
 
 fn bar_to_virt(bar_val: u64) -> usize {
     let offset = crate::memory::physical_memory_offset();
     (offset + bar_val) as usize
 }
 
-/// Walk PCI capabilities list, return offset of matching capability ID
-pub fn find_capability(bus: u8, slot: u8, func: u8, cap_id: u8) -> Option<u8> {
-    let status = read_config_u16(bus, slot, func, 0x06);
-    if status & (1 << 4) == 0 {
-        return None;
-    }
-    let mut offset = read_config_u8(bus, slot, func, 0x34);
-    while offset != 0 {
-        if read_config_u8(bus, slot, func, offset) == cap_id {
-            return Some(offset);
+#[cfg(not(target_arch = "aarch64"))]
+pub fn map_bar_mmio(bar_phys: u64) {
+    use x86_64::structures::paging::{Mapper, Page, PageTableFlags, Size4KiB};
+    use x86_64::VirtAddr;
+    let hhdm = hhdm_offset();
+    let phys_offset = VirtAddr::new(hhdm);
+    let level4 = unsafe { crate::memory::active_level_4_table(phys_offset) };
+    let mut mapper =
+        unsafe { x86_64::structures::paging::OffsetPageTable::new(level4, phys_offset) };
+    let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
+    let size = 256 * 1024u64;
+    let start = bar_phys & !0xFFF;
+    let end = (bar_phys + size + 0xFFF) & !0xFFF;
+    let mut addr = start;
+    while addr < end {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(hhdm + addr));
+        let frame =
+            x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(addr));
+        unsafe {
+            let _ = mapper.map_to(
+                page,
+                frame,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE,
+                &mut frame_allocator,
+            );
         }
-        offset = read_config_u8(bus, slot, func, offset + 1);
+        addr += 4096;
     }
-    None
 }
 
-/// Enable MSI for a PCI function, returns the allocated vector
 pub fn pci_enable_msi(bus: u8, slot: u8, func: u8) -> Option<u8> {
     let cap = find_capability(bus, slot, func, 0x05)?;
-    let vector = crate::apic::msi::alloc()?;
-    let lapic_id = crate::apic::current_lapic_id();
+    let vector = msi::alloc()?;
+    let lapic_id = vahi_apic::current_lapic_id();
 
     let msg_ctrl = read_config_u16(bus, slot, func, cap + 2);
     let is_64bit = (msg_ctrl & (1 << 7)) != 0;
-    // ponytail: single message only (MME=0), per-vector masking untouched
 
-    let addr = crate::apic::msi::msi_addr(lapic_id);
-    let data = crate::apic::msi::msi_data(vector);
+    let addr = msi::msi_addr(lapic_id);
+    let data = msi::msi_data(vector);
 
     write_config_u32(bus, slot, func, cap + 4, addr);
     if is_64bit {
@@ -92,23 +61,13 @@ pub fn pci_enable_msi(bus: u8, slot: u8, func: u8) -> Option<u8> {
     } else {
         write_config_u16(bus, slot, func, cap + 0x08, data);
     }
-    // Enable MSI, keep MME=0 (single message), clear MMC bits
     write_config_u16(bus, slot, func, cap + 2, (msg_ctrl & !0x70) | 1);
 
     Some(vector)
 }
 
-/// Route a PCI device's legacy interrupt through the I/O APIC
-pub fn pci_route_legacy_irq(bus: u8, slot: u8, _func: u8, pin: u8) -> Option<u8> {
-    let vector = crate::apic::msi::alloc()?;
-
-    if let Some(map) = crate::acpi::PCI_GSI_MAP.get() {
-        if let Some(&gsi) = map.get(&(bus, slot, pin)) {
-            crate::apic::route_by_gsi(gsi, vector);
-            return Some(vector);
-        }
-    }
-
+pub fn pci_route_legacy_irq(_bus: u8, _slot: u8, _func: u8, pin: u8) -> Option<u8> {
+    let vector = msi::alloc()?;
     crate::apic::route_pci_irq(pin, vector);
     Some(vector)
 }
@@ -126,7 +85,9 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
     for func in 0..max_func {
         let vendor_id = read_config_u16(bus, slot, func, 0);
         if vendor_id == 0xFFFF {
-            if func == 0 { return; }
+            if func == 0 {
+                return;
+            }
             continue;
         }
         let device_id = read_config_u16(bus, slot, func, 2);
@@ -140,14 +101,12 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
 
         let irq = (read_config_u32(bus, slot, func, 0x3C) & 0xFF) as u8;
 
-        // NVMe
         if class_code == 0x01 && subclass == 0x08 && prog_if == 0x02 {
             crate::println!("    -> NVMe Controller detected!");
             let bar0 = read_bar64(bus, slot, func, 0x10);
             crate::drivers::storage::nvme::NvmeController::new(bar_to_virt(bar0), bus, slot, func);
         }
 
-        // AHCI/SATA
         if class_code == 0x01 && subclass == 0x06 {
             crate::println!("    -> AHCI/SATA Controller detected!");
             let bar5 = read_bar64(bus, slot, func, 0x24);
@@ -156,46 +115,51 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             crate::drivers::storage::ahci::init(virt_abar);
         }
 
-        // PATA/IDE fallback
         if class_code == 0x01 && subclass == 0x01 {
             crate::println!("    -> PATA/IDE Controller detected, using PIO fallback.");
             crate::drivers::storage::pata::init();
         }
 
-        // E1000
         if vendor_id == 0x8086 && device_id == 0x100E {
-             crate::println!("    -> Intel E1000 Network Card detected!");
+            crate::println!("    -> Intel E1000 Network Card detected!");
 
-             let bar0 = read_bar64(bus, slot, func, 0x10);
-             let mem_base = bar_to_virt(bar0);
+            let bar0 = read_bar64(bus, slot, func, 0x10);
+            #[cfg(not(target_arch = "aarch64"))]
+            map_bar_mmio(bar0);
+            let mem_base = bar_to_virt(bar0);
 
-             // Try MSI first; fall back to IOAPIC routing for legacy INTx#
-              let net_vector = pci_enable_msi(bus, slot, func)
-                  .or_else(|| pci_route_legacy_irq(bus, slot, func, irq));
-              let net_vector = match net_vector {
-                  Some(v) => v,
-                  None => {
-                      crate::println!("       E1000: no available interrupt vectors, skipping");
-                      continue;
-                  }
-              };
+            let net_vector = pci_enable_msi(bus, slot, func)
+                .or_else(|| pci_route_legacy_irq(bus, slot, func, irq));
+            let net_vector = match net_vector {
+                Some(v) => v,
+                None => {
+                    crate::println!("       E1000: no available interrupt vectors, skipping");
+                    continue;
+                }
+            };
 
-             crate::interrupts::set_network_vector(net_vector);
-             crate::println!("       Mem Base: 0x{:x}, IRQ: {}, Vector: {}", bar0, irq, net_vector);
+            crate::interrupts::set_network_vector(net_vector);
+            crate::println!(
+                "       Mem Base: 0x{:x}, IRQ: {}, Vector: {}",
+                bar0,
+                irq,
+                net_vector
+            );
 
-             unsafe {
-                 let mut nic_inner = crate::drivers::net::e1000::E1000::new(mem_base);
-                 nic_inner.set_irq(irq);
-                 nic_inner.init();
+            unsafe {
+                let bdf = ((bus as u16) << 8) | ((slot as u16) << 3) | (func as u16);
+                let mut nic_inner = crate::drivers::net::e1000::E1000::new(mem_base, bdf);
+                nic_inner.set_irq(irq);
+                nic_inner.init();
 
-                 let nic_device = crate::drivers::net::e1000::E1000Device { inner: nic_inner };
-                 let nic_arc = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(nic_device));
+                let nic_device = crate::drivers::net::e1000::E1000Device { inner: nic_inner };
+                let nic_arc = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(nic_device));
 
-                 *crate::drivers::net::NIC.lock() = Some(crate::drivers::net::NicDevice::E1000(nic_arc));
-             }
-         }
+                *crate::drivers::net::NIC.lock() =
+                    Some(crate::drivers::net::NicDevice::E1000(nic_arc));
+            }
+        }
 
-        // VirtIO-Block
         if vendor_id == 0x1AF4 && device_id == 0x1001 {
             crate::println!("    -> VirtIO-Block Device detected!");
             let bar0 = read_config_u32(bus, slot, func, 0x10);
@@ -206,7 +170,6 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             }
         }
 
-        // VirtIO-GPU
         if vendor_id == 0x1AF4 && device_id == 0x1050 {
             crate::println!("    -> VirtIO-GPU Device detected!");
             let bar0 = read_config_u32(bus, slot, func, 0x10);
@@ -217,7 +180,6 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             }
         }
 
-        // VirtIO-Net
         if vendor_id == 0x1AF4 && device_id == 0x1000 {
             crate::println!("    -> VirtIO-Net Device detected!");
             let bar0 = read_config_u32(bus, slot, func, 0x10);
@@ -227,23 +189,24 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
 
                 let nic_inner = crate::drivers::net::virtio::VirtIONet::new(io_base);
                 let nic_device = crate::drivers::net::virtio::VirtIONetDevice {
-                    inner: alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(nic_inner))
+                    inner: alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(nic_inner)),
                 };
                 let nic_arc = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(nic_device));
 
-                *crate::drivers::net::NIC.lock() = Some(crate::drivers::net::NicDevice::VirtIO(nic_arc));
+                *crate::drivers::net::NIC.lock() =
+                    Some(crate::drivers::net::NicDevice::VirtIO(nic_arc));
             }
         }
 
-        // BGA framebuffer
-        if (vendor_id == 0x1234 && device_id == 0x1111) || (vendor_id == 0x80ee && device_id == 0xbeef) {
-             let bar0 = read_config_u32(bus, slot, func, 0x10);
-             let fb_phys = (bar0 & 0xFFFFFFF0) as usize;
-             let bga = crate::drivers::graphics::bga::Bga::new(fb_phys);
-             bga.init();
+        if (vendor_id == 0x1234 && device_id == 0x1111)
+            || (vendor_id == 0x80ee && device_id == 0xbeef)
+        {
+            let bar0 = read_config_u32(bus, slot, func, 0x10);
+            let fb_phys = (bar0 & 0xFFFFFFF0) as usize;
+            let bga = crate::drivers::graphics::bga::Bga::new(fb_phys);
+            bga.init();
         }
 
-        // Audio (class 0x04)
         if class_code == 0x04 {
             crate::serial_write("[PCI] Audio device detected!\n");
             crate::println!("    -> Audio Device detected!");
@@ -257,19 +220,16 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             }
         }
 
-        // XHCI (USB 3.0)
         if class_code == 0x0C && subclass == 0x03 && prog_if == 0x30 {
             crate::println!("    -> XHCI (USB 3.0) Controller detected!");
             let bar0 = read_bar64(bus, slot, func, 0x10);
             let virt_base = bar_to_virt(bar0);
-            let mut xhci = crate::drivers::usb::xhci::XhciController::new(virt_base);
+            let bdf = ((bus as u16) << 8) | ((slot as u16) << 3) | (func as u16);
+            let mut xhci = crate::drivers::usb::xhci::XhciController::new(virt_base, bdf);
             xhci.init();
-            // Hand the controller to the USB subsystem so it survives boot and
-            // the HID poller thread can reach it.
             crate::drivers::usb::register_xhci(xhci);
         }
 
-        // UHCI (USB 1.x) â€” I/O BAR, bit 0 = 1
         #[cfg(feature = "uhci")]
         if class_code == 0x0C && subclass == 0x03 && prog_if == 0x00 {
             crate::println!("    -> UHCI (USB 1.x) Controller detected!");
@@ -281,7 +241,6 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
                 uhci.init();
             }
         }
-        // EHCI (USB 2.0)
         if class_code == 0x0C && subclass == 0x03 && prog_if == 0x20 {
             crate::println!("    -> EHCI (USB 2.0) Controller detected! (not yet implemented)");
         }
@@ -296,4 +255,3 @@ pub fn enumerate_pci() {
         }
     }
 }
-

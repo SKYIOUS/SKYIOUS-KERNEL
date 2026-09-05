@@ -6,6 +6,26 @@ version = "0.3.0"
 edition = "2021"
 
 [dependencies]
+vahi-sync = { path = "../crates/sync" }
+vahi-memory = { path = "../crates/memory" }
+vahi-crypto = { path = "../crates/crypto" }
+vahi-hal = { path = "../crates/hal" }
+vahi-limine = { path = "../crates/limine" }
+vahi-ipc = { path = "../crates/ipc" }
+vahi-pci = { path = "../crates/pci" }
+vahi-ebpf = { path = "../crates/ebpf", optional = true }
+vahi-syscalls = { path = "../crates/syscalls" }
+vahi-vfs = { path = "../crates/vfs" }
+vahi-apic = { path = "../crates/apic" }
+vahi-drivers = { path = "../crates/drivers" }
+vahi-task = { path = "../crates/task" }
+vahi-objects = { path = "../crates/objects" }
+vahi-types = { path = "../crates/types" }
+vahi-acpi = { path = "../crates/acpi" }
+vahi-net = { path = "../crates/net" }
+vahi-gdt = { path = "../crates/gdt" }
+vahi-arch = { path = "../crates/arch" }
+vahi-boot = { path = "../crates/boot" }
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"
 volatile = "0.2.6"
@@ -42,6 +62,7 @@ ext4 = []
 self_test = []
 ash = []
 gpu = []
+ebpf = []
 hypervisor = []
 
 [profile.dev]

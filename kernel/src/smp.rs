@@ -1,10 +1,10 @@
-use core::arch::global_asm;
-use crate::println;
 use crate::arch::Arch;
+use crate::println;
+use core::arch::global_asm;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{PageTable, PhysFrame, FrameAllocator};
+use x86_64::structures::paging::{FrameAllocator, PageTable, PhysFrame};
 use x86_64::VirtAddr;
 
 // The trampoline must be placed at a 4KB aligned physical address in the first 1MB.
@@ -73,7 +73,8 @@ fn allocate_low_pml4() -> Option<PhysFrame> {
     Some(new_frame)
 }
 
-global_asm!(r#"
+global_asm!(
+    r#"
 .code16
 .global smp_trampoline_start
 .global smp_trampoline_end
@@ -175,7 +176,8 @@ t_gdt64:
     .quad 0x0000920000000000 # 64-bit Data
 t_gdt64_end:
 smp_trampoline_end:
-"#);
+"#
+);
 
 extern "C" {
     fn smp_trampoline_start();
@@ -186,14 +188,21 @@ pub fn init() {
     crate::serial_write("[SMP] init enter\n");
     let ap_ids: &alloc::vec::Vec<u8> = match crate::acpi::AP_LAPIC_IDS.get() {
         Some(ids) => ids,
-        None => { crate::serial_write("[SMP] no ap_ids, return\n"); return; },
+        None => {
+            crate::serial_write("[SMP] no ap_ids, return\n");
+            return;
+        }
     };
 
     if ap_ids.is_empty() {
         crate::serial_write("[SMP] ap_ids empty, return\n");
         return;
     }
-    crate::serial_write(&alloc::format!("[SMP] {} APs: {:?}\n", ap_ids.len(), ap_ids));
+    crate::serial_write(&alloc::format!(
+        "[SMP] {} APs: {:?}\n",
+        ap_ids.len(),
+        ap_ids
+    ));
 
     let offset = crate::memory::physical_memory_offset();
 
@@ -201,7 +210,7 @@ pub fn init() {
     {
         use x86_64::structures::paging::mapper::TranslateResult;
         use x86_64::structures::paging::*;
-        use x86_64::{VirtAddr, PhysAddr};
+        use x86_64::{PhysAddr, VirtAddr};
         let phys_mem_offset = VirtAddr::new(offset);
         let level_4_table = unsafe { crate::memory::active_level_4_table(phys_mem_offset) };
         let mut mapper = unsafe { OffsetPageTable::new(level_4_table, phys_mem_offset) };
@@ -210,7 +219,7 @@ pub fn init() {
         for pa in [0x7000u64, 0x8000u64] {
             let page = Page::<Size4KiB>::containing_address(VirtAddr::new(pa));
             let tr = mapper.translate(page.start_address());
-            if !matches!(tr, TranslateResult::Mapped{..}) {
+            if !matches!(tr, TranslateResult::Mapped { .. }) {
                 let frame = PhysFrame::containing_address(PhysAddr::new(pa));
                 unsafe {
                     if let Ok(flush) = mapper.map_to(page, frame, flags, &mut frame_allocator) {
@@ -226,7 +235,7 @@ pub fn init() {
     let trampoline_src = unsafe {
         core::slice::from_raw_parts(
             smp_trampoline_start as *const u8,
-            smp_trampoline_end as *const () as usize - smp_trampoline_start as *const () as usize
+            smp_trampoline_end as *const () as usize - smp_trampoline_start as *const () as usize,
         )
     };
     let trampoline_dest = unsafe {
@@ -252,12 +261,11 @@ pub fn init() {
 
     for &ap_id in ap_ids {
         crate::serial_write(&alloc::format!("[SMP] booting AP {}\n", ap_id));
-        let stack = crate::memory::stack::alloc_stack(8)
-            .expect("Failed to allocate AP stack");
-        
+        let stack = crate::memory::stack::alloc_stack(8).expect("Failed to allocate AP stack");
+
         unsafe {
-             let data_ptr = (offset + DATA_PHYS) as *mut u64;
-             *data_ptr.add(2) = stack.top;
+            let data_ptr = (offset + DATA_PHYS) as *mut u64;
+            *data_ptr.add(2) = stack.top;
         }
 
         let mut booted = false;
@@ -273,7 +281,9 @@ pub fn init() {
                 }
                 crate::serial_write("[SMP] INIT delivered, spin 10ms\n");
                 // Wait 10ms (spinloop approximation)
-                for _ in 0..10_000_000 { core::hint::spin_loop(); }
+                for _ in 0..10_000_000 {
+                    core::hint::spin_loop();
+                }
                 crate::serial_write("[SMP] 10ms wait done\n");
             }
 
@@ -286,19 +296,32 @@ pub fn init() {
                     crate::serial_write("[SMP] SIPI IPI delivery stalled\n");
                 }
                 // Short delay between SIPIs (~200us)
-                for _ in 0..200_000 { core::hint::spin_loop(); }
+                for _ in 0..200_000 {
+                    core::hint::spin_loop();
+                }
             }
             crate::serial_write("[SMP] SIPI sent, waiting ap_count\n");
 
             // Wait with timeout
             let mut timeout = 0u64;
-            while unsafe { (*core::ptr::addr_of!(BOOT_DATA)).ap_count.load(Ordering::SeqCst) } == 0 && timeout < 50_000_000 {
+            while unsafe {
+                (*core::ptr::addr_of!(BOOT_DATA))
+                    .ap_count
+                    .load(Ordering::SeqCst)
+            } == 0
+                && timeout < 50_000_000
+            {
                 timeout += 1;
                 core::hint::spin_loop();
             }
             crate::serial_write("[SMP] ap_count wait done\n");
 
-            if unsafe { (*core::ptr::addr_of!(BOOT_DATA)).ap_count.load(Ordering::SeqCst) } > 0 {
+            if unsafe {
+                (*core::ptr::addr_of!(BOOT_DATA))
+                    .ap_count
+                    .load(Ordering::SeqCst)
+            } > 0
+            {
                 booted = true;
                 break;
             }
@@ -307,23 +330,34 @@ pub fn init() {
 
         if booted {
             println!("SMP: CPU ID {} booted successfully", ap_id);
-            unsafe { (*core::ptr::addr_of!(BOOT_DATA)).ap_count.store(0, Ordering::SeqCst); }
+            unsafe {
+                (*core::ptr::addr_of!(BOOT_DATA))
+                    .ap_count
+                    .store(0, Ordering::SeqCst);
+            }
         } else {
-            println!("SMP: WARNING: CPU ID {} failed to boot after 3 attempts", ap_id);
+            println!(
+                "SMP: WARNING: CPU ID {} failed to boot after 3 attempts",
+                ap_id
+            );
         }
     }
 
     let total = 1 + ap_ids.len();
     let booted_count = ap_ids.len(); // If we got here, all APs in the loop booted or we would have continued
-    println!("SMP: {} cores initialized (1 BSP + {} AP)", total, booted_count);
+    println!(
+        "SMP: {} cores initialized (1 BSP + {} AP)",
+        total, booted_count
+    );
 }
-
 
 #[no_mangle]
 pub extern "C" fn ap_kernel_entry() -> ! {
     crate::serial_write("[AP] ap_kernel_entry\n");
     unsafe {
-        (*core::ptr::addr_of!(BOOT_DATA)).ap_count.fetch_add(1, Ordering::SeqCst);
+        (*core::ptr::addr_of!(BOOT_DATA))
+            .ap_count
+            .fetch_add(1, Ordering::SeqCst);
     }
     crate::serial_write("[AP] count incremented\n");
 
@@ -343,7 +377,9 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     // We do NOT call syscalls::init() because it also sets GS base to CPU 0.
     unsafe {
         use x86_64::registers::model_specific::Efer;
-        Efer::update(|efer| efer.insert(x86_64::registers::model_specific::EferFlags::SYSTEM_CALL_EXTENSIONS));
+        Efer::update(|efer| {
+            efer.insert(x86_64::registers::model_specific::EferFlags::SYSTEM_CALL_EXTENSIONS)
+        });
     }
 
     // STAR/LSTAR/SFMask are per-CPU MSRs that reset to 0; set them on this AP
@@ -353,13 +389,13 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     // Each AP needs its own GDT and IDT
     crate::gdt::init_ap();
     crate::interrupts::init_ap();
-    
+
     // Initialize Local APIC for this core
     crate::apic::lapic::init();
-    
+
     // Enable interrupts
     x86_64::instructions::interrupts::enable();
-    
+
     // This core is now ready to be scheduled.
     crate::println!("SMP: CPU {} entering scheduler", cpu_id);
     crate::task::scheduler::schedule();
@@ -376,7 +412,6 @@ pub fn get_cpu_id() -> usize {
 
 /// Calls a function on a specific CPU core via IPI.
 /// `func` must be a pointer to an `extern "C" fn(u64)`.
-#[allow(dead_code)]
 pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
     // CFI: validate function pointer before dispatching via IPI
     if !crate::sync::cfi::cfi_check(func as *const () as usize) {
@@ -389,8 +424,12 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
         let raw = ptr.0;
         if !raw.is_null() {
             unsafe {
-                (*raw).ipi_kind.store(3, core::sync::atomic::Ordering::Release); // Func
-                (*raw).ipi_arg.store(func as u64, core::sync::atomic::Ordering::Release);
+                (*raw)
+                    .ipi_kind
+                    .store(3, core::sync::atomic::Ordering::Release); // Func
+                (*raw)
+                    .ipi_arg
+                    .store(func as u64, core::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -403,7 +442,6 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
 }
 
 /// Broadcasts a function call to all CPU cores except self.
-#[allow(dead_code)]
 pub fn smp_broadcast(func: extern "C" fn(u64), _arg: u64) {
     // CFI: validate function pointer before broadcasting
     if !crate::sync::cfi::cfi_check(func as *const () as usize) {
@@ -415,8 +453,12 @@ pub fn smp_broadcast(func: extern "C" fn(u64), _arg: u64) {
         let raw = ptr.0;
         if !raw.is_null() {
             unsafe {
-                (*raw).ipi_kind.store(3, core::sync::atomic::Ordering::Release); // Func
-                (*raw).ipi_arg.store(func as u64, core::sync::atomic::Ordering::Release);
+                (*raw)
+                    .ipi_kind
+                    .store(3, core::sync::atomic::Ordering::Release); // Func
+                (*raw)
+                    .ipi_arg
+                    .store(func as u64, core::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -427,7 +469,10 @@ pub fn smp_broadcast(func: extern "C" fn(u64), _arg: u64) {
         if cpu_id != current_cpu {
             crate::apic::send_ipi(cpu_id, 251, 0);
             if !crate::apic::wait_for_ipi() {
-                crate::serial_write(&alloc::format!("[SMP] broadcast IPI to CPU {} stalled\n", cpu_id));
+                crate::serial_write(&alloc::format!(
+                    "[SMP] broadcast IPI to CPU {} stalled\n",
+                    cpu_id
+                ));
             }
         }
     }
@@ -440,12 +485,18 @@ pub fn smp_broadcast_func(kind: u64, arg: u64) {
     let current = get_cpu_id();
     let areas = crate::syscalls::PER_CPU_AREAS.lock();
     for (cpu_id, ptr) in areas.iter().enumerate() {
-        if cpu_id == current as usize { continue; }
+        if cpu_id == current as usize {
+            continue;
+        }
         let raw = ptr.0;
         if !raw.is_null() {
             unsafe {
-                (*raw).ipi_kind.store(kind, core::sync::atomic::Ordering::Release);
-                (*raw).ipi_arg.store(arg, core::sync::atomic::Ordering::Release);
+                (*raw)
+                    .ipi_kind
+                    .store(kind, core::sync::atomic::Ordering::Release);
+                (*raw)
+                    .ipi_arg
+                    .store(arg, core::sync::atomic::Ordering::Release);
             }
         }
     }

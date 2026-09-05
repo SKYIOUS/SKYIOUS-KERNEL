@@ -7,7 +7,6 @@
 //
 // Uses the `aml` crate to parse AML bytecode and extract _PRT packages.
 
-
 /// PCI INTx routing entry extracted from _PRT.
 #[derive(Debug, Clone, Copy)]
 pub struct PrtEntry {
@@ -56,5 +55,3 @@ pub fn lookup(bus: u8, device: u8, pin: u8) -> Option<PrtEntry> {
         level_triggered: false,
     })
 }
-
-

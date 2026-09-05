@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Stride scheduling correctness proofs.
 //!
 //! # Stride scheduling model
@@ -78,17 +76,46 @@ pub enum SchedViolation {
 impl core::fmt::Display for SchedViolation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            SchedViolation::PassSumMismatch { expected, actual, detail } => {
-                write!(f, "PassSumMismatch: expected={expected} actual={actual} {detail}")
+            SchedViolation::PassSumMismatch {
+                expected,
+                actual,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "PassSumMismatch: expected={expected} actual={actual} {detail}"
+                )
             }
-            SchedViolation::SelectedNotMinPass { selected_pass, min_pass, detail } => {
-                write!(f, "SelectedNotMinPass: selected={selected_pass} min={min_pass} {detail}")
+            SchedViolation::SelectedNotMinPass {
+                selected_pass,
+                min_pass,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "SelectedNotMinPass: selected={selected_pass} min={min_pass} {detail}"
+                )
             }
-            SchedViolation::StretchViolation { max_pass, min_pass, limit, detail } => {
-                write!(f, "StretchViolation: max={max_pass} min={min_pass} limit={limit} {detail}")
+            SchedViolation::StretchViolation {
+                max_pass,
+                min_pass,
+                limit,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "StretchViolation: max={max_pass} min={min_pass} limit={limit} {detail}"
+                )
             }
-            SchedViolation::StarvationRisk { thread_pass, min_pass, gap } => {
-                write!(f, "StarvationRisk: pass={thread_pass} min={min_pass} gap={gap}")
+            SchedViolation::StarvationRisk {
+                thread_pass,
+                min_pass,
+                gap,
+            } => {
+                write!(
+                    f,
+                    "StarvationRisk: pass={thread_pass} min={min_pass} gap={gap}"
+                )
             }
             SchedViolation::NegativeTickets { tickets } => {
                 write!(f, "NegativeTickets: tickets={tickets}")
@@ -123,7 +150,10 @@ pub fn check_schedule_correctness(snap: &SchedSnapshot<'_>) -> Result<(), SchedV
             min_pass,
             detail: alloc::format!(
                 "selected thread {} has pass {} > min {} among {} ready threads",
-                snap.selected_idx, selected_pass, min_pass, threads.len()
+                snap.selected_idx,
+                selected_pass,
+                min_pass,
+                threads.len()
             ),
         });
     }
@@ -145,7 +175,10 @@ pub fn check_schedule_correctness(snap: &SchedSnapshot<'_>) -> Result<(), SchedV
     }
 
     // --- INVARIANT 1: pass sum bounded ---
-    let total_pass: u64 = threads.iter().map(|t| t.pass).fold(0u64, core::ops::Add::add);
+    let total_pass: u64 = threads
+        .iter()
+        .map(|t| t.pass)
+        .fold(0u64, core::ops::Add::add);
     let max_possible = snap.elapsed_ticks.saturating_mul(STRIDE_MAX);
     if total_pass > max_possible.saturating_mul(2) {
         // Multiply by 2 for slack (initial passes may be skewed)

@@ -1,11 +1,13 @@
 //! Boot state machine types and transition validation.
 
+pub mod init;
 pub mod logger;
 pub mod state;
+pub mod tasks;
 
+use crate::sync::IrqSafeMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::IrqSafeMutex as Mutex;
 
 static BOOT_TRACE: Mutex<Option<Vec<BootEvent>>> = Mutex::new(None);
 static BOOT_INIT_PATHS: Mutex<Option<Vec<String>>> = Mutex::new(None);

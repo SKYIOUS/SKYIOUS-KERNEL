@@ -1,6 +1,7 @@
 # ADR-018: SkyFS Journaling
 
 ## Status
+Accepted
 
 **Proposed** — No team decision required; straightforward durability feature.
 

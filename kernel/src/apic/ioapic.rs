@@ -3,8 +3,8 @@
 //! This module provides an interface for interacting with the I/O APIC,
 //! which is responsible for routing hardware interrupts to Local APICs.
 
-use volatile::Volatile;
 use crate::memory;
+use volatile::Volatile;
 
 /// I/O APIC MMIO register offsets (relative to the I/O APIC base).
 const IOREGSEL: u32 = 0x00;
@@ -12,13 +12,11 @@ const IOREGSEL: u32 = 0x00;
 const IOWIN: u32 = 0x10;
 
 /// I/O APIC Identification Register (bits 31:24 = APIC ID).
-#[allow(dead_code)]
 const IOAPICID: u32 = 0x00;
 /// I/O APIC Version Register — bits 23:16 of the high double-word give the
 /// maximum redirection-table entry index.
 const IOAPICVER: u32 = 0x01;
 /// I/O APIC Arbitration ID Register.
-#[allow(dead_code)]
 const IOAPICARB: u32 = 0x02;
 /// Redirection Table Base Offset. Each entry occupies two consecutive
 /// double-words (low word, then high word).
@@ -138,7 +136,9 @@ impl IoApic {
         #[cfg(debug_assertions)]
         crate::serial_write(&alloc::format!(
             "[IOAPIC] set_redir idx={} vec={} dest={}\n",
-            index, vector, dest_lapic_id
+            index,
+            vector,
+            dest_lapic_id
         ));
 
         self.write(low_reg, low);
@@ -149,7 +149,10 @@ impl IoApic {
             let (rlow, rhigh) = self.read_redirection_entry(index);
             crate::serial_write(&alloc::format!(
                 "[IOAPIC] readback idx={} low=0x{:08x} high=0x{:08x} expected_low=0x{:08x}\n",
-                index, rlow, rhigh, low
+                index,
+                rlow,
+                rhigh,
+                low
             ));
             crate::serial_write("[IOAPIC] done\n");
         }
@@ -157,4 +160,3 @@ impl IoApic {
         crate::apic::errata::apply_ioapic_workarounds(self, index);
     }
 }
-

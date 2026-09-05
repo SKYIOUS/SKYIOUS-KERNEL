@@ -57,23 +57,32 @@ pub fn reboot(out: &mut dyn FnMut(&str)) {
     out("Rebooting system...\n");
     use x86_64::instructions::port::Port;
     let mut port = Port::new(0x64);
-    unsafe { port.write(0xfeu8); }
+    unsafe {
+        port.write(0xfeu8);
+    }
 }
 
 pub fn poweroff(out: &mut dyn FnMut(&str)) {
     out("Shutting down...\n");
     use x86_64::instructions::port::Port;
     let mut port = Port::<u32>::new(0xf4); // isa-debug-exit
-    unsafe { port.write(0x10); }
+    unsafe {
+        port.write(0x10);
+    }
     out("It is now safe to turn off your computer.\n");
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 pub fn neofetch(out: &mut dyn FnMut(&str)) {
     out("   .---.    User: root@vahi\n");
     out("  /     \\   Host: QEMU\n");
     out("  |  |  |   Kernel: Vahi v0.3.0\n");
-    out(&format!("  \\     /   Uptime: {}s\n", crate::interrupts::get_ticks() / 100));
+    out(&format!(
+        "  \\     /   Uptime: {}s\n",
+        crate::interrupts::get_ticks() / 100
+    ));
     out("   '---'    Shell: SkyOS Terminal\n");
 }
 
@@ -96,7 +105,15 @@ pub fn exec(filename: &str, out: &mut dyn FnMut(&str)) {
     let argv: [*const u8; 2] = [path_c.as_ptr(), core::ptr::null()];
 
     out(&format!("[SHELL] Executing {}...\n", filename));
-    crate::syscalls::syscall_handler(59, path_c.as_ptr() as u64, argv.as_ptr() as u64, 0, 0, 0, core::ptr::null_mut());
+    crate::syscalls::syscall_handler(
+        59,
+        path_c.as_ptr() as u64,
+        argv.as_ptr() as u64,
+        0,
+        0,
+        0,
+        core::ptr::null_mut(),
+    );
 }
 
 pub fn echo(args: &[&str], out: &mut dyn FnMut(&str)) {
@@ -119,13 +136,15 @@ pub fn date(out: &mut dyn FnMut(&str)) {
     let mut y = 1970u64;
     let mut d = days;
     loop {
-        let leap = (y % 400 == 0) || (y % 4 == 0 && y % 100 != 0);
+        let leap = y.is_multiple_of(400) || (y.is_multiple_of(4) && !y.is_multiple_of(100));
         let diy = if leap { 366 } else { 365 };
-        if d < diy { break; }
+        if d < diy {
+            break;
+        }
         d -= diy;
         y += 1;
     }
-    let leap = (y % 400 == 0) || (y % 4 == 0 && y % 100 != 0);
+    let leap = y.is_multiple_of(400) || (y.is_multiple_of(4) && !y.is_multiple_of(100));
     let mdays: [u64; 12] = if leap {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
@@ -133,12 +152,17 @@ pub fn date(out: &mut dyn FnMut(&str)) {
     };
     let mut mo = 1u64;
     for &md in mdays.iter() {
-        if d < md { break; }
+        if d < md {
+            break;
+        }
         d -= md;
         mo += 1;
     }
     let day = d + 1;
-    out(&format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}\n", y, mo, day, h, m, sec));
+    out(&format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}\n",
+        y, mo, day, h, m, sec
+    ));
 }
 
 pub fn whoami(out: &mut dyn FnMut(&str)) {
@@ -156,7 +180,12 @@ pub fn ps(out: &mut dyn FnMut(&str)) {
 }
 
 pub fn mem(out: &mut dyn FnMut(&str)) {
-    let free_pages = crate::memory::buddy::BUDDY_ALLOCATOR.lock().count_free_pages();
+    let free_pages = crate::memory::buddy::BUDDY_ALLOCATOR
+        .lock()
+        .count_free_pages();
     let free_kb = (free_pages * 4) as u64;
-    out(&format!("Free memory: ~{} KB ({} pages)\n", free_kb, free_pages));
+    out(&format!(
+        "Free memory: ~{} KB ({} pages)\n",
+        free_kb, free_pages
+    ));
 }

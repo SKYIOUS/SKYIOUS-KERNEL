@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, dead_code, unused_doc_comments)]
+#![allow(unused_imports)]
 //! VM management syscalls: create, destroy, start, stop, resume,
 //! load_kernel, get_info, set_memory, inject_irq.
 //! Extracted from misc.rs to keep each module focused.
@@ -16,7 +16,11 @@ pub fn sys_vm_create(name_ptr: *const u8, mem_mb: u64) -> u64 {
     let name_end = name_buf.iter().position(|&b| b == 0).unwrap_or(64);
     let name = core::str::from_utf8(&name_buf[..name_end]).unwrap_or("guest");
     let mem_size = (mem_mb as usize) * 1024 * 1024;
-    match crate::hypervisor::create_guest(name, crate::hypervisor::OsType::BareMetal { entry: 0 }, mem_size) {
+    match crate::hypervisor::create_guest(
+        name,
+        crate::hypervisor::OsType::BareMetal { entry: 0 },
+        mem_size,
+    ) {
         Some(id) => id,
         None => errno::Errno::ENOMEM as u64,
     }
@@ -27,7 +31,11 @@ pub fn sys_vm_destroy(guest_id: u64) -> u64 {
     if !crate::hypervisor::HYPERVISOR_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
         return errno::Errno::ENODEV as u64;
     }
-    if crate::hypervisor::destroy_guest(guest_id) { 0 } else { errno::Errno::ENOENT as u64 }
+    if crate::hypervisor::destroy_guest(guest_id) {
+        0
+    } else {
+        errno::Errno::ENOENT as u64
+    }
 }
 
 #[cfg(feature = "hypervisor")]
@@ -38,7 +46,10 @@ pub fn sys_vm_start(guest_id: u64) -> u64 {
         None => return errno::Errno::ENODEV as u64,
     };
     match hv.guests.get_mut(&guest_id) {
-        Some(guest) => { guest.state = crate::hypervisor::VmState::Running; 0 }
+        Some(guest) => {
+            guest.state = crate::hypervisor::VmState::Running;
+            0
+        }
         None => errno::Errno::ENOENT as u64,
     }
 }
@@ -89,7 +100,9 @@ pub fn sys_vm_load_kernel(_guest_id: u64, path_ptr: *const u8) -> u64 {
     if unsafe { user_access::copy_from_user(&mut path_buf, path_ptr).is_err() } {
         return errno::Errno::EFAULT as u64;
     }
-    let _path = core::str::from_utf8(&path_buf[..]).unwrap_or("").trim_end_matches(char::from(0));
+    let _path = core::str::from_utf8(&path_buf[..])
+        .unwrap_or("")
+        .trim_end_matches(char::from(0));
     errno::Errno::ENOSYS as u64
 }
 
@@ -105,7 +118,10 @@ pub fn sys_vm_get_info(guest_id: u64, buf: *mut u8, len: usize) -> u64 {
         Some(g) => g,
         None => return errno::Errno::ENOENT as u64,
     };
-    let info = alloc::format!("{} {} {}", guest.name, guest.vcpus.len(),
+    let info = alloc::format!(
+        "{} {} {}",
+        guest.name,
+        guest.vcpus.len(),
         match guest.state {
             crate::hypervisor::VmState::Created => "created",
             crate::hypervisor::VmState::Running => "running",
@@ -140,7 +156,11 @@ pub fn sys_vm_inject_irq(guest_id: u64, vector: u8) -> u64 {
         Some(guest) => {
             if let Some(vcpu) = guest.vcpus.first_mut() {
                 let vcpu_ref: &mut crate::hypervisor::vcpu::Vcpu = vcpu;
-                if vcpu_ref.inject_interrupt(vector) { 0 } else { errno::Errno::EIO as u64 }
+                if vcpu_ref.inject_interrupt(vector) {
+                    0
+                } else {
+                    errno::Errno::EIO as u64
+                }
             } else {
                 errno::Errno::ENOENT as u64
             }
@@ -148,4 +168,3 @@ pub fn sys_vm_inject_irq(guest_id: u64, vector: u8) -> u64 {
         None => errno::Errno::ENOENT as u64,
     }
 }
-

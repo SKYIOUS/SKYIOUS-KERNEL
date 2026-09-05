@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Formal verification infrastructure for critical kernel paths.
 //!
 //! # Architecture
@@ -28,13 +26,13 @@
 //! | Locks          | Ordering, deadlock prevention      | Documented       |
 
 #[cfg(feature = "verification")]
-pub mod scheduler;
+pub mod concurrency;
 #[cfg(feature = "verification")]
 pub mod journal;
 #[cfg(feature = "verification")]
-pub mod concurrency;
-#[cfg(feature = "verification")]
 pub mod runner;
+#[cfg(feature = "verification")]
+pub mod scheduler;
 
 /// Runtime-checked invariant trait (refinement-type analogue).
 ///

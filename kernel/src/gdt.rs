@@ -1,14 +1,15 @@
-use x86_64::VirtAddr;
-use x86_64::structures::tss::TaskStateSegment;
-use x86_64::structures::gdt::{GlobalDescriptorTable, Descriptor, SegmentSelector};
-use lazy_static::lazy_static;
 use alloc::boxed::Box;
 use core::sync::atomic::Ordering;
+use lazy_static::lazy_static;
+use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
+use x86_64::structures::tss::TaskStateSegment;
+use x86_64::VirtAddr;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 lazy_static! {
-    static ref TSS: crate::sync::IrqSafeMutex<TaskStateSegment> = crate::sync::IrqSafeMutex::new(TaskStateSegment::new());
+    static ref TSS: crate::sync::IrqSafeMutex<TaskStateSegment> =
+        crate::sync::IrqSafeMutex::new(TaskStateSegment::new());
 }
 
 pub fn init_tss() {
@@ -30,8 +31,8 @@ lazy_static! {
         let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
         let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
         // We will add TSS entry later after initialization
-        (gdt, Selectors { 
-            code_selector, 
+        (gdt, Selectors {
+            code_selector,
             data_selector,
             user_code_selector,
             user_data_selector,
@@ -52,7 +53,11 @@ pub struct Selectors {
 static mut SELECTORS: Option<Selectors> = None;
 
 pub fn get_selectors() -> &'static Selectors {
-    unsafe { (*core::ptr::addr_of!(SELECTORS)).as_ref().expect("GDT not initialized") }
+    unsafe {
+        (*core::ptr::addr_of!(SELECTORS))
+            .as_ref()
+            .expect("GDT not initialized")
+    }
 }
 
 /// Boot-time boot/p_stack top, used only as the initial per-CPU kernel_rsp
@@ -85,8 +90,8 @@ pub fn set_privilege_stack(top: u64) {
 }
 
 pub fn init() {
+    use x86_64::instructions::segmentation::{Segment, CS, DS, SS};
     use x86_64::instructions::tables::load_tss;
-    use x86_64::instructions::segmentation::{CS, DS, SS, Segment};
 
     // 1. Initialize TSS stacks with guard pages
     init_tss();
@@ -95,23 +100,25 @@ pub fn init() {
     // Leak a reference to the global TSS for the BSP GDT entry
     let tss_ptr = Box::leak(Box::new(TSS.lock().clone()));
     unsafe { LOADED_TSS[0] = tss_ptr as *mut TaskStateSegment };
-    
+
     let mut gdt = GDT.0.clone();
     let tss_selector = gdt.add_entry(Descriptor::tss_segment(tss_ptr));
-    
+
     let mut selectors = GDT.1.clone();
     selectors.tss_selector = tss_selector;
     unsafe { *core::ptr::addr_of_mut!(SELECTORS) = Some(selectors) };
 
     let gdt_static = Box::leak(Box::new(gdt));
     gdt_static.load();
-    
+
     unsafe {
         // Store user CS/SS for fork_child_return assembly to read
         // Written once before APs start, read-only afterwards (Relaxed ordering ok)
-        crate::task::thread::FORK_CHILD_CS.store(selectors.user_code_selector.0 as u64 | 3, Ordering::Relaxed);
-        crate::task::thread::FORK_CHILD_SS.store(selectors.user_data_selector.0 as u64 | 3, Ordering::Relaxed);
-        
+        crate::task::thread::FORK_CHILD_CS
+            .store(selectors.user_code_selector.0 as u64 | 3, Ordering::Relaxed);
+        crate::task::thread::FORK_CHILD_SS
+            .store(selectors.user_data_selector.0 as u64 | 3, Ordering::Relaxed);
+
         CS::set_reg(selectors.code_selector);
         load_tss(tss_selector);
         DS::set_reg(selectors.data_selector);
@@ -120,17 +127,18 @@ pub fn init() {
 }
 
 pub fn init_ap() {
-    use x86_64::instructions::tables::load_tss;
-    use x86_64::instructions::segmentation::{CS, DS, SS, Segment};
     use alloc::boxed::Box;
+    use x86_64::instructions::segmentation::{Segment, CS, DS, SS};
+    use x86_64::instructions::tables::load_tss;
 
     // Create a per-CPU TSS
     let mut tss = Box::new(TaskStateSegment::new());
-    
+
     let df_stack = crate::memory::stack::alloc_stack(5).expect("Failed to allocate AP DF stack");
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(df_stack.top);
 
-    let p_stack = crate::memory::stack::alloc_stack(5).expect("Failed to allocate AP Privilege stack");
+    let p_stack =
+        crate::memory::stack::alloc_stack(5).expect("Failed to allocate AP Privilege stack");
     tss.privilege_stack_table[0] = VirtAddr::new(p_stack.top);
 
     let tss_ref = Box::leak(tss);
@@ -149,11 +157,11 @@ pub fn init_ap() {
 
     // Load GDT and segments
     unsafe {
-        // We use Box::leak to ensure GDT stays valid. 
+        // We use Box::leak to ensure GDT stays valid.
         // In a real OS we'd track this in a PerCpu structure.
         let gdt_ref = Box::leak(Box::new(gdt));
         gdt_ref.load();
-        
+
         CS::set_reg(code_selector);
         load_tss(tss_selector);
         DS::set_reg(data_selector);

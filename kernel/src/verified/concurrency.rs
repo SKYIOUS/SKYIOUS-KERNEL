@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Lock correctness proofs.
 //!
 //! # Locking model
@@ -29,8 +27,8 @@
 //!    scheduling point in interrupt context (checked by the caller
 //!    discipline: `try_lock` in timer/IRQ handlers).
 
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Opaque lock identifier for ordering analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -92,7 +90,11 @@ impl core::fmt::Display for LockViolation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             LockViolation::DeadlockDetected { cycle, detail } => {
-                write!(f, "DeadlockDetected: cycle of {} locks: {detail}", cycle.len())
+                write!(
+                    f,
+                    "DeadlockDetected: cycle of {} locks: {detail}",
+                    cycle.len()
+                )
             }
             LockViolation::NoMutualExclusion { lock, holders } => {
                 write!(f, "NoMutualExclusion: lock {lock:?} held by {holders:?}")
@@ -148,7 +150,11 @@ impl LockOrderVerifier {
     /// while holding `from` creates this edge.
     pub fn record_ordering(&mut self, from: LockId, to: LockId, thread: ThreadId) {
         // Skip if already recorded
-        if self.edges.iter().any(|e| e.from == from && e.to == to && e.thread == thread) {
+        if self
+            .edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.thread == thread)
+        {
             return;
         }
         self.edges.push(LockEdge { from, to, thread });
@@ -160,11 +166,8 @@ impl LockOrderVerifier {
     /// locks in conflicting orders.
     pub fn detect_cycle(&self) -> Option<LockViolation> {
         // Build adjacency list (all threads combined)
-        let mut adj: Vec<(LockId, Vec<LockId>)> = self
-            .locks
-            .iter()
-            .map(|n| (n.id, Vec::new()))
-            .collect();
+        let mut adj: Vec<(LockId, Vec<LockId>)> =
+            self.locks.iter().map(|n| (n.id, Vec::new())).collect();
 
         for edge in &self.edges {
             if let Some((_, targets)) = adj.iter_mut().find(|(id, _)| *id == edge.from) {
@@ -210,7 +213,11 @@ impl LockOrderVerifier {
                 if let Some(cycle) = dfs(*id, &adj, &mut visited, &mut stack) {
                     let detail = alloc::format!(
                         "Lock cycle: {}",
-                        cycle.iter().map(|c| alloc::format!("{c:?}")).collect::<Vec<_>>().join(" ──► ")
+                        cycle
+                            .iter()
+                            .map(|c| alloc::format!("{c:?}"))
+                            .collect::<Vec<_>>()
+                            .join(" ──► ")
                     );
                     return Some(LockViolation::DeadlockDetected { cycle, detail });
                 }
@@ -277,7 +284,7 @@ impl LockOrderVerifier {
         }
         for reason in block_reason {
             match reason {
-                BlockReason::HeldByOther(_) => {}  // will be woken when holder drops
+                BlockReason::HeldByOther(_) => {} // will be woken when holder drops
                 BlockReason::Contended => { /* spinlock: loop until acquire */ }
                 BlockReason::OrderViolation => {
                     return false; // ordering violation = no guarantee

@@ -30,7 +30,9 @@ pub trait Arch: Send + Sync {
 
     /// Halt the CPU indefinitely (panic or shutdown).
     fn halt_loop() -> ! {
-        loop { Self::halt(); }
+        loop {
+            Self::halt();
+        }
     }
 
     /// Jump to userspace at the given entry point and stack pointer.

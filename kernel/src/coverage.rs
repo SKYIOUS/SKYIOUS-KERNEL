@@ -1,24 +1,19 @@
 //! Coverage bitmap for coverage-guided fuzzing.
 //!
-//! Maintains a 64 KiB coverage bitmap at a fixed physical address.
+//! Maintains a 64 KiB coverage bitmap for tracking basic block coverage.
 //! Each basic block maps to a byte in the bitmap via hash; toggling
-//! a bit indicates new coverage. QEMU dumps this region after execution
-//! for the fuzzer to analyze.
+//! a bit indicates new coverage.
 //!
 //! Design: same coverage bitmap layout as AFL/libFuzzer (64 KiB, XOR-based).
 
 use core::sync::atomic::AtomicBool;
-
-/// Physical address where the coverage bitmap lives.
-/// Chosen to be above 4 GiB, in QEMU's address space.
-pub const COVERAGE_BITMAP_PHYS: u64 = 0x0000_0004_0000_0000;
 
 /// Size of the coverage bitmap in bytes (64 KiB — matches AFL).
 pub const COVERAGE_BITMAP_SIZE: usize = 64 * 1024;
 
 /// Coverage bitmap: XOR-folded hash of basic block addresses.
 pub struct CoverageBitmap {
-    bitmap: *mut u8,
+    bitmap: alloc::boxed::Box<[u8; COVERAGE_BITMAP_SIZE]>,
     unique_blocks: usize,
     total_hits: usize,
     initialized: AtomicBool,
@@ -30,14 +25,9 @@ unsafe impl Send for CoverageBitmap {}
 unsafe impl Sync for CoverageBitmap {}
 
 impl CoverageBitmap {
-    /// Create a new coverage bitmap backed by the fixed physical address.
-    ///
-    /// # Safety
-    /// The physical address must be mapped in the current address space.
-    pub unsafe fn new() -> Self {
-        let virt = crate::memory::physical_memory_offset() + COVERAGE_BITMAP_PHYS;
-        let bitmap = virt as *mut u8;
-        core::ptr::write_bytes(bitmap, 0, COVERAGE_BITMAP_SIZE);
+    /// Create a new coverage bitmap (heap-allocated).
+    pub fn new() -> Self {
+        let bitmap = alloc::boxed::Box::new([0u8; COVERAGE_BITMAP_SIZE]);
         CoverageBitmap {
             bitmap,
             unique_blocks: 0,
@@ -52,16 +42,13 @@ impl CoverageBitmap {
         let folded = ((block_addr >> 4) ^ (block_addr >> 16)) as usize;
         let idx = folded & (COVERAGE_BITMAP_SIZE - 1);
 
-        unsafe {
-            let byte = self.bitmap.add(idx);
-            let old = core::ptr::read_volatile(byte);
-            let new = old ^ ((block_addr & 0xF) as u8);
-            core::ptr::write_volatile(byte, new);
+        let byte = &mut self.bitmap[idx];
+        let old = *byte;
+        *byte = old ^ ((block_addr & 0xF) as u8);
 
-            self.total_hits += 1;
-            if old == 0 && new != 0 {
-                self.unique_blocks += 1;
-            }
+        self.total_hits += 1;
+        if old == 0 && *byte != 0 {
+            self.unique_blocks += 1;
         }
     }
 
@@ -78,15 +65,11 @@ impl CoverageBitmap {
     }
 
     pub fn snapshot(&self, buf: &mut [u8; COVERAGE_BITMAP_SIZE]) {
-        unsafe {
-            core::ptr::copy_nonoverlapping(self.bitmap, buf.as_mut_ptr(), COVERAGE_BITMAP_SIZE);
-        }
+        buf.copy_from_slice(self.bitmap.as_slice());
     }
 
     pub fn reset(&mut self) {
-        unsafe {
-            core::ptr::write_bytes(self.bitmap, 0, COVERAGE_BITMAP_SIZE);
-        }
+        self.bitmap.fill(0);
         self.unique_blocks = 0;
         self.total_hits = 0;
     }
@@ -112,10 +95,9 @@ static COVERAGE: Once<Mutex<CoverageBitmap>> = Once::new();
 /// Initialize the coverage bitmap. Called once during boot.
 pub fn init() {
     COVERAGE.call_once(|| {
-        let cov = unsafe { CoverageBitmap::new() };
+        let cov = CoverageBitmap::new();
         crate::serial_write(&alloc::format!(
-            "[COVERAGE] Bitmap at phys=0x{:x}, {} bytes\n",
-            COVERAGE_BITMAP_PHYS,
+            "[COVERAGE] Bitmap {} bytes (heap-allocated)\n",
             COVERAGE_BITMAP_SIZE,
         ));
         Mutex::new(cov)

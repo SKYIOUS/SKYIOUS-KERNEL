@@ -1,7 +1,7 @@
 use crate::gui::drawing;
-use alloc::vec::Vec;
-use alloc::string::String;
 use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 pub struct TerminalWidget {
     pub width_chars: usize,
@@ -97,19 +97,47 @@ impl TerminalWidget {
         }
     }
 
-    pub fn render(&self, pixel_buffer: &mut [u32], pw: usize, ph: usize, start_x: usize, start_y: usize, _content_w: usize, _content_h: usize) {
+    pub fn render(
+        &self,
+        pixel_buffer: &mut [u32],
+        pw: usize,
+        ph: usize,
+        start_x: usize,
+        start_y: usize,
+        _content_w: usize,
+        _content_h: usize,
+    ) {
         let term_w = self.width_chars * 8;
         let term_h = self.height_chars * 8;
-        drawing::draw_rect(pixel_buffer, pw, ph, start_x, start_y, term_w, term_h, 0xFF0C0C0C);
+        drawing::draw_rect(
+            pixel_buffer,
+            pw,
+            ph,
+            start_x,
+            start_y,
+            term_w,
+            term_h,
+            0xFF0C0C0C,
+        );
 
         if !self.is_monitor {
-            drawing::draw_line_h(pixel_buffer, pw, ph, start_x, start_y + term_h - 1, term_w, 0xFF333333);
+            drawing::draw_line_h(
+                pixel_buffer,
+                pw,
+                ph,
+                start_x,
+                start_y + term_h - 1,
+                term_w,
+                0xFF333333,
+            );
         }
 
         let total_lines = self.buffer.len();
         let scroll_start = if self.scroll_offset > 0 {
             let offset = self.scroll_offset.min(total_lines);
-            total_lines.saturating_sub(offset).saturating_sub(self.height_chars)
+            total_lines
+                .saturating_sub(offset)
+                .saturating_sub(self.height_chars)
         } else {
             0
         };
@@ -123,11 +151,28 @@ impl TerminalWidget {
             } else {
                 continue;
             };
-            drawing::draw_string(pixel_buffer, pw, ph, start_x, start_y + i * 8, line, 0xFFD4D4D4);
+            drawing::draw_string(
+                pixel_buffer,
+                pw,
+                ph,
+                start_x,
+                start_y + i * 8,
+                line,
+                0xFFD4D4D4,
+            );
         }
 
         if self.scroll_offset == 0 && !self.is_monitor {
-            drawing::draw_rect(pixel_buffer, pw, ph, start_x + self.cursor_x * 8, start_y + self.cursor_y * 8, 8, 8, 0xFF007ACC);
+            drawing::draw_rect(
+                pixel_buffer,
+                pw,
+                ph,
+                start_x + self.cursor_x * 8,
+                start_y + self.cursor_y * 8,
+                8,
+                8,
+                0xFF007ACC,
+            );
         }
     }
 
@@ -135,19 +180,26 @@ impl TerminalWidget {
         let total_visible = self.buffer.len().saturating_add(1);
         let max_offset = total_visible.saturating_sub(self.height_chars);
         if delta > 0 {
-            self.scroll_offset = self.scroll_offset.saturating_add(delta as usize).min(max_offset);
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add(delta as usize)
+                .min(max_offset);
         } else {
             self.scroll_offset = self.scroll_offset.saturating_sub((-delta) as usize);
         }
     }
 
     pub fn refresh_monitor(&mut self) {
-        if !self.is_monitor { return; }
+        if !self.is_monitor {
+            return;
+        }
 
         use core::sync::atomic::{AtomicU32, Ordering};
         static FRAME_CNT: AtomicU32 = AtomicU32::new(0);
         FRAME_CNT.fetch_add(1, Ordering::Relaxed);
-        if FRAME_CNT.load(Ordering::Relaxed) % 30 != 0 { return; }
+        if !FRAME_CNT.load(Ordering::Relaxed).is_multiple_of(30) {
+            return;
+        }
 
         self.buffer.clear();
         self.current_line.clear();
@@ -211,7 +263,9 @@ impl TerminalWidget {
     }
 
     fn execute_command(&mut self, command: &str) {
-        if command.is_empty() { return; }
+        if command.is_empty() {
+            return;
+        }
 
         let mut parts = command.split_whitespace();
         let cmd = parts.next().unwrap_or("");

@@ -1,11 +1,12 @@
-#![allow(dead_code)]
-
-use core::{pin::Pin, task::{Context, Poll}};
-use futures_util::stream::Stream;
-use crossbeam_queue::ArrayQueue;
 use crate::println;
-use core::task::Waker;
 use crate::sync::IrqSafeMutex as Mutex;
+use core::task::Waker;
+use core::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+use crossbeam_queue::ArrayQueue;
+use futures_util::stream::Stream;
 use lazy_static::lazy_static;
 
 lazy_static! {

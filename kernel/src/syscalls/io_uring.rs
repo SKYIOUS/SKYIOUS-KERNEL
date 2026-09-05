@@ -4,13 +4,13 @@
 //! CQ ring: kernel writes CQEs at cq.tail, userspace reads at cq.head.
 //! eventfd integration for async completion notification.
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::IrqSafeMutex as Mutex;
 use crate::syscalls::errno::Errno;
 use crate::syscalls::user_access;
-use crate::task::process::{CURRENT_PROCESS, FileDescriptor};
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -91,9 +91,19 @@ impl IoUringInstance {
         let ring_mask = (entries - 1) as u32;
         let cq_entries = entries * 2;
         IoUringInstance {
-            sq_ring: IoRingRing { head: 0, tail: 0, ring_mask, ring_entries: entries },
+            sq_ring: IoRingRing {
+                head: 0,
+                tail: 0,
+                ring_mask,
+                ring_entries: entries,
+            },
             sq_entries: Vec::with_capacity(n),
-            cq_ring: IoRingRing { head: 0, tail: 0, ring_mask: (cq_entries - 1), ring_entries: cq_entries },
+            cq_ring: IoRingRing {
+                head: 0,
+                tail: 0,
+                ring_mask: (cq_entries - 1),
+                ring_entries: cq_entries,
+            },
             cq_entries: Vec::with_capacity(cq_entries as usize),
             fixed_buffers: Vec::new(),
             fixed_files: Vec::new(),
@@ -108,7 +118,9 @@ impl IoUringInstance {
         let tail = self.sq_ring.tail as usize;
         let mut accepted = 0usize;
         for sqe in sqes {
-            if accepted >= ring_cap { break; }
+            if accepted >= ring_cap {
+                break;
+            }
             let idx = (tail + accepted) & mask;
             while self.sq_entries.len() <= idx {
                 self.sq_entries.push(IoSqEntry::default());
@@ -135,7 +147,11 @@ impl IoUringInstance {
             };
             let is_linked = sqe.flags & IOSQE_IO_LINK != 0;
             if is_linked && link_chain_failed {
-                self.push_cqe(IoCqe { user_data: sqe.user_data, res: Errno::ECANCELED as i32, flags: 0 });
+                self.push_cqe(IoCqe {
+                    user_data: sqe.user_data,
+                    res: Errno::ECANCELED as i32,
+                    flags: 0,
+                });
                 pos += 1;
                 continue;
             }
@@ -144,11 +160,17 @@ impl IoUringInstance {
             self.push_cqe(cqe);
             processed += 1;
             pos += 1;
-            if !is_linked { link_chain_failed = false; } else if failed { link_chain_failed = true; }
+            if !is_linked {
+                link_chain_failed = false;
+            } else if failed {
+                link_chain_failed = true;
+            }
         }
         self.sq_ring.head = (head + processed) as u32;
         self.sq_entries.clear();
-        if processed > 0 { self.notify_eventfd(); }
+        if processed > 0 {
+            self.notify_eventfd();
+        }
         processed
     }
 
@@ -164,7 +186,9 @@ impl IoUringInstance {
     fn notify_eventfd(&self) {
         if let Some(ref efd) = self.eventfd {
             let mut d = efd.lock();
-            if d.counter < crate::task::process::EFD_MAX { d.counter += 1; }
+            if d.counter < crate::task::process::EFD_MAX {
+                d.counter += 1;
+            }
             let key = d.key;
             drop(d);
             crate::task::scheduler::wake_pipe(key);
@@ -179,7 +203,9 @@ impl IoUringInstance {
         let mut pos = head;
         while pos != tail && count < buf.len() {
             let idx = pos & mask;
-            if idx < self.cq_entries.len() { buf[count] = self.cq_entries[idx]; }
+            if idx < self.cq_entries.len() {
+                buf[count] = self.cq_entries[idx];
+            }
             count += 1;
             pos += 1;
         }
@@ -202,65 +228,123 @@ pub fn next_io_uring_key() -> u64 {
 fn process_sqe(sqe: &IoSqEntry) -> IoCqe {
     let ud = sqe.user_data;
     match sqe.opcode {
-        IORING_OP_NOP => IoCqe { user_data: ud, res: 0, flags: 0 },
-        IORING_OP_READV => IoCqe { user_data: ud, res: do_readv(sqe.fd, sqe.addr, sqe.len as usize), flags: 0 },
-        IORING_OP_WRITEV => IoCqe { user_data: ud, res: do_writev(sqe.fd, sqe.addr, sqe.len as usize), flags: 0 },
-        IORING_OP_CLOSE => IoCqe { user_data: ud, res: do_close(sqe.fd), flags: 0 },
-        IORING_OP_POLL_ADD => IoCqe { user_data: ud, res: do_poll_add(sqe.fd, sqe.len as u32), flags: 0 },
-        IORING_OP_POLL_REMOVE => IoCqe { user_data: ud, res: 0, flags: 0 },
-        _ => IoCqe { user_data: ud, res: Errno::ENOSYS as i32, flags: 0 },
+        IORING_OP_NOP => IoCqe {
+            user_data: ud,
+            res: 0,
+            flags: 0,
+        },
+        IORING_OP_READV => IoCqe {
+            user_data: ud,
+            res: do_readv(sqe.fd, sqe.addr, sqe.len as usize),
+            flags: 0,
+        },
+        IORING_OP_WRITEV => IoCqe {
+            user_data: ud,
+            res: do_writev(sqe.fd, sqe.addr, sqe.len as usize),
+            flags: 0,
+        },
+        IORING_OP_CLOSE => IoCqe {
+            user_data: ud,
+            res: do_close(sqe.fd),
+            flags: 0,
+        },
+        IORING_OP_POLL_ADD => IoCqe {
+            user_data: ud,
+            res: do_poll_add(sqe.fd, sqe.len as u32),
+            flags: 0,
+        },
+        IORING_OP_POLL_REMOVE => IoCqe {
+            user_data: ud,
+            res: 0,
+            flags: 0,
+        },
+        _ => IoCqe {
+            user_data: ud,
+            res: Errno::ENOSYS as i32,
+            flags: 0,
+        },
     }
 }
 
 // ── Opcode implementations ──────────────────────────────────────────
 
 fn do_readv(fd: i32, addr: u64, len: usize) -> i32 {
-    if len == 0 || addr == 0 { return Errno::EINVAL as i32; }
-    if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
+    if len == 0 || addr == 0 {
+        return Errno::EINVAL as i32;
+    }
+    if !user_access::validate_ptr(addr as *const u8, len) {
+        return Errno::EFAULT as i32;
+    }
     let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) };
     crate::syscalls::fs_io::sys_read(fd as u64, buf.as_mut_ptr(), len) as i32
 }
 
 fn do_writev(fd: i32, addr: u64, len: usize) -> i32 {
-    if len == 0 || addr == 0 { return Errno::EINVAL as i32; }
-    if !user_access::validate_ptr(addr as *const u8, len) { return Errno::EFAULT as i32; }
+    if len == 0 || addr == 0 {
+        return Errno::EINVAL as i32;
+    }
+    if !user_access::validate_ptr(addr as *const u8, len) {
+        return Errno::EFAULT as i32;
+    }
     let buf = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
     crate::syscalls::fs_io::sys_write(fd as u64, buf.as_ptr(), len) as i32
 }
 
 fn do_close(fd: i32) -> i32 {
-    if fd < 0 { return Errno::EBADF as i32; }
+    if fd < 0 {
+        return Errno::EBADF as i32;
+    }
     let ret = crate::syscalls::fs_open::sys_close(fd as u64);
-    if ret == 0 { 0 } else { ret as i32 }
+    if ret == 0 {
+        0
+    } else {
+        ret as i32
+    }
 }
 
 fn do_poll_add(fd: i32, poll_mask: u32) -> i32 {
-    if fd < 0 { return Errno::EBADF as i32; }
+    if fd < 0 {
+        return Errno::EBADF as i32;
+    }
     let proc = match *CURRENT_PROCESS.lock() {
         Some(ref p) => Arc::clone(p),
         None => return Errno::ESRCH as i32,
     };
     let files = proc.files.lock();
-    if (fd as usize) >= files.fd_table.len() { return Errno::EBADF as i32; }
+    if (fd as usize) >= files.fd_table.len() {
+        return Errno::EBADF as i32;
+    }
     let mut revents: u32 = 0;
     match files.fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
-            if poll_mask & 1 != 0 && node.stat().map(|s| s.st_size > 0).unwrap_or(false) { revents |= 1; }
+            if poll_mask & 1 != 0 && node.stat().map(|s| s.st_size > 0).unwrap_or(false) {
+                revents |= 1;
+            }
             revents |= 4;
         }
-        Some(FileDescriptor::Socket(..)) | Some(FileDescriptor::UnixSocket(..)) => { revents |= 4; }
-        Some(_) => { revents |= 1 | 4; }
+        Some(FileDescriptor::Socket(..)) | Some(FileDescriptor::UnixSocket(..)) => {
+            revents |= 4;
+        }
+        Some(_) => {
+            revents |= 1 | 4;
+        }
         None => return Errno::EBADF as i32,
     }
     drop(files);
-    if (revents & poll_mask) != 0 { revents as i32 } else { Errno::EAGAIN as i32 }
+    if (revents & poll_mask) != 0 {
+        revents as i32
+    } else {
+        Errno::EAGAIN as i32
+    }
 }
 
 // ── Syscalls ───────────────────────────────────────────────────────
 
 pub fn sys_io_uring_setup(entries: u64, params_ptr: u64) -> u64 {
     let entries = entries as u32;
-    if entries == 0 || entries > IORING_MAX_ENTRIES { return Errno::EINVAL as u64; }
+    if entries == 0 || entries > IORING_MAX_ENTRIES {
+        return Errno::EINVAL as u64;
+    }
 
     let instance = Arc::new(Mutex::new(IoUringInstance::new(entries)));
     let proc = match *CURRENT_PROCESS.lock() {
@@ -271,41 +355,72 @@ pub fn sys_io_uring_setup(entries: u64, params_ptr: u64) -> u64 {
     let fd_num = {
         let mut found = None;
         for (i, slot) in files.fd_table.iter().enumerate() {
-            if slot.is_none() { found = Some(i); break; }
+            if slot.is_none() {
+                found = Some(i);
+                break;
+            }
         }
         match found {
-            Some(i) => { files.fd_table[i] = Some(FileDescriptor::IoUringFd(instance)); i }
-            None => { files.fd_table.push(Some(FileDescriptor::IoUringFd(instance))); files.fd_table.len() - 1 }
+            Some(i) => {
+                files.fd_table[i] = Some(FileDescriptor::IoUringFd(instance));
+                i
+            }
+            None => {
+                files
+                    .fd_table
+                    .push(Some(FileDescriptor::IoUringFd(instance)));
+                files.fd_table.len() - 1
+            }
         }
     };
 
     if params_ptr != 0 {
         // Write sq_entries + cq_entries back to userspace (first 8 bytes)
         let data = [entries, entries * 2];
-        unsafe { let _ = user_access::copy_to_user(params_ptr as *mut u8, core::slice::from_raw_parts(data.as_ptr() as *const u8, 8)); }
+        unsafe {
+            let _ = user_access::copy_to_user(
+                params_ptr as *mut u8,
+                core::slice::from_raw_parts(data.as_ptr() as *const u8, 8),
+            );
+        }
     }
     fd_num as u64
 }
 
-pub fn sys_io_uring_enter(fd: u64, to_submit: u32, min_complete: u32, flags: u32, _sig_ptr: u64) -> u64 {
+pub fn sys_io_uring_enter(
+    fd: u64,
+    to_submit: u32,
+    min_complete: u32,
+    flags: u32,
+    _sig_ptr: u64,
+) -> u64 {
     let proc = match *CURRENT_PROCESS.lock() {
         Some(ref p) => Arc::clone(p),
         None => return Errno::ESRCH as u64,
     };
     let files = proc.files.lock();
-    if fd as usize >= files.fd_table.len() { return Errno::EBADF as u64; }
+    if fd as usize >= files.fd_table.len() {
+        return Errno::EBADF as u64;
+    }
     let instance_arc = match files.fd_table[fd as usize] {
         Some(FileDescriptor::IoUringFd(ref arc)) => Arc::clone(arc),
         _ => return Errno::EBADF as u64,
     };
     drop(files);
 
-    let mut inst = instance_arc.lock();
-    if to_submit > 0 { inst.process_all(); }
+    let mut guard = instance_arc.lock();
+    let inst = guard
+        .downcast_mut::<IoUringInstance>()
+        .expect("IoUringFd did not contain IoUringInstance");
+    if to_submit > 0 {
+        inst.process_all();
+    }
 
     if min_complete > 0 && (flags & IORING_ENTER_GETEVENTS != 0) {
         for _ in 0..10_000u64 {
-            if inst.peek_cqes() >= min_complete { break; }
+            if inst.peek_cqes() >= min_complete {
+                break;
+            }
             crate::task::scheduler::try_schedule();
         }
     }
@@ -318,41 +433,69 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
         None => return Errno::ESRCH as u64,
     };
     let files = proc.files.lock();
-    if fd as usize >= files.fd_table.len() { return Errno::EBADF as u64; }
+    if fd as usize >= files.fd_table.len() {
+        return Errno::EBADF as u64;
+    }
     let instance_arc = match files.fd_table[fd as usize] {
         Some(FileDescriptor::IoUringFd(ref arc)) => Arc::clone(arc),
         _ => return Errno::EBADF as u64,
     };
     drop(files);
 
-    let mut inst = instance_arc.lock();
+    let mut guard = instance_arc.lock();
+    let inst = guard
+        .downcast_mut::<IoUringInstance>()
+        .expect("IoUringFd did not contain IoUringInstance");
     match opcode {
         IORING_REGISTER_BUFFERS => {
-            if arg == 0 || nr_args == 0 || nr_args > 1024 { return Errno::EINVAL as u64; }
-            #[repr(C)] struct IoVec { addr: u64, len: u64 }
-            let iovecs = unsafe { core::slice::from_raw_parts(arg as *const IoVec, nr_args as usize) };
-            inst.fixed_buffers = iovecs.iter().map(|iov| (iov.addr, iov.len as u32)).collect();
+            if arg == 0 || nr_args == 0 || nr_args > 1024 {
+                return Errno::EINVAL as u64;
+            }
+            #[repr(C)]
+            struct IoVec {
+                addr: u64,
+                len: u64,
+            }
+            let iovecs =
+                unsafe { core::slice::from_raw_parts(arg as *const IoVec, nr_args as usize) };
+            inst.fixed_buffers = iovecs
+                .iter()
+                .map(|iov| (iov.addr, iov.len as u32))
+                .collect();
             0
         }
-        IORING_UNREGISTER_BUFFERS => { inst.fixed_buffers.clear(); 0 }
+        IORING_UNREGISTER_BUFFERS => {
+            inst.fixed_buffers.clear();
+            0
+        }
         IORING_REGISTER_FILES => {
-            if arg == 0 || nr_args == 0 || nr_args > 1024 { return Errno::EINVAL as u64; }
+            if arg == 0 || nr_args == 0 || nr_args > 1024 {
+                return Errno::EINVAL as u64;
+            }
             let fds = unsafe { core::slice::from_raw_parts(arg as *const i32, nr_args as usize) };
             inst.fixed_files = fds.to_vec();
             0
         }
-        IORING_UNREGISTER_FILES => { inst.fixed_files.clear(); 0 }
+        IORING_UNREGISTER_FILES => {
+            inst.fixed_files.clear();
+            0
+        }
         IORING_REGISTER_EVENTFD => {
-            if arg == 0 { return Errno::EINVAL as u64; }
+            if arg == 0 {
+                return Errno::EINVAL as u64;
+            }
             let efd_fd = unsafe { core::ptr::read_volatile(arg as *const i32) };
-            if efd_fd < 0 { return Errno::EINVAL as u64; }
+            if efd_fd < 0 {
+                return Errno::EINVAL as u64;
+            }
             let proc2 = match *CURRENT_PROCESS.lock() {
                 Some(ref p) => Arc::clone(p),
                 None => return Errno::ESRCH as u64,
             };
             let files2 = proc2.files.lock();
             if (efd_fd as usize) < files2.fd_table.len() {
-                if let Some(FileDescriptor::EventFd(ref efd_arc)) = files2.fd_table[efd_fd as usize] {
+                if let Some(FileDescriptor::EventFd(ref efd_arc)) = files2.fd_table[efd_fd as usize]
+                {
                     inst.eventfd = Some(Arc::clone(efd_arc));
                     drop(files2);
                     return 0;
@@ -360,7 +503,10 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
             }
             Errno::EBADF as u64
         }
-        IORING_UNREGISTER_EVENTFD => { inst.eventfd = None; 0 }
+        IORING_UNREGISTER_EVENTFD => {
+            inst.eventfd = None;
+            0
+        }
         _ => Errno::EINVAL as u64,
     }
 }

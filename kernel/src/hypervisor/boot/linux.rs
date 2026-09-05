@@ -3,8 +3,8 @@
 //! Sets up a guest for Linux kernel boot following the Linux/x86 Boot
 //! Protocol. Supports both 32-bit and 64-bit (EFI stub) entry paths.
 
-use crate::hypervisor::memory::GuestMemory;
 use crate::hypervisor::boot::BootConfig;
+use crate::hypervisor::memory::GuestMemory;
 
 /// Load and configure a Linux kernel for boot.
 ///
@@ -20,12 +20,12 @@ pub fn boot_linux(
     initrd: &[u8],
     cmdline: &str,
 ) -> Option<BootConfig> {
-    const KERNEL_LOAD_ADDR: u64 = 0x100_0000;  // 16MB
+    const KERNEL_LOAD_ADDR: u64 = 0x100_0000; // 16MB
     const SETUP_HDR_OFFSET: u64 = 0x1F1;
     const CMDLINE_ADDR: u64 = 0x1_0000;
-    const INITRD_LOAD_ADDR: u64 = 0x20_000_00;  // 32MB
-    const E820_ADDR: u64 = 0x1_4000;             // e820 map
-    const E820_ENTRIES: u64 = 0x1_4E8;           // e820 entry count address
+    const INITRD_LOAD_ADDR: u64 = 0x20_000_00; // 32MB
+    const E820_ADDR: u64 = 0x1_4000; // e820 map
+    const E820_ENTRIES: u64 = 0x1_4E8; // e820 entry count address
 
     // 1. Load kernel at 16MB
     if !memory.load_binary(kernel_data, KERNEL_LOAD_ADDR) {
@@ -55,7 +55,11 @@ pub fn boot_linux(
     let e820_entry_size = 20u64; // e820 entry = 20 bytes
     let num_entries = memory.regions.len().min(128) as u64;
 
-    let region_snapshot: alloc::vec::Vec<_> = memory.regions.iter().map(|r| (r.guest_phys, r.size)).collect();
+    let region_snapshot: alloc::vec::Vec<_> = memory
+        .regions
+        .iter()
+        .map(|r| (r.guest_phys, r.size))
+        .collect();
     for (i, (gphys, size)) in region_snapshot.iter().enumerate().take(128) {
         let entry_addr = E820_ADDR + (i as u64) * e820_entry_size;
         let mut entry_buf = [0u8; 20];
@@ -74,7 +78,7 @@ pub fn boot_linux(
 
         // Write ramdisk info into setup header
         let ramdisk_image_addr = KERNEL_LOAD_ADDR + 0x218u64; // hdr.ramdisk_image
-        let ramdisk_size_addr = KERNEL_LOAD_ADDR + 0x21Cu64;  // hdr.ramdisk_size
+        let ramdisk_size_addr = KERNEL_LOAD_ADDR + 0x21Cu64; // hdr.ramdisk_size
         memory.load_binary(&INITRD_LOAD_ADDR.to_le_bytes(), ramdisk_image_addr);
         memory.load_binary(&(initrd.len() as u64).to_le_bytes(), ramdisk_size_addr);
         INITRD_LOAD_ADDR

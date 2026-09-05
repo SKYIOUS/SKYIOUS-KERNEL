@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! AMD-V (SVM) implementation.
 //!
 //! Provides VMCB management, VMRUN/VMLOAD/VMSAVE wrappers, and NPT
@@ -39,7 +38,8 @@ pub struct Vmcb {
 impl Vmcb {
     pub fn new() -> Option<&'static mut Vmcb> {
         let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()?;
-        let frame = crate::memory::buddy::BUDDY_ALLOCATOR.lock()
+        let frame = crate::memory::buddy::BUDDY_ALLOCATOR
+            .lock()
             .allocate_contiguous(0)?;
         let virt = (frame.as_u64() + offset) as *mut Vmcb;
         // SAFETY: frame is valid and zeroed.
@@ -141,9 +141,10 @@ impl SvmHandler {
         // SAFETY: Write intercept sets to VMCB control area.
         unsafe {
             let vmcb = self.vmcb_phys.as_u64();
-            core::ptr::write_volatile((vmcb + 0x010) as *mut u64, intercept_cr);   // CR intercepts
-            core::ptr::write_volatile((vmcb + 0x018) as *mut u64, intercept_dr);   // DR intercepts
-            core::ptr::write_volatile((vmcb + 0x020) as *mut u64, intercept_exc);  // Exception intercepts
+            core::ptr::write_volatile((vmcb + 0x010) as *mut u64, intercept_cr); // CR intercepts
+            core::ptr::write_volatile((vmcb + 0x018) as *mut u64, intercept_dr); // DR intercepts
+            core::ptr::write_volatile((vmcb + 0x020) as *mut u64, intercept_exc);
+            // Exception intercepts
         }
 
         true
@@ -186,9 +187,7 @@ fn vmcb_write_64(vmcb_pa: u64, offset: u64, value: u64) {
 
 fn vmcb_read_64(vmcb_pa: u64, offset: u64) -> u64 {
     // SAFETY: vmcb_pa + offset must be within the 4KB VMCB.
-    unsafe {
-        core::ptr::read_volatile((vmcb_pa + offset) as *const u64)
-    }
+    unsafe { core::ptr::read_volatile((vmcb_pa + offset) as *const u64) }
 }
 
 /// SVM VM-exit codes (subset).
@@ -211,11 +210,17 @@ fn decode_exit_code(code: u64) -> VmExitReason {
         0x72 => VmExitReason::Cpuid,
         0x78 => VmExitReason::Hlt,
         0x7C => VmExitReason::Vmcall,
-        0x7B => VmExitReason::IoInstruction { port: 0, size: 1, write: false },
+        0x7B => VmExitReason::IoInstruction {
+            port: 0,
+            size: 1,
+            write: false,
+        },
         0x7F => VmExitReason::MsrRead,
         0x80 => VmExitReason::MsrWrite,
         0x400 => VmExitReason::NptViolation { gpa: 0 },
-        0x60..=0x6F => VmExitReason::Exception { vector: (code & 0xFF) as u8 },
+        0x60..=0x6F => VmExitReason::Exception {
+            vector: (code & 0xFF) as u8,
+        },
         0x40 => VmExitReason::ExternalInterrupt,
         _ => VmExitReason::Unknown(code),
     }

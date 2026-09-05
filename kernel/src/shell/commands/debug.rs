@@ -13,7 +13,11 @@ pub fn heap_test(out: &mut dyn FnMut(&str)) {
     for i in 0..100 {
         v.push(i);
     }
-    out(&format!("Vector sum: {} at {:p}\n", v.iter().sum::<i32>(), v.as_ptr()));
+    out(&format!(
+        "Vector sum: {} at {:p}\n",
+        v.iter().sum::<i32>(),
+        v.as_ptr()
+    ));
     out("Heap test passed!\n");
 }
 
@@ -29,15 +33,16 @@ pub fn panic() {
 // test address spaces — not safe from the GUI terminal.
 
 pub fn test_pf() {
-    use crate::task::process::{Process, Vma, CURRENT_PROCESS};
     use crate::memory::paging::AddressSpace;
-    use x86_64::structures::paging::PageTableFlags;
+    use crate::task::process::{Process, Vma, CURRENT_PROCESS};
     use alloc::sync::Arc;
+    use x86_64::structures::paging::PageTableFlags;
 
     println!("[TEST] Demand Paging...");
 
     let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
-    let address_space = AddressSpace::new(&mut frame_allocator).expect("Failed to create AddressSpace");
+    let address_space =
+        AddressSpace::new(&mut frame_allocator).expect("Failed to create AddressSpace");
     let process = Process::new(2, None, address_space);
 
     let test_addr = 0x1234_5678_0000u64;
@@ -63,7 +68,7 @@ pub fn test_pf() {
     }
 
     println!("[TEST] Attempting write to 0x{:x}...", test_addr);
-    
+
     let ptr = test_addr as *mut u64;
     unsafe {
         *ptr = 0xCAFEBABE_DEADBEEF;
@@ -71,7 +76,7 @@ pub fn test_pf() {
 
     let val = unsafe { *ptr };
     println!("[TEST] Value at 0x{:x} is 0x{:x}", test_addr, val);
-    
+
     if val == 0xCAFEBABE_DEADBEEF {
         println!("[TEST] Demand Paging: SUCCESS ✅");
     } else {
@@ -80,19 +85,19 @@ pub fn test_pf() {
 }
 
 pub fn test_cow() {
-    use crate::task::process::{Process, Vma, CURRENT_PROCESS};
-    use crate::memory::paging::AddressSpace;
-    use x86_64::structures::paging::{PageTableFlags, Page, Size4KiB, Mapper, FrameAllocator};
-    use alloc::sync::Arc;
     use crate::memory::buddy::BuddyFrameAllocator;
+    use crate::memory::paging::AddressSpace;
+    use crate::task::process::{Process, Vma, CURRENT_PROCESS};
+    use alloc::sync::Arc;
+    use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
 
     println!("[TEST] Copy-on-Write...");
 
     let mut frame_allocator = BuddyFrameAllocator;
-    
+
     let parent_as = AddressSpace::new(&mut frame_allocator).expect("Failed to create parent AS");
     let parent = Process::new(10, None, parent_as);
-    
+
     let test_addr = 0x2222_3333_0000u64;
     parent.add_vma(Vma {
         start: test_addr,
@@ -110,15 +115,25 @@ pub fn test_cow() {
         let page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(test_addr));
         let frame = frame_allocator.allocate_frame().unwrap();
         unsafe {
-            mapper.map_to(page, frame, PageTableFlags::PRESENT | PageTableFlags::WRITABLE, &mut frame_allocator)
-                .unwrap().flush();
+            mapper
+                .map_to(
+                    page,
+                    frame,
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+                    &mut frame_allocator,
+                )
+                .unwrap()
+                .flush();
             let ptr = test_addr as *mut u64;
             *ptr = 0x1111_1111_1111_1111;
         }
     }
 
     println!("[TEST] Cloning Address Space (COW)...");
-    let child_as = parent.address_space.clone_cow(&mut frame_allocator).expect("Failed to clone AS");
+    let child_as = parent
+        .address_space
+        .clone_cow(&mut frame_allocator)
+        .expect("Failed to clone AS");
     let child = Process::new(11, None, child_as);
     {
         let parent_vmas = parent.memory.lock().vmas.clone();
@@ -128,7 +143,9 @@ pub fn test_cow() {
     let child_arc = Arc::new(child);
 
     println!("[TEST] Verifying child can read parent's value...");
-    unsafe { child_arc.address_space.activate(); }
+    unsafe {
+        child_arc.address_space.activate();
+    }
     {
         let mut cur = CURRENT_PROCESS.lock();
         *cur = Some(child_arc.clone());
@@ -148,14 +165,16 @@ pub fn test_cow() {
     assert_eq!(val_child, 0x2222_2222_2222_2222);
 
     println!("[TEST] Verifying parent memory is unchanged...");
-    unsafe { parent_arc.address_space.activate(); }
+    unsafe {
+        parent_arc.address_space.activate();
+    }
     {
         let mut cur = CURRENT_PROCESS.lock();
         *cur = Some(parent_arc.clone());
     }
     let val_parent = unsafe { *(test_addr as *const u64) };
     println!("[TEST] Parent value: 0x{:x}", val_parent);
-    
+
     if val_parent == 0x1111_1111_1111_1111 && val_child == 0x2222_2222_2222_2222 {
         println!("[TEST] Copy-on-Write: SUCCESS ✅");
     } else {

@@ -1,10 +1,8 @@
+use crate::ash::{AshError, AshHandler, AshResult, AshStats, HookPoint, VerifiedAsh};
+use crate::sync::IrqSafeMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
-use crate::ash::{
-    AshHandler, HookPoint, VerifiedAsh, AshResult, AshError, AshStats,
-};
 
 lazy_static! {
     static ref ASH_MANAGER: Mutex<AshManagerInner> = Mutex::new(AshManagerInner::new());
@@ -39,16 +37,23 @@ impl AshManagerInner {
 }
 
 /// Register a new ASH handler for the given process.
-pub fn register(pid: u64, bytecode: &[u8], hook: HookPoint, max_insns: u32, expiry: Option<u64>) -> Result<u64, AshResult> {
+pub fn register(
+    pid: u64,
+    bytecode: &[u8],
+    hook: HookPoint,
+    max_insns: u32,
+    expiry: Option<u64>,
+) -> Result<u64, AshResult> {
     let mut mgr = ASH_MANAGER.lock();
 
     let id = mgr.next_id;
     mgr.next_id = mgr.next_id.wrapping_add(1);
 
     // ponytail: simple linear dedup — compares bytecode+hoook identity
-    let is_dup = mgr.handlers.values().any(|h| {
-        h.pid == pid && h.bytecode.as_slice() == bytecode && h.hook_point == hook
-    });
+    let is_dup = mgr
+        .handlers
+        .values()
+        .any(|h| h.pid == pid && h.bytecode.as_slice() == bytecode && h.hook_point == hook);
     if is_dup {
         return Err(AshResult::Error(AshError::Unknown));
     }
@@ -73,7 +78,10 @@ pub fn register(pid: u64, bytecode: &[u8], hook: HookPoint, max_insns: u32, expi
 /// Unregister a handler by ID. Only the owning process can unregister.
 pub fn unregister(handler_id: u64, pid: u64) -> Result<(), AshResult> {
     let mut mgr = ASH_MANAGER.lock();
-    let handler = mgr.handlers.get(&handler_id).ok_or(AshResult::Error(AshError::NotFound))?;
+    let handler = mgr
+        .handlers
+        .get(&handler_id)
+        .ok_or(AshResult::Error(AshError::NotFound))?;
     if handler.pid != pid {
         return Err(AshResult::Error(AshError::Unknown));
     }
@@ -85,7 +93,9 @@ pub fn unregister(handler_id: u64, pid: u64) -> Result<(), AshResult> {
 /// Unregister all handlers belonging to a process (called on process exit).
 pub fn unregister_all(pid: u64) {
     let mut mgr = ASH_MANAGER.lock();
-    let ids: Vec<u64> = mgr.handlers.iter()
+    let ids: Vec<u64> = mgr
+        .handlers
+        .iter()
         .filter(|(_, h)| h.pid == pid)
         .map(|(id, _)| *id)
         .collect();
@@ -99,7 +109,8 @@ pub fn unregister_all(pid: u64) {
 /// Returns handler IDs to avoid lifetime issues with the mutex.
 pub fn lookup_ids(hook: &HookPoint) -> Vec<u64> {
     let mgr = ASH_MANAGER.lock();
-    mgr.handlers.iter()
+    mgr.handlers
+        .iter()
         .filter(|(_, h)| hook_matches(&h.hook_point, hook))
         .map(|(id, _)| *id)
         .collect()
@@ -114,15 +125,32 @@ pub fn get_verified(id: u64) -> Option<VerifiedAsh> {
 /// Check if a handler's hook point matches a triggered hook.
 fn hook_matches(registered: &HookPoint, triggered: &HookPoint) -> bool {
     match (registered, triggered) {
-        (HookPoint::NetReceive { protocol: rp, port: rport, .. },
-         HookPoint::NetReceive { protocol: tp, port: tport, .. }) => {
-            (rp == tp || *rport == 0) && (*rport == 0 || *rport == *tport)
+        (
+            HookPoint::NetReceive {
+                protocol: rp,
+                port: rport,
+                ..
+            },
+            HookPoint::NetReceive {
+                protocol: tp,
+                port: tport,
+                ..
+            },
+        ) => (rp == tp || *rport == 0) && (*rport == 0 || *rport == *tport),
+        (
+            HookPoint::SyscallEntry { syscall_num: r },
+            HookPoint::SyscallEntry { syscall_num: t },
+        ) => r == t,
+        (HookPoint::SyscallExit { syscall_num: r }, HookPoint::SyscallExit { syscall_num: t }) => {
+            r == t
         }
-        (HookPoint::SyscallEntry { syscall_num: r }, HookPoint::SyscallEntry { syscall_num: t }) => r == t,
-        (HookPoint::SyscallExit { syscall_num: r }, HookPoint::SyscallExit { syscall_num: t }) => r == t,
         (HookPoint::TimerFired { timer_id: r }, HookPoint::TimerFired { timer_id: t }) => r == t,
-        (HookPoint::SignalDelivery { signal: r }, HookPoint::SignalDelivery { signal: t }) => r == t,
-        (HookPoint::MessageReceive { channel: r }, HookPoint::MessageReceive { channel: t }) => r == t,
+        (HookPoint::SignalDelivery { signal: r }, HookPoint::SignalDelivery { signal: t }) => {
+            r == t
+        }
+        (HookPoint::MessageReceive { channel: r }, HookPoint::MessageReceive { channel: t }) => {
+            r == t
+        }
         _ => false,
     }
 }

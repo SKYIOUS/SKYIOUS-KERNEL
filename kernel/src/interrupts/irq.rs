@@ -7,12 +7,10 @@
 use core::sync::atomic::Ordering;
 use x86_64::structures::idt::InterruptStackFrame;
 
-use super::diag::{soft_lockup_check, diag_first_tick, diag_mouse_state, diag_thread_dump};
+use super::diag::{diag_first_tick, diag_mouse_state, diag_thread_dump, soft_lockup_check};
 use super::TICKS;
 
-pub(super) extern "x86-interrupt" fn timer_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
-{
+pub(super) extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let ticks = TICKS.fetch_add(1, Ordering::Release) + 1;
 
     crate::drivers::watchdog::pet();
@@ -33,9 +31,7 @@ pub(super) extern "x86-interrupt" fn timer_interrupt_handler(
     crate::task::scheduler::try_schedule();
 }
 
-pub(super) extern "x86-interrupt" fn tlb_flush_handler(
-    _stack_frame: InterruptStackFrame)
-{
+pub(super) extern "x86-interrupt" fn tlb_flush_handler(_stack_frame: InterruptStackFrame) {
     unsafe {
         use x86_64::registers::control::Cr3;
         let (frame, flags) = Cr3::read();
@@ -44,9 +40,7 @@ pub(super) extern "x86-interrupt" fn tlb_flush_handler(
     crate::apic::eoi();
 }
 
-pub(super) extern "x86-interrupt" fn mouse_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
-{
+pub(super) extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
     crate::drivers::mouse::MOUSE_IRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -74,11 +68,10 @@ pub(super) extern "x86-interrupt" fn mouse_interrupt_handler(
     crate::apic::eoi();
 }
 
-pub(super) extern "x86-interrupt" fn keyboard_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
-{
+pub(super) extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
+    crate::drivers::ps2::KBD_IRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // One-shot: print on first IRQ1 fire
     static KB_FIRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     if !KB_FIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
@@ -107,9 +100,7 @@ pub(super) extern "x86-interrupt" fn keyboard_interrupt_handler(
     crate::apic::eoi();
 }
 
-pub(super) extern "x86-interrupt" fn ipi_func_handler(
-    _stack_frame: InterruptStackFrame)
-{
+pub(super) extern "x86-interrupt" fn ipi_func_handler(_stack_frame: InterruptStackFrame) {
     let cpu = crate::syscalls::get_per_cpu();
     let kind = cpu.ipi_kind.swap(0, core::sync::atomic::Ordering::AcqRel);
     match kind {
@@ -142,19 +133,23 @@ pub(super) extern "x86-interrupt" fn ipi_func_handler(
     crate::apic::eoi();
 }
 
-pub(super) extern "x86-interrupt" fn network_interrupt_handler(
-    _stack_frame: InterruptStackFrame) 
-{
+pub(super) extern "x86-interrupt" fn network_interrupt_handler(_stack_frame: InterruptStackFrame) {
     #[cfg(feature = "net")]
     {
-        let icr = crate::drivers::net::NIC.lock().as_ref().map(|nic| {
-            match nic {
-                crate::drivers::net::NicDevice::E1000(dev) => {
-                    dev.lock().inner.read_reg(crate::drivers::net::e1000::REG_ICR)
-                }
-                _ => 0,
-            }
-        }).unwrap_or(0);
+        // AGENTS.md §Kernel-specific: IRQ handlers must use try_lock(),
+        // never blocking .lock(). A syscall on another CPU may hold NIC.
+        let icr = crate::drivers::net::NIC
+            .try_lock()
+            .and_then(|nic_guard| {
+                nic_guard.as_ref().map(|nic| match nic {
+                    crate::drivers::net::NicDevice::E1000(dev) => dev
+                        .try_lock()
+                        .map(|d| d.inner.read_reg(crate::drivers::net::e1000::REG_ICR))
+                        .unwrap_or(0),
+                    _ => 0,
+                })
+            })
+            .unwrap_or(0);
 
         if icr == 0 {
             crate::apic::eoi();
@@ -165,5 +160,3 @@ pub(super) extern "x86-interrupt" fn network_interrupt_handler(
     }
     crate::apic::eoi();
 }
-
-

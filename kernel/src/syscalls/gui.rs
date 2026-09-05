@@ -1,19 +1,19 @@
-#![allow(unused_imports, unused_variables, dead_code, unused_doc_comments)]
+#![allow(unused_imports)]
 //! gui syscalls — split from mod.rs (7246 lines).
 use super::errno;
 use super::numbers;
 use super::*;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::objects::KernelObject;
-use crate::vfs::{VFS, VfsNode, Stat};
-use crate::sync::IrqSafeMutex as Mutex;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::vec;
-use crate::gui::{COMPOSITOR, window::Window};
+use crate::gui::{window::Window, COMPOSITOR};
 use crate::memory::buddy::{BUDDY_ALLOCATOR, MAX_ORDER};
 use crate::memory::physical_memory_offset;
+use crate::objects::KernelObject;
+use crate::sync::IrqSafeMutex as Mutex;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use crate::vfs::{Stat, VfsNode, VFS};
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 
 pub fn sys_beep(freq_hz: u32, duration_ms: u32) -> u64 {
     crate::drivers::audio::pcspeaker::beep(freq_hz, duration_ms);
@@ -21,9 +21,9 @@ pub fn sys_beep(freq_hz: u32, duration_ms: u32) -> u64 {
 }
 
 pub fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) -> u64 {
-    use crate::gui::{COMPOSITOR, window::Window};
+    use crate::gui::{window::Window, COMPOSITOR};
     let mut comp = COMPOSITOR.lock();
-    
+
     let title_str = if title_ptr.is_null() {
         alloc::string::String::from("User App").into_boxed_str()
     } else {
@@ -34,11 +34,11 @@ pub fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) 
     };
 
     let mut win = Window::new(0, 0, width + 2, height + 22, &title_str);
-    
+
     // PHASE G3: Allocate shared physical memory for high-performance rendering
     let content_len = width * height;
     let size_bytes = content_len * 4;
-    
+
     use crate::memory::buddy::BUDDY_ALLOCATOR;
     let mut order = 0;
     while (4096 << order) < size_bytes && order < crate::memory::buddy::MAX_ORDER {
@@ -51,11 +51,13 @@ pub fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) 
         win.phys_addr = Some(pa.as_u64());
         let offset = crate::memory::physical_memory_offset();
         let k_ptr = (offset + pa.as_u64()) as *mut u8;
-        unsafe { core::ptr::write_bytes(k_ptr, 0, (4096 << order) as usize); }
+        unsafe {
+            core::ptr::write_bytes(k_ptr, 0, (4096 << order) as usize);
+        }
     } else {
         win.content = Some(alloc::vec![0; content_len].into_boxed_slice());
     }
-    
+
     comp.add_window(win);
     (comp.windows.len() - 1) as u64 // Handle
 }
@@ -63,7 +65,9 @@ pub fn sys_gui_create_window(title_ptr: *const u8, width: usize, height: usize) 
 pub fn sys_gui_get_buffer(handle: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     let comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return 0; }
+    if handle as usize >= comp.windows.len() {
+        return 0;
+    }
 
     let win = &comp.windows[handle as usize];
     let content_w = win.width.saturating_sub(2);
@@ -76,8 +80,10 @@ pub fn sys_gui_get_buffer(handle: u64) -> u64 {
 pub fn sys_gui_map_buffer(handle: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     let comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return 0; }
-    
+    if handle as usize >= comp.windows.len() {
+        return 0;
+    }
+
     let win = &comp.windows[handle as usize];
     let phys_addr = match win.phys_addr {
         Some(p) => p,
@@ -90,21 +96,36 @@ pub fn sys_gui_map_buffer(handle: u64) -> u64 {
     let pages_needed = size_bytes.div_ceil(4096);
 
     let process_lock = CURRENT_PROCESS.lock();
-    let process = match *process_lock { Some(ref p) => p, None => return 0 };
+    let process = match *process_lock {
+        Some(ref p) => p,
+        None => return 0,
+    };
 
     // Find a virtual address to map to
-    static NEXT_GUI_MAP_ADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x5000_0000_0000);
-    let v_addr = NEXT_GUI_MAP_ADDR.fetch_add(pages_needed as u64 * 4096, core::sync::atomic::Ordering::SeqCst);
+    static NEXT_GUI_MAP_ADDR: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0x5000_0000_0000);
+    let v_addr = NEXT_GUI_MAP_ADDR.fetch_add(
+        pages_needed as u64 * 4096,
+        core::sync::atomic::Ordering::SeqCst,
+    );
 
     use crate::memory::buddy::BuddyFrameAllocator;
     let mut frame_allocator = BuddyFrameAllocator;
-    let mut mapper = if let Some(m) = unsafe { process.address_space.mapper() } { m } else { return 0; };
+    let mut mapper = if let Some(m) = unsafe { process.address_space.mapper() } {
+        m
+    } else {
+        return 0;
+    };
 
     for i in 0..pages_needed {
-        let page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(v_addr + i as u64 * 4096));
-        let frame = x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(phys_addr + i as u64 * 4096));
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-        
+        let page =
+            Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(v_addr + i as u64 * 4096));
+        let frame = x86_64::structures::paging::PhysFrame::containing_address(
+            x86_64::PhysAddr::new(phys_addr + i as u64 * 4096),
+        );
+        let flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
         unsafe {
             if let Ok(t) = mapper.map_to(page, frame, flags, &mut frame_allocator) {
                 t.flush();
@@ -134,7 +155,9 @@ pub fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
         crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed) as usize,
     );
     let mut comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return errno::Errno::EBADF as u64; }
+    if handle as usize >= comp.windows.len() {
+        return errno::Errno::EBADF as u64;
+    }
 
     let win = &mut comp.windows[handle as usize];
     if win.phys_addr.is_some() {
@@ -159,7 +182,9 @@ pub fn sys_gui_flush(handle: u64, buf_ptr: *const u32) -> u64 {
 pub fn sys_gui_get_key(handle: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     let mut comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return 0; }
+    if handle as usize >= comp.windows.len() {
+        return 0;
+    }
     let win = &mut comp.windows[handle as usize];
     win.key_events.pop_front().map(|k| k as u64).unwrap_or(0)
 }
@@ -168,7 +193,9 @@ pub fn sys_gui_get_mouse(handle: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     use core::sync::atomic::Ordering;
     let comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return 0; }
+    if handle as usize >= comp.windows.len() {
+        return 0;
+    }
     let win = &comp.windows[handle as usize];
     let mx = crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed) as i64;
     let my = crate::drivers::mouse::CURSOR_Y.load(Ordering::Relaxed) as i64;
@@ -185,12 +212,18 @@ pub fn sys_gui_get_mouse(handle: u64) -> u64 {
 pub fn sys_gui_set_title(handle: u64, title_ptr: *const u8) -> u64 {
     use crate::gui::COMPOSITOR;
     let mut comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return errno::Errno::EINVAL as u64; }
+    if handle as usize >= comp.windows.len() {
+        return errno::Errno::EINVAL as u64;
+    }
     let win = &mut comp.windows[handle as usize];
-    if title_ptr.is_null() { return errno::Errno::EINVAL as u64; }
+    if title_ptr.is_null() {
+        return errno::Errno::EINVAL as u64;
+    }
     let mut len = 0;
     unsafe {
-        while *title_ptr.add(len) != 0 && len < 64 { len += 1; }
+        while *title_ptr.add(len) != 0 && len < 64 {
+            len += 1;
+        }
     }
     let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, len) };
     if let Ok(s) = core::str::from_utf8(title_slice) {
@@ -202,7 +235,9 @@ pub fn sys_gui_set_title(handle: u64, title_ptr: *const u8) -> u64 {
 pub fn sys_gui_destroy_window(handle: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     let mut comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return errno::Errno::EINVAL as u64; }
+    if handle as usize >= comp.windows.len() {
+        return errno::Errno::EINVAL as u64;
+    }
     comp.windows.remove(handle as usize);
     0
 }
@@ -210,7 +245,9 @@ pub fn sys_gui_destroy_window(handle: u64) -> u64 {
 pub fn sys_gui_resize_window(handle: u64, width: u64, height: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     let mut comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return errno::Errno::EINVAL as u64; }
+    if handle as usize >= comp.windows.len() {
+        return errno::Errno::EINVAL as u64;
+    }
     let win = &mut comp.windows[handle as usize];
     win.width = width as usize;
     win.height = height as usize;
@@ -220,7 +257,9 @@ pub fn sys_gui_resize_window(handle: u64, width: u64, height: u64) -> u64 {
 pub fn sys_gui_move_window(handle: u64, x: u64, y: u64) -> u64 {
     use crate::gui::COMPOSITOR;
     let mut comp = COMPOSITOR.lock();
-    if handle as usize >= comp.windows.len() { return errno::Errno::EINVAL as u64; }
+    if handle as usize >= comp.windows.len() {
+        return errno::Errno::EINVAL as u64;
+    }
     let win = &mut comp.windows[handle as usize];
     win.x = x as usize;
     win.y = y as usize;
@@ -234,8 +273,12 @@ pub fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
         0 => {
             // Read clipboard
             let copy_len = (len as usize).min(comp.clipboard.len());
-            if copy_len == 0 { return 0; }
-            if buf.is_null() { return comp.clipboard.len() as u64; }
+            if copy_len == 0 {
+                return 0;
+            }
+            if buf.is_null() {
+                return comp.clipboard.len() as u64;
+            }
             unsafe {
                 core::ptr::copy_nonoverlapping(comp.clipboard.as_ptr(), buf, copy_len);
             }
@@ -243,7 +286,10 @@ pub fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
         }
         1 => {
             // Write clipboard
-            if buf.is_null() || len == 0 { comp.clipboard.clear(); return 0; }
+            if buf.is_null() || len == 0 {
+                comp.clipboard.clear();
+                return 0;
+            }
             let mut new_data = alloc::vec![0u8; len as usize];
             unsafe {
                 core::ptr::copy_nonoverlapping(buf, new_data.as_mut_ptr(), len as usize);
@@ -260,11 +306,15 @@ pub fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
 }
 
 pub fn sys_notify(text_ptr: *const u8, duration_ms: u64, kind: u64) -> u64 {
-    use crate::gui::{COMPOSITOR, NotifKind};
-    if text_ptr.is_null() { return errno::Errno::EINVAL as u64; }
+    use crate::gui::{NotifKind, COMPOSITOR};
+    if text_ptr.is_null() {
+        return errno::Errno::EINVAL as u64;
+    }
     let mut len = 0;
     unsafe {
-        while *text_ptr.add(len) != 0 && len < 256 { len += 1; }
+        while *text_ptr.add(len) != 0 && len < 256 {
+            len += 1;
+        }
     }
     let text_slice = unsafe { core::slice::from_raw_parts(text_ptr, len) };
     let text = match core::str::from_utf8(text_slice) {
@@ -302,13 +352,19 @@ pub fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
     match request {
         DRM_IOCTL_GET_DISPLAY_INFO => {
             #[repr(C)]
-            struct DisplayInfo { width: u32, height: u32 }
+            struct DisplayInfo {
+                width: u32,
+                height: u32,
+            }
             let info = DisplayInfo {
                 width: crate::drivers::gpu::width(),
                 height: crate::drivers::gpu::height(),
             };
             let bytes = unsafe {
-                core::slice::from_raw_parts(&info as *const DisplayInfo as *const u8, core::mem::size_of::<DisplayInfo>())
+                core::slice::from_raw_parts(
+                    &info as *const DisplayInfo as *const u8,
+                    core::mem::size_of::<DisplayInfo>(),
+                )
             };
             if unsafe { user_access::copy_to_user(arg, bytes).is_err() } {
                 return errno::Errno::EFAULT as u64;
@@ -329,10 +385,21 @@ pub fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
                 }
             };
             #[repr(C)]
-            struct DumbInfo { id: u64, size: u64, addr: u64 }
-            let di = DumbInfo { id: 1, size: (w * h * 4) as u64, addr: paddr };
+            struct DumbInfo {
+                id: u64,
+                size: u64,
+                addr: u64,
+            }
+            let di = DumbInfo {
+                id: 1,
+                size: (w * h * 4) as u64,
+                addr: paddr,
+            };
             let bytes = unsafe {
-                core::slice::from_raw_parts(&di as *const DumbInfo as *const u8, core::mem::size_of::<DumbInfo>())
+                core::slice::from_raw_parts(
+                    &di as *const DumbInfo as *const u8,
+                    core::mem::size_of::<DumbInfo>(),
+                )
             };
             if unsafe { user_access::copy_to_user(arg, bytes).is_err() } {
                 return errno::Errno::EFAULT as u64;
@@ -363,7 +430,8 @@ pub fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
         }
         DRM_IOCTL_MAP_DUMB => {
             // Return the virtual address of the framebuffer
-            let fb_ptr = crate::drivers::graphics::FRAMEBUFFER.load(core::sync::atomic::Ordering::Relaxed);
+            let fb_ptr =
+                crate::drivers::graphics::FRAMEBUFFER.load(core::sync::atomic::Ordering::Relaxed);
             fb_ptr as u64
         }
         DRM_IOCTL_PAGE_FLIP => {
@@ -390,7 +458,9 @@ pub fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
         // 0x010A = SET_ACCENT_COLOR: arg = packed ARGB u32
         0x010A => {
             let color = arg as u32 | 0xFF000000;
-            unsafe { crate::gui::ACCENT_COLOR = color; }
+            unsafe {
+                crate::gui::ACCENT_COLOR = color;
+            }
             crate::println!("DRM: accent color -> 0x{:08X}", color);
             0
         }
@@ -418,12 +488,24 @@ pub fn sys_openpty() -> u64 {
     if let Some(ref proc) = *proc_lock {
         let mut ft = proc.files.lock().fd_table.clone();
         let m = ft.iter().position(|f| f.is_none()).unwrap_or(ft.len());
-        if m >= 256 { return errno::Errno::ENFILE as u64; }
-        if m == ft.len() { ft.push(None); }
-        ft[m] = Some(FileDescriptor::PtyMaster { _idx: idx, pair: pair.clone() });
+        if m >= 256 {
+            return errno::Errno::ENFILE as u64;
+        }
+        if m == ft.len() {
+            ft.push(None);
+        }
+        ft[m] = Some(FileDescriptor::PtyMaster {
+            _idx: idx,
+            pair: pair.clone(),
+        });
         let s = ft.iter().position(|f| f.is_none()).unwrap_or(ft.len());
-        if s >= 256 { ft[m] = None; return errno::Errno::ENFILE as u64; }
-        if s == ft.len() { ft.push(None); }
+        if s >= 256 {
+            ft[m] = None;
+            return errno::Errno::ENFILE as u64;
+        }
+        if s == ft.len() {
+            ft.push(None);
+        }
         ft[s] = Some(FileDescriptor::PtySlave { _idx: idx, pair });
         (m as u64) | ((s as u64) << 16)
     } else {

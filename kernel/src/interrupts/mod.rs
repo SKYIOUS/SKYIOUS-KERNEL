@@ -11,8 +11,8 @@
 
 pub mod diag;
 pub mod exceptions;
-pub mod page_fault;
 pub mod irq;
+pub mod page_fault;
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 #[cfg(not(target_arch = "aarch64"))]
@@ -28,7 +28,9 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 #[cfg(not(target_arch = "aarch64"))]
 // SAFETY: ChainedPics::new is safe when offsets are valid PIC interrupt offsets
 pub static PICS: crate::sync::IrqSafeMutex<pic8259::ChainedPics> =
-    crate::sync::IrqSafeMutex::new(unsafe { pic8259::ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+    crate::sync::IrqSafeMutex::new(unsafe {
+        pic8259::ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
+    });
 
 // ─── Tick counter ───────────────────────────────────────────────
 
@@ -36,6 +38,18 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 
 pub fn get_ticks() -> u64 {
     TICKS.load(Ordering::Acquire)
+}
+
+/// Single owner of the 100Hz tick counter for the whole kernel image.
+///
+/// Crates (`vahi-net`, `vahi-task`, `vahi-drivers`, `vahi-vfs`, `vahi-apic`)
+/// declare this Rust-ABI symbol `extern` and wrap it in their own
+/// `get_ticks()`; defining per-crate `#[no_mangle]` bodies would fail the
+/// link with duplicate symbols, and plain per-crate stubs silently return 0
+/// (they are never overridden — mangled names don't collide).
+#[no_mangle]
+pub fn vahi_kernel_get_ticks() -> u64 {
+    get_ticks()
 }
 
 // ─── Interrupt vector indices ───────────────────────────────────
@@ -82,39 +96,43 @@ pub fn init_idt() {
     use alloc::boxed::Box;
 
     let mut idt = Box::new(InterruptDescriptorTable::new());
-    idt.breakpoint.set_handler_fn(exceptions::breakpoint_handler);
+    idt.breakpoint
+        .set_handler_fn(exceptions::breakpoint_handler);
     unsafe {
-        idt.double_fault.set_handler_fn(exceptions::double_fault_handler)
+        idt.double_fault
+            .set_handler_fn(exceptions::double_fault_handler)
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
     }
     // Route #PF through `vahi_pf_dispatch` (asm): it stashes the entry RSP for
     // `abort_user_copy` before entering the normal Rust handler.
     // SAFETY: trampoline preserves all GPRs + fault-entry stack layout exactly.
     unsafe {
-        idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(page_fault::vahi_pf_dispatch as *const () as u64));
+        idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(
+            page_fault::vahi_pf_dispatch as *const () as u64,
+        ));
     }
-    idt.general_protection_fault.set_handler_fn(exceptions::general_protection_fault_handler);
-    idt.stack_segment_fault.set_handler_fn(exceptions::stack_segment_fault_handler);
-    idt.invalid_opcode.set_handler_fn(exceptions::invalid_opcode_handler);
-    idt.device_not_available.set_handler_fn(exceptions::device_not_available_handler);
+    idt.general_protection_fault
+        .set_handler_fn(exceptions::general_protection_fault_handler);
+    idt.stack_segment_fault
+        .set_handler_fn(exceptions::stack_segment_fault_handler);
+    idt.invalid_opcode
+        .set_handler_fn(exceptions::invalid_opcode_handler);
+    idt.device_not_available
+        .set_handler_fn(exceptions::device_not_available_handler);
 
-    idt[InterruptIndex::Timer.as_usize()]
-        .set_handler_fn(irq::timer_interrupt_handler);
-    idt[InterruptIndex::Keyboard.as_usize()]
-        .set_handler_fn(irq::keyboard_interrupt_handler);
-    idt[InterruptIndex::Mouse.as_usize()]
-        .set_handler_fn(irq::mouse_interrupt_handler);
-    idt[InterruptIndex::Network.as_usize()]
-        .set_handler_fn(irq::network_interrupt_handler);
-    idt[InterruptIndex::TlbFlush.as_usize()]
-        .set_handler_fn(irq::tlb_flush_handler);
-    idt[InterruptIndex::IpiFunc.as_usize()]
-        .set_handler_fn(irq::ipi_func_handler);
+    idt[InterruptIndex::Timer.as_usize()].set_handler_fn(irq::timer_interrupt_handler);
+    idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(irq::keyboard_interrupt_handler);
+    idt[InterruptIndex::Mouse.as_usize()].set_handler_fn(irq::mouse_interrupt_handler);
+    idt[InterruptIndex::Network.as_usize()].set_handler_fn(irq::network_interrupt_handler);
+    idt[InterruptIndex::TlbFlush.as_usize()].set_handler_fn(irq::tlb_flush_handler);
+    idt[InterruptIndex::IpiFunc.as_usize()].set_handler_fn(irq::ipi_func_handler);
 
     let raw = Box::into_raw(idt);
     // SAFETY: table is box-leaked (into_raw never freed), lives forever
     // load() is safe when IDT is properly configured
-    unsafe { (*raw).load(); }
+    unsafe {
+        (*raw).load();
+    }
     *IDT.lock() = Some(IdtPtr(raw));
 
     unsafe {
@@ -148,7 +166,9 @@ type MsiHandler = extern "x86-interrupt" fn(InterruptStackFrame);
 pub fn set_handler(vector: u8, handler: MsiHandler) {
     if let Some(IdtPtr(ptr)) = *IDT.lock() {
         // SAFETY: single-core during registration; idt lives forever
-        unsafe { (&mut *ptr)[vector as usize].set_handler_fn(handler); }
+        unsafe {
+            (&mut *ptr)[vector as usize].set_handler_fn(handler);
+        }
     }
 }
 
@@ -161,6 +181,6 @@ pub fn set_network_vector(vector: u8) {
 #[cfg(not(target_arch = "aarch64"))]
 static NET_VECTOR: AtomicU8 = AtomicU8::new(InterruptIndex::Network as u8);
 
-// Re-export `IrqFmtBuf` for use by other crate modules
-// (e.g., the old `interrupts::IrqFmtBuf` path used in other files)
-pub(crate) use diag::IrqFmtBuf;
+// Re-export `IrqFmtBuf` and the stack-buffer formatter for use by other
+// crate modules (fault paths, panic handler, stack trace).
+pub(crate) use diag::{serial_fmt, IrqFmtBuf};

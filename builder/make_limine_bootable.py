@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """
+DEPRECATED: Use build_limine_image.py instead.
+
+This FAT16 builder has known bugs in directory creation (EFI/BOOT/BOOTX64.EFI
+paths silently dropped) and 8.3 name handling. The FAT32 builder
+(build_limine_image.py) is the maintained path.
+
 Create a Limine-bootable UEFI disk image.
 
 Uses pyfatfs for FAT filesystem creation and limine.exe for BIOS boot.
@@ -14,6 +20,7 @@ import struct
 import subprocess
 import tempfile
 import shutil
+import binascii
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -66,10 +73,8 @@ def create_disk_image(output_path, limine_dir, size_mb=64):
     struct.pack_into('<Q', gpt, 72, 2)
     struct.pack_into('<I', gpt, 80, 128)
     struct.pack_into('<I', gpt, 84, 128)
+    # (CRC written after entries)
     disk[SECTOR:2*SECTOR] = gpt
-    
-    # Backup GPT
-    disk[(total_sectors-1)*SECTOR:total_sectors*SECTOR] = gpt
     
     # Partition entries at LBA 2
     # ESP partition
@@ -81,6 +86,7 @@ def create_disk_image(output_path, limine_dir, size_mb=64):
     esp_entry[16:32] = esp_guid
     struct.pack_into('<Q', esp_entry, 32, esp_start)
     struct.pack_into('<Q', esp_entry, 40, esp_end)
+    struct.pack_into('<Q', esp_entry, 48, 0x1)  # ESP attribute bit 0 = required
     disk[2*SECTOR:2*SECTOR+128] = esp_entry
     
     # Data partition (FAT16)
@@ -98,7 +104,7 @@ def create_disk_image(output_path, limine_dir, size_mb=64):
     print("  Creating ESP...")
     esp_data = create_fat16_partition(
         esp_sectors * SECTOR,
-        {"BOOTX64.EFI": os.path.join(limine_dir, "BOOTX64.EFI")}
+        {"EFI/BOOT/BOOTX64.EFI": os.path.join(limine_dir, "BOOTX64.EFI")}
     )
     disk[esp_start*SECTOR:esp_start*SECTOR+len(esp_data)] = esp_data
     
@@ -112,6 +118,30 @@ def create_disk_image(output_path, limine_dir, size_mb=64):
     }
     data_part = create_fat16_partition(data_sectors * SECTOR, data_files)
     disk[data_start*SECTOR:data_start*SECTOR+len(data_part)] = data_part
+    
+    # Compute GPT CRCs for primary header (header at LBA 1 = offset SECTOR)
+    entries_data = bytes(disk[2*SECTOR:2*SECTOR + 128*128])
+    entries_crc = binascii.crc32(entries_data) & 0xFFFFFFFF
+    struct.pack_into('<I', disk, SECTOR + 88, entries_crc)  # entries CRC in header at offset 88
+    # Header CRC: over first 92 bytes with header CRC field (offset 16) zeroed
+    hdr = bytearray(disk[SECTOR:2*SECTOR])
+    struct.pack_into('<I', hdr, 16, 0)
+    hdr_crc = binascii.crc32(bytes(hdr[:92])) & 0xFFFFFFFF
+    struct.pack_into('<I', disk, SECTOR + 16, hdr_crc)
+    # Copy primary to backup
+    disk[(total_sectors-1)*SECTOR:total_sectors*SECTOR] = disk[SECTOR:2*SECTOR]
+    # Also copy entries to backup location
+    backup_entries_lba = total_sectors - 1 - 32
+    disk[backup_entries_lba*SECTOR:backup_entries_lba*SECTOR + 128*128] = entries_data
+    # Update backup header entries_lba and CRC
+    backup_hdr = bytearray(disk[(total_sectors-1)*SECTOR:total_sectors*SECTOR])
+    struct.pack_into('<Q', backup_hdr, 72, backup_entries_lba)
+    struct.pack_into('<I', backup_hdr, 16, 0)
+    backup_entries_crc = binascii.crc32(entries_data) & 0xFFFFFFFF
+    struct.pack_into('<I', backup_hdr, 88, backup_entries_crc)
+    backup_hdr_crc = binascii.crc32(bytes(backup_hdr[:92])) & 0xFFFFFFFF
+    struct.pack_into('<I', backup_hdr, 16, backup_hdr_crc)
+    disk[(total_sectors-1)*SECTOR:total_sectors*SECTOR] = backup_hdr
     
     # Write image
     with open(output_path, 'wb') as f:
@@ -195,9 +225,12 @@ def create_fat16_partition(size_bytes, files):
         return c
     
     def name_83(name):
-        """Convert to 8.3 format."""
+        """Convert to 8.3 format. Must return exactly 11 bytes."""
         base, ext = os.path.splitext(name)
-        return (base.upper()[:8] + '   ')[:8].encode('ascii') + (ext.upper()[1:4] + '  ')[:3].encode('ascii')
+        name_part = base.upper()[:8].ljust(8).encode('ascii')
+        ext_part = ext.upper()[1:4].ljust(3).encode('ascii') if ext else b'   '
+        assert len(name_part) == 8 and len(ext_part) == 3
+        return name_part + ext_part
     
     def add_root_entry(name_83_bytes, first_cluster, size=0, is_dir=False):
         """Add entry to root directory."""
@@ -260,39 +293,40 @@ def create_fat16_partition(size_bytes, files):
             # File in root
             first = write_file_data(0, data)
             add_root_entry(name_83(parts[0]), first, len(data))
-        elif len(parts) == 2:
-            # File in subdirectory
-            dirname = parts[0]
-            fname = parts[1]
-            
-            if dirname not in dir_entries:
-                # Create directory
-                dir_cluster = alloc_cluster()
-                fat[dir_cluster*2] = 0xFF
-                fat[dir_cluster*2+1] = 0xFF
-                
-                # . and .. entries
-                dot_off = data_start_sector * SECTOR + (dir_cluster - 2) * spc * SECTOR
-                dot = bytearray(32)
-                dot[0:11] = b'.          '
-                dot[11] = 0x10
-                struct.pack_into('<H', dot, 26, dir_cluster)
-                fs[dot_off:dot_off+32] = dot
-                
-                dotdot = bytearray(32)
-                dotdot[0:11] = b'..         '
-                dotdot[11] = 0x10
-                fs[dot_off+32:dot_off+64] = dotdot
-                
-                add_root_entry(name_83(dirname), dir_cluster, is_dir=True)
-                dir_entries[dirname] = dir_cluster
-            
+        else:
+            # File in one or more subdirectories.
+            # Walk from root down, creating each directory level as needed.
+            # dir_entries maps the FULL path prefix to its first cluster.
+            current_parent_cluster = 0  # 0 = root directory
+            for idx, part in enumerate(parts[:-1]):
+                dir_key = '/'.join(parts[:idx+1])
+                if dir_key not in dir_entries:
+                    dir_cluster = alloc_cluster()
+                    fat[dir_cluster*2] = 0xFF
+                    fat[dir_cluster*2+1] = 0xFF
+                    # . and .. entries in the new directory
+                    dot_off = data_start_sector * SECTOR + (dir_cluster - 2) * spc * SECTOR
+                    dot = bytearray(32)
+                    dot[0:11] = b'.          '
+                    dot[11] = 0x10
+                    struct.pack_into('<H', dot, 26, dir_cluster)
+                    fs[dot_off:dot_off+32] = dot
+                    dotdot = bytearray(32)
+                    dotdot[0:11] = b'..         '
+                    dotdot[11] = 0x10
+                    struct.pack_into('<H', dotdot, 26, current_parent_cluster)
+                    fs[dot_off+32:dot_off+64] = dotdot
+                    # Add entry in parent directory
+                    if current_parent_cluster == 0:
+                        add_root_entry(name_83(part), dir_cluster, is_dir=True)
+                    else:
+                        add_subdir_entry(dir_cluster, current_parent_cluster, name_83(part))
+                    dir_entries[dir_key] = dir_cluster
+                current_parent_cluster = dir_entries[dir_key]
+            # Write the file into the deepest directory
+            fname = parts[-1]
             first = write_file_data(0, data)
-            add_subdir_entry(dir_entries[dirname], dir_entries[dirname], name_83(fname))
-            
-            # Also add to root for /BOOT/VAHI_KERNEL etc.
-            # Actually, we need the parent to know about this file
-            # The subdirectory entry is already added above
+            add_subdir_entry(first, current_parent_cluster, name_83(fname))
     
     # Write FAT
     fs[SECTOR:SECTOR+len(fat)] = fat

@@ -1,5 +1,5 @@
 //! GuiScene — the bridge between gui's software compositor and HwCompositor.
-//! 
+//!
 //! The gui owns the scene state (windows, damage rects, backbuffer pointer).
 //! The HwCompositor owns the HW blit path (shadows, blur, blend, flip).
 /// Scene snapshot passed from gui to HwCompositor for each frame.

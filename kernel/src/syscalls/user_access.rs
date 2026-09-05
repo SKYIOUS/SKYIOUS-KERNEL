@@ -40,7 +40,10 @@ extern "C" {
 /// The page-fault handler checks this: a fault while true means "bad user
 /// pointer" → abort the copy instead of panicking the kernel.
 pub fn user_copy_active() -> bool {
-    crate::syscalls::get_per_cpu().user_copy_nest.load(Ordering::Relaxed) > 0
+    crate::syscalls::get_per_cpu()
+        .user_copy_nest
+        .load(Ordering::Relaxed)
+        > 0
 }
 
 /// Address the page-fault handler must return to to abort the active copy.
@@ -53,20 +56,39 @@ pub fn user_copy_fixup_addr() -> u64 {
 /// user-range fault inside a copy cannot be resolved (COW/swap/demand).
 ///
 /// The trampoline stored the CPU entry RSP (pointing at the error code) in
-/// `PerCpuData::pf_entry_rsp`. We overwrite the saved RIP slot with the fixup
-/// and iretq into it; the fixup (`mov eax, 1; ret`) returns to the copy
-/// routine's caller where the nest count is decremented and `clac` runs.
+/// `PerCpuData::pf_entry_rsp` and the interrupted callee-saved registers in
+/// `PerCpuData::pf_callee_saved`. The x86-interrupt handler clobbered those
+/// registers while deciding to abort, and we iretq out of the handler
+/// directly — bypassing its ABI epilogue — so we restore them here first.
+/// Then we overwrite the saved RIP slot with the fixup and iretq into it;
+/// the fixup (`mov eax, 1; ret`) returns to the copy routine's caller where
+/// the nest count is decremented and `clac` runs.
 pub fn abort_user_copy() -> ! {
-    let entry_rsp = crate::syscalls::get_per_cpu().pf_entry_rsp;
     let fixup = user_copy_fixup_addr();
     unsafe {
         core::arch::asm!(
-            "mov qword ptr [{e} + 8], {f}",  // saved RIP slot
-            "mov rsp, {e}",
+            // Restore callee-saved regs stashed by the vahi_pf_dispatch
+            // trampoline (offsets match PerCpuData::pf_callee_saved). The
+            // interrupted context was inside `user_copy_bytes`, which per the
+            // C ABI may clobber caller-saved regs but must preserve these;
+            // the x86-interrupt handler clobbered them while running and we
+            // iretq out directly, bypassing its ABI epilogue.
+            "mov rax, gs:[0x0]",
+            "mov rbx, [rax + 0x50]",
+            "mov rbp, [rax + 0x58]",
+            "mov r12, [rax + 0x60]",
+            "mov r13, [rax + 0x68]",
+            "mov r14, [rax + 0x70]",
+            "mov r15, [rax + 0x78]",
+            // rax = entry RSP (points at error code), overwrite saved RIP slot.
+            "mov rax, [rax + 0x48]",
+            "mov qword ptr [rax + 8], rsi",
+            "mov rsp, rax",
             "add rsp, 8",
             "iretq",
-            e = in(reg) entry_rsp,
-            f = in(reg) fixup,
+            // fixup rides in rsi (caller-saved, not restored) to avoid the
+            // compiler picking a register we rewrite above.
+            in("rsi") fixup,
             options(noreturn),
         );
     }
@@ -112,14 +134,18 @@ fn smap_supported() -> bool {
 #[inline(always)]
 fn do_stac() {
     if HAS_SMAP.load(Ordering::Relaxed) {
-        unsafe { core::arch::asm!("stac", options(nomem, nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("stac", options(nomem, nostack, preserves_flags));
+        }
     }
 }
 
 #[inline(always)]
 fn do_clac() {
     if HAS_SMAP.load(Ordering::Relaxed) {
-        unsafe { core::arch::asm!("clac", options(nomem, nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("clac", options(nomem, nostack, preserves_flags));
+        }
     }
 }
 
@@ -131,7 +157,7 @@ pub fn validate_ptr(ptr: *const u8, len: usize) -> bool {
         Some(e) => e,
         None => return false,
     };
-    
+
     let user_limit = 0x0000_8000_0000_0000;
     end <= user_limit
 }
@@ -141,9 +167,13 @@ pub fn validate_ptr(ptr: *const u8, len: usize) -> bool {
 /// `user_copy_bytes` (0 = success, non-zero = fault).
 unsafe fn do_user_copy(dst: *mut u8, src: *const u8, len: usize) -> usize {
     do_stac();
-    crate::syscalls::get_per_cpu().user_copy_nest.fetch_add(1, Ordering::Relaxed);
+    crate::syscalls::get_per_cpu()
+        .user_copy_nest
+        .fetch_add(1, Ordering::Relaxed);
     let failed = user_copy_bytes(dst, src, len);
-    crate::syscalls::get_per_cpu().user_copy_nest.fetch_sub(1, Ordering::Relaxed);
+    crate::syscalls::get_per_cpu()
+        .user_copy_nest
+        .fetch_sub(1, Ordering::Relaxed);
     do_clac();
     failed
 }
@@ -174,7 +204,10 @@ pub unsafe fn copy_to_user(dst_ptr: *mut u8, src: &[u8]) -> Result<(), ()> {
 }
 
 /// A wrapper for reading a string from userspace.
-pub unsafe fn read_user_string(ptr: *const u8, max_len: usize) -> Result<alloc::string::String, ()> {
+pub unsafe fn read_user_string(
+    ptr: *const u8,
+    max_len: usize,
+) -> Result<alloc::string::String, ()> {
     if ptr.is_null() || max_len == 0 {
         return Err(());
     }

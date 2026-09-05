@@ -3,11 +3,11 @@
 //! Provides /proc/meminfo, /proc/version, /proc/self/ directory, and basic
 //! process listings needed by ps, top, and other userspace utilities.
 
+use crate::task::process::{FileDescriptor, PROCESS_TABLE};
+use crate::vfs::{Stat, VfsNode};
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::sync::Arc;
-use crate::task::process::{PROCESS_TABLE, FileDescriptor};
-use crate::vfs::{VfsNode, Stat};
+use alloc::vec::Vec;
 
 /// Read /proc/meminfo
 fn read_meminfo() -> String {
@@ -87,7 +87,10 @@ fn read_proc_oom_score(pid: u64) -> String {
     if let Some(proc) = table.get(&pid) {
         let rss = crate::task::oom::estimate_process_rss(proc);
         let total_mem = crate::task::oom::total_system_memory();
-        let (score, _, _) = crate::task::oom::compute_oom_score(pid, rss, total_mem);
+        // _from_proc: the table guard above is held, and compute_oom_score
+        // would re-lock it (nested non-reentrant acquisition = deadlock).
+        let (score, _, _) =
+            crate::task::oom::compute_oom_score_from_proc(pid, proc, rss, total_mem);
         alloc::format!("{}\n", score)
     } else {
         String::from("0\n")
@@ -150,8 +153,20 @@ fn read_proc_status(pid: u64) -> String {
         s.push_str(&alloc::format!("Pid:\t{}\n", pid));
         s.push_str(&alloc::format!("PPid:\t{}\n", ppid));
         s.push_str(&alloc::format!("TracerPid:\t0\n"));
-        s.push_str(&alloc::format!("Uid:\t{}\t{}\t{}\t{}\n", uid, uid, uid, uid));
-        s.push_str(&alloc::format!("Gid:\t{}\t{}\t{}\t{}\n", gid, gid, gid, gid));
+        s.push_str(&alloc::format!(
+            "Uid:\t{}\t{}\t{}\t{}\n",
+            uid,
+            uid,
+            uid,
+            uid
+        ));
+        s.push_str(&alloc::format!(
+            "Gid:\t{}\t{}\t{}\t{}\n",
+            gid,
+            gid,
+            gid,
+            gid
+        ));
         s.push_str(&alloc::format!("FDSize:\t{}\n", 256));
         s.push_str(&alloc::format!("Threads:\t{}\n", threads));
         s.push_str(&alloc::format!("SigPnd:\t0\n"));
@@ -221,9 +236,12 @@ fn read_proc_maps(pid: u64) -> String {
             };
             s.push_str(&alloc::format!(
                 "{:016x}-{:016x} {} {:08x} 00:00 0{}\n",
-                vma.start, vma.end, perms, vma.file_offset,
-                if vma.is_shared { " shmem" } else { ""
-            }));
+                vma.start,
+                vma.end,
+                perms,
+                vma.file_offset,
+                if vma.is_shared { " shmem" } else { "" }
+            ));
         }
         s
     } else {
@@ -417,7 +435,8 @@ impl VfsNode for ProcFsNode {
     }
 
     fn children(&self) -> Result<Vec<Arc<dyn VfsNode>>, ()> {
-        let mut entries = Vec::new();        if self.path == "/proc" || self.path == "/proc/" {
+        let mut entries = Vec::new();
+        if self.path == "/proc" || self.path == "/proc/" {
             entries.push(Arc::new(ProcFsNode::new("/proc/meminfo")) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new("/proc/version")) as Arc<dyn VfsNode>);
             entries.push(Arc::new(ProcFsNode::new("/proc/uptime")) as Arc<dyn VfsNode>);
@@ -427,32 +446,37 @@ impl VfsNode for ProcFsNode {
 
             let table = PROCESS_TABLE.lock();
             for pid in table.keys() {
-                entries.push(Arc::new(ProcFsNode::new(
-                    &alloc::format!("/proc/{}", pid),
-                )) as Arc<dyn VfsNode>);
+                entries
+                    .push(Arc::new(ProcFsNode::new(&alloc::format!("/proc/{}", pid)))
+                        as Arc<dyn VfsNode>);
             }
         } else if self.path.starts_with("/proc/") && !self.path[6..].contains('/') {
-            entries.push(Arc::new(ProcFsNode::new(
-                    &alloc::format!("{}/status", self.path),
-                )) as Arc<dyn VfsNode>);
-            entries.push(Arc::new(ProcFsNode::new(
-                    &alloc::format!("{}/cmdline", self.path),
-                )) as Arc<dyn VfsNode>);
-            entries.push(Arc::new(ProcFsNode::new(
-                    &alloc::format!("{}/maps", self.path),
-                )) as Arc<dyn VfsNode>);
-            entries.push(Arc::new(ProcFsNode::new(
-                    &alloc::format!("{}/io", self.path),
-                )) as Arc<dyn VfsNode>);
-            entries.push(Arc::new(ProcFsNode::new(
-                    &alloc::format!("{}/fd", self.path),
-                )) as Arc<dyn VfsNode>);
-            entries.push(Arc::new(ProcFsNode::new(
-                    &alloc::format!("{}/oom_score", self.path),
-                )) as Arc<dyn VfsNode>);
-            entries.push(Arc::new(ProcFsNode::new(
-                    &alloc::format!("{}/oom_score_adj", self.path),
-                )) as Arc<dyn VfsNode>);
+            entries.push(
+                Arc::new(ProcFsNode::new(&alloc::format!("{}/status", self.path)))
+                    as Arc<dyn VfsNode>,
+            );
+            entries.push(
+                Arc::new(ProcFsNode::new(&alloc::format!("{}/cmdline", self.path)))
+                    as Arc<dyn VfsNode>,
+            );
+            entries.push(
+                Arc::new(ProcFsNode::new(&alloc::format!("{}/maps", self.path)))
+                    as Arc<dyn VfsNode>,
+            );
+            entries.push(
+                Arc::new(ProcFsNode::new(&alloc::format!("{}/io", self.path))) as Arc<dyn VfsNode>,
+            );
+            entries.push(
+                Arc::new(ProcFsNode::new(&alloc::format!("{}/fd", self.path))) as Arc<dyn VfsNode>,
+            );
+            entries.push(
+                Arc::new(ProcFsNode::new(&alloc::format!("{}/oom_score", self.path)))
+                    as Arc<dyn VfsNode>,
+            );
+            entries.push(Arc::new(ProcFsNode::new(&alloc::format!(
+                "{}/oom_score_adj",
+                self.path
+            ))) as Arc<dyn VfsNode>);
         }
 
         Ok(entries)
@@ -477,5 +501,10 @@ pub fn mount_procfs() {
 
 /// Initialize procfs — called during VFS init
 pub fn init() {
+    mount_procfs();
+}
+
+/// Initialize procfs with an already-locked VFS reference
+pub fn init_with_vfs(_vfs: &mut crate::vfs::VfsManager) {
     mount_procfs();
 }

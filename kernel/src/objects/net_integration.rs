@@ -1,6 +1,7 @@
+use crate::objects::{KernelObject, ObjectHeader, ObjectTypeId};
 use alloc::sync::Arc;
-use crate::objects::{KernelObject, ObjectHeader, ObjectTypeId, security::SecurityDescriptor};
 use smoltcp::iface::SocketHandle;
+use vahi_objects::security::SecurityDescriptor;
 
 /// Canonical SocketObject: wraps a smoltcp SocketHandle as a KernelObject.
 ///
@@ -23,12 +24,18 @@ impl SocketObject {
             crate::task::process::SocketType::Unix => "UnixSocket",
         };
         *header.name.lock() = Some(alloc::format!("Socket/{}", name));
-        Arc::new(SocketObject { header, handle, socket_type })
+        Arc::new(SocketObject {
+            header,
+            handle,
+            socket_type,
+        })
     }
 }
 
 impl KernelObject for SocketObject {
-    fn header(&self) -> &ObjectHeader { &self.header }
+    fn header(&self) -> &ObjectHeader {
+        &self.header
+    }
 
     fn type_name(&self) -> &'static str {
         match self.socket_type {
@@ -48,7 +55,9 @@ impl KernelObject for SocketObject {
         for (h, socket) in sockets.iter() {
             if h == self.handle {
                 use smoltcp::socket::Socket;
-                if let Socket::Tcp(ref tcp) = socket { return tcp.may_recv(); }
+                if let Socket::Tcp(ref tcp) = socket {
+                    return tcp.may_recv();
+                }
             }
         }
         false
@@ -59,7 +68,9 @@ impl KernelObject for SocketObject {
         for (h, socket) in sockets.iter() {
             if h == self.handle {
                 use smoltcp::socket::Socket;
-                if let Socket::Tcp(ref tcp) = socket { return tcp.may_send(); }
+                if let Socket::Tcp(ref tcp) = socket {
+                    return tcp.may_send();
+                }
             }
         }
         true
@@ -74,6 +85,8 @@ pub fn register_socket(
 ) -> Arc<SocketObject> {
     let obj = SocketObject::new(handle, stype);
     let path = alloc::format!("System/Sockets/{}", name);
-    crate::objects::namespace::OBJECT_NAMESPACE.lock().insert(&path, obj.clone());
+    crate::objects::namespace::OBJECT_NAMESPACE
+        .lock()
+        .insert(&path, obj.clone());
     obj
 }

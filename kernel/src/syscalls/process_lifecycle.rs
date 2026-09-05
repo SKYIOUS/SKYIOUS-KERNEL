@@ -1,30 +1,24 @@
-#![allow(unused_imports, unused_variables, dead_code, unused_doc_comments)]
+#![allow(unused_imports)]
 //! Process lifecycle syscalls: fork, clone, execve, exit, wait, sched, time.
 //! Extracted from process.rs to keep each module under 1k lines.
 
 use super::errno;
 use super::numbers;
 use super::*;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::objects::KernelObject;
-use crate::vfs::{VFS, VfsNode, Stat};
-use crate::sync::IrqSafeMutex as Mutex;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::vec;
-use x86_64::VirtAddr;
-use x86_64::structures::paging::{Page, Size4KiB, Mapper, FrameAllocator, PageTableFlags};
 use crate::gdt;
-use crate::interrupts::IrqFmtBuf;
+use crate::objects::KernelObject;
+use crate::sync::IrqSafeMutex as Mutex;
+use crate::task::process::FileDescriptor;
+use crate::vfs::{Stat, VfsNode, VFS};
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
+use x86_64::VirtAddr;
 
 pub fn sys_getppid() -> u64 {
-    let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock {
-        p.parent_id.unwrap_or(0)
-    } else {
-        0
-    }
+    get_current_process().map_or(0, |p| p.parent_id.unwrap_or(0))
 }
 
 pub fn sys_uname(buf: *mut UtsName) -> u64 {
@@ -46,36 +40,60 @@ pub fn sys_uname(buf: *mut UtsName) -> u64 {
     fill(&mut uts.sysname, "Vahi");
     fill(&mut uts.nodename, "sarga-os");
     fill(&mut uts.release, "0.3.0");
-    fill(&mut uts.version, "SARGA OS Ã¢â‚¬â€ Vahi V5.0 Roadmap Implementation");
+    fill(
+        &mut uts.version,
+        "SARGA OS Ã¢â‚¬â€ Vahi V5.0 Roadmap Implementation",
+    );
     #[cfg(not(target_arch = "aarch64"))]
     fill(&mut uts.machine, "x86_64");
     #[cfg(target_arch = "aarch64")]
     fill(&mut uts.machine, "aarch64");
 
-    if unsafe { user_access::copy_to_user(buf as *mut u8, core::slice::from_raw_parts(&uts as *const _ as *const u8, core::mem::size_of::<UtsName>())) }.is_err() {
+    if unsafe {
+        user_access::copy_to_user(
+            buf as *mut u8,
+            core::slice::from_raw_parts(
+                &uts as *const _ as *const u8,
+                core::mem::size_of::<UtsName>(),
+            ),
+        )
+    }
+    .is_err()
+    {
         return errno::Errno::EFAULT as u64;
     }
     0
 }
 
 pub fn sys_exit(status: u64) -> u64 {
-    let (parent_pid, clear_tid, child_pid) = {
-        let process_lock = CURRENT_PROCESS.lock();
-        if let Some(ref process) = *process_lock {
+    // Resolve the caller per-CPU, like fork/clone: the global CURRENT_PROCESS
+    // mirror is rewritten by every context switch on every CPU, so a service
+    // thread exiting could be read as PID 1 — spurious "PID 1 exited" panic
+    // and SYSTEM HALTED.
+    let (parent_pid, clear_tid, child_pid) = match get_current_process() {
+        Some(process) => {
             // PID 1 exit is fatal — no init means the system is dead.
             if process.id == 1 {
-                panic!("PID 1 (init) exited with status {}. No init process = system dead.", status);
+                panic!(
+                    "PID 1 (init) exited with status {}. No init process = system dead.",
+                    status
+                );
             }
-            *process.exit_code.lock() = Some(status as i32);
+            process
+                .exit_code
+                .store(status as i32, core::sync::atomic::Ordering::Relaxed);
             if status != 42 {
                 crate::println!("[PROCESS] Pid {} exited with status {}", process.id, status);
             }
-            (process.parent_id, *process.clear_child_tid.lock(), process.id)
-        } else {
-            (None, 0, 0)
+            (
+                process.parent_id,
+                *process.clear_child_tid.lock(),
+                process.id,
+            )
         }
+        None => (None, 0, 0),
     };
-    
+
     // Reparent orphaned children to PID 1 (init reaps them via wait4).
     // If PID 1 doesn't exist yet (very early boot), children become orphans
     // with parent_id = None and will be cleaned up on next wait4(-1).
@@ -101,27 +119,51 @@ pub fn sys_exit(status: u64) -> u64 {
             }
         }
     }
-    
+
     // Clear child tid and wake futex (for pthread_join)
     if clear_tid != 0 {
         let zero = 0u32;
-        let _ = unsafe { user_access::copy_to_user(clear_tid as *mut u8, core::slice::from_raw_parts(&zero as *const _ as *const u8, 4)) };
-        let _ = crate::syscalls::futex::sys_futex(clear_tid as *mut u32, 1, 1, 0, core::ptr::null_mut(), 0);
+        let _ = unsafe {
+            user_access::copy_to_user(
+                clear_tid as *mut u8,
+                core::slice::from_raw_parts(&zero as *const _ as *const u8, 4),
+            )
+        };
+        let _ = crate::syscalls::futex::sys_futex(
+            clear_tid as *mut u32,
+            1,
+            1,
+            0,
+            core::ptr::null_mut(),
+            0,
+        );
     }
-    
+
     // Send SIGCHLD to parent process
     if let Some(ppid) = parent_pid {
-        let table = crate::task::process::PROCESS_TABLE.lock();
-        if let Some(parent) = table.get(&ppid) {
-            parent.signals.lock().raise(crate::syscalls::signal::Signal::SIGCHLD);
-            // Route SIGCHLD to signalfd instances
-            crate::task::process::route_signal_to_signalfd(
-                parent.id, 17, crate::task::process::SI_CHILD, child_pid, 0, 0,
+        // Clone the parent out from under the table guard: raise/route below
+        // take per-process locks (I2: never nested under the table).
+        let parent = {
+            let table = crate::task::process::PROCESS_TABLE.lock();
+            table.get(&ppid).cloned()
+        };
+        if let Some(parent) = parent {
+            parent
+                .signals
+                .lock()
+                .raise(crate::syscalls::signal::Signal::SIGCHLD);
+            // Arc already resolved: route via the IRQ-safe variant (no table re-lock).
+            crate::task::process::route_signal_to_signalfd_for(
+                &parent,
+                17,
+                crate::task::process::SI_CHILD,
+                child_pid,
+                0,
+                0,
             );
         }
-        drop(table);
     }
-    
+
     // Mark current thread as exited
     crate::task::scheduler::with_current_thread(|thread| {
         thread.status = crate::task::thread::ThreadStatus::Exited;
@@ -135,12 +177,12 @@ pub fn sys_exit(status: u64) -> u64 {
 }
 
 pub fn sys_set_tid_address(tidptr: *const u32) -> u64 {
-    let lock = CURRENT_PROCESS.lock();
-    if let Some(ref proc) = *lock {
-        *proc.clear_child_tid.lock() = tidptr as u64;
-        proc.id
-    } else {
-        0
+    match get_current_process() {
+        Some(proc) => {
+            *proc.clear_child_tid.lock() = tidptr as u64;
+            proc.id
+        }
+        None => 0,
     }
 }
 
@@ -176,7 +218,11 @@ pub fn process_close_all_fds(proc: &crate::task::process::Process) {
                 crate::task::scheduler::wake_pipe(data.lock().key);
             }
             FileDescriptor::IoUringFd(data) => {
-                crate::task::scheduler::wake_pipe(data.lock().key);
+                let key = data
+                    .lock()
+                    .downcast_ref::<crate::syscalls::io_uring::IoUringInstance>()
+                    .map_or(0, |i| i.key);
+                crate::task::scheduler::wake_pipe(key);
             }
             _ => {} // File, PtyMaster, PtySlave — dropped by Arc refcount
         }
@@ -194,7 +240,9 @@ pub fn sys_nanosleep(seconds: u64, nanoseconds: u64) -> u64 {
     let ms = (seconds * 1000) + (nanoseconds / 1_000_000);
     let sleep_ticks = core::cmp::max(1, ms / 10);
 
-    if check_signal_interrupt() { return errno::Errno::EINTR as u64; }
+    if check_signal_interrupt() {
+        return errno::Errno::EINTR as u64;
+    }
 
     let target_tick = crate::interrupts::get_ticks() + sleep_ticks;
 
@@ -218,19 +266,20 @@ pub fn sys_sysinfo(buf: *mut u64) -> u64 {
     let uptime_ticks = crate::interrupts::get_ticks();
     let uptime_secs = uptime_ticks / 100;
     let info = [
-        0u64,                            // total_ram (pages)
-        0u64,                            // free_ram (pages)
-        uptime_secs,                     // uptime_seconds
-        0u64,                            // processes
-        1u64,                            // load_avg_1m (1<<16 fixed point)
+        0u64,        // total_ram (pages)
+        0u64,        // free_ram (pages)
+        uptime_secs, // uptime_seconds
+        0u64,        // processes
+        1u64,        // load_avg_1m (1<<16 fixed point)
     ];
-    if unsafe { crate::syscalls::user_access::copy_to_user(
-        buf as *mut u8,
-        core::slice::from_raw_parts(
-            info.as_ptr() as *const u8,
-            info.len() * 8,
-        ),
-    ) }.is_err() {
+    if unsafe {
+        crate::syscalls::user_access::copy_to_user(
+            buf as *mut u8,
+            core::slice::from_raw_parts(info.as_ptr() as *const u8, info.len() * 8),
+        )
+    }
+    .is_err()
+    {
         return errno::Errno::EFAULT as u64;
     }
     0
@@ -252,7 +301,14 @@ pub fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
             let base = x86_64::registers::segmentation::FS::read_base();
             if addr != 0 {
                 let val = base.as_u64();
-                if unsafe { user_access::copy_to_user(addr as *mut u8, core::slice::from_raw_parts(&val as *const _ as *const u8, 8)) }.is_err() {
+                if unsafe {
+                    user_access::copy_to_user(
+                        addr as *mut u8,
+                        core::slice::from_raw_parts(&val as *const _ as *const u8, 8),
+                    )
+                }
+                .is_err()
+                {
                     return errno::Errno::EFAULT as u64;
                 }
             }
@@ -284,9 +340,8 @@ pub fn sys_sched_yield() -> u64 {
 
 pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
     let proc = if pid == 0 {
-        let lock = crate::task::process::CURRENT_PROCESS.lock();
-        match *lock {
-            Some(ref p) => p.clone(),
+        match get_current_process() {
+            Some(p) => p,
             None => return errno::Errno::ESRCH as u64,
         }
     } else {
@@ -298,14 +353,20 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
         }
     };
 
-    if attr_ptr.is_null() { return errno::Errno::EFAULT as u64; }
+    if attr_ptr.is_null() {
+        return errno::Errno::EFAULT as u64;
+    }
 
     let size = unsafe { *(attr_ptr as *const u32) };
-    if size < 8 { return errno::Errno::EINVAL as u64; }
+    if size < 8 {
+        return errno::Errno::EINVAL as u64;
+    }
 
     let policy = unsafe { *(attr_ptr.add(4) as *const u32) };
     // Validate policy: 0=SCHED_NORMAL, 1=SCHED_FIFO, 2=SCHED_RR, 3=SCHED_BATCH
-    if policy > 3 { return errno::Errno::EINVAL as u64; }
+    if policy > 3 {
+        return errno::Errno::EINVAL as u64;
+    }
 
     let nice_or_rt_prio = if size >= 12 {
         unsafe { *(attr_ptr.add(8) as *const i32) }
@@ -318,19 +379,28 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
         // SCHED_FIFO / SCHED_RR: rt_priority 1-99
         let rt_prio = (nice_or_rt_prio as u32).clamp(1, 99);
         let quantum = if policy == 2 { 4u32 } else { 0u32 }; // 4 ticks for RR
-        // RT threads go to priority level 7 (highest) for queue ordering
+                                                             // RT threads go to priority level 7 (highest) for queue ordering
         (7u8, rt_prio, quantum)
     } else {
         // SCHED_NORMAL (0) / SCHED_BATCH (3): map nice [-20..19] to priority [0..7]
         let nice = nice_or_rt_prio;
-        let p = if nice <= -15 { 7u8 }
-            else if nice <= -10 { 6u8 }
-            else if nice <= -5  { 5u8 }
-            else if nice <= 0   { 4u8 }
-            else if nice <= 5   { 3u8 }
-            else if nice <= 10  { 2u8 }
-            else if nice <= 15  { 1u8 }
-            else { 0u8 };
+        let p = if nice <= -15 {
+            7u8
+        } else if nice <= -10 {
+            6u8
+        } else if nice <= -5 {
+            5u8
+        } else if nice <= 0 {
+            4u8
+        } else if nice <= 5 {
+            3u8
+        } else if nice <= 10 {
+            2u8
+        } else if nice <= 15 {
+            1u8
+        } else {
+            0u8
+        };
         (p, 0u32, 0u32)
     };
 
@@ -362,7 +432,9 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
                 t.rr_time_slice = rr_quantum;
                 t.priority = priority;
                 t.sched_class = policy;
-                if policy == 1 || policy == 2 { t.stride = 0; }
+                if policy == 1 || policy == 2 {
+                    t.stride = 0;
+                }
             }
         }
     }
@@ -372,9 +444,8 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
 
 pub fn sys_sched_getattr(pid: i64, attr_ptr: *mut u8, size: u64, _flags: u64) -> u64 {
     let target = if pid == 0 {
-        let lock = crate::task::process::CURRENT_PROCESS.lock();
-        match *lock {
-            Some(ref p) => p.clone(),
+        match get_current_process() {
+            Some(p) => p,
             None => return errno::Errno::ESRCH as u64,
         }
     } else {
@@ -385,7 +456,9 @@ pub fn sys_sched_getattr(pid: i64, attr_ptr: *mut u8, size: u64, _flags: u64) ->
         }
     };
 
-    if attr_ptr.is_null() { return errno::Errno::EFAULT as u64; }
+    if attr_ptr.is_null() {
+        return errno::Errno::EFAULT as u64;
+    }
     let out_size = if size == 0 { 12u32 } else { size as u32 };
 
     // Get current thread priority if it belongs to target process
@@ -393,28 +466,63 @@ pub fn sys_sched_getattr(pid: i64, attr_ptr: *mut u8, size: u64, _flags: u64) ->
         let sched = crate::task::scheduler::this_cpu_sched().lock();
         if let Some(ref cur) = sched.current_thread {
             if let Some(ref p) = cur.process {
-                if p.id == target.id { cur.priority } else { 3u8 }
-            } else { 3u8 }
-        } else { 3u8 }
+                if p.id == target.id {
+                    cur.priority
+                } else {
+                    3u8
+                }
+            } else {
+                3u8
+            }
+        } else {
+            3u8
+        }
     };
 
     let nice = match priority {
-        7 => -20, 6 => -10, 5 => -5, 4 => 0,
-        3 => 5, 2 => 10, 1 => 15, _ => 19,
+        7 => -20,
+        6 => -10,
+        5 => -5,
+        4 => 0,
+        3 => 5,
+        2 => 10,
+        1 => 15,
+        _ => 19,
     };
 
-        if unsafe { user_access::copy_to_user(attr_ptr, core::slice::from_raw_parts(&out_size as *const _ as *const u8, 4)) }.is_err() {
+    if unsafe {
+        user_access::copy_to_user(
+            attr_ptr,
+            core::slice::from_raw_parts(&out_size as *const _ as *const u8, 4),
+        )
+    }
+    .is_err()
+    {
         return errno::Errno::EFAULT as u64;
     }
     if out_size >= 8 {
         let zero = 0u32;
-        if unsafe { user_access::copy_to_user(attr_ptr.add(4), core::slice::from_raw_parts(&zero as *const _ as *const u8, 4)) }.is_err() {
+        if unsafe {
+            user_access::copy_to_user(
+                attr_ptr.add(4),
+                core::slice::from_raw_parts(&zero as *const _ as *const u8, 4),
+            )
+        }
+        .is_err()
+        {
             return errno::Errno::EFAULT as u64;
         }
     }
     if out_size >= 12 {
         let nice_le = nice as u32;
-        if unsafe { user_access::copy_to_user(attr_ptr.add(8), core::slice::from_raw_parts(&nice_le as *const _ as *const u8, 4)) }.is_err() {
+        if unsafe {
+            user_access::copy_to_user(
+                attr_ptr.add(8),
+                core::slice::from_raw_parts(&nice_le as *const _ as *const u8, 4),
+            )
+        }
+        .is_err()
+        {
             return errno::Errno::EFAULT as u64;
         }
     }
@@ -425,9 +533,8 @@ pub fn sys_sched_getattr(pid: i64, attr_ptr: *mut u8, size: u64, _flags: u64) ->
 /// Sets the CPU affinity mask for a thread/process.
 pub fn sys_sched_setaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
     let target = if pid == 0 {
-        let lock = crate::task::process::CURRENT_PROCESS.lock();
-        match *lock {
-            Some(ref p) => p.clone(),
+        match get_current_process() {
+            Some(p) => p,
             None => return errno::Errno::ESRCH as u64,
         }
     } else {
@@ -439,24 +546,31 @@ pub fn sys_sched_setaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
     };
 
     // cpusetsize must be at least 8 bytes (64-bit mask)
-    if cpusetsize < 8 { return errno::Errno::EINVAL as u64; }
-    if mask_ptr == 0 { return errno::Errno::EFAULT as u64; }
+    if cpusetsize < 8 {
+        return errno::Errno::EINVAL as u64;
+    }
+    if mask_ptr == 0 {
+        return errno::Errno::EFAULT as u64;
+    }
 
     let mut mask: u64 = 0;
-    let mask_slice = unsafe {
-        core::slice::from_raw_parts_mut(&mut mask as *mut u64 as *mut u8, 8)
-    };
+    let mask_slice =
+        unsafe { core::slice::from_raw_parts_mut(&mut mask as *mut u64 as *mut u8, 8) };
     if unsafe { user_access::copy_from_user(mask_slice, mask_ptr as *const u8) }.is_err() {
         return errno::Errno::EFAULT as u64;
     }
 
     // Mask must have at least one bit set
-    if mask == 0 { return errno::Errno::EINVAL as u64; }
+    if mask == 0 {
+        return errno::Errno::EINVAL as u64;
+    }
 
     // Limit to MAX_CPUS
     let max_mask = (1u64 << crate::task::scheduler::MAX_CPUS) - 1;
     mask &= max_mask;
-    if mask == 0 { return errno::Errno::EINVAL as u64; }
+    if mask == 0 {
+        return errno::Errno::EINVAL as u64;
+    }
 
     // Update current thread if it belongs to this process
     {
@@ -488,13 +602,16 @@ pub fn sys_sched_setaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
 /// sched_getaffinity(pid, cpusetsize, mask)
 /// Gets the CPU affinity mask for a thread/process.
 pub fn sys_sched_getaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
-    if cpusetsize < 8 { return errno::Errno::EINVAL as u64; }
-    if mask_ptr == 0 { return errno::Errno::EFAULT as u64; }
+    if cpusetsize < 8 {
+        return errno::Errno::EINVAL as u64;
+    }
+    if mask_ptr == 0 {
+        return errno::Errno::EFAULT as u64;
+    }
 
     let target = if pid == 0 {
-        let lock = crate::task::process::CURRENT_PROCESS.lock();
-        match *lock {
-            Some(ref p) => p.clone(),
+        match get_current_process() {
+            Some(p) => p,
             None => return errno::Errno::ESRCH as u64,
         }
     } else {
@@ -526,7 +643,14 @@ pub fn sys_sched_getaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
     let max_mask = (1u64 << crate::task::scheduler::MAX_CPUS) - 1;
     let final_mask = mask & max_mask;
 
-    if unsafe { user_access::copy_to_user(mask_ptr as *mut u8, core::slice::from_raw_parts(&final_mask as *const u64 as *const u8, 8)) }.is_err() {
+    if unsafe {
+        user_access::copy_to_user(
+            mask_ptr as *mut u8,
+            core::slice::from_raw_parts(&final_mask as *const u64 as *const u8, 8),
+        )
+    }
+    .is_err()
+    {
         return errno::Errno::EFAULT as u64;
     }
 
@@ -534,222 +658,221 @@ pub fn sys_sched_getaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
 }
 
 pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
-    use crate::task::process::{Process, CURRENT_PROCESS};
     use crate::memory::buddy::BuddyFrameAllocator;
+    use crate::task::process::{Process, CURRENT_PROCESS};
 
-    crate::serial_write("[FORK] enter\n");
-    let parent_lock = CURRENT_PROCESS.lock();
-    if let Some(ref parent) = *parent_lock {
-        // Cgroup pids.max check
-        {
-            let cg_path = parent.cgroup_path.lock();
-            let hierarchy = crate::syscalls::cgroup::cgroup_ensure();
-            if let Some(cg) = hierarchy.find_cgroup(&cg_path) {
-                if !cg.can_fork() {
-                    crate::serial_write("[FORK] denied: cgroup pids.max reached\n");
-                    return errno::Errno::EAGAIN as u64;
-                }
+    // The parent is THIS CPU's current thread's process — never the global
+    // CURRENT_PROCESS mirror, which another CPU's context switch can
+    // overwrite between syscall entry and here (fork would clone the wrong
+    // process as the parent and corrupt the child's ancestry — the child
+    // inherits the wrong fd table, address space, and parentage).
+    let parent_arc = {
+        let sched = crate::task::scheduler::this_cpu_sched().lock();
+        sched
+            .current_thread
+            .as_ref()
+            .and_then(|t| t.process.clone())
+    };
+    let Some(parent) = parent_arc else {
+        return errno::Errno::EPERM as u64;
+    };
+    // Cgroup pids.max check
+    {
+        let cg_path = parent.cgroup_path.lock();
+        let hierarchy = crate::syscalls::cgroup::cgroup_ensure();
+        if let Some(cg) = hierarchy.find_cgroup(&cg_path) {
+            if !cg.can_fork() {
+                return errno::Errno::EAGAIN as u64;
             }
         }
-        let parent_id = parent.id;
-        // 1. Clone Address Space with CoW
-        let mut frame_allocator = BuddyFrameAllocator;
-        let child_as = match parent.address_space.clone_cow(&mut frame_allocator) {
-            Some(as_space) => as_space,
-            None => return errno::Errno::ENOMEM as u64,
-        };
-        crate::serial_write("[FORK] cow done\n");
-        // FORKDIAG: dump the parent's slab free-list heads (ALLOCATOR .bss at
-        // the init binary's 0x4063d8) with VMA residency, to see whether a
-        // free-list entry already points at an unmapped page pre-fork.
-        {
-            let mut scratch = [0u8; 1024];
-            let mut w = IrqFmtBuf { buf: &mut scratch, len: 0 };
-            let _ = core::fmt::write(&mut w, format_args!("[FORKDIAG] pid={} heads:", parent_id));
-            for cls in 0..9usize {
-                let addr = 0x4063d8u64 + (cls as u64) * 8;
-                let pv = crate::memory::virt_to_phys(x86_64::VirtAddr::new(addr));
-                let head = match pv {
-                    Some(phys) => {
-                        let k = crate::memory::physical_memory_offset() + phys.as_u64();
-                        unsafe { *(k as *const u64) }
-                    }
-                    None => u64::MAX,
-                };
-                let in_vma = head != 0 && head != u64::MAX
-                    && parent.find_vma(head).is_some();
-                let _ = core::fmt::write(&mut w, format_args!(" c{}={:#x}{}", cls, head, if head != 0 && head != u64::MAX { if in_vma { "v" } else { "X" } } else { "" }));
-            }
-            let _ = core::fmt::write(&mut w, format_args!("
-"));
-            let diag_len = w.len;
-            drop(w);
-            crate::serial_write(core::str::from_utf8(&scratch[..diag_len]).unwrap_or(""));
-        }
-
-        // 2. Create new Process
-        let child_pid = Process::next_id();
-        let mut child_process = Process::new(child_pid, Some(parent_id), child_as);
-        {
-            let parent_vmas = parent.memory.lock().vmas.clone();
-            child_process.memory.lock().vmas = parent_vmas;
-        }
-        // Clone isolate for CoW virtual memory tracking
-        if let Some(ref parent_isolate) = parent.isolate {
-            child_process.isolate = parent_isolate.clone_cow(
-                child_pid,
-                &mut crate::memory::buddy::BuddyFrameAllocator,
-            );
-        }
-        child_process.entry_point = parent.entry_point;
-        child_process.files.lock().fd_table = parent.files.lock().fd_table.clone();
-        child_process.files.lock().fd_flags = parent.files.lock().fd_flags.clone();
-        child_process.files.lock().dir_fds = parent.files.lock().dir_fds.clone();
-        child_process.clone_credentials_from(parent);
-        {
-            let p_id = parent.identity.lock();
-            let mut c_id = child_process.identity.lock();
-            c_id.pgid = p_id.pgid;
-            c_id.session = p_id.session;
-            c_id.is_group_leader = false;
-        }
-        // Copy the brk pointer: the child heap region must mirror the parent
-        // or demand-paging of inherited brk pages SIGSEGVs.
-        child_process.memory.lock().brk = parent.memory.lock().brk;
-        let child_arc = Arc::new(child_process);
-        crate::serial_write("[FORK] process cloned\n");
-
-        // 3. Clone current thread (deep copy stack) BEFORE registering the
-        // child, so a stack-alloc failure leaves no orphan in children/table.
-        let child_thread = {
-            let sched = crate::task::scheduler::this_cpu_sched().lock();
-            match sched.current_thread.as_ref() {
-                Some(t) => match t.clone_fork(child_arc.clone(), regs_ptr) {
-                    Some(t) => t,
-                    None => return errno::Errno::ENOMEM as u64,
-                },
-                None => {
-                    crate::serial_write("[FORK] no current thread!\n");
-                    return errno::Errno::EPERM as u64;
-                }
-            }
-        };
-        crate::serial_write("[FORK] thread cloned\n");
-
-        // Track child in parent and global table
-        parent.children.lock().push(child_pid);
-        crate::task::process::Process::register(child_arc.clone());
-        crate::serial_write("[FORK] registered\n");
-
-        // 4. Add to scheduler
-        crate::task::scheduler::spawn_thread(child_thread);
-        crate::serial_write("[FORK] spawned\n");
-
-        return child_pid;
     }
-    crate::serial_write("[FORK] no current process!\n");
-    
-    errno::Errno::EPERM as u64 
+    let parent_id = parent.id;
+    // 1. Clone Address Space with CoW
+    let mut frame_allocator = BuddyFrameAllocator;
+    let child_as = match parent.address_space.clone_cow(&mut frame_allocator) {
+        Some(as_space) => as_space,
+        None => return errno::Errno::ENOMEM as u64,
+    };
+
+    // 2. Create new Process
+    let child_pid = Process::next_id();
+    let mut child_process = Process::new(child_pid, Some(parent_id), child_as);
+    {
+        let parent_vmas = parent.memory.lock().vmas.clone();
+        child_process.memory.lock().vmas = parent_vmas;
+    }
+    // Clone isolate for CoW virtual memory tracking
+    if let Some(ref parent_isolate) = parent.isolate {
+        child_process.isolate =
+            parent_isolate.clone_cow(child_pid, &mut crate::memory::buddy::BuddyFrameAllocator);
+    }
+    child_process.entry_point = parent.entry_point;
+    child_process.files.lock().fd_table = parent.files.lock().fd_table.clone();
+    child_process.files.lock().fd_flags = parent.files.lock().fd_flags.clone();
+    child_process.files.lock().dir_fds = parent.files.lock().dir_fds.clone();
+    child_process.clone_credentials_from(&parent);
+    {
+        let p_id = parent.identity.lock();
+        let mut c_id = child_process.identity.lock();
+        c_id.pgid = p_id.pgid;
+        c_id.session = p_id.session;
+        c_id.is_group_leader = false;
+    }
+    // Copy the brk pointer: the child heap region must mirror the parent
+    // or demand-paging of inherited brk pages SIGSEGVs.
+    child_process.memory.lock().brk = parent.memory.lock().brk;
+    let child_arc = Arc::new(child_process);
+
+    // 3. Clone current thread (deep copy stack) BEFORE registering the
+    // child, so a stack-alloc failure leaves no orphan in children/table.
+    let child_thread = {
+        let sched = crate::task::scheduler::this_cpu_sched().lock();
+        match sched.current_thread.as_ref() {
+            Some(t) => match t.clone_fork(child_arc.clone(), regs_ptr) {
+                Some(t) => t,
+                None => return errno::Errno::ENOMEM as u64,
+            },
+            None => {
+                crate::serial_write("[FORK] no current thread!\n");
+                return errno::Errno::EPERM as u64;
+            }
+        }
+    };
+
+    // Track child in parent and global table
+    parent.children.lock().push(child_pid);
+    crate::task::process::Process::register(child_arc.clone());
+
+    // 4. Add to scheduler
+    crate::task::scheduler::spawn_thread(child_thread);
+
+    return child_pid;
 }
 
-pub fn sys_clone(flags: u64, child_stack: u64, parent_tid: *mut u32, child_tls: u64, child_tidptr: *mut u32, regs_ptr: *mut u64) -> u64 {
-    use crate::task::process::{Process, CURRENT_PROCESS};
+pub fn sys_clone(
+    flags: u64,
+    child_stack: u64,
+    parent_tid: *mut u32,
+    child_tls: u64,
+    child_tidptr: *mut u32,
+    regs_ptr: *mut u64,
+) -> u64 {
     use crate::memory::buddy::BuddyFrameAllocator;
+    use crate::task::process::{Process, CURRENT_PROCESS};
 
     const CLONE_SETTLS: u64 = 0x80000;
     const CLONE_PARENT_SETTID: u64 = 0x00100000;
     const CLONE_CHILD_SETTID: u64 = 0x02000000;
     const CLONE_CHILD_CLEARTID: u64 = 0x00200000;
 
-    let parent_lock = CURRENT_PROCESS.lock();
-    if let Some(ref parent) = *parent_lock {
-        let child_pid = Process::next_id();
+    // Same as sys_fork: derive the parent from THIS CPU's current thread, not
+    // the global CURRENT_PROCESS mirror (another CPU's switch can overwrite it
+    // between syscall entry and here, cloning the wrong process).
+    let parent_arc = {
+        let sched = crate::task::scheduler::this_cpu_sched().lock();
+        sched
+            .current_thread
+            .as_ref()
+            .and_then(|t| t.process.clone())
+    };
+    let Some(parent) = parent_arc else {
+        return errno::Errno::EPERM as u64;
+    };
+    let child_pid = Process::next_id();
 
-        let child_as = match parent.address_space.clone_cow(&mut BuddyFrameAllocator) {
-            Some(as_space) => as_space,
-            None => return errno::Errno::ENOMEM as u64,
-        };
+    let child_as = match parent.address_space.clone_cow(&mut BuddyFrameAllocator) {
+        Some(as_space) => as_space,
+        None => return errno::Errno::ENOMEM as u64,
+    };
 
-        let mut child_process = Process::new(child_pid, Some(parent.id), child_as);
-        {
-            let parent_vmas = parent.memory.lock().vmas.clone();
-            child_process.memory.lock().vmas = parent_vmas;
-        }
-        // Clone isolate for CoW virtual memory tracking
-        if let Some(ref parent_isolate) = parent.isolate {
-            child_process.isolate = parent_isolate.clone_cow(
-                child_pid,
-                &mut BuddyFrameAllocator,
-            );
-        }
-        child_process.entry_point = parent.entry_point;
-        child_process.files.lock().fd_table = parent.files.lock().fd_table.clone();
-        child_process.files.lock().fd_flags = parent.files.lock().fd_flags.clone();
-        child_process.files.lock().dir_fds = parent.files.lock().dir_fds.clone();
-        *child_process.signal_handlers.lock() = *parent.signal_handlers.lock();
-        child_process.clone_credentials_from(parent);
-        {
-            let p_id = parent.identity.lock();
-            let mut c_id = child_process.identity.lock();
-            c_id.pgid = p_id.pgid;
-            c_id.session = p_id.session;
-            c_id.is_group_leader = false;
-        }
-
-        if flags & CLONE_CHILD_CLEARTID != 0 && !child_tidptr.is_null() {
-            *child_process.clear_child_tid.lock() = child_tidptr as u64;
-        }
-
-        if flags & CLONE_CHILD_SETTID != 0 && !child_tidptr.is_null() {
-            let val = child_pid as u32;
-            if unsafe { user_access::copy_to_user(child_tidptr as *mut u8, core::slice::from_raw_parts(&val as *const u32 as *const u8, 4)) }.is_err() {
-                return errno::Errno::EFAULT as u64;
-            }
-        }
-
-        if flags & CLONE_PARENT_SETTID != 0 && !parent_tid.is_null() {
-            let val = child_pid as u32;
-            if unsafe { user_access::copy_to_user(parent_tid as *mut u8, core::slice::from_raw_parts(&val as *const u32 as *const u8, 4)) }.is_err() {
-                return errno::Errno::EFAULT as u64;
-            }
-        }
-
-        let child_arc = Arc::new(child_process);
-
-        // Clone thread before registering Ã¢â‚¬â€ a stack-alloc failure must not
-        // leave an orphan child in PROCESS_TABLE/children.
-        let child_thread = {
-            let sched = crate::task::scheduler::this_cpu_sched().lock();
-            match sched.current_thread.as_ref() {
-                Some(t) => match t.clone_thread(child_arc.clone(), regs_ptr, child_stack) {
-                    Some(t) => t,
-                    None => return errno::Errno::ENOMEM as u64,
-                },
-                None => return errno::Errno::EPERM as u64,
-            }
-        };
-
-        parent.children.lock().push(child_pid);
-        crate::task::process::Process::register(child_arc.clone());
-
-        let mut child_thread = child_thread;
-        if flags & CLONE_SETTLS != 0 {
-            child_thread.fs_base = child_tls;
-        }
-
-        crate::task::scheduler::spawn_thread(child_thread);
-        return child_pid;
+    let mut child_process = Process::new(child_pid, Some(parent.id), child_as);
+    {
+        let parent_vmas = parent.memory.lock().vmas.clone();
+        child_process.memory.lock().vmas = parent_vmas;
+    }
+    // Clone isolate for CoW virtual memory tracking
+    if let Some(ref parent_isolate) = parent.isolate {
+        child_process.isolate = parent_isolate.clone_cow(child_pid, &mut BuddyFrameAllocator);
+    }
+    child_process.entry_point = parent.entry_point;
+    child_process.files.lock().fd_table = parent.files.lock().fd_table.clone();
+    child_process.files.lock().fd_flags = parent.files.lock().fd_flags.clone();
+    child_process.files.lock().dir_fds = parent.files.lock().dir_fds.clone();
+    *child_process.signal_handlers.lock() = *parent.signal_handlers.lock();
+    child_process.clone_credentials_from(&parent);
+    {
+        let p_id = parent.identity.lock();
+        let mut c_id = child_process.identity.lock();
+        c_id.pgid = p_id.pgid;
+        c_id.session = p_id.session;
+        c_id.is_group_leader = false;
     }
 
-    errno::Errno::EPERM as u64
+    if flags & CLONE_CHILD_CLEARTID != 0 && !child_tidptr.is_null() {
+        *child_process.clear_child_tid.lock() = child_tidptr as u64;
+    }
+
+    if flags & CLONE_CHILD_SETTID != 0 && !child_tidptr.is_null() {
+        let val = child_pid as u32;
+        if unsafe {
+            user_access::copy_to_user(
+                child_tidptr as *mut u8,
+                core::slice::from_raw_parts(&val as *const u32 as *const u8, 4),
+            )
+        }
+        .is_err()
+        {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    if flags & CLONE_PARENT_SETTID != 0 && !parent_tid.is_null() {
+        let val = child_pid as u32;
+        if unsafe {
+            user_access::copy_to_user(
+                parent_tid as *mut u8,
+                core::slice::from_raw_parts(&val as *const u32 as *const u8, 4),
+            )
+        }
+        .is_err()
+        {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    let child_arc = Arc::new(child_process);
+
+    // Clone thread before registering Ã¢â‚¬â€ a stack-alloc failure must not
+    // leave an orphan child in PROCESS_TABLE/children.
+    let child_thread = {
+        let sched = crate::task::scheduler::this_cpu_sched().lock();
+        match sched.current_thread.as_ref() {
+            Some(t) => match t.clone_thread(child_arc.clone(), regs_ptr, child_stack) {
+                Some(t) => t,
+                None => return errno::Errno::ENOMEM as u64,
+            },
+            None => return errno::Errno::EPERM as u64,
+        }
+    };
+
+    parent.children.lock().push(child_pid);
+    crate::task::process::Process::register(child_arc.clone());
+
+    let mut child_thread = child_thread;
+    if flags & CLONE_SETTLS != 0 {
+        child_thread.fs_base = child_tls;
+    }
+
+    crate::task::scheduler::spawn_thread(child_thread);
+    return child_pid;
 }
 
 pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8) -> u64 {
     const WNOHANG: i32 = 1;
     const WUNTRACED: i32 = 2;
-    let parent_id = {
-        let lock = CURRENT_PROCESS.lock();
-        if let Some(ref p) = *lock { p.id } else { return errno::Errno::ESRCH as u64; }
+    let parent_id = match get_current_process() {
+        Some(p) => p.id,
+        None => return errno::Errno::ESRCH as u64,
     };
 
     let mut child_to_reap = None;
@@ -759,7 +882,9 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
             let process_table = crate::task::process::PROCESS_TABLE.lock();
             let parent = match process_table.get(&parent_id) {
                 Some(p) => p,
-                None => { return 0; }
+                None => {
+                    return 0;
+                }
             };
             let children_pids = parent.children.lock();
 
@@ -767,10 +892,10 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
                 if pid != -1 && child_pid != pid as u64 {
                     continue;
                 }
-                
+
                 if let Some(child) = process_table.get(&child_pid) {
-                    let exit_status = child.exit_code.lock();
-                    if let Some(status) = *exit_status {
+                    let status = child.exit_code.load(core::sync::atomic::Ordering::Relaxed);
+                    if status != i32::MIN {
                         child_to_reap = Some((child_pid, status, index));
                         break;
                     }
@@ -780,20 +905,26 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
 
         if let Some((child_pid, status, index)) = child_to_reap.take() {
             if !status_ptr.is_null() {
-                unsafe { *status_ptr = status; }
+                unsafe {
+                    *status_ptr = status;
+                }
             }
-            
+
             {
                 let process_table = crate::task::process::PROCESS_TABLE.lock();
                 let parent = process_table.get(&parent_id).unwrap();
                 parent.children.lock().remove(index);
             }
-            crate::task::process::PROCESS_TABLE.lock().remove(&child_pid);
+            crate::task::process::PROCESS_TABLE
+                .lock()
+                .remove(&child_pid);
             return child_pid;
         }
 
         // No child exited yet Ã¢â‚¬â€ check for signals before sleeping
-        if check_signal_interrupt() { return errno::Errno::EINTR as u64; }
+        if check_signal_interrupt() {
+            return errno::Errno::EINTR as u64;
+        }
 
         // WNOHANG: report nothing to reap instead of blocking.
         if options & WNOHANG != 0 {
@@ -814,18 +945,17 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
 }
 
 pub fn sys_getpid() -> u64 {
-    use crate::task::process::CURRENT_PROCESS;
-    let lock = CURRENT_PROCESS.lock();
-    if let Some(ref p) = *lock {
-        p.id
-    } else {
-        0
-    }
+    get_current_process().map_or(0, |p| p.id)
 }
 
-pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *const *const u8, _regs_ptr: *mut u64) -> u64 {
+pub fn sys_execve(
+    path_ptr: *const u8,
+    argv_ptr: *const *const u8,
+    envp_ptr: *const *const u8,
+    _regs_ptr: *mut u64,
+) -> u64 {
     use crate::syscalls::user_access;
-    
+
     // 1. Copy path, argv, and envp from user space
     let path = match unsafe { user_access::read_user_string(path_ptr, 256) } {
         Ok(s) => s,
@@ -845,18 +975,27 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *co
         loop {
             let mut ptr: *const u8 = core::ptr::null();
             unsafe {
-                if user_access::copy_from_user(core::slice::from_raw_parts_mut(&mut ptr as *mut _ as *mut u8, 8), argv_ptr.add(i) as *const u8).is_err() {
+                if user_access::copy_from_user(
+                    core::slice::from_raw_parts_mut(&mut ptr as *mut _ as *mut u8, 8),
+                    argv_ptr.add(i) as *const u8,
+                )
+                .is_err()
+                {
                     break;
                 }
             }
-            if ptr.is_null() { break; }
+            if ptr.is_null() {
+                break;
+            }
             if let Ok(s) = unsafe { user_access::read_user_string(ptr, 256) } {
                 argv.push(s);
             } else {
                 break;
             }
             i += 1;
-            if i > 64 { break; }
+            if i > 64 {
+                break;
+            }
         }
     }
 
@@ -867,18 +1006,27 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *co
         loop {
             let mut ptr: *const u8 = core::ptr::null();
             unsafe {
-                if user_access::copy_from_user(core::slice::from_raw_parts_mut(&mut ptr as *mut _ as *mut u8, 8), envp_ptr.add(i) as *const u8).is_err() {
+                if user_access::copy_from_user(
+                    core::slice::from_raw_parts_mut(&mut ptr as *mut _ as *mut u8, 8),
+                    envp_ptr.add(i) as *const u8,
+                )
+                .is_err()
+                {
                     break;
                 }
             }
-            if ptr.is_null() { break; }
+            if ptr.is_null() {
+                break;
+            }
             if let Ok(s) = unsafe { user_access::read_user_string(ptr, 1024) } {
                 envp.push(s);
             } else {
                 break;
             }
             i += 1;
-            if i > 256 { break; }
+            if i > 256 {
+                break;
+            }
         }
     }
 
@@ -904,11 +1052,16 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *co
             if !crate::security::hook_setuid_exec(&subj, &path) {
                 return errno::Errno::EACCES as u64;
             }
-            let lock = CURRENT_PROCESS.lock();
-            if let Some(ref proc) = *lock {
+            if let Some(ref proc) = get_current_process() {
                 let mut c = proc.credentials();
-                if is_setuid { c.euid = stat.st_uid; c.suid = stat.st_uid; }
-                if is_setgid { c.egid = stat.st_gid; c.sgid = stat.st_gid; }
+                if is_setuid {
+                    c.euid = stat.st_uid;
+                    c.suid = stat.st_uid;
+                }
+                if is_setgid {
+                    c.egid = stat.st_gid;
+                    c.sgid = stat.st_gid;
+                }
                 proc.set_credentials(&c);
             }
         }
@@ -919,25 +1072,47 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *co
         Err(_) => return errno::Errno::EIO as u64,
     };
 
-    // 3. Copy fd table and flags from old process. Serialize the whole
-    // exec tail across CPUs: concurrent execs (fork children exec'ing on
-    // different CPUs) otherwise overwrite the global CURRENT_PROCESS mid-
-    // flight, so one exec'd process runs with another's process context
-    // (wrong fd table, wrong VMA list -> SIGSEGV on its first heap write).
+    // 3. Copy fd table and flags from old process. The old process is THIS
+    // CPU's current thread's process (per-CPU — the global CURRENT_PROCESS
+    // mirror is rewritten by every switch on every CPU and can name a
+    // sibling under SMP). Serialize the exec tail across CPUs: concurrent
+    // execs otherwise interleave the tail, so one exec'd process can run
+    // with another's process context (wrong fd table -> wrong fds after
+    // exec). Deriving per-CPU removes the wrong-context source entirely.
     static EXEC_LOCK: crate::sync::IrqSafeMutex<()> = crate::sync::IrqSafeMutex::new(());
     let exec_guard = EXEC_LOCK.lock();
-    let (old_fd_table, old_fd_flags) = crate::task::process::CURRENT_PROCESS.lock()
-        .as_ref().map(|p| (p.files.lock().fd_table.clone(), p.files.lock().fd_flags.clone()))
+    let (old_fd_table, old_fd_flags) = get_current_process()
+        .map(|p| {
+            // One acquisition: a second p.files.lock() while the first guard is
+            // still alive (Rust temporaries live to the end of the let) would
+            // self-deadlock on the non-reentrant IrqSafeMutex.
+            let files = p.files.lock();
+            (files.fd_table.clone(), files.fd_flags.clone())
+        })
         .unwrap_or_default();
 
     // 4. Load ELF into new AddressSpace
     use crate::memory::paging::AddressSpace;
     let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
-    let new_as = AddressSpace::new(&mut frame_allocator).expect("Failed to create new AddressSpace");
-    
+    let new_as =
+        AddressSpace::new(&mut frame_allocator).expect("Failed to create new AddressSpace");
+
     let process = match crate::task::process::Process::load_elf(&elf_data, new_as) {
         Ok(p) => p,
-        Err(_) => return errno::Errno::ENOEXEC as u64,
+        Err(e) => {
+            let magic = elf_data
+                .get(0..4)
+                .map(|b| alloc::format!("{:02x}{:02x}{:02x}{:02x}", b[0], b[1], b[2], b[3]))
+                .unwrap_or_else(|| "none".into());
+            crate::serial_write(&alloc::format!(
+                "[EXEC] load_elf failed path={} bytes={} magic={} err={}\n",
+                path,
+                elf_data.len(),
+                magic,
+                e
+            ));
+            return errno::Errno::ENOEXEC as u64;
+        }
     };
 
     // Detect emulation mode based on ELF header
@@ -965,7 +1140,9 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *co
 
     // Activate new address space BEFORE setting up user stack
     // so virt_to_phys can find the freshly-mapped pages.
-    unsafe { process_arc.address_space.activate(); }
+    unsafe {
+        process_arc.address_space.activate();
+    }
 
     // 4. Setup user stack with argc/argv/envp/auxv
     let user_rsp = match process_arc.setup_user_stack(&argv, &envp, entry, &elf_data) {
@@ -978,21 +1155,16 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *co
 
     // 5. Update CURRENT_PROCESS
     {
-        let mut cur = CURRENT_PROCESS.lock();
+        let mut cur = crate::task::process::CURRENT_PROCESS.lock();
         *cur = Some(process_arc.clone());
     }
-    
+
     // Update current thread's process
     {
         crate::task::scheduler::with_current_thread(|thread| {
             thread.process = Some(process_arc.clone());
         });
     }
-
-    crate::serial_write(&alloc::format!(
-        "[EXEC] pid={} path={} elf={} entry={:#x} rsp={:#x}\n",
-        process_arc.id, path, elf_data.len(), entry, user_rsp
-    ));
 
     drop(exec_guard);
     unsafe {
@@ -1001,8 +1173,12 @@ pub fn sys_execve(path_ptr: *const u8, argv_ptr: *const *const u8, envp_ptr: *co
 }
 
 pub fn sys_getitimer(which: u64, curr_ptr: *mut u8) -> u64 {
-    if which != 0 { return errno::Errno::EINVAL as u64; } // Only ITIMER_REAL
-    if curr_ptr.is_null() { return errno::Errno::EFAULT as u64; }
+    if which != 0 {
+        return errno::Errno::EINVAL as u64;
+    } // Only ITIMER_REAL
+    if curr_ptr.is_null() {
+        return errno::Errno::EFAULT as u64;
+    }
 
     let process = match get_current_process() {
         Some(p) => p,
@@ -1010,7 +1186,10 @@ pub fn sys_getitimer(which: u64, curr_ptr: *mut u8) -> u64 {
     };
     let it = process.itimer_real.lock();
     let slice = unsafe {
-        core::slice::from_raw_parts(&*it as *const itimerval as *const u8, core::mem::size_of::<itimerval>())
+        core::slice::from_raw_parts(
+            &*it as *const itimerval as *const u8,
+            core::mem::size_of::<itimerval>(),
+        )
     };
     if unsafe { user_access::copy_to_user(curr_ptr, slice) }.is_err() {
         return errno::Errno::EFAULT as u64;
@@ -1019,7 +1198,9 @@ pub fn sys_getitimer(which: u64, curr_ptr: *mut u8) -> u64 {
 }
 
 pub fn sys_setitimer(which: u64, new_ptr: *const u8, old_ptr: *mut u8) -> u64 {
-    if which != 0 { return errno::Errno::EINVAL as u64; } // Only ITIMER_REAL
+    if which != 0 {
+        return errno::Errno::EINVAL as u64;
+    } // Only ITIMER_REAL
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
@@ -1028,7 +1209,10 @@ pub fn sys_setitimer(which: u64, new_ptr: *const u8, old_ptr: *mut u8) -> u64 {
     if !old_ptr.is_null() {
         let it = process.itimer_real.lock();
         let slice = unsafe {
-            core::slice::from_raw_parts(&*it as *const itimerval as *const u8, core::mem::size_of::<itimerval>())
+            core::slice::from_raw_parts(
+                &*it as *const itimerval as *const u8,
+                core::mem::size_of::<itimerval>(),
+            )
         };
         if unsafe { user_access::copy_to_user(old_ptr, slice) }.is_err() {
             return errno::Errno::EFAULT as u64;
@@ -1037,11 +1221,20 @@ pub fn sys_setitimer(which: u64, new_ptr: *const u8, old_ptr: *mut u8) -> u64 {
 
     if !new_ptr.is_null() {
         let mut new_it: itimerval = itimerval {
-            it_interval: timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: timeval { tv_sec: 0, tv_usec: 0 },
+            it_interval: timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         };
         let slice = unsafe {
-            core::slice::from_raw_parts_mut(&mut new_it as *mut itimerval as *mut u8, core::mem::size_of::<itimerval>())
+            core::slice::from_raw_parts_mut(
+                &mut new_it as *mut itimerval as *mut u8,
+                core::mem::size_of::<itimerval>(),
+            )
         };
         if unsafe { user_access::copy_from_user(slice, new_ptr) }.is_err() {
             return errno::Errno::EFAULT as u64;
@@ -1085,8 +1278,10 @@ pub fn sys_vm_pause(guest_id: u64) -> u64 {
         None => return errno::Errno::ENODEV as u64,
     };
     match hv.guests.get_mut(&guest_id) {
-        Some(guest) => { guest.state = crate::hypervisor::VmState::Paused; 0 }
+        Some(guest) => {
+            guest.state = crate::hypervisor::VmState::Paused;
+            0
+        }
         None => errno::Errno::ENOENT as u64,
     }
 }
-

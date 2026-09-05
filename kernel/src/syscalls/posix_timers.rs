@@ -1,6 +1,6 @@
 use crate::sync::IrqSafeMutex as Mutex;
-use hashbrown::HashMap;
 use core::sync::atomic::{AtomicI32, Ordering};
+use hashbrown::HashMap;
 use lazy_static::lazy_static;
 
 pub struct PosixTimer {
@@ -72,8 +72,7 @@ pub fn check_posix_timers() {
     // Called from IRQ context (timer tick): the IRQ may have preempted the
     // holder of these locks, and a spin here would deadlock the CPU. Skip the
     // pass on contention — expired timers re-expire on the next tick.
-    if POSIX_TIMERS.try_lock().is_none()
-        || crate::task::process::PROCESS_TABLE.try_lock().is_none()
+    if POSIX_TIMERS.try_lock().is_none() || crate::task::process::PROCESS_TABLE.try_lock().is_none()
     {
         return;
     }
@@ -122,11 +121,20 @@ pub fn sys_timer_create(clockid: i32, sevp: *const sigevent, timerid: *mut i32) 
     let (notify, signo, value) = if sevp.is_null() {
         (SIGEV_SIGNAL, 14i32, 0i64)
     } else {
-        let mut ev = sigevent { sigev_value: 0, sigev_signo: 14, sigev_notify: 0 };
-        let slice = unsafe {
-            core::slice::from_raw_parts_mut(&mut ev as *mut sigevent as *mut u8, core::mem::size_of::<sigevent>())
+        let mut ev = sigevent {
+            sigev_value: 0,
+            sigev_signo: 14,
+            sigev_notify: 0,
         };
-        if unsafe { crate::syscalls::user_access::copy_from_user(slice, sevp as *const u8) }.is_err() {
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(
+                &mut ev as *mut sigevent as *mut u8,
+                core::mem::size_of::<sigevent>(),
+            )
+        };
+        if unsafe { crate::syscalls::user_access::copy_from_user(slice, sevp as *const u8) }
+            .is_err()
+        {
             return crate::syscalls::errno::Errno::EFAULT as u64;
         }
         if ev.sigev_notify == SIGEV_THREAD {
@@ -170,7 +178,9 @@ pub fn sys_timer_create(clockid: i32, sevp: *const sigevent, timerid: *mut i32) 
         POSIX_TIMERS.lock().remove(&tid);
         return crate::syscalls::errno::Errno::EFAULT as u64;
     }
-    if unsafe { crate::syscalls::user_access::copy_to_user(timerid as *mut u8, &tid.to_ne_bytes()) }.is_err() {
+    if unsafe { crate::syscalls::user_access::copy_to_user(timerid as *mut u8, &tid.to_ne_bytes()) }
+        .is_err()
+    {
         POSIX_TIMERS.lock().remove(&tid);
         return crate::syscalls::errno::Errno::EFAULT as u64;
     }
@@ -180,7 +190,12 @@ pub fn sys_timer_create(clockid: i32, sevp: *const sigevent, timerid: *mut i32) 
 
 // ─── timer_settime ────────────────────────────────────────────────
 
-pub fn sys_timer_settime(timerid: i32, flags: i32, new_value: *const itimerspec, old_value: *mut itimerspec) -> u64 {
+pub fn sys_timer_settime(
+    timerid: i32,
+    flags: i32,
+    new_value: *const itimerspec,
+    old_value: *mut itimerspec,
+) -> u64 {
     let mut timers = POSIX_TIMERS.lock();
     let timer = match timers.get_mut(&timerid) {
         Some(t) => t,
@@ -193,31 +208,53 @@ pub fn sys_timer_settime(timerid: i32, flags: i32, new_value: *const itimerspec,
             it_value: if timer.active && timer.value > 0 {
                 let now = get_current_time_ns();
                 if now >= timer.value {
-                    timespec { tv_sec: 0, tv_nsec: 0 }
+                    timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
                 } else {
                     ns_to_timespec(timer.value - now)
                 }
             } else {
-                timespec { tv_sec: 0, tv_nsec: 0 }
+                timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }
             },
         };
         let slice = unsafe {
-            core::slice::from_raw_parts(&old_its as *const itimerspec as *const u8, core::mem::size_of::<itimerspec>())
+            core::slice::from_raw_parts(
+                &old_its as *const itimerspec as *const u8,
+                core::mem::size_of::<itimerspec>(),
+            )
         };
-        if unsafe { crate::syscalls::user_access::copy_to_user(old_value as *mut u8, slice) }.is_err() {
+        if unsafe { crate::syscalls::user_access::copy_to_user(old_value as *mut u8, slice) }
+            .is_err()
+        {
             return crate::syscalls::errno::Errno::EFAULT as u64;
         }
     }
 
     if !new_value.is_null() {
         let mut new_its = itimerspec {
-            it_interval: timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         let slice = unsafe {
-            core::slice::from_raw_parts_mut(&mut new_its as *mut itimerspec as *mut u8, core::mem::size_of::<itimerspec>())
+            core::slice::from_raw_parts_mut(
+                &mut new_its as *mut itimerspec as *mut u8,
+                core::mem::size_of::<itimerspec>(),
+            )
         };
-        if unsafe { crate::syscalls::user_access::copy_from_user(slice, new_value as *const u8) }.is_err() {
+        if unsafe { crate::syscalls::user_access::copy_from_user(slice, new_value as *const u8) }
+            .is_err()
+        {
             return crate::syscalls::errno::Errno::EFAULT as u64;
         }
 
@@ -232,7 +269,11 @@ pub fn sys_timer_settime(timerid: i32, flags: i32, new_value: *const itimerspec,
             timer.value = 0;
         } else {
             let now = get_current_time_ns();
-            timer.value = if (flags & TIMER_ABSTIME) != 0 { value_ns } else { now + value_ns };
+            timer.value = if (flags & TIMER_ABSTIME) != 0 {
+                value_ns
+            } else {
+                now + value_ns
+            };
             timer.interval = interval;
             timer.overrun = 0;
             timer.active = true;
@@ -254,12 +295,18 @@ pub fn sys_timer_gettime(timerid: i32, curr_value: *mut itimerspec) -> u64 {
     let rem = if timer.active && timer.value > 0 {
         let now = get_current_time_ns();
         if now >= timer.value {
-            timespec { tv_sec: 0, tv_nsec: 0 }
+            timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }
         } else {
             ns_to_timespec(timer.value - now)
         }
     } else {
-        timespec { tv_sec: 0, tv_nsec: 0 }
+        timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }
     };
 
     let its = itimerspec {
@@ -268,9 +315,13 @@ pub fn sys_timer_gettime(timerid: i32, curr_value: *mut itimerspec) -> u64 {
     };
 
     let slice = unsafe {
-        core::slice::from_raw_parts(&its as *const itimerspec as *const u8, core::mem::size_of::<itimerspec>())
+        core::slice::from_raw_parts(
+            &its as *const itimerspec as *const u8,
+            core::mem::size_of::<itimerspec>(),
+        )
     };
-    if unsafe { crate::syscalls::user_access::copy_to_user(curr_value as *mut u8, slice) }.is_err() {
+    if unsafe { crate::syscalls::user_access::copy_to_user(curr_value as *mut u8, slice) }.is_err()
+    {
         return crate::syscalls::errno::Errno::EFAULT as u64;
     }
 
@@ -307,7 +358,7 @@ pub fn sys_timer_delete(timerid: i32) -> u64 {
 // descriptor that becomes readable when a timer fires. Essential for
 // epoll-based servers (nginx, redis, systemd).
 
-use crate::task::process::{CURRENT_PROCESS, FileDescriptor, TimerFdData};
+use crate::task::process::{FileDescriptor, TimerFdData, CURRENT_PROCESS};
 use alloc::sync::Arc;
 
 const TFD_CLOEXEC: u32 = 0x80000;
@@ -361,17 +412,32 @@ struct ITimerspec {
     it_value_nsec: i64,
 }
 
-pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_value_ptr: *mut u8) -> u64 {
+pub fn sys_timerfd_settime(
+    fd: u64,
+    flags: u64,
+    new_value_ptr: *const u8,
+    old_value_ptr: *mut u8,
+) -> u64 {
     if new_value_ptr.is_null() {
         return crate::syscalls::errno::Errno::EINVAL as u64;
     }
 
-    let mut new_val = ITimerspec { it_interval_sec: 0, it_interval_nsec: 0, it_value_sec: 0, it_value_nsec: 0 };
+    let mut new_val = ITimerspec {
+        it_interval_sec: 0,
+        it_interval_nsec: 0,
+        it_value_sec: 0,
+        it_value_nsec: 0,
+    };
     unsafe {
         if crate::syscalls::user_access::copy_from_user(
-            core::slice::from_raw_parts_mut(&mut new_val as *mut _ as *mut u8, core::mem::size_of::<ITimerspec>()),
+            core::slice::from_raw_parts_mut(
+                &mut new_val as *mut _ as *mut u8,
+                core::mem::size_of::<ITimerspec>(),
+            ),
             new_value_ptr,
-        ).is_err() {
+        )
+        .is_err()
+        {
             return crate::syscalls::errno::Errno::EFAULT as u64;
         }
     }
@@ -379,8 +445,10 @@ pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_va
     let abstime = (flags & TFD_TIMER_ABSTIME as u64) != 0;
     let _ = abstime; // TODO: absolute time support
 
-    let it_value_ns = (new_val.it_value_sec as u64) * 1_000_000_000 + (new_val.it_value_nsec as u64);
-    let it_interval_ns = (new_val.it_interval_sec as u64) * 1_000_000_000 + (new_val.it_interval_nsec as u64);
+    let it_value_ns =
+        (new_val.it_value_sec as u64) * 1_000_000_000 + (new_val.it_value_nsec as u64);
+    let it_interval_ns =
+        (new_val.it_interval_sec as u64) * 1_000_000_000 + (new_val.it_interval_nsec as u64);
 
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref proc) = *lock {
@@ -392,8 +460,10 @@ pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_va
             // Write old value if requested
             if !old_value_ptr.is_null() {
                 let mut old = ITimerspec {
-                    it_interval_sec: 0, it_interval_nsec: 0,
-                    it_value_sec: 0, it_value_nsec: 0,
+                    it_interval_sec: 0,
+                    it_interval_nsec: 0,
+                    it_value_sec: 0,
+                    it_value_nsec: 0,
                 };
                 {
                     let t = tfd.lock();
@@ -407,7 +477,10 @@ pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_va
                 unsafe {
                     let _ = crate::syscalls::user_access::copy_to_user(
                         old_value_ptr,
-                        core::slice::from_raw_parts(&old as *const _ as *const u8, core::mem::size_of::<ITimerspec>()),
+                        core::slice::from_raw_parts(
+                            &old as *const _ as *const u8,
+                            core::mem::size_of::<ITimerspec>(),
+                        ),
                     );
                 }
             }
@@ -456,8 +529,10 @@ pub fn sys_timerfd_gettime(fd: u64, cur_value_ptr: *mut u8) -> u64 {
         if let Some(FileDescriptor::TimerFd(ref tfd)) = files.fd_table[fd as usize] {
             let t = tfd.lock();
             let mut cur = ITimerspec {
-                it_interval_sec: 0, it_interval_nsec: 0,
-                it_value_sec: 0, it_value_nsec: 0,
+                it_interval_sec: 0,
+                it_interval_nsec: 0,
+                it_value_sec: 0,
+                it_value_nsec: 0,
             };
             if t.armed {
                 let now_ticks = crate::interrupts::get_ticks();
@@ -475,8 +550,13 @@ pub fn sys_timerfd_gettime(fd: u64, cur_value_ptr: *mut u8) -> u64 {
             unsafe {
                 if crate::syscalls::user_access::copy_to_user(
                     cur_value_ptr,
-                    core::slice::from_raw_parts(&cur as *const _ as *const u8, core::mem::size_of::<ITimerspec>()),
-                ).is_err() {
+                    core::slice::from_raw_parts(
+                        &cur as *const _ as *const u8,
+                        core::mem::size_of::<ITimerspec>(),
+                    ),
+                )
+                .is_err()
+                {
                     return crate::syscalls::errno::Errno::EFAULT as u64;
                 }
             }

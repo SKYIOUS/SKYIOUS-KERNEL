@@ -3,10 +3,10 @@
 //! Emulates a 16550-compatible serial port for guest console I/O.
 //! I/O ports 0x3F8–0x3FF (COM1) with IRQ 4.
 
+use crate::hypervisor::devices::{VirtDevice, VirtDeviceType};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use x86_64::PhysAddr;
-use crate::hypervisor::devices::{VirtDevice, VirtDeviceType};
 
 const UART_BASE: u16 = 0x3F8;
 const UART_SIZE: u16 = 8;

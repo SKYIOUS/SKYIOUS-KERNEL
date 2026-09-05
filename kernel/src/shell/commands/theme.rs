@@ -2,7 +2,9 @@ use crate::println;
 use crate::vga_buffer;
 
 pub fn theme(name: &str) {
-    if name.is_empty() { return; }
+    if name.is_empty() {
+        return;
+    }
     match name {
         "matrix" => {
             crate::drivers::graphics::console::set_console_color(0x00FF00, 0x000000);
@@ -19,7 +21,7 @@ pub fn theme(name: &str) {
             vga_buffer::clear_screen();
             println!("Cyberpunk mode engaged.");
         }
-         "synthwave" => {
+        "synthwave" => {
             crate::drivers::graphics::console::set_console_color(0x00FFFF, 0x120024);
             vga_buffer::clear_screen();
             println!("Synthwave mode engaged.");

@@ -53,20 +53,30 @@ impl EbpfJit {
     fn emit_prologue(&mut self) {
         // push rbp; mov rbp, rsp
         self.emit_byte(0x55);
-        self.emit_byte(0x48); self.emit_byte(0x89); self.emit_byte(0xE5);
+        self.emit_byte(0x48);
+        self.emit_byte(0x89);
+        self.emit_byte(0xE5);
         // push r12; push r13; push r14; push r15
-        self.emit_byte(0x41); self.emit_byte(0x54);
-        self.emit_byte(0x41); self.emit_byte(0x55);
-        self.emit_byte(0x41); self.emit_byte(0x56);
-        self.emit_byte(0x41); self.emit_byte(0x57);
+        self.emit_byte(0x41);
+        self.emit_byte(0x54);
+        self.emit_byte(0x41);
+        self.emit_byte(0x55);
+        self.emit_byte(0x41);
+        self.emit_byte(0x56);
+        self.emit_byte(0x41);
+        self.emit_byte(0x57);
     }
 
     fn emit_epilogue(&mut self) {
         // pop r15; pop r14; pop r13; pop r12
-        self.emit_byte(0x41); self.emit_byte(0x5F);
-        self.emit_byte(0x41); self.emit_byte(0x5E);
-        self.emit_byte(0x41); self.emit_byte(0x5D);
-        self.emit_byte(0x41); self.emit_byte(0x5C);
+        self.emit_byte(0x41);
+        self.emit_byte(0x5F);
+        self.emit_byte(0x41);
+        self.emit_byte(0x5E);
+        self.emit_byte(0x41);
+        self.emit_byte(0x5D);
+        self.emit_byte(0x41);
+        self.emit_byte(0x5C);
         // pop rbp; ret
         self.emit_byte(0x5D);
     }
@@ -74,38 +84,48 @@ impl EbpfJit {
     /// Map eBPF register number to x86_64 register encoding.
     fn x86reg(&self, r: u8) -> Result<u8, &'static str> {
         match r {
-            0 => Ok(0),   // RAX
-            1 => Ok(7),   // RDI
-            2 => Ok(6),   // RSI
-            3 => Ok(2),   // RDX
-            4 => Ok(1),   // RCX
-            5 => Ok(0),   // R8  (needs REX.B)
-            6 => Ok(1),   // R9  (needs REX.B)
-            7 => Ok(2),   // R10 (needs REX.B)
-            8 => Ok(3),   // R11 (needs REX.B)
-            9 => Ok(4),   // R12 (needs REX.B)
-            10 => Ok(5),  // R13 (needs REX.B)
+            0 => Ok(0),  // RAX
+            1 => Ok(7),  // RDI
+            2 => Ok(6),  // RSI
+            3 => Ok(2),  // RDX
+            4 => Ok(1),  // RCX
+            5 => Ok(0),  // R8  (needs REX.B)
+            6 => Ok(1),  // R9  (needs REX.B)
+            7 => Ok(2),  // R10 (needs REX.B)
+            8 => Ok(3),  // R11 (needs REX.B)
+            9 => Ok(4),  // R12 (needs REX.B)
+            10 => Ok(5), // R13 (needs REX.B)
             _ => Err("Invalid eBPF register"),
         }
     }
 
     /// Returns true if the eBPF register needs REX.B in ModRM encoding.
-    fn needs_rexb(&self, r: u8) -> bool { r >= 5 }
+    fn needs_rexb(&self, r: u8) -> bool {
+        r >= 5
+    }
 
     /// Returns true if the eBPF register needs REX.R in ModRM encoding.
-    fn needs_rexr(&self, r: u8) -> bool { r >= 5 }
+    fn needs_rexr(&self, r: u8) -> bool {
+        r >= 5
+    }
 
-    fn emit_byte(&mut self, b: u8) { self.code.push(b); }
+    fn emit_byte(&mut self, b: u8) {
+        self.code.push(b);
+    }
 
     fn emit_u32(&mut self, v: u32) {
-        for b in v.to_le_bytes() { self.emit_byte(b); }
+        for b in v.to_le_bytes() {
+            self.emit_byte(b);
+        }
     }
 
     /// Emit: MOV r64, imm64 (10 bytes)
     fn emit_mov_imm64(&mut self, dst: u8, imm: u64) -> Result<(), &'static str> {
         let d = self.x86reg(dst)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
         self.emit_byte(rex);
         self.emit_byte(0xB8 | (d & 7));
         self.emit_u32(imm as u32);
@@ -118,8 +138,12 @@ impl EbpfJit {
         let d = self.x86reg(dst)?;
         let s = self.x86reg(src)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
-        if self.needs_rexb(src) { rex |= 0x01; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
+        if self.needs_rexb(src) {
+            rex |= 0x01;
+        }
         self.emit_byte(rex);
         self.emit_byte(0x89);
         self.emit_byte(0xC0 | ((s & 7) << 3) | (d & 7));
@@ -131,8 +155,12 @@ impl EbpfJit {
         let d = self.x86reg(dst)?;
         let s = self.x86reg(src)?;
         let mut rex = 0x40;
-        if self.needs_rexr(dst) { rex |= 0x04; }
-        if self.needs_rexb(src) { rex |= 0x01; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
+        if self.needs_rexb(src) {
+            rex |= 0x01;
+        }
         self.emit_byte(rex);
         self.emit_byte(0x89);
         self.emit_byte(0xC0 | ((s & 7) << 3) | (d & 7));
@@ -145,7 +173,9 @@ impl EbpfJit {
     fn emit_alu_imm32(&mut self, dst: u8, imm: i32, opcode_ext: u8) -> Result<(), &'static str> {
         let d = self.x86reg(dst)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
         self.emit_byte(rex);
         self.emit_byte(0x81);
         self.emit_byte(0xC0 | ((opcode_ext & 7) << 3) | (d & 7));
@@ -159,8 +189,12 @@ impl EbpfJit {
         let d = self.x86reg(dst)?;
         let s = self.x86reg(src)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
-        if self.needs_rexb(src) { rex |= 0x01; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
+        if self.needs_rexb(src) {
+            rex |= 0x01;
+        }
         self.emit_byte(rex);
         self.emit_byte(opcode);
         self.emit_byte(0xC0 | ((s & 7) << 3) | (d & 7));
@@ -172,7 +206,9 @@ impl EbpfJit {
     fn emit_shift_imm(&mut self, dst: u8, imm: u8, opcode_ext: u8) -> Result<(), &'static str> {
         let d = self.x86reg(dst)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
         self.emit_byte(rex);
         self.emit_byte(0xC1);
         self.emit_byte(0xE0 | ((opcode_ext & 7) << 3) | (d & 7));
@@ -184,7 +220,9 @@ impl EbpfJit {
     fn emit_cmp_imm(&mut self, dst: u8, imm: i32) -> Result<(), &'static str> {
         let d = self.x86reg(dst)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
         self.emit_byte(rex);
         self.emit_byte(0x81);
         self.emit_byte(0xF8 | (d & 7));
@@ -197,8 +235,12 @@ impl EbpfJit {
         let d = self.x86reg(dst)?;
         let s = self.x86reg(src)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
-        if self.needs_rexb(src) { rex |= 0x01; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
+        if self.needs_rexb(src) {
+            rex |= 0x01;
+        }
         self.emit_byte(rex);
         self.emit_byte(0x39); // CMP r/m64, r64
         self.emit_byte(0xC0 | ((s & 7) << 3) | (d & 7));
@@ -209,7 +251,9 @@ impl EbpfJit {
     fn emit_neg(&mut self, dst: u8) -> Result<(), &'static str> {
         let d = self.x86reg(dst)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
         self.emit_byte(rex);
         self.emit_byte(0xF7);
         self.emit_byte(0xD8 | (d & 7));
@@ -227,22 +271,24 @@ impl EbpfJit {
 
         match op {
             BPF_ADD if is_imm => self.emit_alu_imm32(dst, imm, 0)?,
-            BPF_ADD           => self.emit_alu_reg(dst, src, 0x01)?,
+            BPF_ADD => self.emit_alu_reg(dst, src, 0x01)?,
             BPF_SUB if is_imm => self.emit_alu_imm32(dst, imm, 5)?,
-            BPF_SUB           => self.emit_alu_reg(dst, src, 0x29)?,
+            BPF_SUB => self.emit_alu_reg(dst, src, 0x29)?,
             BPF_AND if is_imm => self.emit_alu_imm32(dst, imm, 4)?,
-            BPF_AND           => self.emit_alu_reg(dst, src, 0x21)?,
-            BPF_OR  if is_imm => self.emit_alu_imm32(dst, imm, 1)?,
-            BPF_OR            => self.emit_alu_reg(dst, src, 0x09)?,
+            BPF_AND => self.emit_alu_reg(dst, src, 0x21)?,
+            BPF_OR if is_imm => self.emit_alu_imm32(dst, imm, 1)?,
+            BPF_OR => self.emit_alu_reg(dst, src, 0x09)?,
             BPF_XOR if is_imm => self.emit_alu_imm32(dst, imm, 6)?,
-            BPF_XOR           => self.emit_alu_reg(dst, src, 0x31)?,
+            BPF_XOR => self.emit_alu_reg(dst, src, 0x31)?,
             BPF_LSH if is_imm => self.emit_shift_imm(dst, imm as u8, 4)?,
             BPF_LSH => {
                 // SHL by CL (RCX). Move src into ECX first.
                 self.emit_mov_reg32(4, src)?; // ECX = src
                 let d = self.x86reg(dst)?;
                 let mut rex = 0x48;
-                if self.needs_rexr(dst) { rex |= 0x04; }
+                if self.needs_rexr(dst) {
+                    rex |= 0x04;
+                }
                 self.emit_byte(rex);
                 self.emit_byte(0xD3);
                 self.emit_byte(0xE4 | (d & 7)); // SHL r/m64, CL
@@ -252,19 +298,23 @@ impl EbpfJit {
                 self.emit_mov_reg32(4, src)?;
                 let d = self.x86reg(dst)?;
                 let mut rex = 0x48;
-                if self.needs_rexr(dst) { rex |= 0x04; }
+                if self.needs_rexr(dst) {
+                    rex |= 0x04;
+                }
                 self.emit_byte(rex);
                 self.emit_byte(0xD3);
                 self.emit_byte(0xEC | (d & 7)); // SHR r/m64, CL
             }
             BPF_NEG => self.emit_neg(dst)?,
             BPF_MOV if is_imm => self.emit_mov_imm64(dst, imm as u64)?,
-            BPF_MOV           => self.emit_mov_reg64(dst, src)?,
+            BPF_MOV => self.emit_mov_reg64(dst, src)?,
             BPF_MUL if is_imm => {
                 // IMUL r64, r/m64, imm32
                 let d = self.x86reg(dst)?;
                 let mut rex = 0x48;
-                if self.needs_rexr(dst) { rex |= 0x04; }
+                if self.needs_rexr(dst) {
+                    rex |= 0x04;
+                }
                 self.emit_byte(rex);
                 self.emit_byte(0x69);
                 self.emit_byte(0xC0 | (d & 7) << 3 | (d & 7));
@@ -275,8 +325,12 @@ impl EbpfJit {
                 let d = self.x86reg(dst)?;
                 let s = self.x86reg(src)?;
                 let mut rex = 0x48;
-                if self.needs_rexr(dst) { rex |= 0x04; }
-                if self.needs_rexb(src) { rex |= 0x01; }
+                if self.needs_rexr(dst) {
+                    rex |= 0x04;
+                }
+                if self.needs_rexb(src) {
+                    rex |= 0x01;
+                }
                 self.emit_byte(rex);
                 self.emit_byte(0x0F);
                 self.emit_byte(0xAF);
@@ -287,8 +341,10 @@ impl EbpfJit {
                 // Move dst to RAX, zero RDX, DIV src, move result back.
                 let is_mod = op == BPF_MOD;
                 self.emit_mov_reg64(0, dst)?; // RAX = dst
-                // XOR RDX, RDX
-                self.emit_byte(0x48); self.emit_byte(0x31); self.emit_byte(0xD2);
+                                              // XOR RDX, RDX
+                self.emit_byte(0x48);
+                self.emit_byte(0x31);
+                self.emit_byte(0xD2);
                 if is_imm {
                     // Load imm into R11, then DIV R11
                     self.emit_mov_imm64(8, imm as u64)?;
@@ -299,7 +355,9 @@ impl EbpfJit {
                 } else {
                     let s = self.x86reg(src)?;
                     let mut rex = 0x48;
-                    if self.needs_rexb(src) { rex |= 0x01; }
+                    if self.needs_rexb(src) {
+                        rex |= 0x01;
+                    }
                     self.emit_byte(rex);
                     self.emit_byte(0xF7);
                     self.emit_byte(0xF0 | (s & 7));
@@ -326,17 +384,17 @@ impl EbpfJit {
 
         match op {
             BPF_MOV if is_imm => self.emit_mov_imm64(dst, imm as u64)?,
-            BPF_MOV           => self.emit_mov_reg32(dst, src)?,
+            BPF_MOV => self.emit_mov_reg32(dst, src)?,
             BPF_ADD if is_imm => self.emit_alu_imm32(dst, imm, 0)?,
-            BPF_ADD           => self.emit_alu_reg(dst, src, 0x01)?,
+            BPF_ADD => self.emit_alu_reg(dst, src, 0x01)?,
             BPF_SUB if is_imm => self.emit_alu_imm32(dst, imm, 5)?,
-            BPF_SUB           => self.emit_alu_reg(dst, src, 0x29)?,
+            BPF_SUB => self.emit_alu_reg(dst, src, 0x29)?,
             BPF_AND if is_imm => self.emit_alu_imm32(dst, imm, 4)?,
-            BPF_AND           => self.emit_alu_reg(dst, src, 0x21)?,
-            BPF_OR  if is_imm => self.emit_alu_imm32(dst, imm, 1)?,
-            BPF_OR            => self.emit_alu_reg(dst, src, 0x09)?,
+            BPF_AND => self.emit_alu_reg(dst, src, 0x21)?,
+            BPF_OR if is_imm => self.emit_alu_imm32(dst, imm, 1)?,
+            BPF_OR => self.emit_alu_reg(dst, src, 0x09)?,
             BPF_XOR if is_imm => self.emit_alu_imm32(dst, imm, 6)?,
-            BPF_XOR           => self.emit_alu_reg(dst, src, 0x31)?,
+            BPF_XOR => self.emit_alu_reg(dst, src, 0x31)?,
             _ => return Err("Unsupported ALU32 op in JIT"),
         }
         Ok(())
@@ -382,13 +440,13 @@ impl EbpfJit {
         let target_bytes = (1 + insn.off as i32) * 8;
 
         let cc = match op {
-            BPF_JEQ  => 0x84u8, // JE
-            BPF_JNE  => 0x85,   // JNE
-            BPF_JGT  => 0x87,   // JA (above, unsigned)
-            BPF_JGE  => 0x8D,   // JAE (above or equal, unsigned)
-            BPF_JSET => 0x85,   // JNZ (after TEST — special case below)
-            BPF_JSGT => 0x8F,   // JG (greater, signed)
-            BPF_JSGE => 0x8D,   // JGE (greater or equal, signed)
+            BPF_JEQ => 0x84u8, // JE
+            BPF_JNE => 0x85,   // JNE
+            BPF_JGT => 0x87,   // JA (above, unsigned)
+            BPF_JGE => 0x8D,   // JAE (above or equal, unsigned)
+            BPF_JSET => 0x85,  // JNZ (after TEST — special case below)
+            BPF_JSGT => 0x8F,  // JG (greater, signed)
+            BPF_JSGE => 0x8D,  // JGE (greater or equal, signed)
             _ => return Err("Unsupported JMP condition"),
         };
 
@@ -406,7 +464,9 @@ impl EbpfJit {
                 // TEST r/m64, imm32
                 let d = self.x86reg(dst)?;
                 let mut rex = 0x48;
-                if self.needs_rexr(dst) { rex |= 0x04; }
+                if self.needs_rexr(dst) {
+                    rex |= 0x04;
+                }
                 self.emit_byte(rex);
                 self.emit_byte(0xF7);
                 self.emit_byte(0xC0 | (d & 7)); // TEST r/m64, imm32
@@ -416,8 +476,12 @@ impl EbpfJit {
                 let d = self.x86reg(dst)?;
                 let s = self.x86reg(insn.src_reg)?;
                 let mut rex = 0x48;
-                if self.needs_rexr(dst) { rex |= 0x04; }
-                if self.needs_rexb(insn.src_reg) { rex |= 0x01; }
+                if self.needs_rexr(dst) {
+                    rex |= 0x04;
+                }
+                if self.needs_rexb(insn.src_reg) {
+                    rex |= 0x01;
+                }
                 self.emit_byte(rex);
                 self.emit_byte(0x85); // TEST r/m64, r64
                 self.emit_byte(0xC0 | ((s & 7) << 3) | (d & 7));
@@ -448,8 +512,12 @@ impl EbpfJit {
         let d = self.x86reg(dst)?;
         let s = self.x86reg(src)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
-        if self.needs_rexb(src) { rex |= 0x01; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
+        if self.needs_rexb(src) {
+            rex |= 0x01;
+        }
         let modrm = 0x80 | ((s & 7) << 3) | (d & 7); // [reg + disp32]
 
         match size {
@@ -498,7 +566,9 @@ impl EbpfJit {
 
         let d = self.x86reg(dst)?;
         let mut rex = 0x40;
-        if self.needs_rexr(dst) { rex |= 0x04; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
 
         match size {
             BPF_W => {
@@ -540,8 +610,12 @@ impl EbpfJit {
         let d = self.x86reg(dst)?;
         let s = self.x86reg(src)?;
         let mut rex = 0x48;
-        if self.needs_rexr(dst) { rex |= 0x04; }
-        if self.needs_rexb(src) { rex |= 0x01; }
+        if self.needs_rexr(dst) {
+            rex |= 0x04;
+        }
+        if self.needs_rexb(src) {
+            rex |= 0x01;
+        }
 
         match size {
             BPF_W => {

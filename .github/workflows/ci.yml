@@ -43,6 +43,13 @@ jobs:
       - name: Build (all features, no default)
         run: cargo build --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu"
 
+      - name: Build (each feature solo)
+        run: |
+          for feat in smp net ext4 self_test ash hypervisor verification gpu; do
+            echo "Building with feature: $feat"
+            cargo build --no-default-features --features "$feat" || exit 1
+          done
+
       - name: Check (self_test feature compiles in bin mode)
         run: cargo check --features self_test
 
@@ -135,5 +142,16 @@ jobs:
             kernel/target/
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('kernel/Cargo.lock') }}
 
-      - name: Clippy
+      - name: Clippy (default features)
         run: cargo clippy -- -D warnings
+
+      - name: Clippy (all features)
+        run: cargo clippy --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu" -- -D warnings
+
+      - name: Clippy (extracted crates)
+        run: |
+          for crate in vahi-sync vahi-crypto vahi-hal vahi-limine vahi-memory; do
+            echo "Clippy: $crate"
+            cargo clippy -p "$crate" --target x86_64-unknown-none -- -D warnings || exit 1
+          done
+        working-directory: .

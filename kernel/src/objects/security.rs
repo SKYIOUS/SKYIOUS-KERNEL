@@ -1,5 +1,5 @@
-use alloc::vec::Vec;
 use crate::vfs::Stat;
+use alloc::vec::Vec;
 
 /// Effective credentials snapshot for access checks.
 #[derive(Clone, Copy, Debug)]
@@ -15,7 +15,15 @@ pub struct Credentials {
 
 impl Credentials {
     pub fn new() -> Self {
-        Credentials { uid: 0, gid: 0, euid: 0, egid: 0, fsuid: 0, fsgid: 0, cap_effective: 0 }
+        Credentials {
+            uid: 0,
+            gid: 0,
+            euid: 0,
+            egid: 0,
+            fsuid: 0,
+            fsgid: 0,
+            cap_effective: 0,
+        }
     }
 }
 
@@ -30,19 +38,34 @@ pub struct SecurityDescriptor {
 
 impl SecurityDescriptor {
     pub fn new(uid: u32, gid: u32, mode: u32) -> Self {
-        SecurityDescriptor { uid, gid, mode, acl: Vec::new() }
+        SecurityDescriptor {
+            uid,
+            gid,
+            mode,
+            acl: Vec::new(),
+        }
     }
 }
 
 impl Default for SecurityDescriptor {
     fn default() -> Self {
-        SecurityDescriptor { uid: 0, gid: 0, mode: 0o644, acl: Vec::new() }
+        SecurityDescriptor {
+            uid: 0,
+            gid: 0,
+            mode: 0o644,
+            acl: Vec::new(),
+        }
     }
 }
 
 impl SecurityDescriptor {
     pub fn default_socket() -> Self {
-        SecurityDescriptor { uid: 0, gid: 0, mode: 0o600, acl: Vec::new() }
+        SecurityDescriptor {
+            uid: 0,
+            gid: 0,
+            mode: 0o600,
+            acl: Vec::new(),
+        }
     }
 }
 
@@ -110,33 +133,48 @@ pub const CAP_RIGHT_SHMEM: u64 = 1 << 14;
 pub const CAP_RIGHT_SIGNAL: u64 = 1 << 15;
 
 /// All valid rights
-pub const CAP_ALL_RIGHTS: u64 = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
-    | CAP_RIGHT_CREATE | CAP_RIGHT_DELETE | CAP_RIGHT_MODIFY | CAP_RIGHT_ADMIN
-    | CAP_RIGHT_CONNECT | CAP_RIGHT_LISTEN | CAP_RIGHT_BIND
-    | CAP_RIGHT_SEND | CAP_RIGHT_RECV | CAP_RIGHT_IOCTL
-    | CAP_RIGHT_MMAP | CAP_RIGHT_SHMEM | CAP_RIGHT_SIGNAL;
+pub const CAP_ALL_RIGHTS: u64 = CAP_RIGHT_READ
+    | CAP_RIGHT_WRITE
+    | CAP_RIGHT_EXEC
+    | CAP_RIGHT_CREATE
+    | CAP_RIGHT_DELETE
+    | CAP_RIGHT_MODIFY
+    | CAP_RIGHT_ADMIN
+    | CAP_RIGHT_CONNECT
+    | CAP_RIGHT_LISTEN
+    | CAP_RIGHT_BIND
+    | CAP_RIGHT_SEND
+    | CAP_RIGHT_RECV
+    | CAP_RIGHT_IOCTL
+    | CAP_RIGHT_MMAP
+    | CAP_RIGHT_SHMEM
+    | CAP_RIGHT_SIGNAL;
 
 impl Capability {
     /// Create a new capability with the given rights.
     pub fn new(rights: u64, object_type: u32, object_id: u64) -> Self {
-        Self { rights: rights & CAP_ALL_RIGHTS, object_type, object_id }
+        Self {
+            rights: rights & CAP_ALL_RIGHTS,
+            object_type,
+            object_id,
+        }
     }
-    
+
     /// Check if this capability grants a specific right.
     pub fn has_right(&self, right: u64) -> bool {
         (self.rights & right) == right
     }
-    
+
     /// Grant additional rights to this capability.
     pub fn grant(&mut self, rights: u64) {
         self.rights |= rights & CAP_ALL_RIGHTS;
     }
-    
+
     /// Drop specific rights from this capability.
     pub fn drop_rights(&mut self, rights: u64) {
         self.rights &= !rights;
     }
-    
+
     /// Compose two capabilities (intersect rights).
     pub fn compose(&self, other: &Capability) -> Capability {
         Capability {
@@ -145,7 +183,7 @@ impl Capability {
             object_id: self.object_id,
         }
     }
-    
+
     /// Create a child capability with reduced rights.
     pub fn fork(&self, additional_rights: u64) -> Capability {
         Capability {
@@ -162,24 +200,34 @@ impl Capability {
 /// All checks must pass for access to be granted.
 pub fn access_check(cred: &Credentials, sec: &SecurityDescriptor, desired: u32) -> bool {
     // Root bypass
-    if cred.euid == 0 { return true; }
+    if cred.euid == 0 {
+        return true;
+    }
 
     // DAC check
-    let dac_bits = if cred.euid == sec.uid { (sec.mode >> 6) & 7 }
-                   else if cred.egid == sec.gid { (sec.mode >> 3) & 7 }
-                   else { sec.mode & 7 };
-    if (dac_bits & desired) == desired { return true; }
+    let dac_bits = if cred.euid == sec.uid {
+        (sec.mode >> 6) & 7
+    } else if cred.egid == sec.gid {
+        (sec.mode >> 3) & 7
+    } else {
+        sec.mode & 7
+    };
+    if (dac_bits & desired) == desired {
+        return true;
+    }
 
     // Capability override
-    if (cred.cap_effective & CAP_DAC_OVERRIDE) != 0 { return true; }
-    if (cred.cap_effective & CAP_DAC_READ_SEARCH) != 0 && (desired & ACCESS_WRITE) == 0 { return true; }
+    if (cred.cap_effective & CAP_DAC_OVERRIDE) != 0 {
+        return true;
+    }
+    if (cred.cap_effective & CAP_DAC_READ_SEARCH) != 0 && (desired & ACCESS_WRITE) == 0 {
+        return true;
+    }
 
     // ACL check
     for ace in &sec.acl {
-        if ace.uid == cred.euid || ace.uid == cred.uid {
-            if ace.access_mask & desired == desired {
-                return ace.ace_type == AceType::Allow;
-            }
+        if (ace.uid == cred.euid || ace.uid == cred.uid) && ace.access_mask & desired == desired {
+            return ace.ace_type == AceType::Allow;
         }
     }
 

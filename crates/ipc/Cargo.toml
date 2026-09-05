@@ -1,0 +1,10 @@
+[package]
+name = "vahi-ipc"
+version = "0.3.0"
+edition = "2021"
+description = "Inter-process communication for the Vahi kernel"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+vahi-types = { path = "../types" }
+spin = "0.9.8"

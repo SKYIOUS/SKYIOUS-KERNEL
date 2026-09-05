@@ -4,8 +4,8 @@
 //! BootInfo structure (similar to the native boot) describing its
 //! memory map, framebuffer, and hypervisor interface.
 
-use crate::hypervisor::memory::GuestMemory;
 use crate::hypervisor::boot::BootConfig;
+use crate::hypervisor::memory::GuestMemory;
 
 /// Boot a SkyOS guest.
 ///
@@ -19,7 +19,7 @@ pub fn boot_skyos(
     kernel_data: &[u8],
     mem_size: usize,
 ) -> Option<BootConfig> {
-    const BOOTINFO_ADDR: u64 = 0x1_000;        // 4KB
+    const BOOTINFO_ADDR: u64 = 0x1_000; // 4KB
 
     // 1. Load kernel ELF
     let entry = memory.load_elf(kernel_data)?;

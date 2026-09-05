@@ -1,6 +1,6 @@
+use crate::sync::IrqSafeMutex as Mutex;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::sync::IrqSafeMutex as Mutex;
 use lazy_static::lazy_static;
 
 pub const BPF_MAP_TYPE_HASH: u32 = 1;
@@ -95,10 +95,18 @@ impl Map for HashTable {
         entries.len() < before
     }
 
-    fn key_size(&self) -> usize { self.key_size }
-    fn value_size(&self) -> usize { self.value_size }
-    fn max_entries(&self) -> usize { self.max_entries }
-    fn clear(&self) { self.entries.lock().clear(); }
+    fn key_size(&self) -> usize {
+        self.key_size
+    }
+    fn value_size(&self) -> usize {
+        self.value_size
+    }
+    fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+    fn clear(&self) {
+        self.entries.lock().clear();
+    }
 }
 
 // ── Array ─────────────────────────────────────────────────────────
@@ -121,13 +129,25 @@ impl ArrayMap {
 
 impl Map for ArrayMap {
     fn lookup(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let idx = if key.len() >= 4 { u32::from_ne_bytes([key[0], key[1], key[2], key[3]]) as usize } else { 0 };
+        let idx = if key.len() >= 4 {
+            u32::from_ne_bytes([key[0], key[1], key[2], key[3]]) as usize
+        } else {
+            0
+        };
         let entries = self.entries.lock();
-        if idx < entries.len() { entries[idx].clone() } else { None }
+        if idx < entries.len() {
+            entries[idx].clone()
+        } else {
+            None
+        }
     }
 
     fn update(&self, key: &[u8], value: &[u8]) -> bool {
-        let idx = if key.len() >= 4 { u32::from_ne_bytes([key[0], key[1], key[2], key[3]]) as usize } else { 0 };
+        let idx = if key.len() >= 4 {
+            u32::from_ne_bytes([key[0], key[1], key[2], key[3]]) as usize
+        } else {
+            0
+        };
         let mut entries = self.entries.lock();
         if idx < entries.len() {
             entries[idx] = Some(value.to_vec());
@@ -138,7 +158,11 @@ impl Map for ArrayMap {
     }
 
     fn delete(&self, key: &[u8]) -> bool {
-        let idx = if key.len() >= 4 { u32::from_ne_bytes([key[0], key[1], key[2], key[3]]) as usize } else { 0 };
+        let idx = if key.len() >= 4 {
+            u32::from_ne_bytes([key[0], key[1], key[2], key[3]]) as usize
+        } else {
+            0
+        };
         let mut entries = self.entries.lock();
         if idx < entries.len() {
             entries[idx] = None;
@@ -148,10 +172,20 @@ impl Map for ArrayMap {
         }
     }
 
-    fn key_size(&self) -> usize { 4 }
-    fn value_size(&self) -> usize { self.value_size }
-    fn max_entries(&self) -> usize { self.max_entries }
-    fn clear(&self) { for e in self.entries.lock().iter_mut() { *e = None; } }
+    fn key_size(&self) -> usize {
+        4
+    }
+    fn value_size(&self) -> usize {
+        self.value_size
+    }
+    fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+    fn clear(&self) {
+        for e in self.entries.lock().iter_mut() {
+            *e = None;
+        }
+    }
 }
 
 // ── Perf Event Array ──────────────────────────────────────────────
@@ -160,16 +194,32 @@ pub struct PerfEventArray {
 }
 
 impl PerfEventArray {
-    pub fn new(max_entries: u32) -> Self { PerfEventArray { max_entries: max_entries as usize } }
+    pub fn new(max_entries: u32) -> Self {
+        PerfEventArray {
+            max_entries: max_entries as usize,
+        }
+    }
 }
 
 impl Map for PerfEventArray {
-    fn lookup(&self, _key: &[u8]) -> Option<Vec<u8>> { None }
-    fn update(&self, _key: &[u8], _value: &[u8]) -> bool { false }
-    fn delete(&self, _key: &[u8]) -> bool { false }
-    fn key_size(&self) -> usize { 4 }
-    fn value_size(&self) -> usize { 4 }
-    fn max_entries(&self) -> usize { self.max_entries }
+    fn lookup(&self, _key: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+    fn update(&self, _key: &[u8], _value: &[u8]) -> bool {
+        false
+    }
+    fn delete(&self, _key: &[u8]) -> bool {
+        false
+    }
+    fn key_size(&self) -> usize {
+        4
+    }
+    fn value_size(&self) -> usize {
+        4
+    }
+    fn max_entries(&self) -> usize {
+        self.max_entries
+    }
     fn clear(&self) {}
 }
 
@@ -210,7 +260,8 @@ impl RingBuf {
         let used = prod.wrapping_sub(cons);
         let free = self.capacity - used;
         if len > free {
-            self.lost_bytes.fetch_add(len as u64, core::sync::atomic::Ordering::Relaxed);
+            self.lost_bytes
+                .fetch_add(len as u64, core::sync::atomic::Ordering::Relaxed);
             return None;
         }
         let offset = *prod % self.capacity;
@@ -224,7 +275,9 @@ impl RingBuf {
         let prod = *self.producer.lock();
         let available = prod.wrapping_sub(*cons);
         let to_read = dst.len().min(available);
-        if to_read == 0 { return 0; }
+        if to_read == 0 {
+            return 0;
+        }
         let offset = *cons % self.capacity;
         let buf = self.buf.lock();
         // Handle wrap-around: read in two parts if needed
@@ -248,7 +301,12 @@ impl Map for RingBuf {
         // Read one record from the ring buffer
         let mut output = alloc::vec![0u8; 256];
         let n = self.consume(&mut output);
-        if n == 0 { None } else { output.truncate(n); Some(output) }
+        if n == 0 {
+            None
+        } else {
+            output.truncate(n);
+            Some(output)
+        }
     }
     fn update(&self, _key: &[u8], value: &[u8]) -> bool {
         if let Some(offset) = self.reserve(value.len()) {
@@ -267,12 +325,19 @@ impl Map for RingBuf {
         *self.consumer.lock() = *self.producer.lock();
         true
     }
-    fn key_size(&self) -> usize { 4 }
-    fn value_size(&self) -> usize { 64 }
-    fn max_entries(&self) -> usize { self.capacity / 64 }
+    fn key_size(&self) -> usize {
+        4
+    }
+    fn value_size(&self) -> usize {
+        64
+    }
+    fn max_entries(&self) -> usize {
+        self.capacity / 64
+    }
     fn clear(&self) {
         *self.producer.lock() = 0;
         *self.consumer.lock() = 0;
-        self.lost_bytes.store(0, core::sync::atomic::Ordering::Relaxed);
+        self.lost_bytes
+            .store(0, core::sync::atomic::Ordering::Relaxed);
     }
 }

@@ -5,20 +5,33 @@
 use super::errno;
 use super::net_helpers::*;
 use super::*;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use crate::sync::IrqSafeMutex as Mutex;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 
-pub fn sys_setsockopt(sockfd: u64, level: i32, optname: i32, _optval: *const u8, _optlen: u64) -> u64 {
+pub fn sys_setsockopt(
+    sockfd: u64,
+    level: i32,
+    optname: i32,
+    _optval: *const u8,
+    _optlen: u64,
+) -> u64 {
     #[cfg(not(feature = "net"))]
     return errno::Errno::ENOSYS as u64;
 
     #[cfg(feature = "net")]
     {
         let process_lock = CURRENT_PROCESS.lock();
-        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let process = match *process_lock {
+            Some(ref p) => p,
+            None => return errno::Errno::ESRCH as u64,
+        };
         let fd_table = process.files.lock().fd_table.clone();
-        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
-        if fd_table[sockfd as usize].is_none() { return errno::Errno::EBADF as u64; }
+        if (sockfd as usize) >= fd_table.len() {
+            return errno::Errno::EBADF as u64;
+        }
+        if fd_table[sockfd as usize].is_none() {
+            return errno::Errno::EBADF as u64;
+        }
 
         // Socket options — smoltcp sockets are non-blocking; most are accepted but unused
         match level {
@@ -147,33 +160,69 @@ pub fn sys_sendmsg(sockfd: i64, msg: *const msghdr, flags: i32) -> u64 {
                 if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
                     drop(fd_table);
                     drop(process_lock);
-                    if msg.is_null() { return errno::Errno::EFAULT as u64; }
+                    if msg.is_null() {
+                        return errno::Errno::EFAULT as u64;
+                    }
                     let mut hdr = msghdr::default();
-                    if unsafe { user_access::copy_from_user(
-                        core::slice::from_raw_parts_mut(&mut hdr as *mut msghdr as *mut u8, core::mem::size_of::<msghdr>()),
-                        msg as *const u8,
-                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    if unsafe {
+                        user_access::copy_from_user(
+                            core::slice::from_raw_parts_mut(
+                                &mut hdr as *mut msghdr as *mut u8,
+                                core::mem::size_of::<msghdr>(),
+                            ),
+                            msg as *const u8,
+                        )
+                    }
+                    .is_err()
+                    {
+                        return errno::Errno::EFAULT as u64;
+                    }
                     if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
                         return errno::Errno::EINVAL as u64;
                     }
                     let mut iov_buf = alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
-                    if unsafe { user_access::copy_from_user(
-                        core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
-                        hdr.msg_iov as *const u8,
-                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    if unsafe {
+                        user_access::copy_from_user(
+                            core::slice::from_raw_parts_mut(
+                                iov_buf.as_mut_ptr() as *mut u8,
+                                hdr.msg_iovlen * core::mem::size_of::<iovec>(),
+                            ),
+                            hdr.msg_iov as *const u8,
+                        )
+                    }
+                    .is_err()
+                    {
+                        return errno::Errno::EFAULT as u64;
+                    }
                     let total_size = iov_buf.iter().map(|iov| iov.iov_len).sum::<usize>();
-                    if total_size == 0 { return 0; }
+                    if total_size == 0 {
+                        return 0;
+                    }
                     let mut combined = alloc::vec![0u8; total_size];
                     let mut offset = 0;
                     for iov in &iov_buf {
-                        if iov.iov_len == 0 { continue; }
-                        if unsafe { user_access::copy_from_user(
-                            &mut combined[offset..offset + iov.iov_len],
-                            iov.iov_base as *const u8,
-                        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                        if iov.iov_len == 0 {
+                            continue;
+                        }
+                        if unsafe {
+                            user_access::copy_from_user(
+                                &mut combined[offset..offset + iov.iov_len],
+                                iov.iov_base as *const u8,
+                            )
+                        }
+                        .is_err()
+                        {
+                            return errno::Errno::EFAULT as u64;
+                        }
                         offset += iov.iov_len;
                     }
-                    return crate::net::unix::sendmsg_unix(handle, combined, hdr.msg_name as *const u8, hdr.msg_namelen as u64).unwrap_or_else(|e| e as u64);
+                    return crate::net::unix::sendmsg_unix(
+                        handle,
+                        combined,
+                        hdr.msg_name as *const u8,
+                        hdr.msg_namelen as u64,
+                    )
+                    .unwrap_or_else(|e| e as u64);
                 }
             }
         }
@@ -184,31 +233,55 @@ pub fn sys_sendmsg(sockfd: i64, msg: *const msghdr, flags: i32) -> u64 {
 
     #[cfg(feature = "net")]
     {
-        if msg.is_null() { return errno::Errno::EFAULT as u64; }
+        if msg.is_null() {
+            return errno::Errno::EFAULT as u64;
+        }
         let mut hdr = msghdr::default();
-        if unsafe { user_access::copy_from_user(
-            core::slice::from_raw_parts_mut(&mut hdr as *mut msghdr as *mut u8, core::mem::size_of::<msghdr>()),
-            msg as *const u8,
-        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+        if unsafe {
+            user_access::copy_from_user(
+                core::slice::from_raw_parts_mut(
+                    &mut hdr as *mut msghdr as *mut u8,
+                    core::mem::size_of::<msghdr>(),
+                ),
+                msg as *const u8,
+            )
+        }
+        .is_err()
+        {
+            return errno::Errno::EFAULT as u64;
+        }
 
         if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
             return errno::Errno::EINVAL as u64;
         }
 
-        let mut iov_buf = alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
-        if unsafe { user_access::copy_from_user(
-            core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
-            hdr.msg_iov as *const u8,
-        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+        let mut iov_buf =
+            alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
+        if unsafe {
+            user_access::copy_from_user(
+                core::slice::from_raw_parts_mut(
+                    iov_buf.as_mut_ptr() as *mut u8,
+                    hdr.msg_iovlen * core::mem::size_of::<iovec>(),
+                ),
+                hdr.msg_iov as *const u8,
+            )
+        }
+        .is_err()
+        {
+            return errno::Errno::EFAULT as u64;
+        }
 
         let total_size = iov_buf.iter().map(|iov| iov.iov_len).sum::<usize>();
-        if total_size == 0 { return 0; }
+        if total_size == 0 {
+            return 0;
+        }
 
         // Check for MSG_ZEROCOPY flag
         let use_zerocopy = (hdr.msg_flags & crate::net::zerocopy::MSG_ZEROCOPY) != 0;
-        let zerocopy_registered = use_zerocopy && iov_buf.iter().any(|iov| {
-            crate::net::zerocopy::is_zerocopy_registered(iov.iov_base as usize)
-        });
+        let zerocopy_registered = use_zerocopy
+            && iov_buf
+                .iter()
+                .any(|iov| crate::net::zerocopy::is_zerocopy_registered(iov.iov_base as usize));
 
         let combined = if zerocopy_registered {
             // Zero-copy path: use registered buffers directly
@@ -220,11 +293,19 @@ pub fn sys_sendmsg(sockfd: i64, msg: *const msghdr, flags: i32) -> u64 {
             let mut buf = alloc::vec![0u8; total_size];
             let mut offset = 0;
             for iov in &iov_buf {
-                if iov.iov_len == 0 { continue; }
-                if unsafe { user_access::copy_from_user(
-                    &mut buf[offset..offset + iov.iov_len],
-                    iov.iov_base as *const u8,
-                ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                if iov.iov_len == 0 {
+                    continue;
+                }
+                if unsafe {
+                    user_access::copy_from_user(
+                        &mut buf[offset..offset + iov.iov_len],
+                        iov.iov_base as *const u8,
+                    )
+                }
+                .is_err()
+                {
+                    return errno::Errno::EFAULT as u64;
+                }
                 offset += iov.iov_len;
             }
             buf
@@ -235,12 +316,19 @@ pub fn sys_sendmsg(sockfd: i64, msg: *const msghdr, flags: i32) -> u64 {
                 Ok((port, addr)) => Some(smoltcp::wire::IpEndpoint::new(addr, port)),
                 Err(e) => return e as u64,
             }
-        } else { None };
+        } else {
+            None
+        };
 
         let process_lock = CURRENT_PROCESS.lock();
-        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let process = match *process_lock {
+            Some(ref p) => p,
+            None => return errno::Errno::ESRCH as u64,
+        };
         let fd_table = process.files.lock().fd_table.clone();
-        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+        if (sockfd as usize) >= fd_table.len() {
+            return errno::Errno::EBADF as u64;
+        }
         if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
             let pid = process.id;
             let mut sockets = crate::net::SOCKETS.lock();
@@ -274,22 +362,44 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                 if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
                     drop(fd_table);
                     drop(process_lock);
-                    if msg.is_null() { return errno::Errno::EFAULT as u64; }
+                    if msg.is_null() {
+                        return errno::Errno::EFAULT as u64;
+                    }
                     let mut hdr = msghdr::default();
-                    if unsafe { user_access::copy_from_user(
-                        core::slice::from_raw_parts_mut(&mut hdr as *mut msghdr as *mut u8, core::mem::size_of::<msghdr>()),
-                        msg as *const u8,
-                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    if unsafe {
+                        user_access::copy_from_user(
+                            core::slice::from_raw_parts_mut(
+                                &mut hdr as *mut msghdr as *mut u8,
+                                core::mem::size_of::<msghdr>(),
+                            ),
+                            msg as *const u8,
+                        )
+                    }
+                    .is_err()
+                    {
+                        return errno::Errno::EFAULT as u64;
+                    }
                     if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
                         return errno::Errno::EINVAL as u64;
                     }
                     let mut iov_buf = alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
-                    if unsafe { user_access::copy_from_user(
-                        core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
-                        hdr.msg_iov as *const u8,
-                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    if unsafe {
+                        user_access::copy_from_user(
+                            core::slice::from_raw_parts_mut(
+                                iov_buf.as_mut_ptr() as *mut u8,
+                                hdr.msg_iovlen * core::mem::size_of::<iovec>(),
+                            ),
+                            hdr.msg_iov as *const u8,
+                        )
+                    }
+                    .is_err()
+                    {
+                        return errno::Errno::EFAULT as u64;
+                    }
                     let total_size = iov_buf.iter().map(|iov| iov.iov_len).sum::<usize>();
-                    if total_size == 0 { return 0; }
+                    if total_size == 0 {
+                        return 0;
+                    }
                     let recv_buf = match crate::net::unix::recvmsg_unix(handle) {
                         Ok(d) => d,
                         Err(e) => return e as u64,
@@ -297,23 +407,43 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                     let n = recv_buf.len();
                     let mut offset = 0;
                     for iov in &iov_buf {
-                        if iov.iov_len == 0 { continue; }
+                        if iov.iov_len == 0 {
+                            continue;
+                        }
                         let to_copy = core::cmp::min(iov.iov_len, n - offset);
-                        if unsafe { user_access::copy_to_user(iov.iov_base as *mut u8, &recv_buf[offset..offset + to_copy]) }.is_err() {
+                        if unsafe {
+                            user_access::copy_to_user(
+                                iov.iov_base as *mut u8,
+                                &recv_buf[offset..offset + to_copy],
+                            )
+                        }
+                        .is_err()
+                        {
                             return errno::Errno::EFAULT as u64;
                         }
                         offset += to_copy;
-                        if offset >= n { break; }
+                        if offset >= n {
+                            break;
+                        }
                     }
                     // Update msg_namelen for unix socket (write empty sockaddr_un)
                     if !hdr.msg_name.is_null() {
                         let empty_len: u32 = 2;
-                        let _ = unsafe { user_access::copy_to_user(hdr.msg_name as *mut u8, &[1u8, 0u8]) };
+                        let _ = unsafe {
+                            user_access::copy_to_user(hdr.msg_name as *mut u8, &[1u8, 0u8])
+                        };
                         let namelen_ptr = (msg as usize + 8) as *mut u32;
-                        let _ = unsafe { user_access::copy_to_user(namelen_ptr as *mut u8, &empty_len.to_ne_bytes()) };
+                        let _ = unsafe {
+                            user_access::copy_to_user(
+                                namelen_ptr as *mut u8,
+                                &empty_len.to_ne_bytes(),
+                            )
+                        };
                     }
                     let flags_ptr = (msg as usize + 24) as *mut i32;
-                    let _ = unsafe { user_access::copy_to_user(flags_ptr as *mut u8, &0i32.to_ne_bytes()) };
+                    let _ = unsafe {
+                        user_access::copy_to_user(flags_ptr as *mut u8, &0i32.to_ne_bytes())
+                    };
                     return n as u64;
                 }
             }
@@ -325,32 +455,60 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
 
     #[cfg(feature = "net")]
     {
-        if msg.is_null() { return errno::Errno::EFAULT as u64; }
+        if msg.is_null() {
+            return errno::Errno::EFAULT as u64;
+        }
         let mut hdr = msghdr::default();
-        if unsafe { user_access::copy_from_user(
-            core::slice::from_raw_parts_mut(&mut hdr as *mut msghdr as *mut u8, core::mem::size_of::<msghdr>()),
-            msg as *const u8,
-        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+        if unsafe {
+            user_access::copy_from_user(
+                core::slice::from_raw_parts_mut(
+                    &mut hdr as *mut msghdr as *mut u8,
+                    core::mem::size_of::<msghdr>(),
+                ),
+                msg as *const u8,
+            )
+        }
+        .is_err()
+        {
+            return errno::Errno::EFAULT as u64;
+        }
 
         if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
             return errno::Errno::EINVAL as u64;
         }
 
-        let mut iov_buf = alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
-        if unsafe { user_access::copy_from_user(
-            core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
-            hdr.msg_iov as *const u8,
-        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+        let mut iov_buf =
+            alloc::vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
+        if unsafe {
+            user_access::copy_from_user(
+                core::slice::from_raw_parts_mut(
+                    iov_buf.as_mut_ptr() as *mut u8,
+                    hdr.msg_iovlen * core::mem::size_of::<iovec>(),
+                ),
+                hdr.msg_iov as *const u8,
+            )
+        }
+        .is_err()
+        {
+            return errno::Errno::EFAULT as u64;
+        }
 
         let total_size = iov_buf.iter().map(|iov| iov.iov_len).sum::<usize>();
-        if total_size == 0 { return 0; }
+        if total_size == 0 {
+            return 0;
+        }
 
         let mut recv_buf = alloc::vec![0u8; total_size];
 
         let process_lock = CURRENT_PROCESS.lock();
-        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let process = match *process_lock {
+            Some(ref p) => p,
+            None => return errno::Errno::ESRCH as u64,
+        };
         let fd_table = process.files.lock().fd_table.clone();
-        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+        if (sockfd as usize) >= fd_table.len() {
+            return errno::Errno::EBADF as u64;
+        }
 
         if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
             let pid = process.id;
@@ -368,13 +526,24 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
 
             let mut offset = 0;
             for iov in &iov_buf {
-                if iov.iov_len == 0 { continue; }
+                if iov.iov_len == 0 {
+                    continue;
+                }
                 let to_copy = core::cmp::min(iov.iov_len, n - offset);
-                if unsafe { user_access::copy_to_user(iov.iov_base as *mut u8, &recv_buf[offset..offset + to_copy]) }.is_err() {
+                if unsafe {
+                    user_access::copy_to_user(
+                        iov.iov_base as *mut u8,
+                        &recv_buf[offset..offset + to_copy],
+                    )
+                }
+                .is_err()
+                {
                     return errno::Errno::EFAULT as u64;
                 }
                 offset += to_copy;
-                if offset >= n { break; }
+                if offset >= n {
+                    break;
+                }
             }
 
             if let Some(ep) = meta {
@@ -386,9 +555,16 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                             sockaddr[..2].copy_from_slice(&AF_INET.to_ne_bytes());
                             sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
                             sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
-                            let _ = unsafe { user_access::copy_to_user(hdr.msg_name as *mut u8, &sockaddr) };
+                            let _ = unsafe {
+                                user_access::copy_to_user(hdr.msg_name as *mut u8, &sockaddr)
+                            };
                             let namelen_ptr = (msg as usize + 8) as *mut u32;
-                            let _ = unsafe { user_access::copy_to_user(namelen_ptr as *mut u8, &sa_len.to_ne_bytes()) };
+                            let _ = unsafe {
+                                user_access::copy_to_user(
+                                    namelen_ptr as *mut u8,
+                                    &sa_len.to_ne_bytes(),
+                                )
+                            };
                         }
                         smoltcp::wire::IpAddress::Ipv6(ipv6) => {
                             let sa_len: u32 = 28;
@@ -396,9 +572,16 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                             sockaddr[..2].copy_from_slice(&AF_INET6.to_ne_bytes());
                             sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
                             sockaddr[8..24].copy_from_slice(ipv6.as_bytes());
-                            let _ = unsafe { user_access::copy_to_user(hdr.msg_name as *mut u8, &sockaddr) };
+                            let _ = unsafe {
+                                user_access::copy_to_user(hdr.msg_name as *mut u8, &sockaddr)
+                            };
                             let namelen_ptr = (msg as usize + 8) as *mut u32;
-                            let _ = unsafe { user_access::copy_to_user(namelen_ptr as *mut u8, &sa_len.to_ne_bytes()) };
+                            let _ = unsafe {
+                                user_access::copy_to_user(
+                                    namelen_ptr as *mut u8,
+                                    &sa_len.to_ne_bytes(),
+                                )
+                            };
                         }
                     }
                 }
@@ -424,17 +607,27 @@ pub fn sys_getsockname(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
     #[cfg(feature = "net")]
     {
         let process_lock = CURRENT_PROCESS.lock();
-        let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+        let process = match *process_lock {
+            Some(ref p) => p,
+            None => return errno::Errno::ESRCH as u64,
+        };
         let fd_table = process.files.lock().fd_table.clone();
-        if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+        if (sockfd as usize) >= fd_table.len() {
+            return errno::Errno::EBADF as u64;
+        }
 
         if let Some(FileDescriptor::Socket(handle, stype)) = fd_table[sockfd as usize] {
             let mut sockets = crate::net::SOCKETS.lock();
             match stype {
                 crate::task::process::SocketType::Tcp => {
-                    if let Some(ep) = with_tcp_mut(&mut sockets, handle, |socket| {
-                        socket.local_endpoint()
-                    }).flatten().map(|le| smoltcp::wire::IpEndpoint { addr: le.addr, port: le.port }) {
+                    if let Some(ep) =
+                        with_tcp_mut(&mut sockets, handle, |socket| socket.local_endpoint())
+                            .flatten()
+                            .map(|le| smoltcp::wire::IpEndpoint {
+                                addr: le.addr,
+                                port: le.port,
+                            })
+                    {
                         write_sockaddr(addr, addrlen, &ep);
                         return 0;
                     }
@@ -444,8 +637,15 @@ pub fn sys_getsockname(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
                     if let Some(ep) = with_udp_mut(&mut sockets, handle, |socket| {
                         if socket.is_open() {
                             Some(socket.endpoint())
-                        } else { None }
-                    }).flatten().map(|le| smoltcp::wire::IpEndpoint { addr: le.addr.unwrap_or(smoltcp::wire::IpAddress::v4(0,0,0,0)), port: le.port }) {
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten()
+                    .map(|le| smoltcp::wire::IpEndpoint {
+                        addr: le.addr.unwrap_or(smoltcp::wire::IpAddress::v4(0, 0, 0, 0)),
+                        port: le.port,
+                    }) {
                         write_sockaddr(addr, addrlen, &ep);
                         return 0;
                     }
@@ -458,7 +658,13 @@ pub fn sys_getsockname(sockfd: u64, addr: *mut u8, addrlen: *mut u32) -> u64 {
     }
 }
 
-pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, optlen: *mut u32) -> u64 {
+pub fn sys_getsockopt(
+    sockfd: u64,
+    level: i32,
+    optname: i32,
+    optval: *mut u8,
+    optlen: *mut u32,
+) -> u64 {
     // AF_UNIX check
     {
         let process_lock = CURRENT_PROCESS.lock();
@@ -468,12 +674,20 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
                 if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
                     drop(fd_table);
                     drop(process_lock);
-                    if optval.is_null() || optlen.is_null() { return errno::Errno::EFAULT as u64; }
+                    if optval.is_null() || optlen.is_null() {
+                        return errno::Errno::EFAULT as u64;
+                    }
                     let mut len: u32 = 0;
-                    if unsafe { user_access::copy_from_user(
-                        core::slice::from_raw_parts_mut(&mut len as *mut u32 as *mut u8, 4),
-                        optlen as *const u8,
-                    ) }.is_err() { return errno::Errno::EFAULT as u64; }
+                    if unsafe {
+                        user_access::copy_from_user(
+                            core::slice::from_raw_parts_mut(&mut len as *mut u32 as *mut u8, 4),
+                            optlen as *const u8,
+                        )
+                    }
+                    .is_err()
+                    {
+                        return errno::Errno::EFAULT as u64;
+                    }
                     const SOL_SOCKET: i32 = 1;
                     const SO_TYPE: i32 = 3;
                     const SO_ERROR: i32 = 4;
@@ -481,44 +695,73 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
                     const SO_PEERCRED: i32 = 17;
                     const SOCK_STREAM: i32 = 1;
                     const SOCK_DGRAM: i32 = 2;
-                    if level != SOL_SOCKET { return errno::Errno::ENOPROTOOPT as u64; }
+                    if level != SOL_SOCKET {
+                        return errno::Errno::ENOPROTOOPT as u64;
+                    }
                     match optname {
                         SO_TYPE => {
                             let is_stream = {
                                 let socks = crate::net::unix::UNIX_SOCKETS.lock();
-                                socks.get(&handle).map(|s| s.inner.lock().sock_type == crate::net::unix::UnixSocketType::Stream).unwrap_or(true)
+                                socks
+                                    .get(&handle)
+                                    .map(|s| {
+                                        s.inner.lock().sock_type
+                                            == crate::net::unix::UnixSocketType::Stream
+                                    })
+                                    .unwrap_or(true)
                             };
                             let val: i32 = if is_stream { SOCK_STREAM } else { SOCK_DGRAM };
                             let copy_len = core::cmp::min(len as usize, 4);
-                            if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                            if unsafe {
+                                user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len])
+                            }
+                            .is_err()
+                            {
                                 return errno::Errno::EFAULT as u64;
                             }
                             let written = copy_len as u32;
-                            let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                            let _ = unsafe {
+                                user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes())
+                            };
                             return 0;
                         }
                         SO_ERROR => {
                             let val: i32 = 0;
                             let copy_len = core::cmp::min(len as usize, 4);
-                            if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                            if unsafe {
+                                user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len])
+                            }
+                            .is_err()
+                            {
                                 return errno::Errno::EFAULT as u64;
                             }
                             let written = copy_len as u32;
-                            let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                            let _ = unsafe {
+                                user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes())
+                            };
                             return 0;
                         }
                         SO_ACCEPTCONN => {
                             let is_listening = {
                                 let socks = crate::net::unix::UNIX_SOCKETS.lock();
-                                socks.get(&handle).map(|s| s.inner.lock().is_listening).unwrap_or(false)
+                                socks
+                                    .get(&handle)
+                                    .map(|s| s.inner.lock().is_listening)
+                                    .unwrap_or(false)
                             };
                             let val: i32 = if is_listening { 1 } else { 0 };
                             let copy_len = core::cmp::min(len as usize, 4);
-                            if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                            if unsafe {
+                                user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len])
+                            }
+                            .is_err()
+                            {
                                 return errno::Errno::EFAULT as u64;
                             }
                             let written = copy_len as u32;
-                            let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                            let _ = unsafe {
+                                user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes())
+                            };
                             return 0;
                         }
                         SO_PEERCRED => {
@@ -527,14 +770,30 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
                                 Err(_) => (0u32, 0u32, 0u32),
                             };
                             #[repr(C)]
-                            struct ucred { pid: u32, uid: u32, gid: u32 }
+                            struct ucred {
+                                pid: u32,
+                                uid: u32,
+                                gid: u32,
+                            }
                             let cred = ucred { pid, uid, gid };
                             let copy_len = core::cmp::min(len as usize, 12);
-                            if unsafe { user_access::copy_to_user(optval, &core::slice::from_raw_parts(&cred as *const _ as *const u8, 12)[..copy_len]) }.is_err() {
+                            if unsafe {
+                                user_access::copy_to_user(
+                                    optval,
+                                    &core::slice::from_raw_parts(
+                                        &cred as *const _ as *const u8,
+                                        12,
+                                    )[..copy_len],
+                                )
+                            }
+                            .is_err()
+                            {
                                 return errno::Errno::EFAULT as u64;
                             }
                             let written = copy_len as u32;
-                            let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                            let _ = unsafe {
+                                user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes())
+                            };
                             return 0;
                         }
                         _ => return errno::Errno::ENOPROTOOPT as u64,
@@ -549,18 +808,31 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
 
     #[cfg(feature = "net")]
     {
-        if optval.is_null() || optlen.is_null() { return errno::Errno::EFAULT as u64; }
+        if optval.is_null() || optlen.is_null() {
+            return errno::Errno::EFAULT as u64;
+        }
         let mut len: u32 = 0;
-        if unsafe { user_access::copy_from_user(
-            core::slice::from_raw_parts_mut(&mut len as *mut u32 as *mut u8, 4),
-            optlen as *const u8,
-        ) }.is_err() { return errno::Errno::EFAULT as u64; }
+        if unsafe {
+            user_access::copy_from_user(
+                core::slice::from_raw_parts_mut(&mut len as *mut u32 as *mut u8, 4),
+                optlen as *const u8,
+            )
+        }
+        .is_err()
+        {
+            return errno::Errno::EFAULT as u64;
+        }
 
         let socket_stype = {
             let process_lock = CURRENT_PROCESS.lock();
-            let process = match *process_lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+            let process = match *process_lock {
+                Some(ref p) => p,
+                None => return errno::Errno::ESRCH as u64,
+            };
             let fd_table = process.files.lock().fd_table.clone();
-            if (sockfd as usize) >= fd_table.len() { return errno::Errno::EBADF as u64; }
+            if (sockfd as usize) >= fd_table.len() {
+                return errno::Errno::EBADF as u64;
+            }
             match fd_table[sockfd as usize] {
                 Some(FileDescriptor::Socket(handle, stype)) => Some((handle, stype)),
                 _ => return errno::Errno::ENOTSOCK as u64,
@@ -585,21 +857,29 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
                         _ => return errno::Errno::EINVAL as u64,
                     };
                     let copy_len = core::cmp::min(len as usize, 4);
-                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }
+                        .is_err()
+                    {
                         return errno::Errno::EFAULT as u64;
                     }
                     let written = copy_len as u32;
-                    let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                    let _ = unsafe {
+                        user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes())
+                    };
                     0
                 }
                 SO_ERROR => {
                     let val: i32 = 0;
                     let copy_len = core::cmp::min(len as usize, 4);
-                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }
+                        .is_err()
+                    {
                         return errno::Errno::EFAULT as u64;
                     }
                     let written = copy_len as u32;
-                    let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                    let _ = unsafe {
+                        user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes())
+                    };
                     0
                 }
                 SO_ACCEPTCONN => {
@@ -607,15 +887,24 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
                     let val: i32 = {
                         let mut sockets = crate::net::SOCKETS.lock();
                         with_tcp_mut(&mut sockets, handle, |socket| {
-                            if socket.is_listening() { 1i32 } else { 0i32 }
-                        }).unwrap_or(0)
+                            if socket.is_listening() {
+                                1i32
+                            } else {
+                                0i32
+                            }
+                        })
+                        .unwrap_or(0)
                     };
                     let copy_len = core::cmp::min(len as usize, 4);
-                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }.is_err() {
+                    if unsafe { user_access::copy_to_user(optval, &val.to_ne_bytes()[..copy_len]) }
+                        .is_err()
+                    {
                         return errno::Errno::EFAULT as u64;
                     }
                     let written = copy_len as u32;
-                    let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                    let _ = unsafe {
+                        user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes())
+                    };
                     0
                 }
                 _ => errno::Errno::ENOPROTOOPT as u64,
@@ -628,7 +917,10 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
                     };
                     let pid = {
                         let process_lock = CURRENT_PROCESS.lock();
-                        match *process_lock { Some(ref p) => p.id, None => 0 }
+                        match *process_lock {
+                            Some(ref p) => p.id,
+                            None => 0,
+                        }
                     };
                     let tcp_info = super::net_helpers::build_tcp_info(pid, handle);
                     let info_bytes = unsafe {
@@ -638,11 +930,15 @@ pub fn sys_getsockopt(sockfd: u64, level: i32, optname: i32, optval: *mut u8, op
                         )
                     };
                     let copy_len = core::cmp::min(len as usize, info_bytes.len());
-                    if unsafe { user_access::copy_to_user(optval, &info_bytes[..copy_len]) }.is_err() {
+                    if unsafe { user_access::copy_to_user(optval, &info_bytes[..copy_len]) }
+                        .is_err()
+                    {
                         return errno::Errno::EFAULT as u64;
                     }
                     let written = copy_len as u32;
-                    let _ = unsafe { user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes()) };
+                    let _ = unsafe {
+                        user_access::copy_to_user(optlen as *mut u8, &written.to_ne_bytes())
+                    };
                     0
                 }
                 _ => errno::Errno::ENOPROTOOPT as u64,

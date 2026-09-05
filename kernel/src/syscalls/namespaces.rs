@@ -3,13 +3,13 @@
 //! Implements PID, Mount, Network, IPC, UTS, and User namespaces.
 //! Provides unshare(), setns(), and clone() with CLONE_NEW* flags.
 
-use alloc::vec::Vec;
+use crate::sync::IrqSafeMutex as Mutex;
+use crate::syscalls::errno;
+use crate::task::process::CURRENT_PROCESS;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use hashbrown::HashMap;
-use crate::task::process::CURRENT_PROCESS;
-use crate::syscalls::errno;
-use crate::sync::IrqSafeMutex as Mutex;
 
 // Clone flags — correct Linux x86_64 values from include/uapi/linux/sched.h
 pub const CLONE_VM: u64 = 0x0000_0100;
@@ -152,12 +152,31 @@ pub struct NamespaceSet {
 impl Default for NamespaceSet {
     fn default() -> Self {
         Self {
-            pid_ns: Arc::new(Mutex::new(PidNamespace { id: 0, parent_id: None, pid_counter: 100 })),
-            mount_ns: Arc::new(Mutex::new(MountNamespace { id: 0, mounts: Vec::new() })),
-            net_ns: Arc::new(Mutex::new(NetNamespace { id: 0, interfaces: HashMap::new() })),
-            ipc_ns: Arc::new(Mutex::new(IpcNamespace { id: 0, shm_ids: Vec::new(), sem_ids: Vec::new(), msg_ids: Vec::new() })),
+            pid_ns: Arc::new(Mutex::new(PidNamespace {
+                id: 0,
+                parent_id: None,
+                pid_counter: 100,
+            })),
+            mount_ns: Arc::new(Mutex::new(MountNamespace {
+                id: 0,
+                mounts: Vec::new(),
+            })),
+            net_ns: Arc::new(Mutex::new(NetNamespace {
+                id: 0,
+                interfaces: HashMap::new(),
+            })),
+            ipc_ns: Arc::new(Mutex::new(IpcNamespace {
+                id: 0,
+                shm_ids: Vec::new(),
+                sem_ids: Vec::new(),
+                msg_ids: Vec::new(),
+            })),
             uts_ns: Arc::new(Mutex::new(UtsNamespace::default())),
-            user_ns: Arc::new(Mutex::new(UserNamespace { id: 0, uid_map: Vec::new(), gid_map: Vec::new() })),
+            user_ns: Arc::new(Mutex::new(UserNamespace {
+                id: 0,
+                uid_map: Vec::new(),
+                gid_map: Vec::new(),
+            })),
         }
     }
 }
@@ -165,7 +184,7 @@ impl Default for NamespaceSet {
 impl NamespaceSet {
     /// Clone this namespace set. If clone_flags has CLONE_NEW*, create new namespaces.
     /// Otherwise, share the parent's namespace.
-    pub fn clone_with_flags(&self, clone_flags: u64, new_pid: u64) -> Self {
+    pub fn clone_with_flags(&self, clone_flags: u64, _new_pid: u64) -> Self {
         Self {
             pid_ns: if clone_flags & CLONE_NEWPID != 0 {
                 let parent = self.pid_ns.lock();
@@ -257,21 +276,27 @@ pub fn sys_unshare(flags: u64) -> u64 {
         // User namespaces can be created by any process
         // But we need CAP_SYS_ADMIN for other namespace types
         if flags & !CLONE_NEWUSER != 0 {
-            let cred = proc.creds.lock();
-            if cred.euid != 0 && !crate::syscalls::has_capability(crate::syscalls::helpers::CAP_SYS_ADMIN) {
+            // Read euid out first: has_capability locks this process's creds,
+            // and a creds guard held across it would be the same nested
+            // non-reentrant acquisition as the CURRENT_PROCESS family.
+            let euid = proc.creds.lock().euid;
+            if euid != 0
+                && !crate::syscalls::has_capability(crate::syscalls::helpers::CAP_SYS_ADMIN)
+            {
                 return errno::Errno::EPERM as u64;
             }
         }
     } else if flags != 0 {
-        let cred = proc.creds.lock();
-        if cred.euid != 0 && !crate::syscalls::has_capability(crate::syscalls::helpers::CAP_SYS_ADMIN) {
+        let euid = proc.creds.lock().euid;
+        if euid != 0 && !crate::syscalls::has_capability(crate::syscalls::helpers::CAP_SYS_ADMIN) {
             return errno::Errno::EPERM as u64;
         }
     }
 
     // Hold the namespaces lock once for the entire operation
     {
-        let _ns_guard = proc.security.lock(); let ns = &_ns_guard.namespaces;
+        let _ns_guard = proc.security.lock();
+        let ns = &_ns_guard.namespaces;
 
         if flags & CLONE_NEWPID != 0 {
             let parent_id = ns.pid_ns.lock().id;
@@ -283,14 +308,23 @@ pub fn sys_unshare(flags: u64) -> u64 {
         }
         if flags & CLONE_NEWNS != 0 {
             let mounts = ns.mount_ns.lock().mounts.clone();
-            *ns.mount_ns.lock() = MountNamespace { id: next_ns_id(), mounts };
+            *ns.mount_ns.lock() = MountNamespace {
+                id: next_ns_id(),
+                mounts,
+            };
         }
         if flags & CLONE_NEWNET != 0 {
-            *ns.net_ns.lock() = NetNamespace { id: next_ns_id(), interfaces: HashMap::new() };
+            *ns.net_ns.lock() = NetNamespace {
+                id: next_ns_id(),
+                interfaces: HashMap::new(),
+            };
         }
         if flags & CLONE_NEWIPC != 0 {
             *ns.ipc_ns.lock() = IpcNamespace {
-                id: next_ns_id(), shm_ids: Vec::new(), sem_ids: Vec::new(), msg_ids: Vec::new(),
+                id: next_ns_id(),
+                shm_ids: Vec::new(),
+                sem_ids: Vec::new(),
+                msg_ids: Vec::new(),
             };
         }
         if flags & CLONE_NEWUTS != 0 {
@@ -298,11 +332,16 @@ pub fn sys_unshare(flags: u64) -> u64 {
                 let parent = ns.uts_ns.lock();
                 (parent.hostname.clone(), parent.domainname.clone())
             };
-            *ns.uts_ns.lock() = UtsNamespace { hostname, domainname };
+            *ns.uts_ns.lock() = UtsNamespace {
+                hostname,
+                domainname,
+            };
         }
         if flags & CLONE_NEWUSER != 0 {
             *ns.user_ns.lock() = UserNamespace {
-                id: next_ns_id(), uid_map: Vec::new(), gid_map: Vec::new(),
+                id: next_ns_id(),
+                uid_map: Vec::new(),
+                gid_map: Vec::new(),
             };
         }
     } // ns lock released here
@@ -318,7 +357,8 @@ pub fn sys_unshare(flags: u64) -> u64 {
 /// nstype: Namespace type (0 = auto-detect, or CLONE_NEW*)
 pub fn sys_setns(fd: u64, nstype: u64) -> u64 {
     if nstype != 0 {
-        let valid = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWUSER;
+        let valid =
+            CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWUSER;
         if nstype & !valid != 0 {
             return errno::Errno::EINVAL as u64;
         }
@@ -332,7 +372,8 @@ pub fn sys_setns(fd: u64, nstype: u64) -> u64 {
 
     // Look up the namespace type from namespace_fds
     let ns_type = {
-        let _nfd_guard = proc.security.lock(); let ns_fds = &_nfd_guard.namespace_fds;
+        let _nfd_guard = proc.security.lock();
+        let ns_fds = &_nfd_guard.namespace_fds;
         match ns_fds.get(&(fd as usize)) {
             Some(t) => *t,
             None => return errno::Errno::EBADF as u64,
@@ -364,8 +405,14 @@ pub fn sys_setns(fd: u64, nstype: u64) -> u64 {
 
 /// Clone with namespace flags — creates new namespaces for the child.
 /// Called from sys_clone when CLONE_NEW* flags are set.
-pub fn clone_namespaces(parent: &crate::task::process::Process, child: &crate::task::process::Process, clone_flags: u64) {
-    let _pns_guard = parent.security.lock(); let parent_ns = &_pns_guard.namespaces;
-    let mut _cns_guard = child.security.lock(); let child_ns = &mut _cns_guard.namespaces;
+pub fn clone_namespaces(
+    parent: &crate::task::process::Process,
+    child: &crate::task::process::Process,
+    clone_flags: u64,
+) {
+    let _pns_guard = parent.security.lock();
+    let parent_ns = &_pns_guard.namespaces;
+    let mut _cns_guard = child.security.lock();
+    let child_ns = &mut _cns_guard.namespaces;
     *child_ns = parent_ns.clone_with_flags(clone_flags, child.id);
 }

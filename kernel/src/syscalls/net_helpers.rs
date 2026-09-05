@@ -5,9 +5,9 @@ use super::errno;
 use crate::sync::IrqSafeMutex as Mutex;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
-use smoltcp::socket::{Socket, tcp, udp};
-use smoltcp::wire::IpEndpoint;
 use smoltcp::iface::SocketHandle;
+use smoltcp::socket::{tcp, udp, Socket};
+use smoltcp::wire::IpEndpoint;
 
 /// Extract a numeric ID from a smoltcp SocketHandle.
 /// smoltcp 0.10 wraps `usize` privately; Display gives `#N`.
@@ -61,62 +61,62 @@ pub(crate) const IP_DROP_MEMBERSHIP: i32 = 36;
 #[derive(Clone, Copy, Default)]
 pub struct TcpInfo {
     // Byte 0: connection state and control
-    pub tcpi_state: u8,             // TCP state (ESTABLISHED, CLOSE_WAIT, etc.)
-    pub tcpi_ca_state: u8,          // Congestion avoidance state
-    pub tcpi_retransmits: u8,       // Unacknowledged retransmit counter
-    pub tcpi_probes: u8,            // Probe timeout counter
-    pub tcpi_backoff: u8,           // Backoff factor (0-7)
-    pub tcpi_options: u8,           // Bitfield: sack, timestamps, wscale
-    pub tcpi_snd_wscale: u8,        // Send window scale
-    pub tcpi_rcv_wscale: u8,        // Receive window scale
+    pub tcpi_state: u8,       // TCP state (ESTABLISHED, CLOSE_WAIT, etc.)
+    pub tcpi_ca_state: u8,    // Congestion avoidance state
+    pub tcpi_retransmits: u8, // Unacknowledged retransmit counter
+    pub tcpi_probes: u8,      // Probe timeout counter
+    pub tcpi_backoff: u8,     // Backoff factor (0-7)
+    pub tcpi_options: u8,     // Bitfield: sack, timestamps, wscale
+    pub tcpi_snd_wscale: u8,  // Send window scale
+    pub tcpi_rcv_wscale: u8,  // Receive window scale
 
     // Byte 8: timing
-    pub tcpi_rto: u32,              // Retransmit timeout (us)
-    pub tcpi_ato: u32,              // Predicted tick of most recent ACK (us)
+    pub tcpi_rto: u32, // Retransmit timeout (us)
+    pub tcpi_ato: u32, // Predicted tick of most recent ACK (us)
 
     // Byte 16: MSS
-    pub tcpi_snd_mss: u16,          // Send MSS
-    pub tcpi_rcv_mss: u16,          // Receive MSS
+    pub tcpi_snd_mss: u16, // Send MSS
+    pub tcpi_rcv_mss: u16, // Receive MSS
 
     // Byte 20: unreceived/partially acked
-    pub tcpi_unacked: u32,          // Segments not yet acknowledged
-    pub tcpi_sacked: u32,           // Segments selectively ACKed
-    pub tcpi_lost: u32,             // Segments considered lost
-    pub tcpi_retrans: u32,          // Segments currently being retransmitted
-    pub tcpi_fackets: u32,          // FACKed segments count
+    pub tcpi_unacked: u32, // Segments not yet acknowledged
+    pub tcpi_sacked: u32,  // Segments selectively ACKed
+    pub tcpi_lost: u32,    // Segments considered lost
+    pub tcpi_retrans: u32, // Segments currently being retransmitted
+    pub tcpi_fackets: u32, // FACKed segments count
 
     // Byte 40: timestamps (ms since connection start)
-    pub tcpi_last_data_sent: u32,   // Time since last data sent
-    pub tcpi_last_ack_sent: u32,    // Time since last ACK sent
-    pub tcpi_last_data_recv: u32,   // Time since last data received
-    pub tcpi_last_ack_recv: u32,    // Time since last ACK received
+    pub tcpi_last_data_sent: u32, // Time since last data sent
+    pub tcpi_last_ack_sent: u32,  // Time since last ACK sent
+    pub tcpi_last_data_recv: u32, // Time since last data received
+    pub tcpi_last_ack_recv: u32,  // Time since last ACK received
 
     // Byte 56: RTT
-    pub tcpi_rtt: u32,              // Smoothed RTT (us)
-    pub tcpi_rttvar: u32,           // RTT variance (us)
+    pub tcpi_rtt: u32,    // Smoothed RTT (us)
+    pub tcpi_rttvar: u32, // RTT variance (us)
 
     // Byte 64: ssthresh
-    pub tcpi_snd_ssthresh: u32,     // Slow start threshold
-    pub tcpi_rcv_ssthresh: u32,     // Receive window threshold
+    pub tcpi_snd_ssthresh: u32, // Slow start threshold
+    pub tcpi_rcv_ssthresh: u32, // Receive window threshold
 
     // Byte 72: misc
-    pub tcpi_reordering: u32,       // Reordering threshold
-    pub tcpi_rcv_rtt: u32,          // Receive-side RTT estimate
-    pub tcpi_rcv_space: u32,        // Receive window space
+    pub tcpi_reordering: u32, // Reordering threshold
+    pub tcpi_rcv_rtt: u32,    // Receive-side RTT estimate
+    pub tcpi_rcv_space: u32,  // Receive window space
 
     // Byte 84: total counters
-    pub tcpi_total_retrans: u32,    // Total retransmissions since connect
+    pub tcpi_total_retrans: u32, // Total retransmissions since connect
 
     // Byte 88: pacing rate
-    pub tcpi_pacing_rate: u64,      // Pacing rate (bytes/s), 0 = not measured
+    pub tcpi_pacing_rate: u64, // Pacing rate (bytes/s), 0 = not measured
 
     // Byte 96: application-level byte counters
-    pub tcpi_bytes_acked: u64,      // Total bytes ACKed (application data)
-    pub tcpi_bytes_received: u64,   // Total bytes received (application data)
+    pub tcpi_bytes_acked: u64,    // Total bytes ACKed (application data)
+    pub tcpi_bytes_received: u64, // Total bytes received (application data)
 
     // Byte 112: segment counters
-    pub tcpi_segs_out: u32,         // Segments sent
-    pub tcpi_segs_in: u32,          // Segments received
+    pub tcpi_segs_out: u32, // Segments sent
+    pub tcpi_segs_in: u32,  // Segments received
 }
 
 /// TCP connection state constants (Linux ABI-compatible)
@@ -155,7 +155,7 @@ pub(crate) struct TcpConnectionStats {
     pub segs_out: u32,
     pub segs_in: u32,
     pub total_retrans: u32,
-    pub connect_tick: u64,          // boot tick when connection was established
+    pub connect_tick: u64, // boot tick when connection was established
     pub last_data_sent_tick: u64,
     pub last_data_recv_tick: u64,
     pub last_ack_sent_tick: u64,
@@ -185,7 +185,7 @@ impl Default for TcpConnectionStats {
     }
 }
 
-/// Global TCP connection stats: (pid, handle) → TcpConnectionStats
+// Global TCP connection stats: (pid, handle) → TcpConnectionStats
 lazy_static::lazy_static! {
     pub(crate) static ref TCP_STATS: Mutex<HashMap<(u64, SocketHandle), TcpConnectionStats>> =
         Mutex::new(HashMap::new());
@@ -195,7 +195,9 @@ lazy_static::lazy_static! {
 pub(crate) fn tcp_stats_on_connect(pid: u64, handle: SocketHandle) {
     let tick = crate::hal::timer::current_time_us();
     let mut stats = TCP_STATS.lock();
-    let entry = stats.entry((pid, handle)).or_insert_with(TcpConnectionStats::default);
+    let entry = stats
+        .entry((pid, handle))
+        .or_insert_with(TcpConnectionStats::default);
     entry.connect_tick = tick;
     // Initialize congestion control for this connection.
     crate::net::tcp_congestion::create(socket_handle_id(&handle), 1460);
@@ -205,7 +207,9 @@ pub(crate) fn tcp_stats_on_connect(pid: u64, handle: SocketHandle) {
 pub(crate) fn tcp_stats_record_send(pid: u64, handle: SocketHandle, bytes: u64) {
     let tick = crate::hal::timer::current_time_us();
     let mut stats = TCP_STATS.lock();
-    let entry = stats.entry((pid, handle)).or_insert_with(TcpConnectionStats::default);
+    let entry = stats
+        .entry((pid, handle))
+        .or_insert_with(TcpConnectionStats::default);
     entry.bytes_acked += bytes;
     entry.segs_out += 1;
     entry.last_data_sent_tick = tick;
@@ -215,7 +219,9 @@ pub(crate) fn tcp_stats_record_send(pid: u64, handle: SocketHandle, bytes: u64) 
 pub(crate) fn tcp_stats_record_recv(pid: u64, handle: SocketHandle, bytes: u64) {
     let tick = crate::hal::timer::current_time_us();
     let mut stats = TCP_STATS.lock();
-    let entry = stats.entry((pid, handle)).or_insert_with(TcpConnectionStats::default);
+    let entry = stats
+        .entry((pid, handle))
+        .or_insert_with(TcpConnectionStats::default);
     entry.bytes_received += bytes;
     entry.segs_in += 1;
     entry.last_data_recv_tick = tick;
@@ -255,7 +261,13 @@ pub(crate) fn build_tcp_info(pid: u64, handle: SocketHandle) -> TcpInfo {
     if let Some((state, is_open)) = socket_state {
         use smoltcp::socket::tcp::State;
         info.tcpi_state = match state {
-            State::Closed => if is_open { TCP_LISTEN } else { TCP_CLOSE },
+            State::Closed => {
+                if is_open {
+                    TCP_LISTEN
+                } else {
+                    TCP_CLOSE
+                }
+            }
             State::Listen => TCP_LISTEN,
             State::SynSent => TCP_SYN_SENT,
             State::SynReceived => TCP_SYN_RECV,
@@ -283,7 +295,7 @@ pub(crate) fn build_tcp_info(pid: u64, handle: SocketHandle) -> TcpInfo {
 
     // TCP options and window scaling
     info.tcpi_options = TCPOPT_TIMESTAMP | TCPOPT_SACK | TCPOPT_WSCALE;
-    info.tcpi_snd_wscale = 7;  // 128x window scaling
+    info.tcpi_snd_wscale = 7; // 128x window scaling
     info.tcpi_rcv_wscale = 7;
 
     // MSS: Ethernet MTU 1500 minus IP+TCP headers
@@ -291,10 +303,10 @@ pub(crate) fn build_tcp_info(pid: u64, handle: SocketHandle) -> TcpInfo {
     info.tcpi_rcv_mss = 1460;
 
     // RTT: smoothed estimate in microseconds
-    info.tcpi_rtt = 1_000;      // 1ms base RTT (typical LAN)
-    info.tcpi_rttvar = 500;     // 0.5ms variance
-    info.tcpi_rto = 200_000;    // 200ms minimum RTO (Linux standard)
-    info.tcpi_ato = 400_000;    // 400ms ACK timeout (typical delayed-ACK timer)
+    info.tcpi_rtt = 1_000; // 1ms base RTT (typical LAN)
+    info.tcpi_rttvar = 500; // 0.5ms variance
+    info.tcpi_rto = 200_000; // 200ms minimum RTO (Linux standard)
+    info.tcpi_ato = 400_000; // 400ms ACK timeout (typical delayed-ACK timer)
 
     // ssthresh from tracked stats
     info.tcpi_snd_ssthresh = stats_snapshot.snd_ssthresh;
@@ -381,7 +393,7 @@ impl Default for SocketFlags {
     }
 }
 
-/// Global per-socket flags: (pid, handle) → SocketFlags
+// Global per-socket flags: (pid, handle) → SocketFlags
 lazy_static::lazy_static! {
     pub(crate) static ref SOCKET_FLAGS: Mutex<HashMap<(u64, SocketHandle), SocketFlags>> =
         Mutex::new(HashMap::new());
@@ -408,7 +420,7 @@ impl ReusePortGroup {
     }
 }
 
-/// Global SO_REUSEPORT group registry: port → ReusePortGroup
+// Global SO_REUSEPORT group registry: port → ReusePortGroup
 lazy_static::lazy_static! {
     pub(crate) static ref REUSEPORT_SOCKETS: Mutex<HashMap<u16, ReusePortGroup>> =
         Mutex::new(HashMap::new());
@@ -428,13 +440,18 @@ pub(crate) fn simple_hash(data: &[u8]) -> u64 {
 /// Check if a socket has SO_REUSEPORT set.
 pub(crate) fn has_reuse_port(pid: u64, handle: SocketHandle) -> bool {
     let flags = SOCKET_FLAGS.lock();
-    flags.get(&(pid, handle)).map(|f| f.reuse_port).unwrap_or(false)
+    flags
+        .get(&(pid, handle))
+        .map(|f| f.reuse_port)
+        .unwrap_or(false)
 }
 
 /// Set SO_REUSEPORT flag on a socket.
 pub(crate) fn set_reuse_port(pid: u64, handle: SocketHandle, enable: bool) {
     let mut flags = SOCKET_FLAGS.lock();
-    let entry = flags.entry((pid, handle)).or_insert_with(SocketFlags::default);
+    let entry = flags
+        .entry((pid, handle))
+        .or_insert_with(SocketFlags::default);
     entry.reuse_port = enable;
 }
 
@@ -442,8 +459,12 @@ pub(crate) fn set_reuse_port(pid: u64, handle: SocketHandle, enable: bool) {
 pub(crate) fn remove_from_reuseport(pid: u64, handle: SocketHandle) {
     let mut groups = REUSEPORT_SOCKETS.lock();
     for (_port, group) in groups.iter_mut() {
-        group.tcp_sockets.retain(|&(h_pid, h, _)| h_pid != pid || h != handle);
-        group.udp_sockets.retain(|&(h_pid, h, _)| h_pid != pid || h != handle);
+        group
+            .tcp_sockets
+            .retain(|&(h_pid, h, _)| h_pid != pid || h != handle);
+        group
+            .udp_sockets
+            .retain(|&(h_pid, h, _)| h_pid != pid || h != handle);
     }
     groups.retain(|_, group| !group.tcp_sockets.is_empty() || !group.udp_sockets.is_empty());
 }
@@ -451,7 +472,11 @@ pub(crate) fn remove_from_reuseport(pid: u64, handle: SocketHandle) {
 // ─── Socket access helpers ────────────────────────────────────────
 
 /// Safely access a TCP socket by handle without panicking on type mismatch.
-pub(crate) fn with_tcp_mut<R>(sockets: &mut smoltcp::iface::SocketSet, handle: smoltcp::iface::SocketHandle, f: impl FnOnce(&mut tcp::Socket) -> R) -> Option<R> {
+pub(crate) fn with_tcp_mut<R>(
+    sockets: &mut smoltcp::iface::SocketSet,
+    handle: smoltcp::iface::SocketHandle,
+    f: impl FnOnce(&mut tcp::Socket) -> R,
+) -> Option<R> {
     for (h, socket) in sockets.iter_mut() {
         if h == handle {
             if let Socket::Tcp(ref mut s) = socket {
@@ -464,7 +489,11 @@ pub(crate) fn with_tcp_mut<R>(sockets: &mut smoltcp::iface::SocketSet, handle: s
 }
 
 /// Safely access a UDP socket by handle without panicking on type mismatch.
-pub(crate) fn with_udp_mut<R>(sockets: &mut smoltcp::iface::SocketSet, handle: smoltcp::iface::SocketHandle, f: impl FnOnce(&mut udp::Socket) -> R) -> Option<R> {
+pub(crate) fn with_udp_mut<R>(
+    sockets: &mut smoltcp::iface::SocketSet,
+    handle: smoltcp::iface::SocketHandle,
+    f: impl FnOnce(&mut udp::Socket) -> R,
+) -> Option<R> {
     for (h, socket) in sockets.iter_mut() {
         if h == handle {
             if let Socket::Udp(ref mut s) = socket {
@@ -491,7 +520,9 @@ pub(crate) fn sendto_internal(
             if let Some(endpoint) = dest_endpoint {
                 if with_udp_mut(sockets, handle, |socket| {
                     socket.send_slice(data, endpoint).is_ok()
-                }).unwrap_or(false) {
+                })
+                .unwrap_or(false)
+                {
                     return data.len() as u64;
                 }
             }
@@ -512,12 +543,17 @@ pub(crate) fn sendto_internal(
                         (n, true)
                     });
                     if result.unwrap_or(false) {
-                        crate::net::tcp_congestion::on_send(socket_handle_id(&handle), send_len as u32);
+                        crate::net::tcp_congestion::on_send(
+                            socket_handle_id(&handle),
+                            send_len as u32,
+                        );
                         return send_len as u64;
                     }
                 }
                 errno::Errno::EAGAIN as u64
-            }).is_some() {
+            })
+            .is_some()
+            {
                 return send_len as u64;
             }
         }
@@ -545,8 +581,13 @@ pub(crate) fn recvfrom_internal(
                             {
                                 let src = socket.remote_endpoint().map(|e| e.port).unwrap_or(0);
                                 let dst = socket.local_endpoint().map(|e| e.port).unwrap_or(0);
-                                if crate::ash::hooks::net::hook_net_receive(&mut buf[..n], 0, 6, src, dst)
-                                    == crate::ash::AshResult::Drop
+                                if crate::ash::hooks::net::hook_net_receive(
+                                    &mut buf[..n],
+                                    0,
+                                    6,
+                                    src,
+                                    dst,
+                                ) == crate::ash::AshResult::Drop
                                 {
                                     result = Err(errno::Errno::EAGAIN as u64);
                                     return;
@@ -557,7 +598,11 @@ pub(crate) fn recvfrom_internal(
                         Err(_) => {}
                     }
                 }
-            }) { result.map_err(|_| errno::Errno::EAGAIN as u64) } else { Err(errno::Errno::EINVAL as u64) }
+            }) {
+                result.map_err(|_| errno::Errno::EAGAIN as u64)
+            } else {
+                Err(errno::Errno::EINVAL as u64)
+            }
         }
         crate::task::process::SocketType::Udp => {
             let mut result = Err(errno::Errno::EAGAIN as u64);
@@ -576,7 +621,11 @@ pub(crate) fn recvfrom_internal(
                     }
                     result = Ok((n, Some(meta.endpoint)));
                 }
-            }) { result.map_err(|_| errno::Errno::EAGAIN as u64) } else { Err(errno::Errno::EINVAL as u64) }
+            }) {
+                result.map_err(|_| errno::Errno::EAGAIN as u64)
+            } else {
+                Err(errno::Errno::EINVAL as u64)
+            }
         }
         _ => Err(errno::Errno::ENOSYS as u64),
     }
@@ -584,33 +633,50 @@ pub(crate) fn recvfrom_internal(
 
 // ─── Sockaddr helpers ─────────────────────────────────────────────
 
-pub(crate) fn parse_sockaddr(addr_ptr: *const u8, addrlen: u64) -> Result<(u16, smoltcp::wire::IpAddress), errno::Errno> {
+pub(crate) fn parse_sockaddr(
+    addr_ptr: *const u8,
+    addrlen: u64,
+) -> Result<(u16, smoltcp::wire::IpAddress), errno::Errno> {
     if addr_ptr.is_null() || addrlen < 8 || addrlen > MAX_SOCK_ADDR_LEN {
         return Err(errno::Errno::EINVAL);
     }
     let mut family_buf = [0u8; 2];
-    unsafe { super::user_access::copy_from_user(&mut family_buf, addr_ptr).map_err(|_| errno::Errno::EFAULT)?; }
+    unsafe {
+        super::user_access::copy_from_user(&mut family_buf, addr_ptr)
+            .map_err(|_| errno::Errno::EFAULT)?;
+    }
     let family = u16::from_ne_bytes(family_buf);
     if addrlen < (if family == AF_INET6 { 28 } else { 16 }) {
         return Err(errno::Errno::EINVAL);
     }
     let mut port_buf = [0u8; 2];
-    unsafe { super::user_access::copy_from_user(&mut port_buf, addr_ptr.wrapping_add(2)).map_err(|_| errno::Errno::EFAULT)?; }
+    unsafe {
+        super::user_access::copy_from_user(&mut port_buf, addr_ptr.wrapping_add(2))
+            .map_err(|_| errno::Errno::EFAULT)?;
+    }
     let port = u16::from_be_bytes(port_buf);
-    Ok((port,
+    Ok((
+        port,
         match family {
             AF_INET => {
                 let mut ip = [0u8; 4];
-                unsafe { super::user_access::copy_from_user(&mut ip, addr_ptr.wrapping_add(4)).map_err(|_| errno::Errno::EFAULT)?; }
+                unsafe {
+                    super::user_access::copy_from_user(&mut ip, addr_ptr.wrapping_add(4))
+                        .map_err(|_| errno::Errno::EFAULT)?;
+                }
                 smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_bytes(&ip))
             }
             AF_INET6 => {
                 let mut ip = [0u8; 16];
-                unsafe { super::user_access::copy_from_user(&mut ip, addr_ptr.wrapping_add(8)).map_err(|_| errno::Errno::EFAULT)?; }
+                unsafe {
+                    super::user_access::copy_from_user(&mut ip, addr_ptr.wrapping_add(8))
+                        .map_err(|_| errno::Errno::EFAULT)?;
+                }
                 smoltcp::wire::IpAddress::Ipv6(smoltcp::wire::Ipv6Address::from_bytes(&ip))
             }
             _ => return Err(errno::Errno::EAFNOSUPPORT),
-        }))
+        },
+    ))
 }
 
 /// Execute a closure if the fd is a Unix socket, returning the closure's result as u64.
@@ -624,7 +690,9 @@ where
     if let Some(ref process) = *process_lock {
         let fd_table = process.files.lock().fd_table.clone();
         if (sockfd as usize) < fd_table.len() {
-            if let Some(crate::task::process::FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
+            if let Some(crate::task::process::FileDescriptor::UnixSocket(handle, _)) =
+                fd_table[sockfd as usize]
+            {
                 return Some(f(handle).unwrap_or_else(|e| e.into()));
             }
         }
@@ -632,8 +700,14 @@ where
     None
 }
 
-pub(crate) fn write_sockaddr(addr_ptr: *mut u8, addrlen_ptr: *mut u32, ep: &smoltcp::wire::IpEndpoint) {
-    if addr_ptr.is_null() || addrlen_ptr.is_null() { return; }
+pub(crate) fn write_sockaddr(
+    addr_ptr: *mut u8,
+    addrlen_ptr: *mut u32,
+    ep: &smoltcp::wire::IpEndpoint,
+) {
+    if addr_ptr.is_null() || addrlen_ptr.is_null() {
+        return;
+    }
     match ep.addr {
         smoltcp::wire::IpAddress::Ipv4(ipv4) => {
             let mut sockaddr = [0u8; 16];
@@ -642,7 +716,9 @@ pub(crate) fn write_sockaddr(addr_ptr: *mut u8, addrlen_ptr: *mut u32, ep: &smol
             sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
             let addr_len: u32 = 16;
             let _ = unsafe { super::user_access::copy_to_user(addr_ptr, &sockaddr) };
-            let _ = unsafe { super::user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
+            let _ = unsafe {
+                super::user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes())
+            };
         }
         smoltcp::wire::IpAddress::Ipv6(ipv6) => {
             let mut sockaddr = [0u8; 28];
@@ -651,7 +727,9 @@ pub(crate) fn write_sockaddr(addr_ptr: *mut u8, addrlen_ptr: *mut u32, ep: &smol
             sockaddr[8..24].copy_from_slice(ipv6.as_bytes());
             let addr_len: u32 = 28;
             let _ = unsafe { super::user_access::copy_to_user(addr_ptr, &sockaddr) };
-            let _ = unsafe { super::user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes()) };
+            let _ = unsafe {
+                super::user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes())
+            };
         }
     }
 }

@@ -14,8 +14,8 @@
 //! Run at boot via the `self_test` feature; TAP output goes to serial and CI
 //! fails on any `not ok`.
 
-use crate::sync::IrqSafeMutex;
 use crate::selftest;
+use crate::sync::IrqSafeMutex;
 
 fn if_flag() -> bool {
     // SAFETY: pushfq/pop reads RFLAGS; IF is bit 9 (0x200).

@@ -1,11 +1,10 @@
+use crate::sync::IrqSafeMutex as Mutex;
 use core::fmt;
 use lazy_static::lazy_static;
-use crate::sync::IrqSafeMutex as Mutex;
 use volatile::Volatile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-#[allow(dead_code)]
 pub enum Color {
     Black = 0,
     _Blue = 1,
@@ -60,7 +59,8 @@ impl Writer {
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
-            0x08 => { // Backspace
+            0x08 => {
+                // Backspace
                 if self.column_position > 0 {
                     self.column_position -= 1;
                     let row = BUFFER_HEIGHT - 1;
@@ -118,7 +118,7 @@ impl Writer {
         self.column_position = 0;
     }
 
-        pub fn _set_color_code(&mut self, color_code: ColorCode) {
+    pub fn _set_color_code(&mut self, color_code: ColorCode) {
         self.color_code = color_code;
     }
 
@@ -188,7 +188,9 @@ pub fn clear_screen() {
     use x86_64::instructions::interrupts;
     interrupts::without_interrupts(|| {
         if crate::drivers::graphics::is_active() {
-            crate::drivers::graphics::console::WRITER.lock().clear_screen();
+            crate::drivers::graphics::console::WRITER
+                .lock()
+                .clear_screen();
         } else {
             WRITER.lock().clear_screen();
         }
@@ -196,24 +198,18 @@ pub fn clear_screen() {
 }
 
 pub fn init() {
-    use core::fmt::Write;
-    use x86_64::instructions::interrupts;
-    clear_screen();
+    // ponytail: skip clear_screen under TCG — write_volatile per-pixel is
+    // too slow. Console clears on first write instead.
+    if !crate::drivers::graphics::is_active() {
+        WRITER.lock().clear_screen();
+    }
     set_color(Color::Yellow, Color::Black);
-    interrupts::without_interrupts(|| {
-        if crate::drivers::graphics::is_active() {
-            crate::drivers::graphics::console::WRITER.lock().write_str("SKYIOUS Kernel booting...\n").ok();
-        } else {
-            WRITER.lock().write_str("SKYIOUS Kernel booting...\n").ok();
-        }
-    });
 }
 
 pub fn set_color(foreground: Color, background: Color) {
     use x86_64::instructions::interrupts;
     interrupts::without_interrupts(|| {
         if crate::drivers::graphics::is_active() {
-            // Simple mapping for prompt
             let fg = match foreground {
                 Color::Black => 0x000000,
                 Color::_Blue | Color::LightBlue => 0x0000FF,
@@ -224,25 +220,9 @@ pub fn set_color(foreground: Color, background: Color) {
                 Color::_Brown | Color::Yellow => 0xFFFF00,
                 Color::_LightGray | Color::_DarkGray | Color::White => 0xFFFFFF,
             };
-            let bg = match background {
-                Color::Black => 0x001A237E,
-                Color::_Blue => 0x001A237E,
-                Color::_Green => 0x001A237E,
-                Color::Cyan => 0x001A237E,
-                Color::Red => 0x001A237E,
-                Color::_Magenta => 0x001A237E,
-                Color::_Brown => 0x001A237E,
-                Color::_LightGray => 0x001A237E,
-                Color::_DarkGray => 0x001A237E,
-                Color::LightBlue => 0x001A237E,
-                Color::LightGreen => 0x001A237E,
-                Color::LightCyan => 0x001A237E,
-                Color::_LightRed => 0x001A237E,
-                Color::_Pink => 0x001A237E,
-                Color::Yellow => 0x001A237E,
-                Color::White => 0x001A237E,
-            };
-            crate::drivers::graphics::console::set_console_color(fg, bg);
+            // ponytail: background always the same navy; the match arms above
+            // are for foreground only. Keep as-is for future per-color bg support.
+            crate::drivers::graphics::console::set_console_color(fg, 0x001A237E);
         } else {
             WRITER.lock().set_color(foreground, background);
         }

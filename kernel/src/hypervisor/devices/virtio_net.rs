@@ -3,9 +3,9 @@
 //! Emulates a virtio-net device that forwards packets between the guest
 //! and the host networking stack. Uses the VirtIO MMIO transport.
 
+use crate::hypervisor::devices::{VirtDevice, VirtDeviceType};
 use alloc::vec::Vec;
 use x86_64::PhysAddr;
-use crate::hypervisor::devices::{VirtDevice, VirtDeviceType};
 
 const MAC_ADDR: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 

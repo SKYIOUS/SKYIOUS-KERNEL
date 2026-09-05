@@ -3,9 +3,9 @@
 //! Provides a two-dimensional page table so the guest's physical addresses
 //! translate to host physical addresses without hypervisor intervention.
 
-use core::arch::asm;
-use crate::memory::PHYSICAL_MEMORY_OFFSET;
 use crate::memory::buddy::BUDDY_ALLOCATOR;
+use crate::memory::PHYSICAL_MEMORY_OFFSET;
+use core::arch::asm;
 use x86_64::PhysAddr;
 
 /// EPT PML4 table (4 levels for 48-bit guest physical addresses).
@@ -97,7 +97,13 @@ impl EptManager {
         })
     }
 
-    pub fn map_guest(&mut self, guest_phys: u64, host_phys: u64, size: usize, flags: EptFlags) -> bool {
+    pub fn map_guest(
+        &mut self,
+        guest_phys: u64,
+        host_phys: u64,
+        size: usize,
+        flags: EptFlags,
+    ) -> bool {
         // Map region page by page (4KB)
         let mut gpa = guest_phys;
         let mut hpa = host_phys;
@@ -129,18 +135,26 @@ impl EptManager {
         let pml4_virt = (self.root_pml4.as_u64() + offset) as *mut u64;
         // SAFETY: pml4_virt is valid mapped memory.
         let pdpt_phys = unsafe { *pml4_virt.add(pml4_idx) } & 0xFFFFFFF000;
-        if pdpt_phys == 0 { return false; }
+        if pdpt_phys == 0 {
+            return false;
+        }
         let pdpt_virt = (pdpt_phys + offset) as *mut u64;
         // SAFETY: pdpt_virt is valid.
         let pd_phys = unsafe { *pdpt_virt.add(pdpt_idx) } & 0xFFFFFFF000;
-        if pd_phys == 0 { return false; }
+        if pd_phys == 0 {
+            return false;
+        }
         let pd_virt = (pd_phys + offset) as *mut u64;
         // SAFETY: pd_virt is valid.
         let pt_phys = unsafe { *pd_virt.add(pd_idx) } & 0xFFFFFFF000;
-        if pt_phys == 0 { return false; }
+        if pt_phys == 0 {
+            return false;
+        }
         let pt_virt = (pt_phys + offset) as *mut u64;
         // SAFETY: Clear PTE entry.
-        unsafe { *pt_virt.add(pt_idx) = 0; }
+        unsafe {
+            *pt_virt.add(pt_idx) = 0;
+        }
         // Invalidate EPT TLB
         ept_sync();
         true
@@ -187,9 +201,13 @@ unsafe fn ept_map_4k(pml4_pa: u64, guest_phys: u64, host_phys: u64, flags: &EptF
         };
         let pdpt_virt = (pdpt_frame.as_u64() + offset) as *mut u64;
         // SAFETY: allocated frame is writable.
-        unsafe { core::ptr::write_bytes(pdpt_virt, 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes(pdpt_virt, 0, 4096);
+        }
         // SAFETY: write back to PML4 entry.
-        unsafe { *pml4_virt.add(pml4_idx) = pdpt_frame.as_u64() | 0x7; }
+        unsafe {
+            *pml4_virt.add(pml4_idx) = pdpt_frame.as_u64() | 0x7;
+        }
     }
 
     // SAFETY: read PDPT entry.
@@ -205,9 +223,13 @@ unsafe fn ept_map_4k(pml4_pa: u64, guest_phys: u64, host_phys: u64, flags: &EptF
         };
         let pd_virt = (pd_frame.as_u64() + offset) as *mut u64;
         // SAFETY: allocated frame is writable.
-        unsafe { core::ptr::write_bytes(pd_virt, 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes(pd_virt, 0, 4096);
+        }
         // SAFETY: write back to PDPT entry.
-        unsafe { *pdpt_virt.add(pdpt_idx) = pd_frame.as_u64() | 0x7; }
+        unsafe {
+            *pdpt_virt.add(pdpt_idx) = pd_frame.as_u64() | 0x7;
+        }
     }
 
     // SAFETY: read PD entry.
@@ -223,9 +245,13 @@ unsafe fn ept_map_4k(pml4_pa: u64, guest_phys: u64, host_phys: u64, flags: &EptF
         };
         let pt_virt = (pt_frame.as_u64() + offset) as *mut u64;
         // SAFETY: allocated frame is writable.
-        unsafe { core::ptr::write_bytes(pt_virt, 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes(pt_virt, 0, 4096);
+        }
         // SAFETY: write back to PD entry.
-        unsafe { *pd_virt.add(pd_idx) = pt_frame.as_u64() | 0x7; }
+        unsafe {
+            *pd_virt.add(pd_idx) = pt_frame.as_u64() | 0x7;
+        }
     }
 
     // SAFETY: read PT base.
@@ -234,16 +260,28 @@ unsafe fn ept_map_4k(pml4_pa: u64, guest_phys: u64, host_phys: u64, flags: &EptF
 
     // Set 4KB page entry
     let mut entry = host_phys | 0x7; // Read + Write + Present
-    if !flags.read { entry &= !0x1; }
-    if !flags.write { entry &= !0x2; }
-    if !flags.execute { entry |= 0x100; } // XD (execute-disable)
-    // Set memory type (bits 3:5)
+    if !flags.read {
+        entry &= !0x1;
+    }
+    if !flags.write {
+        entry &= !0x2;
+    }
+    if !flags.execute {
+        entry |= 0x100;
+    } // XD (execute-disable)
+      // Set memory type (bits 3:5)
     entry |= (flags.mem_type as u64) << 3;
-    if flags.ignore_pat { entry |= 1 << 6; }
-    if flags.access_dirty { entry |= 1 << 8; } // Access bit tracking
+    if flags.ignore_pat {
+        entry |= 1 << 6;
+    }
+    if flags.access_dirty {
+        entry |= 1 << 8;
+    } // Access bit tracking
 
     // SAFETY: write PTE.
-    unsafe { *pt_virt.add(pt_idx) = entry; }
+    unsafe {
+        *pt_virt.add(pt_idx) = entry;
+    }
 
     true
 }
@@ -252,7 +290,13 @@ unsafe fn ept_map_4k(pml4_pa: u64, guest_phys: u64, host_phys: u64, flags: &EptF
 ///
 /// # Safety
 /// `pml4` must point to a valid EPT PML4 table.
-pub unsafe fn ept_map_2mb(pml4: &mut EptPml4, guest_phys: u64, host_phys: u64, writable: bool, executable: bool) -> bool {
+pub unsafe fn ept_map_2mb(
+    pml4: &mut EptPml4,
+    guest_phys: u64,
+    host_phys: u64,
+    writable: bool,
+    executable: bool,
+) -> bool {
     let offset = match PHYSICAL_MEMORY_OFFSET.get() {
         Some(o) => *o,
         None => return false,
@@ -292,7 +336,9 @@ pub unsafe fn ept_map_2mb(pml4: &mut EptPml4, guest_phys: u64, host_phys: u64, w
             core::ptr::write_bytes(pd_virt, 0, 4096);
         }
         // SAFETY: pdpt_virt is a valid mapping.
-        unsafe { *pdpt_virt.add(pdpt_idx) = pd_frame.as_u64() | 0x7; }
+        unsafe {
+            *pdpt_virt.add(pdpt_idx) = pd_frame.as_u64() | 0x7;
+        }
     }
 
     // SAFETY: pdpt_virt is a valid mapped pointer.
@@ -301,10 +347,16 @@ pub unsafe fn ept_map_2mb(pml4: &mut EptPml4, guest_phys: u64, host_phys: u64, w
 
     // Set 2MB large page entry (Present + writable + large page)
     let mut entry = host_phys | 0x87;
-    if !writable { entry &= !0x2; }
-    if !executable { entry |= 0x1000000000000000; }
+    if !writable {
+        entry &= !0x2;
+    }
+    if !executable {
+        entry |= 0x1000000000000000;
+    }
     // SAFETY: pd_virt points to the page directory entry slot.
-    unsafe { *pd_virt.add(pd_idx) = entry; }
+    unsafe {
+        *pd_virt.add(pd_idx) = entry;
+    }
 
     true
 }

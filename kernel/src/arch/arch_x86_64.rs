@@ -3,7 +3,7 @@
 //! Delegates to the existing x86_64-specific modules (gdt, interrupts, task::thread, etc.).
 
 use super::Arch;
-use crate::hal::platform::{PlatformInfo, PlatformArch};
+use crate::hal::platform::{PlatformArch, PlatformInfo};
 use alloc::sync::Arc;
 
 pub struct X86_64Arch;
@@ -23,8 +23,8 @@ impl Arch for X86_64Arch {
     }
 
     unsafe fn init_cpu() {
-        use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
         use core::sync::atomic::Ordering;
+        use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 
         Cr0::update(|flags| {
             flags.remove(Cr0Flags::EMULATE_COPROCESSOR);
@@ -64,13 +64,17 @@ impl Arch for X86_64Arch {
 
     fn read_sp() -> u64 {
         let sp: u64;
-        unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("mov {}, rsp", out(reg) sp, options(nostack, preserves_flags));
+        }
         sp
     }
 
     fn read_fp() -> u64 {
         let fp: u64;
-        unsafe { core::arch::asm!("mov {}, rbp", out(reg) fp, options(nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("mov {}, rbp", out(reg) fp, options(nostack, preserves_flags));
+        }
         fp
     }
 
@@ -84,7 +88,13 @@ impl Arch for X86_64Arch {
 
     unsafe fn switch_thread(old_sp: *mut u64, new_sp: u64, new_fs_base: u64) {
         // Arch trait path: no FPU pointers available, pass null
-        crate::task::thread::switch_thread(old_sp, new_sp, new_fs_base, core::ptr::null_mut(), core::ptr::null())
+        crate::task::thread::switch_thread(
+            old_sp,
+            new_sp,
+            new_fs_base,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+        )
     }
 
     fn read_thread_pointer() -> u64 {
@@ -143,7 +153,8 @@ impl Arch for X86_64Arch {
         };
 
         let boot_ticks = {
-            let lo: u32; let hi: u32;
+            let lo: u32;
+            let hi: u32;
             unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
             ((hi as u64) << 32) | lo as u64
         };
@@ -181,8 +192,7 @@ impl crate::hal::irq::InterruptController for X86IrqController {
         crate::apic::eoi();
     }
 
-    fn mask_irq(&self, _irq: u8, _masked: bool) {
-    }
+    fn mask_irq(&self, _irq: u8, _masked: bool) {}
 
     fn route_pci_irq(&self, _bus: u8, _device: u8, pin: u8, vector: crate::hal::irq::IrqVector) {
         crate::apic::route_pci_irq(pin, vector);

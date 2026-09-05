@@ -1,39 +1,42 @@
 ENTRY(_start)
 
+VIRT_BASE = 0xFFFFFFFF80000000;
+PHYS_BASE = 0x100000;
+
 SECTIONS
 {
-    . = 0xFFFFFFFF80000000;
+    . = VIRT_BASE;
 
-    .text :
+    .text : AT(PHYS_BASE + (. - VIRT_BASE))
     {
         *(.text .text.*)
     }
 
     . = ALIGN(4K);
-    .rodata :
+    .rodata : AT(PHYS_BASE + (. - VIRT_BASE))
     {
         *(.rodata .rodata.*)
+        KEEP(*(.limine_requests.start))
+        KEEP(*(.limine_requests))
+        KEEP(*(.limine_requests.end))
     }
 
     . = ALIGN(4K);
-    .data :
+    .data : AT(PHYS_BASE + (. - VIRT_BASE))
     {
         *(.data .data.*)
     }
 
-    .bss :
+    .bss : AT(PHYS_BASE + (. - VIRT_BASE))
     {
         *(.bss .bss.*)
+        *(COMMON)
     }
 
-    .got : ALIGN(4K)
+    . = ALIGN(4K);
+    .got : AT(PHYS_BASE + (. - VIRT_BASE))
     {
         *(.got .got.*)
-    }
-
-    .limine_requests : ALIGN(8)
-    {
-        KEEP(*(.limine_requests))
     }
 
     /DISCARD/ :

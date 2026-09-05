@@ -1,0 +1,8 @@
+[package]
+name = "vahi-sync"
+version = "0.3.0"
+edition = "2021"
+description = "IRQ-safe synchronization primitives for the Vahi kernel"
+
+[dependencies]
+spin = "0.9.8"

@@ -6,20 +6,24 @@
 // boot and results are printed via serial output.
 
 pub mod apic_tests;
+pub mod benchmarks;
+pub mod contract_tests;
 pub mod ebpf_tests;
-pub mod skyfs_tests;
-pub mod new_features;
-pub mod pata_read_test;
 pub mod ext2_fs_tests;
 pub mod futex_test;
-pub mod vfs_tests;
-pub mod memory_tests;
-pub mod scheduler_tests;
-pub mod stress;
 pub mod fuzzer;
-pub mod benchmarks;
+pub mod init;
+pub mod memory_tests;
+pub mod new_features;
+pub mod panic_path_tests;
+pub mod pata_read_test;
+pub mod process_lifecycle_tests;
+pub mod scheduler_tests;
+pub mod skyfs_tests;
+pub mod stress;
 #[cfg(not(target_arch = "aarch64"))]
 pub mod sync_tests;
+pub mod vfs_tests;
 
 /// Test function signature
 pub type TestFn = fn() -> Result<(), &'static str>;
@@ -45,6 +49,9 @@ pub fn register_all() {
     stress::register();
     fuzzer::register();
     benchmarks::register();
+    contract_tests::register();
+    panic_path_tests::register();
     #[cfg(not(target_arch = "aarch64"))]
     sync_tests::register();
+    process_lifecycle_tests::register();
 }

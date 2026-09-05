@@ -4,7 +4,7 @@
 //! The cursor is now rendered by the compositor to the backbuffer.
 
 use crate::gui::drawing;
-use crate::gui::{SCREEN_WIDTH, SCREEN_HEIGHT};
+use crate::gui::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 // Cursor dimensions
 pub const CURSOR_WIDTH: usize = 9;
@@ -36,10 +36,24 @@ pub fn draw_cursor(buffer: &mut [u32], x: usize, y: usize) {
         for dx in 0..CURSOR_WIDTH {
             let bit = (row >> (CURSOR_WIDTH - 1 - dx)) & 1;
             if bit == 1 {
-                drawing::draw_pixel(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x + dx, y + dy, cursor_color);
+                drawing::draw_pixel(
+                    buffer,
+                    SCREEN_WIDTH,
+                    SCREEN_HEIGHT,
+                    x + dx,
+                    y + dy,
+                    cursor_color,
+                );
 
                 if x + dx > 0 && (dx == 0 || (row >> (CURSOR_WIDTH - dx)) & 1 == 0) {
-                    drawing::draw_pixel(buffer, SCREEN_WIDTH, SCREEN_HEIGHT, x + dx - 1, y + dy, border_color);
+                    drawing::draw_pixel(
+                        buffer,
+                        SCREEN_WIDTH,
+                        SCREEN_HEIGHT,
+                        x + dx - 1,
+                        y + dy,
+                        border_color,
+                    );
                 }
             }
         }

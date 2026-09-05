@@ -1,6 +1,6 @@
-use crate::ash::{HookPoint, AshResult};
-use crate::ash::runtime::execute_handler;
 use crate::ash::manager;
+use crate::ash::runtime::execute_handler;
+use crate::ash::{AshResult, HookPoint};
 
 /// Context passed to network ASH handlers.
 #[repr(C)]
@@ -39,7 +39,10 @@ pub fn hook_net_receive(
         _pad: [0u8; 26],
     };
     let ctx_bytes = unsafe {
-        core::slice::from_raw_parts(&ctx as *const _ as *const u8, core::mem::size_of::<NetContext>())
+        core::slice::from_raw_parts(
+            &ctx as *const _ as *const u8,
+            core::mem::size_of::<NetContext>(),
+        )
     };
 
     let mut result = AshResult::Continue;
@@ -56,7 +59,6 @@ pub fn hook_net_receive(
 }
 
 /// Hook into network transmit path.
-#[allow(dead_code)]
 pub fn hook_net_transmit(
     packet: &mut [u8],
     interface: u8,
@@ -83,7 +85,10 @@ pub fn hook_net_transmit(
         _pad: [0u8; 26],
     };
     let ctx_bytes = unsafe {
-        core::slice::from_raw_parts(&ctx as *const _ as *const u8, core::mem::size_of::<NetContext>())
+        core::slice::from_raw_parts(
+            &ctx as *const _ as *const u8,
+            core::mem::size_of::<NetContext>(),
+        )
     };
 
     let mut result = AshResult::Continue;

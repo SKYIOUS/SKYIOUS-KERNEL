@@ -1,14 +1,16 @@
-use alloc::vec::Vec;
-use alloc::string::{String, ToString};
-use xmas_elf::ElfFile;
-use xmas_elf::header;
-use xmas_elf::program;
-use x86_64::structures::paging::{Translate, Mapper, Page, Size4KiB, FrameAllocator, PageTableFlags};
-use x86_64::VirtAddr;
 use crate::memory::buddy::BuddyFrameAllocator;
 use crate::memory::paging::AddressSpace;
-use crate::vfs::VFS;
 use crate::task::process::Vma;
+use crate::vfs::VFS;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB, Translate,
+};
+use x86_64::VirtAddr;
+use xmas_elf::header;
+use xmas_elf::program;
+use xmas_elf::ElfFile;
 
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
@@ -72,28 +74,51 @@ fn map_lib_segments(
             let mem_size = ph.mem_size();
             let offset = ph.offset() as usize;
             let end = virt_start + mem_size;
-            if end > max_end { max_end = end; }
+            if end > max_end {
+                max_end = end;
+            }
 
             let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-            if ph.flags().is_write() { flags |= PageTableFlags::WRITABLE; }
-            if !ph.flags().is_execute() { flags |= PageTableFlags::NO_EXECUTE; }
+            if ph.flags().is_write() {
+                flags |= PageTableFlags::WRITABLE;
+            }
+            if !ph.flags().is_execute() {
+                flags |= PageTableFlags::NO_EXECUTE;
+            }
 
-            vmas.push(Vma { start: virt_start, end, flags, _name: "shared_lib", file_handle: None, file_offset: 0, is_shared: false, shm_id: None });
+            vmas.push(Vma {
+                start: virt_start,
+                end,
+                flags,
+                _name: "shared_lib",
+                file_handle: None,
+                file_offset: 0,
+                is_shared: false,
+                shm_id: None,
+            });
 
             let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_start));
             let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end - 1));
             let mut frame_allocator = BuddyFrameAllocator;
-            let mut mapper = unsafe { address_space.mapper().ok_or("Failed to get mapper for lib")? };
+            let mut mapper = unsafe {
+                address_space
+                    .mapper()
+                    .ok_or("Failed to get mapper for lib")?
+            };
 
             for page in Page::range_inclusive(start_page, end_page) {
                 let map_flags = flags | PageTableFlags::WRITABLE;
                 let frame = match mapper.translate_page(page) {
                     Ok(f) => f,
                     Err(_) => {
-                        let f = frame_allocator.allocate_frame().ok_or("OOM loading shared library")?;
+                        let f = frame_allocator
+                            .allocate_frame()
+                            .ok_or("OOM loading shared library")?;
                         unsafe {
-                            mapper.map_to(page, f, map_flags, &mut frame_allocator)
-                                .map_err(|_| "Failed to map lib page")?.flush();
+                            mapper
+                                .map_to(page, f, map_flags, &mut frame_allocator)
+                                .map_err(|_| "Failed to map lib page")?
+                                .flush();
                         }
                         crate::memory::frame_info::increment(f.start_address());
                         f
@@ -107,8 +132,13 @@ fn map_lib_segments(
                     let len = copy_end - copy_start;
                     let src_off = offset + (copy_start - virt_start) as usize;
                     unsafe {
-                        let dst_ptr = VirtAddr::new(phys_to_virt(frame.start_address().as_u64())).as_mut_ptr::<u8>();
-                        let page_offset = if page_start > virt_start { 0 } else { (virt_start - page_start) as usize };
+                        let dst_ptr = VirtAddr::new(phys_to_virt(frame.start_address().as_u64()))
+                            .as_mut_ptr::<u8>();
+                        let page_offset = if page_start > virt_start {
+                            0
+                        } else {
+                            (virt_start - page_start) as usize
+                        };
                         core::ptr::copy_nonoverlapping(
                             elf_data[src_off..src_off + len as usize].as_ptr(),
                             dst_ptr.add(page_offset),
@@ -124,7 +154,8 @@ fn map_lib_segments(
 }
 
 fn parse_dt_entries(dyn_vaddr: u64, mapper: &impl Translate) -> [(u64, u64); 32] {
-    let phys = mapper.translate_addr(VirtAddr::new(dyn_vaddr))
+    let phys = mapper
+        .translate_addr(VirtAddr::new(dyn_vaddr))
         .expect("parse_dt_entries: address not mapped in target address space");
     let ptr = phys_to_virt(phys.as_u64()) as *const u64;
     let mut out = [(0u64, 0u64); 32];
@@ -132,7 +163,9 @@ fn parse_dt_entries(dyn_vaddr: u64, mapper: &impl Translate) -> [(u64, u64); 32]
     for i in 0..1024 {
         let tag = unsafe { core::ptr::read_unaligned(ptr.add(i * 2)) };
         let val = unsafe { core::ptr::read_unaligned(ptr.add(i * 2 + 1)) };
-        if tag == DT_NULL { break; }
+        if tag == DT_NULL {
+            break;
+        }
         if idx < 32 {
             out[idx] = (tag, val);
             idx += 1;
@@ -145,26 +178,44 @@ fn get_dt(entries: &[(u64, u64); 32], tag: u64) -> Option<u64> {
     entries.iter().find(|&&(t, _)| t == tag).map(|&(_, v)| v)
 }
 
-fn read_dt_str(offset: u64, strtab: u64, strsz: usize, mapper: &impl Translate) -> Result<String, &'static str> {
-    let phys = mapper.translate_addr(VirtAddr::new(strtab))
+fn read_dt_str(
+    offset: u64,
+    strtab: u64,
+    strsz: usize,
+    mapper: &impl Translate,
+) -> Result<String, &'static str> {
+    let phys = mapper
+        .translate_addr(VirtAddr::new(strtab))
         .expect("read_dt_str: strtab not mapped in target address space");
     let ptr = phys_to_virt(phys.as_u64()) as *const u8;
     let o = offset as usize;
-    if o >= strsz { return Err("String offset out of bounds"); }
+    if o >= strsz {
+        return Err("String offset out of bounds");
+    }
     let mut end = o;
     unsafe {
-        while end < strsz && *ptr.add(end) != 0 { end += 1; }
+        while end < strsz && *ptr.add(end) != 0 {
+            end += 1;
+        }
     }
     let slice = unsafe { core::slice::from_raw_parts(ptr.add(o), end - o) };
-    core::str::from_utf8(slice).map(|s| s.to_string()).map_err(|_| "Invalid UTF-8 in DT_NEEDED")
+    core::str::from_utf8(slice)
+        .map(|s| s.to_string())
+        .map_err(|_| "Invalid UTF-8 in DT_NEEDED")
 }
 
-fn load_library(name: &str, address_space: &mut AddressSpace, vmas: &mut Vec<Vma>) -> Result<LibInfo, &'static str> {
+fn load_library(
+    name: &str,
+    address_space: &mut AddressSpace,
+    vmas: &mut Vec<Vma>,
+) -> Result<LibInfo, &'static str> {
     let vfs = VFS.lock();
     let path = alloc::string::String::from("/lib/") + name;
     let node = vfs.resolve_path(&path).ok_or("Shared library not found")?;
     drop(vfs);
-    let elf_data = node.read(usize::MAX).map_err(|_| "Failed to read shared library")?;
+    let elf_data = node
+        .read(usize::MAX)
+        .map_err(|_| "Failed to read shared library")?;
 
     let elf = ElfFile::new(&elf_data).map_err(|_| "Failed to parse shared library ELF")?;
     if elf.header.pt2.type_().as_type() != header::Type::SharedObject {
@@ -186,10 +237,18 @@ fn load_library(name: &str, address_space: &mut AddressSpace, vmas: &mut Vec<Vma
             let dyn_vaddr = load_base + ph.virtual_addr();
             let entries = parse_dt_entries(dyn_vaddr, &mapper);
 
-            if let Some(v) = get_dt(&entries, DT_SYMTAB) { symtab = load_base + v; }
-            if let Some(v) = get_dt(&entries, DT_STRTAB) { strtab = load_base + v; }
-            if let Some(v) = get_dt(&entries, DT_STRSZ) { strsz = v as usize; }
-            if let Some(v) = get_dt(&entries, DT_SYMENT) { symt = v as usize; }
+            if let Some(v) = get_dt(&entries, DT_SYMTAB) {
+                symtab = load_base + v;
+            }
+            if let Some(v) = get_dt(&entries, DT_STRTAB) {
+                strtab = load_base + v;
+            }
+            if let Some(v) = get_dt(&entries, DT_STRSZ) {
+                strsz = v as usize;
+            }
+            if let Some(v) = get_dt(&entries, DT_SYMENT) {
+                symt = v as usize;
+            }
 
             for &(tag, val) in &entries {
                 if tag == DT_NEEDED && strtab != 0 {
@@ -202,8 +261,16 @@ fn load_library(name: &str, address_space: &mut AddressSpace, vmas: &mut Vec<Vma
 
     let sym_phys = mapper.translate_addr(VirtAddr::new(symtab));
     let str_phys = mapper.translate_addr(VirtAddr::new(strtab));
-    let sym_ptr = if let Some(p) = sym_phys { phys_to_virt(p.as_u64()) as *const Sym } else { core::ptr::null() };
-    let _str_ptr = if let Some(p) = str_phys { phys_to_virt(p.as_u64()) as *const u8 } else { core::ptr::null() };
+    let sym_ptr = if let Some(p) = sym_phys {
+        phys_to_virt(p.as_u64()) as *const Sym
+    } else {
+        core::ptr::null()
+    };
+    let _str_ptr = if let Some(p) = str_phys {
+        phys_to_virt(p.as_u64()) as *const u8
+    } else {
+        core::ptr::null()
+    };
     let sym_count = if symt > 0 { 4096 / symt } else { 0 };
 
     Ok(LibInfo {
@@ -251,28 +318,34 @@ fn apply_rela(
         let rela_base_abs = base + rela_base;
         for i in 0..count {
             let entry_vaddr = rela_base_abs + (i as u64) * 24;
-            let entry_phys = mapper.translate_addr(VirtAddr::new(entry_vaddr))
+            let entry_phys = mapper
+                .translate_addr(VirtAddr::new(entry_vaddr))
                 .expect("apply_rela: RELA entry not mapped");
             let entry_ptr = (phys_off + entry_phys.as_u64()) as *const u8;
 
             let r_offset = unsafe { core::ptr::read_unaligned::<u64>(entry_ptr as *const u64) };
-            let r_info = unsafe { core::ptr::read_unaligned::<u64>(entry_ptr.add(8) as *const u64) };
-            let r_addend = unsafe { core::ptr::read_unaligned::<i64>(entry_ptr.add(16) as *const i64) };
+            let r_info =
+                unsafe { core::ptr::read_unaligned::<u64>(entry_ptr.add(8) as *const u64) };
+            let r_addend =
+                unsafe { core::ptr::read_unaligned::<i64>(entry_ptr.add(16) as *const i64) };
             let r_type = r_info & 0xffffffff;
             let sym_idx = (r_info >> 32) as usize;
 
             let target_vaddr = base + r_offset;
-            let target_phys = mapper.translate_addr(VirtAddr::new(target_vaddr))
+            let target_phys = mapper
+                .translate_addr(VirtAddr::new(target_vaddr))
                 .expect("apply_rela: RELA target not mapped");
             let target_ptr = (phys_off + target_phys.as_u64()) as *mut u64;
 
             match r_type {
-                R_X86_64_RELATIVE => {
-                    unsafe { core::ptr::write_unaligned(target_ptr, base + r_addend as u64); }
-                }
+                R_X86_64_RELATIVE => unsafe {
+                    core::ptr::write_unaligned(target_ptr, base + r_addend as u64);
+                },
                 R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
                     let sym_vaddr = resolve_sym(libs, sym_idx);
-                    unsafe { core::ptr::write_unaligned(target_ptr, sym_vaddr + r_addend as u64); }
+                    unsafe {
+                        core::ptr::write_unaligned(target_ptr, sym_vaddr + r_addend as u64);
+                    }
                 }
                 _ => {}
             }
@@ -283,30 +356,38 @@ fn apply_rela(
         let jmp_base_abs = base + jmp_base;
         for i in 0..128 {
             let entry_vaddr = jmp_base_abs + (i as u64) * 24;
-            let entry_phys = mapper.translate_addr(VirtAddr::new(entry_vaddr))
+            let entry_phys = mapper
+                .translate_addr(VirtAddr::new(entry_vaddr))
                 .expect("apply_rela: JMPREL entry not mapped");
             let entry_ptr = (phys_off + entry_phys.as_u64()) as *const u8;
 
             let r_offset = unsafe { core::ptr::read_unaligned::<u64>(entry_ptr as *const u64) };
-            let r_info = unsafe { core::ptr::read_unaligned::<u64>(entry_ptr.add(8) as *const u64) };
-            let r_addend = unsafe { core::ptr::read_unaligned::<i64>(entry_ptr.add(16) as *const i64) };
+            let r_info =
+                unsafe { core::ptr::read_unaligned::<u64>(entry_ptr.add(8) as *const u64) };
+            let r_addend =
+                unsafe { core::ptr::read_unaligned::<i64>(entry_ptr.add(16) as *const i64) };
             let r_type = r_info & 0xffffffff;
 
-            if r_type == 0 && r_offset == 0 { break; }
+            if r_type == 0 && r_offset == 0 {
+                break;
+            }
             let sym_idx = (r_info >> 32) as usize;
 
             let target_vaddr = base + r_offset;
-            let target_phys = mapper.translate_addr(VirtAddr::new(target_vaddr))
+            let target_phys = mapper
+                .translate_addr(VirtAddr::new(target_vaddr))
                 .expect("apply_rela: JMPREL target not mapped");
             let target_ptr = (phys_off + target_phys.as_u64()) as *mut u64;
 
             match r_type {
-                R_X86_64_RELATIVE => {
-                    unsafe { core::ptr::write_unaligned(target_ptr, base + r_addend as u64); }
-                }
+                R_X86_64_RELATIVE => unsafe {
+                    core::ptr::write_unaligned(target_ptr, base + r_addend as u64);
+                },
                 R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
                     let sym_vaddr = resolve_sym(libs, sym_idx);
-                    unsafe { core::ptr::write_unaligned(target_ptr, sym_vaddr + r_addend as u64); }
+                    unsafe {
+                        core::ptr::write_unaligned(target_ptr, sym_vaddr + r_addend as u64);
+                    }
                 }
                 _ => {}
             }

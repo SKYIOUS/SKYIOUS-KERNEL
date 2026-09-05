@@ -25,126 +25,204 @@ fn mk(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> EbpfInsn {
     EbpfInsn::new(code, dst, src, off, imm)
 }
 
-fn exit() -> EbpfInsn { mk(0x95, 0, 0, 0, 0) } // BPF_EXIT
+fn exit() -> EbpfInsn {
+    mk(0x95, 0, 0, 0, 0)
+} // BPF_EXIT
 
 // ── Pass tests ────────────────────────────────────────────────────
 fn ebpf_pass_empty_prog() -> Result<(), &'static str> {
     let p = &[exit()];
-    if verifier::verify(p) { Ok(()) } else { Err("empty prog should pass") }
+    if verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("empty prog should pass")
+    }
 }
 
 fn ebpf_pass_simple_alu() -> Result<(), &'static str> {
     let p = &[
-        mk(0x07, 0, 0, 0, 42),  // r0 += 42 (ALU64 ADD)
+        mk(0x07, 0, 0, 0, 42), // r0 += 42 (ALU64 ADD)
         exit(),
     ];
-    if verifier::verify(p) { Ok(()) } else { Err("simple ALU should pass") }
+    if verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("simple ALU should pass")
+    }
 }
 
 fn ebpf_pass_lddw() -> Result<(), &'static str> {
     let p = &[
-        mk(0x18, 0, 0, 0, 0x1234),  // LD_DW_IMM r0, low
-        mk(0x00, 0, 0, 0, 0x5678),  // ld_dw continuation
+        mk(0x18, 0, 0, 0, 0x1234), // LD_DW_IMM r0, low
+        mk(0x00, 0, 0, 0, 0x5678), // ld_dw continuation
         exit(),
     ];
-    if verifier::verify(p) { Ok(()) } else { Err("LD_DW should pass") }
+    if verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("LD_DW should pass")
+    }
 }
 
 fn ebpf_pass_conditional_jump() -> Result<(), &'static str> {
     let p = &[
-        mk(0x15, 0, 1, 1, 0),       // if r0 == r1, pc += 1 (skip to exit)
-        mk(0x07, 0, 0, 0, 1),       // r0 += 1
+        mk(0x15, 0, 1, 1, 0), // if r0 == r1, pc += 1 (skip to exit)
+        mk(0x07, 0, 0, 0, 1), // r0 += 1
         exit(),
     ];
-    if verifier::verify(p) { Ok(()) } else { Err("conditional jump should pass") }
+    if verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("conditional jump should pass")
+    }
 }
 
 fn ebpf_pass_unconditional_jump() -> Result<(), &'static str> {
     let p = &[
-        mk(0x05, 0, 0, 0, 0),       // ja +0 (no-op, jumps to next insn)
-        mk(0x07, 0, 0, 0, 1),       // r0 += 1
+        mk(0x05, 0, 0, 0, 0), // ja +0 (no-op, jumps to next insn)
+        mk(0x07, 0, 0, 0, 1), // r0 += 1
         exit(),
     ];
-    if verifier::verify(p) { Ok(()) } else { Err("unconditional jump should pass") }
+    if verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("unconditional jump should pass")
+    }
 }
 
 // ── Fail tests ────────────────────────────────────────────────────
 fn ebpf_fail_too_many_insns() -> Result<(), &'static str> {
     let p = alloc::vec![exit(); 4097];
-    if !verifier::verify(&p) { Ok(()) } else { Err(">4096 insns should fail") }
+    if !verifier::verify(&p) {
+        Ok(())
+    } else {
+        Err(">4096 insns should fail")
+    }
 }
 
 fn ebpf_fail_bad_reg() -> Result<(), &'static str> {
     let p = &[
-        mk(0x07, 11, 0, 0, 1),      // r11 += 1 (dst > 10)
+        mk(0x07, 11, 0, 0, 1), // r11 += 1 (dst > 10)
         exit(),
     ];
-    if !verifier::verify(p) { Ok(()) } else { Err("dst=11 should fail") }
+    if !verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("dst=11 should fail")
+    }
 }
 
 fn ebpf_fail_write_r10() -> Result<(), &'static str> {
     let p = &[
-        mk(0x07, 10, 0, 0, 1),      // r10 += 1 (r10 is read-only)
+        mk(0x07, 10, 0, 0, 1), // r10 += 1 (r10 is read-only)
         exit(),
     ];
-    if !verifier::verify(p) { Ok(()) } else { Err("write to r10 should fail") }
+    if !verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("write to r10 should fail")
+    }
 }
 
 fn ebpf_fail_no_exit() -> Result<(), &'static str> {
     let p = &[
-        mk(0x07, 0, 0, 0, 1),       // r0 += 1 (no exit)
+        mk(0x07, 0, 0, 0, 1), // r0 += 1 (no exit)
     ];
-    if !verifier::verify(p) { Ok(()) } else { Err("no exit should fail") }
+    if !verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("no exit should fail")
+    }
 }
 
 fn ebpf_fail_bad_lddw_slot() -> Result<(), &'static str> {
     let p = &[
-        mk(0x18, 0, 0, 0, 1),       // LD_DW (needs continuation, but EXIT after)
+        mk(0x18, 0, 0, 0, 1), // LD_DW (needs continuation, but EXIT after)
         exit(),
     ];
-    if !verifier::verify(p) { Ok(()) } else { Err("LD_DW missing continuation should fail") }
+    if !verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("LD_DW missing continuation should fail")
+    }
 }
 
 fn ebpf_pass_call_helper() -> Result<(), &'static str> {
     let p = &[
-        mk(0x85, 0, 0, 0, 1),       // CALL helper #1
+        mk(0x85, 0, 0, 0, 1), // CALL helper #1
         exit(),
     ];
-    if verifier::verify(p) { Ok(()) } else { Err("CALL helper #1 should pass") }
+    if verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("CALL helper #1 should pass")
+    }
 }
 
 fn ebpf_fail_call_bad_helper() -> Result<(), &'static str> {
     let p = &[
-        mk(0x85, 0, 0, 0, 99),      // CALL helper #99 (invalid)
+        mk(0x85, 0, 0, 0, 99), // CALL helper #99 (invalid)
         exit(),
     ];
-    if !verifier::verify(p) { Ok(()) } else { Err("CALL helper #99 should fail") }
+    if !verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("CALL helper #99 should fail")
+    }
 }
 
 fn ebpf_fail_ldx_r10() -> Result<(), &'static str> {
     let p = &[
-        mk(0x61, 10, 1, 0, 0),      // LDX r10, [r1+0] (R10 is read-only)
+        mk(0x61, 10, 1, 0, 0), // LDX r10, [r1+0] (R10 is read-only)
         exit(),
     ];
-    if !verifier::verify(p) { Ok(()) } else { Err("LDX with dst=R10 should fail") }
+    if !verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("LDX with dst=R10 should fail")
+    }
 }
-
 
 fn ebpf_pass_tnum_simple_alu() -> Result<(), &'static str> {
     let p = &[mk(0xbf, 0, 0, 0, 42), exit()];
-    if verifier::tnum_verify(p) { Ok(()) } else { Err("simple tnum ALU should pass") }
+    if verifier::tnum_verify(p) {
+        Ok(())
+    } else {
+        Err("simple tnum ALU should pass")
+    }
 }
 fn ebpf_fail_stack_oob() -> Result<(), &'static str> {
-    let p = &[mk(0xbf, 1, 0, 0, 1), mk(0x1b, 10, 1, -8, 0), mk(0x19, 0, 10, 256, 0), exit()];
-    if !verifier::tnum_verify(p) { Ok(()) } else { Err("OOB stack access should fail tnum") }
+    let p = &[
+        mk(0xbf, 1, 0, 0, 1),
+        mk(0x1b, 10, 1, -8, 0),
+        mk(0x19, 0, 10, 256, 0),
+        exit(),
+    ];
+    if !verifier::tnum_verify(p) {
+        Ok(())
+    } else {
+        Err("OOB stack access should fail tnum")
+    }
 }
 fn ebpf_fail_div_by_zero() -> Result<(), &'static str> {
-    let p = &[mk(0xbf, 0, 0, 0, 42), mk(0xbf, 1, 0, 0, 0), mk(0x37, 0, 1, 0, 0), exit()];
-    if !verifier::tnum_verify(p) { Ok(()) } else { Err("division by zero should fail tnum") }
+    let p = &[
+        mk(0xbf, 0, 0, 0, 42),
+        mk(0xbf, 1, 0, 0, 0),
+        mk(0x37, 0, 1, 0, 0),
+        exit(),
+    ];
+    if !verifier::tnum_verify(p) {
+        Ok(())
+    } else {
+        Err("division by zero should fail tnum")
+    }
 }
 
 fn ebpf_fail_jump_out_of_bounds() -> Result<(), &'static str> {
     let p = &[mk(0x05, 0, 0, 100, 0), exit()];
-    if !verifier::verify(p) { Ok(()) } else { Err("jump out of bounds should fail") }
+    if !verifier::verify(p) {
+        Ok(())
+    } else {
+        Err("jump out of bounds should fail")
+    }
 }
-

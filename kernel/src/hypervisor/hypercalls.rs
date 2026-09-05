@@ -75,7 +75,10 @@ pub fn handle_hypercall(vcpu: &mut Vcpu, num: u64, args: [u64; 6]) -> HypercallR
         Some(Hypercall::AllocateMemory) => {
             // arg0 = size. Return host physical address.
             let _size = args[0] as usize;
-            if let Some(frame) = crate::memory::buddy::BUDDY_ALLOCATOR.lock().allocate_contiguous(0) {
+            if let Some(frame) = crate::memory::buddy::BUDDY_ALLOCATOR
+                .lock()
+                .allocate_contiguous(0)
+            {
                 HypercallResult::Success(frame.as_u64())
             } else {
                 HypercallResult::Error(1)

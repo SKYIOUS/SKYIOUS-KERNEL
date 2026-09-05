@@ -15,13 +15,14 @@ use core::sync::atomic::Ordering;
 /// Stack-buffer fmt writer: lets IRQ handlers format diagnostics without
 /// touching the heap allocator (allocating there can deadlock on the
 /// global ALLOCATOR spinlock — see scheduler::tick docs).
-#[cfg(not(target_arch = "aarch64"))]
+/// Also the panic handler's format path: it must never allocate, because a
+/// panic caused by allocation failure would recurse forever printing only
+/// the banner (AGENTS.md rule 9 — panic handler is serial_write only).
 pub(crate) struct IrqFmtBuf<'a> {
     pub buf: &'a mut [u8],
     pub len: usize,
 }
 
-#[cfg(not(target_arch = "aarch64"))]
 impl<'a> core::fmt::Write for IrqFmtBuf<'a> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let room = self.buf.len().saturating_sub(self.len);
@@ -30,6 +31,27 @@ impl<'a> core::fmt::Write for IrqFmtBuf<'a> {
         self.len += n;
         Ok(())
     }
+}
+
+/// Format `args` into a fixed stack buffer and emit via serial. Allocation
+/// free; truncates rather than recursing on a full buffer. Used by the
+/// panic handler and stack walker to keep every panic-time diagnostic free
+/// of heap allocation.
+pub(crate) fn serial_fmt(args: core::fmt::Arguments) {
+    // 512 bytes covers every panic line (registers, thread info, backtrace);
+    // an over-long message truncates rather than recurses on a full buffer.
+    const BUF: usize = 512;
+    let mut scratch = [0u8; BUF];
+    let len;
+    {
+        let mut w = IrqFmtBuf {
+            buf: &mut scratch,
+            len: 0,
+        };
+        let _ = core::fmt::write(&mut w, args);
+        len = w.len;
+    }
+    crate::serial_write(core::str::from_utf8(&scratch[..len]).unwrap_or(""));
 }
 
 // ─── Soft-lockup detector ──────────────────────────────────────
@@ -74,9 +96,14 @@ pub(crate) fn soft_lockup_check(rip: u64) {
         let mut scratch = [0u8; 128];
         let len;
         {
-            let mut w = IrqFmtBuf { buf: &mut scratch, len: 0 };
-            let _ = core::fmt::write(&mut w, format_args!(
-                "[LOCKUP] rip=0x{:x} stuck {} ticks\n", cur_rip, n));
+            let mut w = IrqFmtBuf {
+                buf: &mut scratch,
+                len: 0,
+            };
+            let _ = core::fmt::write(
+                &mut w,
+                format_args!("[LOCKUP] rip=0x{:x} stuck {} ticks\n", cur_rip, n),
+            );
             len = w.len;
         }
         crate::serial_write(core::str::from_utf8(&scratch[..len]).unwrap_or(""));
@@ -97,7 +124,9 @@ pub(crate) fn diag_first_tick(ticks: u64) {
 /// Print mouse state every 500 ticks (~5s). Stack-buffered, no alloc.
 #[cfg(debug_assertions)]
 pub(crate) fn diag_mouse_state(ticks: u64) {
-    if ticks % 500 != 0 { return; }
+    if !ticks.is_multiple_of(500) {
+        return;
+    }
     let irq = crate::drivers::mouse::MOUSE_IRQ_COUNT.load(Ordering::Relaxed);
     let bytes = crate::drivers::mouse::MOUSE_IRQ_BYTES.load(Ordering::Relaxed);
     let cx = crate::drivers::mouse::CURSOR_X.load(Ordering::Relaxed);
@@ -106,11 +135,17 @@ pub(crate) fn diag_mouse_state(ticks: u64) {
     let mut scratch = [0u8; 128];
     let len;
     {
-        let mut w = IrqFmtBuf { buf: &mut scratch, len: 0 };
-        let _ = core::fmt::write(&mut w, format_args!(
-            "[TICK={}] mouse irq={} bytes={} pos=({},{}) uart_dropped={}\n",
-            ticks, irq, bytes, cx, cy, ud
-        ));
+        let mut w = IrqFmtBuf {
+            buf: &mut scratch,
+            len: 0,
+        };
+        let _ = core::fmt::write(
+            &mut w,
+            format_args!(
+                "[TICK={}] mouse irq={} bytes={} pos=({},{}) uart_dropped={}\n",
+                ticks, irq, bytes, cx, cy, ud
+            ),
+        );
         len = w.len;
     }
     crate::serial_write(core::str::from_utf8(&scratch[..len]).unwrap_or(""));
@@ -119,14 +154,24 @@ pub(crate) fn diag_mouse_state(ticks: u64) {
 /// Dump all scheduler queues every 500 ticks (~5s). Stack-buffered, no alloc.
 #[cfg(debug_assertions)]
 pub(crate) fn diag_thread_dump(ticks: u64, irq_rip: u64) {
-    if ticks % 500 != 0 { return; }
+    if !ticks.is_multiple_of(500) {
+        return;
+    }
     use crate::task::scheduler::GLOBAL;
     let mut tscratch = [0u8; 512];
-    let mut w = IrqFmtBuf { buf: &mut tscratch, len: 0 };
-    let cur_pid = crate::task::scheduler::this_cpu_sched().lock().current_thread
-        .as_ref().and_then(|t| t.process.as_ref().map(|p| p.id));
-    let _ = core::fmt::write(&mut w, format_args!("[THREADS] cur=pid{:?} irq_rip=0x{:x}",
-        cur_pid, irq_rip));
+    let mut w = IrqFmtBuf {
+        buf: &mut tscratch,
+        len: 0,
+    };
+    let cur_pid = crate::task::scheduler::this_cpu_sched()
+        .lock()
+        .current_thread
+        .as_ref()
+        .and_then(|t| t.process.as_ref().map(|p| p.id));
+    let _ = core::fmt::write(
+        &mut w,
+        format_args!("[THREADS] cur=pid{:?} irq_rip=0x{:x}", cur_pid, irq_rip),
+    );
     {
         let sched = crate::task::scheduler::this_cpu_sched().lock();
         if let Some(t) = sched.current_thread.as_ref() {
@@ -135,7 +180,10 @@ pub(crate) fn diag_thread_dump(ticks: u64, irq_rip: u64) {
         }
         if let Some(t) = sched.switching_old.as_ref() {
             let pid = t.process.as_ref().map(|p| p.id);
-            let _ = core::fmt::write(&mut w, format_args!(" switching_old=pid{:?} {:?}", pid, t.status));
+            let _ = core::fmt::write(
+                &mut w,
+                format_args!(" switching_old=pid{:?} {:?}", pid, t.status),
+            );
         }
         let _ = core::fmt::write(&mut w, format_args!(" heap[{}]:", sched.stride_heap.len()));
         for e in sched.stride_heap.iter() {
@@ -148,21 +196,39 @@ pub(crate) fn diag_thread_dump(ticks: u64, irq_rip: u64) {
         let _ = core::fmt::write(&mut w, format_args!("sleep[{}]:", q.len()));
         for t in q.iter() {
             let pid = t.process.as_ref().map(|p| p.id);
-            let _ = core::fmt::write(&mut w, format_args!(" (pid={:?} {:?} wake={:?})", pid, t.status, t.futex_wake_addr));
+            let _ = core::fmt::write(
+                &mut w,
+                format_args!(
+                    " (pid={:?} {:?} wake={:?})",
+                    pid, t.status, t.futex_wake_addr
+                ),
+            );
         }
     }
     if let Some(q) = GLOBAL.futex_queue.try_lock() {
         let _ = core::fmt::write(&mut w, format_args!(" futex[{}]:", q.len()));
         for t in q.iter() {
             let pid = t.process.as_ref().map(|p| p.id);
-            let _ = core::fmt::write(&mut w, format_args!(" (pid={:?} {:?} wake={:?})", pid, t.status, t.futex_wake_addr));
+            let _ = core::fmt::write(
+                &mut w,
+                format_args!(
+                    " (pid={:?} {:?} wake={:?})",
+                    pid, t.status, t.futex_wake_addr
+                ),
+            );
         }
     }
     if let Some(q) = GLOBAL.block_queue.try_lock() {
         let _ = core::fmt::write(&mut w, format_args!(" block[{}]:", q.len()));
         for t in q.iter() {
             let pid = t.process.as_ref().map(|p| p.id);
-            let _ = core::fmt::write(&mut w, format_args!(" (pid={:?} {:?} pipe={:?})", pid, t.status, t.pipe_block_key));
+            let _ = core::fmt::write(
+                &mut w,
+                format_args!(
+                    " (pid={:?} {:?} pipe={:?})",
+                    pid, t.status, t.pipe_block_key
+                ),
+            );
         }
     }
     if let Some(q) = GLOBAL.pending_queue.try_lock() {

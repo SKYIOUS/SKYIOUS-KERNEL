@@ -15,6 +15,18 @@ Usage:
     py builder/build_limine_image.py [--bios] [--kernel PATH] [--initrd PATH] [--output PATH]
 
 No external dependencies — pure Python stdlib (struct, os, hashlib, uuid, binascii).
+
+## Build Paths
+
+1. **Rust builder (recommended)**: `--rust-builder` — uses the custom Vahi UEFI
+   bootloader. This is the production-tested path. The Rust builder is
+   compiled from `builder/src/main.rs`.
+
+2. **Limine (alternative)**: `--limine-dir` or auto-download — uses the Limine
+   bootloader with binaries auto-downloaded from GitHub releases.
+   NOTE: The `limine` Rust crate v0.6.5 (protocol revision 6) works with the
+   v12.7.0 bootloader. The old "init hangs in a futex loop" issue was root-
+   caused to a kernel mmap bug (fixed 2026-09-03), not the boot protocol.
 """
 
 import struct
@@ -25,6 +37,11 @@ import argparse
 import math
 import uuid
 import binascii
+import zipfile
+import tempfile
+import shutil
+import urllib.request
+import urllib.error
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -37,6 +54,10 @@ ROOT_DIR_CLUSTER = 2
 
 EFI_SYSTEM_PARTITION_GUID = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 BIOS_BOOT_PARTITION_GUID = "21686148-6449-6E6F-744E-656564454649"
+
+# Limine binary release URL — update this when upgrading Limine.
+LIMINE_VERSION = "12.7.0"
+LIMINE_BINARY_URL = f"https://github.com/limine-bootloader/limine/releases/download/v{LIMINE_VERSION}/limine-binary.zip"
 
 
 def align_up(value, alignment):
@@ -58,15 +79,131 @@ def efi_guid_str_to_bytes(guid_str: str) -> bytes:
     return struct.pack('<IHH', a, b, c) + d + e
 
 
+# ── Limine Auto-Download ─────────────────────────────────────────────────────
+
+def download_limine_binaries(dest_dir: str):
+    """Download and extract Limine bootloader binaries from GitHub releases.
+
+    Args:
+        dest_dir: Directory to extract binaries into (will be created).
+    """
+    print(f"Downloading Limine v{LIMINE_VERSION} binaries...")
+    print(f"  URL: {LIMINE_BINARY_URL}")
+
+    os.makedirs(dest_dir, exist_ok=True)
+
+    # Download to a temp file
+    tmp_zip = os.path.join(dest_dir, "_limine_download.zip")
+    try:
+        req = urllib.request.Request(
+            LIMINE_BINARY_URL,
+            headers={"User-Agent": "vahi-kernel-builder/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            total = resp.headers.get("Content-Length")
+            if total:
+                print(f"  Downloading {int(total) / 1024:.0f} KB...")
+            else:
+                print("  Downloading...")
+            with open(tmp_zip, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except (urllib.error.URLError, OSError) as e:
+        # Clean up partial download
+        if os.path.exists(tmp_zip):
+            os.remove(tmp_zip)
+        print(f"ERROR: Failed to download Limine binaries: {e}")
+        print(f"  URL: {LIMINE_BINARY_URL}")
+        print(f"  You can also manually place Limine binaries in: {dest_dir}")
+        print(f"  Required files: BOOTX64.EFI, limine-bios.sys")
+        sys.exit(1)
+
+    # Extract — the zip contains a top-level "limine-binary/" directory
+    try:
+        with zipfile.ZipFile(tmp_zip, "r") as zf:
+            for member in zf.namelist():
+                # Strip the top-level "limine-binary/" prefix
+                parts = member.split("/", 1)
+                if len(parts) < 2 or not parts[1]:
+                    continue  # skip top-level directory entries
+                target_name = parts[1]
+                # Skip directory entries (end with /)
+                if target_name.endswith("/"):
+                    continue
+                target_path = os.path.join(dest_dir, target_name)
+
+                # Create subdirectories if needed
+                target_dir = os.path.dirname(target_path)
+                if target_dir and not os.path.exists(target_dir):
+                    os.makedirs(target_dir, exist_ok=True)
+
+                # Extract file
+                with zf.open(member) as src, open(target_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+                if target_name in ("BOOTX64.EFI", "limine-bios.sys", "limine.exe"):
+                    print(f"  Extracted: {target_name}")
+    finally:
+        # Clean up zip
+        if os.path.exists(tmp_zip):
+            os.remove(tmp_zip)
+
+    # Verify required files exist
+    required = ["BOOTX64.EFI", "limine-bios.sys"]
+    for fname in required:
+        fpath = os.path.join(dest_dir, fname)
+        if not os.path.exists(fpath):
+            print(f"ERROR: Required file not found after download: {fname}")
+            print(f"  Expected at: {fpath}")
+            sys.exit(1)
+
+    print(f"  Limine binaries installed to: {dest_dir}")
+
+
+def find_limine_dir(explicit_path=None) -> str:
+    """Locate or download Limine bootloader binaries.
+
+    Search order:
+      1. Explicit --limine-dir path
+      2. $TEMP/limine-binary/
+      3. Auto-download from GitHub releases
+    """
+    if explicit_path:
+        if os.path.exists(os.path.join(explicit_path, "BOOTX64.EFI")):
+            return explicit_path
+        print(f"ERROR: Limine UEFI binary not found at {explicit_path}/BOOTX64.EFI")
+        sys.exit(1)
+
+    # Try common cached locations
+    temp_root = os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp"))
+    candidates = [
+        os.path.join(temp_root, "limine-binary"),
+        os.path.join(temp_root, "limine-binary", "limine-binary"),
+    ]
+    for candidate in candidates:
+        if os.path.exists(os.path.join(candidate, "BOOTX64.EFI")):
+            print(f"Using cached Limine binaries at: {candidate}")
+            return candidate
+
+    # Auto-download
+    dest = os.path.join(temp_root, "limine-binary")
+    download_limine_binaries(dest)
+    return dest
+
+
 # ── FAT32 Writer ─────────────────────────────────────────────────────────────
 
 class FAT32Image:
     """Minimal FAT32 filesystem writer with proper directory entry tracking."""
 
-    def __init__(self, total_sectors: int):
+    def __init__(self, total_sectors: int, hidden_sectors: int = 0):
         self.total_sectors = total_sectors
         self.cluster_size = CLUSTER_SIZE
         self.spc = SECTORS_PER_CLUSTER
+        self.hidden_sectors = hidden_sectors
 
         # Calculate FAT size
         data_sectors = total_sectors - RESERVED_SECTORS
@@ -169,9 +306,6 @@ class FAT32Image:
 
             entries.append(bytes(e))
 
-        # Compute checksum (same for all entries in the set)
-        # Use the 8.3 name for the checksum — but we need to know it.
-        # The caller will set the checksum after getting these entries.
         return entries
 
     def _needs_lfn(self, name: str) -> bool:
@@ -275,7 +409,7 @@ class FAT32Image:
         struct.pack_into('<H', boot, 22, 0)  # FAT size 16
         struct.pack_into('<H', boot, 24, 0)  # sectors per track
         struct.pack_into('<H', boot, 26, 0)  # number of heads
-        struct.pack_into('<I', boot, 28, 0)  # hidden sectors
+        struct.pack_into('<I', boot, 28, self.hidden_sectors)  # hidden sectors (partition start LBA)
         struct.pack_into('<I', boot, 32, self.total_sectors)  # total sectors 32
 
         # FAT32-specific
@@ -296,14 +430,15 @@ class FAT32Image:
 
         # ── FSInfo (Sector 1) ──
         fsinfo = bytearray(SECTOR_SIZE)
-        fsinfo[0:4] = b'\x52\x52\x61\x41'
-        struct.pack_into('<I', fsinfo, 484, self.total_clusters - (self.next_free_cluster - 2))
-        struct.pack_into('<I', fsinfo, 488, self.next_free_cluster)
-        fsinfo[488:492] = b'\x72\x72\x41\x61'
+        fsinfo[0:4] = b'\x52\x52\x61\x41'          # lead signature 0x41615252
+        struct.pack_into('<I', fsinfo, 484, 0x61417272) # struct signature 0x61417272
+        struct.pack_into('<I', fsinfo, 488, 0xFFFFFFFF) # free count (unknown)
+        struct.pack_into('<I', fsinfo, 492, 0xFFFFFFFF) # next free (unknown)
         self.image[SECTOR_SIZE:2 * SECTOR_SIZE] = fsinfo
 
-        # ── Backup boot sector (sector 6) ──
+        # ── Backup boot sector (sector 6) + backup FSInfo (sector 7) ──
         self.image[6 * SECTOR_SIZE:7 * SECTOR_SIZE] = self.image[0:SECTOR_SIZE]
+        self.image[7 * SECTOR_SIZE:8 * SECTOR_SIZE] = self.image[SECTOR_SIZE:2 * SECTOR_SIZE]
 
         # ── Write FAT copies ──
         fat_bytes = bytearray()
@@ -340,10 +475,17 @@ class GPTDiskImage:
 
         self.disk = bytearray(self.total_sectors * SECTOR_SIZE)
 
-        # Partition layout
-        self.bios_start_lba = 2
-        self.bios_end_lba = self.bios_start_lba + self.bios_size // SECTOR_SIZE - 1
-        self.esp_start_lba = align_up((self.bios_end_lba + 1 + 1) * SECTOR_SIZE, self.alignment) // SECTOR_SIZE
+        # Partition layout — start at LBA 64 to leave room for
+        # GPT header (LBA 1), entries (LBAs 2-33), and the MBR gap
+        # that Limine bios-install uses (needs LBAs 1-62 free).
+        PARTITION_START_LBA = 64
+        if self.bios_size > 0:
+            self.bios_start_lba = PARTITION_START_LBA
+            self.bios_end_lba = self.bios_start_lba + self.bios_size // SECTOR_SIZE - 1
+            esp_base = self.bios_end_lba + 1
+        else:
+            esp_base = PARTITION_START_LBA
+        self.esp_start_lba = align_up(esp_base * SECTOR_SIZE, self.alignment) // SECTOR_SIZE
         self.esp_end_lba = self.esp_start_lba + self.esp_size // SECTOR_SIZE - 1
 
     def write_protective_mbr(self):
@@ -375,10 +517,14 @@ class GPTDiskImage:
 
         # ESP: attribute bit 0 = required for boot (EFI_SPEC_PART_ATTR_EFI_SYSTEM_PARTITION)
         ESP_ATTR = 0x1
-        entries[0:GPT_ENTRY_SIZE] = make_entry(BIOS_BOOT_PARTITION_GUID, 'BIOS Boot',
-                                                self.bios_start_lba, self.bios_end_lba)
-        entries[GPT_ENTRY_SIZE:2 * GPT_ENTRY_SIZE] = make_entry(EFI_SYSTEM_PARTITION_GUID, 'EFI System',
-                                                                 self.esp_start_lba, self.esp_end_lba, ESP_ATTR)
+        entry_idx = 0
+        if self.bios_size > 0:
+            entries[0:GPT_ENTRY_SIZE] = make_entry(BIOS_BOOT_PARTITION_GUID, 'BIOS Boot',
+                                                    self.bios_start_lba, self.bios_end_lba)
+            entry_idx = 1
+        esp_offset = entry_idx * GPT_ENTRY_SIZE
+        entries[esp_offset:esp_offset + GPT_ENTRY_SIZE] = make_entry(EFI_SYSTEM_PARTITION_GUID, 'EFI System',
+                                                                     self.esp_start_lba, self.esp_end_lba, ESP_ATTR)
 
         # Write entries to primary location (LBA 2)
         self.disk[2 * SECTOR_SIZE:(2 + num_entry_sectors) * SECTOR_SIZE] = entries
@@ -390,10 +536,6 @@ class GPTDiskImage:
         primary_header[0:8] = b'EFI PART'
         struct.pack_into('<I', primary_header, 8, 0x00010000)
         struct.pack_into('<I', primary_header, 12, 92)
-        # GPT header layout:
-        #  24: my_lba,  32: alt_lba,  40: first_usable,  48: last_usable
-        #  56-71: disk GUID,  72: entries_lba,  80: num_entries,  84: entry_size
-        #  88: entries CRC32
         struct.pack_into('<Q', primary_header, 24, 1)           # my_lba = 1
         struct.pack_into('<Q', primary_header, 32, header_lba)  # alt_lba = backup
         struct.pack_into('<Q', primary_header, 40, 34)          # first_usable_lba
@@ -402,10 +544,10 @@ class GPTDiskImage:
         struct.pack_into('<Q', primary_header, 72, 2)           # partition entries LBA
         struct.pack_into('<I', primary_header, 80, 128)         # num entries
         struct.pack_into('<I', primary_header, 84, GPT_ENTRY_SIZE) # entry size
-        struct.pack_into('<I', primary_header, 16, 0)
-        struct.pack_into('<I', primary_header, 88, 0)
-        struct.pack_into('<I', primary_header, 16, gpt_crc32(bytes(primary_header[:92])))
+        struct.pack_into('<I', primary_header, 16, 0)  # header CRC → 0
+        struct.pack_into('<I', primary_header, 88, 0)  # entries CRC → 0
         struct.pack_into('<I', primary_header, 88, gpt_crc32(bytes(entries)))
+        struct.pack_into('<I', primary_header, 16, gpt_crc32(bytes(primary_header[:92])))
         self.disk[1 * SECTOR_SIZE:2 * SECTOR_SIZE] = primary_header
 
         # ── Backup GPT header (last LBA) ──
@@ -418,12 +560,12 @@ class GPTDiskImage:
         struct.pack_into('<Q', backup_header, 72, entries_lba)  # entries at end
         struct.pack_into('<I', backup_header, 16, 0)
         struct.pack_into('<I', backup_header, 88, 0)
-        struct.pack_into('<I', backup_header, 16, gpt_crc32(bytes(backup_header[:92])))
         struct.pack_into('<I', backup_header, 88, gpt_crc32(bytes(entries)))
+        struct.pack_into('<I', backup_header, 16, gpt_crc32(bytes(backup_header[:92])))
         self.disk[header_lba * SECTOR_SIZE:(header_lba + 1) * SECTOR_SIZE] = backup_header
 
     def build_fat32_esp(self, files: dict) -> bytes:
-        fat = FAT32Image(self.esp_size // SECTOR_SIZE)
+        fat = FAT32Image(self.esp_size // SECTOR_SIZE, hidden_sectors=self.esp_start_lba)
         for path, data in sorted(files.items()):
             fat.add_file_with_path(path, data)
         return fat.finalize()
@@ -440,10 +582,77 @@ class GPTDiskImage:
         print(f"Wrote {len(self.disk)} bytes ({len(self.disk) / 1024 / 1024:.1f} MiB) to {path}")
 
 
+# ── Rust Builder Path ───────────────────────────────────────────────────────
+
+def _run_rust_builder(args):
+    """Build using the Rust builder (production build path).
+
+    The Rust builder uses the custom Vahi UEFI bootloader which is the
+    production-tested boot path. The Limine path below is a verified
+    alternative; both boot to userspace.
+    """
+    import subprocess
+    import shutil
+
+    builder_dir = os.path.join(os.path.dirname(__file__), '..')
+    builder_dir = os.path.abspath(builder_dir)
+    builder_exe = os.path.join(builder_dir, 'builder', 'target', 'debug', 'builder.exe')
+    if not os.path.exists(builder_exe):
+        builder_exe = os.path.join(builder_dir, 'builder', 'target', 'debug', 'builder')
+
+    if not os.path.exists(builder_exe):
+        print("Rust builder not found. Building it first...")
+        ret = subprocess.run(
+            ['cargo', 'build'],
+            cwd=os.path.join(builder_dir, 'builder'),
+            capture_output=True
+        )
+        if ret.returncode != 0:
+            print(f"ERROR: Failed to build Rust builder: {ret.stderr.decode()}")
+            sys.exit(1)
+        if os.path.exists(builder_exe):
+            print("Rust builder built successfully.")
+        else:
+            # Check alternative path
+            builder_exe = os.path.join(builder_dir, 'builder', 'target', 'debug', 'builder')
+
+    if not os.path.exists(builder_exe):
+        print(f"ERROR: Rust builder not found at {builder_exe}")
+        sys.exit(1)
+
+    print(f"Using Rust builder: {builder_exe}")
+    ret = subprocess.run([builder_exe], cwd=os.path.join(builder_dir, 'builder'))
+    if ret.returncode != 0:
+        print(f"ERROR: Rust builder failed with code {ret.returncode}")
+        sys.exit(1)
+
+    # The Rust builder outputs to kernel/target/.../bootimage-vahi_kernel.bin
+    # Copy to the requested output path
+    src = os.path.join(builder_dir, 'kernel', 'target', 'x86_64-unknown-none', 'debug', 'bootimage-vahi_kernel.bin')
+    if not os.path.exists(src):
+        # Try other triples
+        for triple in ['x86_64-vahi', 'x86_64-unknown-none']:
+            src = os.path.join(builder_dir, 'kernel', 'target', triple, 'debug', 'bootimage-vahi_kernel.bin')
+            if os.path.exists(src):
+                break
+
+    if os.path.exists(src):
+        shutil.copy2(src, args.output)
+        print(f"Done! Image: {os.path.abspath(args.output)}")
+        print(f"\nTo boot (UEFI):")
+        print(f'  qemu-system-x86_64 -drive if=pflash,format=raw,file=OVMF.fd -drive format=raw,file={args.output} -serial stdio -m 512')
+    else:
+        print(f"WARNING: Rust builder output not found. Check builder output directory.")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Build a Limine-bootable GPT disk image")
+    parser = argparse.ArgumentParser(
+        description="Build a bootable GPT disk image",
+        epilog="Use --rust-builder to build via the Rust builder (production path), "
+               "or --limine-dir to build with Limine binaries (alternative)."
+    )
     parser.add_argument('--kernel', default='kernel/target/x86_64-unknown-none/debug/vahi_kernel',
                         help='Path to kernel ELF')
     parser.add_argument('--initrd', default='initrd.tar', help='Path to initrd (optional)')
@@ -451,7 +660,14 @@ def main():
     parser.add_argument('--esp-size', default='300M', help='ESP size (default 300M)')
     parser.add_argument('--no-bios', action='store_true', help='Skip BIOS boot partition')
     parser.add_argument('--limine-dir', default=None, help='Path to Limine binary directory')
+    parser.add_argument('--rust-builder', action='store_true',
+                        help='Use the Rust builder (production path, requires builder/ to be compiled)')
     args = parser.parse_args()
+
+    # ── Rust builder path (production) ──
+    if args.rust_builder:
+        _run_rust_builder(args)
+        return
 
     # Parse size
     esp_size_str = args.esp_size.upper()
@@ -484,25 +700,19 @@ def main():
     else:
         print(f"WARNING: No initrd at {args.initrd}")
 
-    # Build limine.conf
-    limine_conf = b"TIMEOUT=0\n:SkyOS\n    PROTOCOL=limine\n    KERNEL_PATH=boot:///vahi_kernel\n"
+    # Build limine.conf (v12+ format: entries use '/', options use 'key: value')
+    limine_conf = (
+        b"TIMEOUT: 0\n"
+        b"SERIAL: yes\n"
+        b"/SkyOS\n"
+        b"    PROTOCOL: limine\n"
+        b"    KERNEL_PATH: boot():/vahi_kernel\n"
+    )
     if initrd_data:
-        limine_conf += b"    MODULE_PATH=boot:///initrd.tar\n    MODULE_CMDLINE=initrd\n"
+        limine_conf += b"    MODULE_PATH: boot():/initrd.tar\n    MODULE_CMDLINE: initrd\n"
 
-    # Find Limine binaries
-    limine_dir = args.limine_dir
-    if limine_dir is None:
-        # Try common locations
-        for candidate in [
-            os.path.join(os.environ.get('TEMP', '/tmp'), 'limine-binary'),
-            os.path.join(os.environ.get('TEMP', '/tmp'), 'limine-binary', 'limine-binary'),
-        ]:
-            if os.path.exists(os.path.join(candidate, 'BOOTX64.EFI')):
-                limine_dir = candidate
-                break
-        if limine_dir is None:
-            print(f"ERROR: Limine binaries not found. Use --limine-dir to specify path.")
-            sys.exit(1)
+    # Find Limine binaries (auto-downloads if not cached)
+    limine_dir = find_limine_dir(args.limine_dir)
 
     files = {}
 
@@ -558,6 +768,8 @@ def main():
     print(f'  qemu-system-x86_64 -drive if=pflash,format=raw,file=OVMF.fd -drive format=raw,file={args.output} -serial stdio -m 512')
     print(f"\nTo boot (BIOS):")
     print(f'  qemu-system-x86_64 -drive format=raw,file={args.output} -serial stdio -m 512')
+    print(f"\nNOTE: The Limine path boots to userspace with init forks verified.")
+    print(f"      For the production build, use: python builder/build_limine_image.py --rust-builder")
 
 
 if __name__ == '__main__':

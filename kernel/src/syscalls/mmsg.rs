@@ -4,12 +4,14 @@
 //! Each syscall processes multiple messages in a single kernel entry,
 //! eliminating per-message syscall overhead.
 
+use super::errno;
+use super::net_helpers::{
+    iovec, msghdr, parse_sockaddr, recvfrom_internal, sendto_internal, write_sockaddr, IOV_MAX,
+};
+use crate::syscalls::user_access;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::task::process::{CURRENT_PROCESS, FileDescriptor};
-use super::errno;
-use super::net_helpers::{iovec, msghdr, parse_sockaddr, sendto_internal, recvfrom_internal, write_sockaddr, IOV_MAX};
-use crate::syscalls::user_access;
 
 /// Maximum messages per mmsg call
 pub const UIO_MAXIOV: usize = 1024;
@@ -47,10 +49,14 @@ pub fn sys_sendmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64) -> u
     // Read the mmsghdr array from userspace
     let mut mmsg: Vec<mmsghdr> = vec![mmsghdr::default(); vlen];
     let array_size = vlen * core::mem::size_of::<mmsghdr>();
-    if unsafe { user_access::copy_from_user(
-        core::slice::from_raw_parts_mut(mmsg.as_mut_ptr() as *mut u8, array_size),
-        mmsg_ptr as *const u8,
-    ) }.is_err() {
+    if unsafe {
+        user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(mmsg.as_mut_ptr() as *mut u8, array_size),
+            mmsg_ptr as *const u8,
+        )
+    }
+    .is_err()
+    {
         return errno::Errno::EFAULT as u64;
     }
 
@@ -92,11 +98,24 @@ pub fn sys_sendmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64) -> u
             }
 
             // Read the iovec array for this message
-            let mut iov_buf: Vec<iovec> = vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
-            if unsafe { user_access::copy_from_user(
-                core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
-                hdr.msg_iov as *const u8,
-            ) }.is_err() {
+            let mut iov_buf: Vec<iovec> = vec![
+                iovec {
+                    iov_base: core::ptr::null_mut(),
+                    iov_len: 0
+                };
+                hdr.msg_iovlen
+            ];
+            if unsafe {
+                user_access::copy_from_user(
+                    core::slice::from_raw_parts_mut(
+                        iov_buf.as_mut_ptr() as *mut u8,
+                        hdr.msg_iovlen * core::mem::size_of::<iovec>(),
+                    ),
+                    hdr.msg_iov as *const u8,
+                )
+            }
+            .is_err()
+            {
                 break;
             }
 
@@ -112,18 +131,28 @@ pub fn sys_sendmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64) -> u
             let mut offset = 0;
             let mut copy_ok = true;
             for iov in &iov_buf {
-                if iov.iov_len == 0 { continue; }
-                if offset + iov.iov_len > combined.len() { break; }
-                if unsafe { user_access::copy_from_user(
-                    &mut combined[offset..offset + iov.iov_len],
-                    iov.iov_base as *const u8,
-                ) }.is_err() {
+                if iov.iov_len == 0 {
+                    continue;
+                }
+                if offset + iov.iov_len > combined.len() {
+                    break;
+                }
+                if unsafe {
+                    user_access::copy_from_user(
+                        &mut combined[offset..offset + iov.iov_len],
+                        iov.iov_base as *const u8,
+                    )
+                }
+                .is_err()
+                {
                     copy_ok = false;
                     break;
                 }
                 offset += iov.iov_len;
             }
-            if !copy_ok { break; }
+            if !copy_ok {
+                break;
+            }
 
             // Parse destination address if provided
             let dest_endpoint = if !hdr.msg_name.is_null() && hdr.msg_namelen >= 8 {
@@ -135,7 +164,13 @@ pub fn sys_sendmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64) -> u
                 None
             };
 
-            let result = sendto_internal(&mut sockets, handle, stype, &combined[..offset], dest_endpoint);
+            let result = sendto_internal(
+                &mut sockets,
+                handle,
+                stype,
+                &combined[..offset],
+                dest_endpoint,
+            );
             if result == errno::Errno::EAGAIN as u64 {
                 // Would block — stop here, return what we've sent so far
                 if sent_count == 0 {
@@ -155,10 +190,14 @@ pub fn sys_sendmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64) -> u
         // Write back the updated mmsghdr array to userspace
         if sent_count > 0 {
             let write_size = sent_count * core::mem::size_of::<mmsghdr>();
-            if unsafe { user_access::copy_to_user(
-                mmsg_ptr as *mut u8,
-                core::slice::from_raw_parts(mmsg.as_ptr() as *const u8, write_size),
-            ) }.is_err() {
+            if unsafe {
+                user_access::copy_to_user(
+                    mmsg_ptr as *mut u8,
+                    core::slice::from_raw_parts(mmsg.as_ptr() as *const u8, write_size),
+                )
+            }
+            .is_err()
+            {
                 return errno::Errno::EFAULT as u64;
             }
         }
@@ -174,7 +213,13 @@ pub fn sys_sendmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64) -> u
 ///
 /// `timeout` is currently unused (non-blocking or poll-based).
 /// Returns the number of messages received (≥ 0), or an error.
-pub fn sys_recvmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64, _timeout: *const u8) -> u64 {
+pub fn sys_recvmmsg(
+    fd: u64,
+    mmsg_ptr: *mut mmsghdr,
+    vlen: u64,
+    flags: u64,
+    _timeout: *const u8,
+) -> u64 {
     let _ = flags;
 
     if mmsg_ptr.is_null() || vlen == 0 {
@@ -189,10 +234,14 @@ pub fn sys_recvmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64, _tim
     // Read the mmsghdr array from userspace
     let mut mmsg: Vec<mmsghdr> = vec![mmsghdr::default(); vlen];
     let array_size = vlen * core::mem::size_of::<mmsghdr>();
-    if unsafe { user_access::copy_from_user(
-        core::slice::from_raw_parts_mut(mmsg.as_mut_ptr() as *mut u8, array_size),
-        mmsg_ptr as *const u8,
-    ) }.is_err() {
+    if unsafe {
+        user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(mmsg.as_mut_ptr() as *mut u8, array_size),
+            mmsg_ptr as *const u8,
+        )
+    }
+    .is_err()
+    {
         return errno::Errno::EFAULT as u64;
     }
 
@@ -234,11 +283,24 @@ pub fn sys_recvmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64, _tim
             }
 
             // Read the iovec array
-            let mut iov_buf: Vec<iovec> = vec![iovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; hdr.msg_iovlen];
-            if unsafe { user_access::copy_from_user(
-                core::slice::from_raw_parts_mut(iov_buf.as_mut_ptr() as *mut u8, hdr.msg_iovlen * core::mem::size_of::<iovec>()),
-                hdr.msg_iov as *const u8,
-            ) }.is_err() {
+            let mut iov_buf: Vec<iovec> = vec![
+                iovec {
+                    iov_base: core::ptr::null_mut(),
+                    iov_len: 0
+                };
+                hdr.msg_iovlen
+            ];
+            if unsafe {
+                user_access::copy_from_user(
+                    core::slice::from_raw_parts_mut(
+                        iov_buf.as_mut_ptr() as *mut u8,
+                        hdr.msg_iovlen * core::mem::size_of::<iovec>(),
+                    ),
+                    hdr.msg_iov as *const u8,
+                )
+            }
+            .is_err()
+            {
                 break;
             }
 
@@ -262,13 +324,21 @@ pub fn sys_recvmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64, _tim
                     // Scatter the received data into the iovecs
                     let mut written = 0;
                     for iov in &iov_buf {
-                        if written >= n { break; }
+                        if written >= n {
+                            break;
+                        }
                         let chunk = core::cmp::min(iov.iov_len, n - written);
-                        if chunk == 0 { continue; }
-                        if unsafe { user_access::copy_to_user(
-                            iov.iov_base as *mut u8,
-                            &recv_buf[written..written + chunk],
-                        ) }.is_err() {
+                        if chunk == 0 {
+                            continue;
+                        }
+                        if unsafe {
+                            user_access::copy_to_user(
+                                iov.iov_base as *mut u8,
+                                &recv_buf[written..written + chunk],
+                            )
+                        }
+                        .is_err()
+                        {
                             break;
                         }
                         written += chunk;
@@ -305,10 +375,14 @@ pub fn sys_recvmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64, _tim
         // Write back the updated mmsghdr array
         if recv_count > 0 {
             let write_size = recv_count * core::mem::size_of::<mmsghdr>();
-            if unsafe { user_access::copy_to_user(
-                mmsg_ptr as *mut u8,
-                core::slice::from_raw_parts(mmsg.as_ptr() as *const u8, write_size),
-            ) }.is_err() {
+            if unsafe {
+                user_access::copy_to_user(
+                    mmsg_ptr as *mut u8,
+                    core::slice::from_raw_parts(mmsg.as_ptr() as *const u8, write_size),
+                )
+            }
+            .is_err()
+            {
                 return errno::Errno::EFAULT as u64;
             }
         }

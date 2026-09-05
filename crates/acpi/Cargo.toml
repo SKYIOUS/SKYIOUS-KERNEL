@@ -1,0 +1,12 @@
+[package]
+name = "vahi-acpi"
+version.workspace = true
+edition.workspace = true
+description = "ACPI table parsing and interrupt routing for Vahi kernel"
+
+[dependencies]
+spin = "0.9"
+x86_64 = "0.14"
+
+[features]
+default = []

@@ -1,0 +1,21 @@
+[package]
+name = "vahi-memory"
+version = "0.3.0"
+edition = "2021"
+description = "Memory management for the Vahi kernel (buddy allocator, slab, paging, CoW)"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+vahi-limine = { path = "../limine" }
+spin = "0.9.8"
+linked_list_allocator = "0.10.5"
+hashbrown = { version = "0.14", default-features = false, features = ["alloc", "ahash"] }
+lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
+
+# x86_64 page table types — needed for paging, buddy, frame_info, virt, stack, isolate
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "0.14.2"
+
+[features]
+default = []
+smp = []

@@ -13,12 +13,18 @@ impl DirtyRect {
         DirtyRect { x, y, w, h }
     }
 
-    pub fn right(&self) -> usize { self.x + self.w }
-    pub fn bottom(&self) -> usize { self.y + self.h }
+    pub fn right(&self) -> usize {
+        self.x + self.w
+    }
+    pub fn bottom(&self) -> usize {
+        self.y + self.h
+    }
 
     fn overlaps(&self, other: &DirtyRect) -> bool {
-        self.x < other.right() && self.right() > other.x
-            && self.y < other.bottom() && self.bottom() > other.y
+        self.x < other.right()
+            && self.right() > other.x
+            && self.y < other.bottom()
+            && self.bottom() > other.y
     }
 
     fn merged(&self, other: &DirtyRect) -> DirtyRect {
@@ -41,16 +47,24 @@ pub struct DamageTracker {
 
 impl DamageTracker {
     pub fn new(screen_w: usize, screen_h: usize) -> Self {
-        DamageTracker { rects: Vec::new(), screen_w, screen_h }
+        DamageTracker {
+            rects: Vec::new(),
+            screen_w,
+            screen_h,
+        }
     }
 
     pub fn mark(&mut self, x: usize, y: usize, w: usize, h: usize) {
-        if w == 0 || h == 0 { return; }
+        if w == 0 || h == 0 {
+            return;
+        }
         let x = x.min(self.screen_w.saturating_sub(1));
         let y = y.min(self.screen_h.saturating_sub(1));
         let w = w.min(self.screen_w - x);
         let h = h.min(self.screen_h - y);
-        if w == 0 || h == 0 { return; }
+        if w == 0 || h == 0 {
+            return;
+        }
         let new = DirtyRect::from_xywh(x, y, w, h);
         for r in &mut self.rects {
             if r.overlaps(&new) {
@@ -63,7 +77,8 @@ impl DamageTracker {
 
     pub fn mark_full(&mut self) {
         self.rects.clear();
-        self.rects.push(DirtyRect::from_xywh(0, 0, self.screen_w, self.screen_h));
+        self.rects
+            .push(DirtyRect::from_xywh(0, 0, self.screen_w, self.screen_h));
     }
 
     pub fn drain(&mut self) -> Vec<DirtyRect> {

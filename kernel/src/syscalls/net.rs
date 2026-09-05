@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, dead_code, unused_doc_comments)]
+#![allow(unused_imports)]
 //! net syscalls — re-exports from submodules for backward compatibility.
 //!
 //! Original 1328-line monolith split into:
@@ -7,5 +7,5 @@
 //! - net_options.rs: setsockopt, getsockopt, sendmsg, recvmsg, getsockname
 
 pub use super::net_helpers::*;
-pub use super::net_socket::*;
 pub use super::net_options::*;
+pub use super::net_socket::*;

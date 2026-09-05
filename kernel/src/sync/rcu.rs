@@ -10,10 +10,10 @@
 //! - `synchronize_rcu()` waits for a grace period (all CPUs passed through quiescent state)
 //! - `call_rcu()` registers a callback to run after the grace period
 
+use crate::sync::IrqSafeMutex;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use crate::sync::IrqSafeMutex;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Global RCU state
 static RCU_STATE: RcuState = RcuState::new();
@@ -66,7 +66,7 @@ pub fn rcu_read_lock() {
     // In a uniprocessor kernel, this prevents context switches during RCU reads.
     // In SMP, we'd need to also track per-CPU nesting.
     RCU_STATE.reader_count.fetch_add(1, Ordering::SeqCst);
-    
+
     // Disable interrupts to prevent preemption (matching IrqSafeMutex pattern)
     x86_64::instructions::interrupts::disable();
 }
@@ -74,7 +74,7 @@ pub fn rcu_read_lock() {
 /// Exit an RCU read-side critical section.
 pub fn rcu_read_unlock() {
     RCU_STATE.reader_count.fetch_sub(1, Ordering::SeqCst);
-    
+
     // Re-enable interrupts
     x86_64::instructions::interrupts::enable();
 }
@@ -88,10 +88,10 @@ pub fn synchronize_rcu() {
     while RCU_STATE.reader_count.load(Ordering::SeqCst) > 0 {
         core::hint::spin_loop();
     }
-    
+
     // Additional barrier: ensure we see the latest state
     core::sync::atomic::fence(Ordering::SeqCst);
-    
+
     // Increment the GP counter to signal completion
     RCU_STATE.gp_counter.fetch_add(1, Ordering::SeqCst);
 }
@@ -103,7 +103,10 @@ pub fn synchronize_rcu() {
 pub fn call_rcu(callback: unsafe extern "C" fn(*mut u8), arg: *mut u8) {
     // Register with CFI so the callback can be validated when executed
     crate::sync::cfi::cfi_register_target(callback as usize);
-    let cb = RcuCallback { func: callback, arg };
+    let cb = RcuCallback {
+        func: callback,
+        arg,
+    };
     RCU_STATE.callbacks.lock().push(cb);
 }
 
@@ -121,10 +124,10 @@ pub fn rcu_process_callbacks() {
         let taken: Vec<RcuCallback> = callbacks.drain(..).collect();
         taken
     };
-    
+
     // Wait for grace period
     synchronize_rcu();
-    
+
     // Execute all callbacks (CFI validated)
     for cb in cbs {
         if crate::sync::cfi::cfi_check(cb.func as usize) {
@@ -152,7 +155,7 @@ impl<T> RcuPtr<T> {
             ptr: core::sync::atomic::AtomicPtr::new(Box::into_raw(Box::new(val))),
         }
     }
-    
+
     /// Read the current pointer.
     ///
     /// The returned pointer is valid as long as the caller is inside an
@@ -161,7 +164,7 @@ impl<T> RcuPtr<T> {
     pub fn read(&self) -> *const T {
         self.ptr.load(Ordering::Acquire)
     }
-    
+
     /// Update the pointer with a new value.
     ///
     /// The old value will be freed after a grace period. This is the
@@ -169,7 +172,7 @@ impl<T> RcuPtr<T> {
     pub fn update(&self, new_val: T) {
         let new_ptr = Box::into_raw(Box::new(new_val));
         let old_ptr = self.ptr.swap(new_ptr, Ordering::AcqRel);
-        
+
         // Schedule freeing the old data after a grace period
         if !old_ptr.is_null() {
             unsafe extern "C" fn free_ptr<T>(ptr: *mut u8) {
@@ -177,7 +180,10 @@ impl<T> RcuPtr<T> {
                     let _ = Box::from_raw(ptr as *mut T);
                 }
             }
-            call_rcu(free_ptr::<T> as unsafe extern "C" fn(*mut u8), old_ptr as *mut u8);
+            call_rcu(
+                free_ptr::<T> as unsafe extern "C" fn(*mut u8),
+                old_ptr as *mut u8,
+            );
         }
     }
 }
@@ -186,7 +192,9 @@ impl<T> Drop for RcuPtr<T> {
     fn drop(&mut self) {
         let ptr = self.ptr.load(Ordering::Acquire);
         if !ptr.is_null() {
-            unsafe { let _ = Box::from_raw(ptr); }
+            unsafe {
+                let _ = Box::from_raw(ptr);
+            }
         }
     }
 }

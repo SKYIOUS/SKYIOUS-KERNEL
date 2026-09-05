@@ -43,15 +43,38 @@ pub struct VcpuRegs {
 impl VcpuRegs {
     pub fn new() -> Self {
         VcpuRegs {
-            rax: 0, rbx: 0, rcx: 0, rdx: 0,
-            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
-            r8: 0, r9: 0, r10: 0, r11: 0,
-            r12: 0, r13: 0, r14: 0, r15: 0,
-            rip: 0, rflags: 0x2, // reserved bit 1 always set
-            cr0: 0x80000001, cr2: 0, cr3: 0, cr4: 0x2000,
-            cs_sel: 0x10, ds_sel: 0x18, es_sel: 0x18, ss_sel: 0x18,
-            gdtr: 0, idtr: 0, efer: 0,
-            fs_base: 0, gs_base: 0, kernel_gs_base: 0,
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            rsp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: 0,
+            rflags: 0x2, // reserved bit 1 always set
+            cr0: 0x80000001,
+            cr2: 0,
+            cr3: 0,
+            cr4: 0x2000,
+            cs_sel: 0x10,
+            ds_sel: 0x18,
+            es_sel: 0x18,
+            ss_sel: 0x18,
+            gdtr: 0,
+            idtr: 0,
+            efer: 0,
+            fs_base: 0,
+            gs_base: 0,
+            kernel_gs_base: 0,
         }
     }
 }
@@ -102,7 +125,9 @@ impl Vcpu {
                 if hv.hardware_cap.has_vmx {
                     let handler = crate::hypervisor::vmx::VmxHandler::new()?;
                     // SAFETY: create_vmcs is unsafe because it touches VMXON/VMCS regions.
-                    unsafe { handler.create_vmcs(self.regs.rip, self.regs.rsp); }
+                    unsafe {
+                        handler.create_vmcs(self.regs.rip, self.regs.rsp);
+                    }
                     let reason = handler.launch_vm(self)?;
                     self.exit_count += 1;
 
@@ -125,7 +150,7 @@ impl Vcpu {
         {
             // Write to VM-entry interruption-information field (0x4016)
             let info = (vector as u64) | (0x0 << 8) | (0x0 << 11); // type=external, valid
-            // SAFETY: VMX root operation.
+                                                                   // SAFETY: VMX root operation.
             unsafe {
                 core::arch::asm!(
                     "vmwrite {0}, {1}",
@@ -137,17 +162,19 @@ impl Vcpu {
             true
         }
         #[cfg(not(target_arch = "x86_64"))]
-        { false }
+        {
+            false
+        }
     }
 
     /// Set initial register state for a Linux boot.
     pub fn setup_linux_boot(&mut self, entry: u64, dtb: u64, cmdline: u64) {
         self.regs.rip = entry;
         self.regs.rsp = 0x8000; // Temporary stack for boot setup
-        self.regs.rsi = dtb;    // x86: rsi = DTB; aarch64: x0 = DTB
+        self.regs.rsi = dtb; // x86: rsi = DTB; aarch64: x0 = DTB
         self.regs.rdi = cmdline; // x86: rdi = cmdline
         self.regs.cr0 = 0x80000001; // Enable paging + protected mode
-        self.regs.cr3 = 0;  // ponytail: set by boot protocol
+        self.regs.cr3 = 0; // ponytail: set by boot protocol
         self.regs.cr4 = 0x2000 | (1 << 5); // PAE + PGE
         self.regs.efer = 0x500; // LME + LMA (long mode)
         self.regs.rflags = 0x2;

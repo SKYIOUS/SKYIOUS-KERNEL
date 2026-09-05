@@ -53,7 +53,7 @@ fn walk_x86_64_stack(mut rbp: *const usize) {
         }
 
         let symbol = lookup_symbol(VirtAddr::new(ret_addr as u64));
-        crate::serial_write(&alloc::format!("  [{:016x}] {}\n", ret_addr, symbol));
+        crate::interrupts::serial_fmt(format_args!("  [{:016x}] {}\n", ret_addr, symbol));
 
         // SAFETY: validated rbp is non-null and within kernel range.
         rbp = unsafe { *rbp as *const usize };
@@ -79,7 +79,7 @@ fn walk_aarch64_stack(mut fp: *const usize) {
         if lr == 0 {
             break;
         }
-        crate::serial_write(&alloc::format!("  [{:016x}] <unknown>\n", lr));
+        crate::interrupts::serial_fmt(format_args!("  [{:016x}] <unknown>\n", lr));
         fp = unsafe { *fp as *const usize };
     }
 }

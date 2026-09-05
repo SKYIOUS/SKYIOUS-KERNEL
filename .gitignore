@@ -77,3 +77,26 @@ kernel/vendor/
 test_logs/
 initrd.tar
 *.tar
+
+# Test logs and results
+*_output.log
+*_results.txt
+*_full.log
+*_raw.log
+*_verify.*
+*_capture.*
+*_output.txt
+*_boot.log
+*_fix_test.log
+*_stress.ps1
+*_full_suite.sh
+*_e2e_*
+*_bench_*
+*_demo_*
+*_selftest_*
+*_long_boot*
+*_post_fix*
+*_network_stress*
+*_fs_stress*
+*_iommu_fix*
+qemu-stderr*.log

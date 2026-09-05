@@ -1,7 +1,7 @@
 # ADR-011: Single Kernel Clock
 
 ## Status
-Proposed
+Accepted — TscTimer in hal/timer.rs, SINGLE_CLOCK enabled
 
 ## Date
 2026-08-20

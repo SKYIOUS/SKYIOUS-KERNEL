@@ -25,10 +25,20 @@ pub struct RegionFlags {
 
 impl RegionFlags {
     pub const fn ram() -> Self {
-        RegionFlags { read: true, write: true, execute: true, mmio: false }
+        RegionFlags {
+            read: true,
+            write: true,
+            execute: true,
+            mmio: false,
+        }
     }
     pub const fn mmio() -> Self {
-        RegionFlags { read: true, write: true, execute: false, mmio: true }
+        RegionFlags {
+            read: true,
+            write: true,
+            execute: false,
+            mmio: true,
+        }
     }
 }
 
@@ -46,7 +56,8 @@ impl GuestMemory {
         let _page_size = 0x2000_00usize; // 2MB large pages
 
         while allocated < mem_size {
-            let frame = crate::memory::buddy::BUDDY_ALLOCATOR.lock()
+            let frame = crate::memory::buddy::BUDDY_ALLOCATOR
+                .lock()
                 .allocate_contiguous(0)?;
             let size = core::cmp::min(0x2000_00, mem_size - allocated);
             let host_phys = frame.as_u64();
@@ -67,7 +78,9 @@ impl GuestMemory {
     /// Load a flat binary into guest memory at the given address.
     pub fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> bool {
         for region in &self.regions {
-            if guest_addr >= region.guest_phys && guest_addr < region.guest_phys + region.size as u64 {
+            if guest_addr >= region.guest_phys
+                && guest_addr < region.guest_phys + region.size as u64
+            {
                 let offset = (guest_addr - region.guest_phys) as usize;
                 if offset + data.len() > region.size {
                     return false;
@@ -112,7 +125,9 @@ impl GuestMemory {
                 // ponytail: efficient zeroing of large BSS regions
                 // works if the mapping region covers the segment
                 for region in &self.regions {
-                    if bss_addr >= region.guest_phys && bss_addr < region.guest_phys + region.size as u64 {
+                    if bss_addr >= region.guest_phys
+                        && bss_addr < region.guest_phys + region.size as u64
+                    {
                         let offset = (bss_addr - region.guest_phys) as usize;
                         if offset + bss_size <= region.size {
                             let phys = region.host_phys + offset as u64;
@@ -165,7 +180,9 @@ impl GuestMemory {
     /// Translate a guest physical address to host physical address.
     pub fn translate(&self, guest_phys: u64) -> Option<u64> {
         for region in &self.regions {
-            if guest_phys >= region.guest_phys && guest_phys < region.guest_phys + region.size as u64 {
+            if guest_phys >= region.guest_phys
+                && guest_phys < region.guest_phys + region.size as u64
+            {
                 let offset = guest_phys - region.guest_phys;
                 return Some(region.host_phys + offset);
             }

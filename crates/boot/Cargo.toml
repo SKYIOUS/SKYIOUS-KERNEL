@@ -1,0 +1,11 @@
+[package]
+name = "vahi-boot"
+version = "0.3.0"
+edition = "2021"
+description = "Boot sequence and initialization for the Vahi kernel"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+vahi-arch = { path = "../arch" }
+spin = "0.9.8"
+limine = "0.6.5"

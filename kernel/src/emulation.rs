@@ -1,7 +1,7 @@
-use crate::task::process::{Process, EmulationMode};
+use crate::syscalls::errno;
 use crate::syscalls::numbers;
 use crate::syscalls::user_access;
-use crate::syscalls::errno;
+use crate::task::process::{EmulationMode, Process};
 
 /// Dispatch a Linux syscall from a Linux ELF binary.
 /// Returns the result directly (in Linux ABI: 0 = success, negative = -errno).
@@ -17,20 +17,27 @@ pub fn dispatch_linux_syscall(
     match n {
         13 => linux_rt_sigaction(arg1 as u64, arg2 as *const u8, arg3 as *mut u8, arg4 as u64),
         15 => linux_rt_sigreturn(regs),
-        57 => linux_fork(),
+        57 => linux_fork(regs),
         63 => linux_uname(arg1 as *mut u8),
         158 => linux_arch_prctl(arg1 as u32, arg2 as u64),
         _ => {
-    let vahi_n = map_linux_to_vahi(n);
-    crate::syscalls::do_syscall(vahi_n, arg1, arg2, arg3, arg4, arg5, regs)
+            let vahi_n = map_linux_to_vahi(n);
+            crate::syscalls::do_syscall(vahi_n, arg1, arg2, arg3, arg4, arg5, regs)
         }
     }
 }
 
 /// Linux `fork()` — implemented via clone with SIGCHLD.
-fn linux_fork() -> u64 {
-    let sigchld = 17u64; // SIGCHLD
-    crate::syscalls::syscall_handler(numbers::SYS_CLONE, sigchld, 0, 0, 0, 0, core::ptr::null_mut())
+fn linux_fork(regs: *mut u64) -> u64 {
+    crate::syscalls::syscall_handler(
+        numbers::SYS_CLONE,
+        crate::syscalls::signal::Signal::SIGCHLD as u64,
+        0,
+        0,
+        0,
+        0,
+        regs,
+    )
 }
 
 /// Linux `uname()` — returns Linux-compatible utsname.
@@ -66,7 +73,17 @@ fn linux_uname(buf: *mut u8) -> u64 {
     fill(&mut uts.version, "#1 SARGA OS Compatibility Layer");
     fill(&mut uts.machine, "x86_64");
 
-    if unsafe { user_access::copy_to_user(buf, core::slice::from_raw_parts(&uts as *const _ as *const u8, core::mem::size_of::<LinuxUtsName>())) }.is_err() {
+    if unsafe {
+        user_access::copy_to_user(
+            buf,
+            core::slice::from_raw_parts(
+                &uts as *const _ as *const u8,
+                core::mem::size_of::<LinuxUtsName>(),
+            ),
+        )
+    }
+    .is_err()
+    {
         return -(errno::Errno::EFAULT as i64) as u64;
     }
     0
@@ -75,7 +92,8 @@ fn linux_uname(buf: *mut u8) -> u64 {
 /// Linux `arch_prctl()` — handles `ARCH_SET_FS` for TLS base.
 fn linux_arch_prctl(code: u32, addr: u64) -> u64 {
     match code {
-        0x1002 => { // ARCH_SET_FS
+        0x1002 => {
+            // ARCH_SET_FS
             {
                 let found = crate::task::scheduler::with_current_thread(|thread| {
                     thread.fs_base = addr;
@@ -88,28 +106,45 @@ fn linux_arch_prctl(code: u32, addr: u64) -> u64 {
             crate::task::thread::write_fs_base(addr);
             0
         }
-        0x1003 => { // ARCH_GET_FS
-            let fs_base = crate::task::scheduler::with_current_thread(|thread| {
-                thread.fs_base
-            }).unwrap_or(0);
+        0x1003 => {
+            // ARCH_GET_FS
+            let fs_base =
+                crate::task::scheduler::with_current_thread(|thread| thread.fs_base).unwrap_or(0);
             let out_ptr = addr as *mut u64;
-            if unsafe { user_access::copy_to_user(out_ptr as *mut u8, core::slice::from_raw_parts(&fs_base as *const _ as *const u8, 8)) }.is_err() {
+            if unsafe {
+                user_access::copy_to_user(
+                    out_ptr as *mut u8,
+                    core::slice::from_raw_parts(&fs_base as *const _ as *const u8, 8),
+                )
+            }
+            .is_err()
+            {
                 return -(errno::Errno::EFAULT as i64) as u64;
             }
             0
         }
-        0x1004 => { // ARCH_SET_GS (unused on x86_64 userspace, but accept)
+        0x1004 => {
+            // ARCH_SET_GS (unused on x86_64 userspace, but accept)
             0
         }
-        0x1005 => { // ARCH_GET_GS
+        0x1005 => {
+            // ARCH_GET_GS
             let out_ptr = addr as *mut u64;
             let gs: u64 = 0;
-            if unsafe { user_access::copy_to_user(out_ptr as *mut u8, core::slice::from_raw_parts(&gs as *const _ as *const u8, 8)) }.is_err() {
+            if unsafe {
+                user_access::copy_to_user(
+                    out_ptr as *mut u8,
+                    core::slice::from_raw_parts(&gs as *const _ as *const u8, 8),
+                )
+            }
+            .is_err()
+            {
                 return -(errno::Errno::EFAULT as i64) as u64;
             }
             0
         }
-        0x1001 => { // ARCH_GET_CPUID (deprecated, just succeed)
+        0x1001 => {
+            // ARCH_GET_CPUID (deprecated, just succeed)
             0
         }
         _ => -(errno::Errno::EINVAL as i64) as u64,
@@ -117,12 +152,7 @@ fn linux_arch_prctl(code: u32, addr: u64) -> u64 {
 }
 
 /// Linux `rt_sigaction()` — translates Linux `sigaction` struct to Vahi format.
-fn linux_rt_sigaction(
-    _signum: u64,
-    _act: *const u8,
-    _oldact: *mut u8,
-    _sigsetsize: u64,
-) -> u64 {
+fn linux_rt_sigaction(_signum: u64, _act: *const u8, _oldact: *mut u8, _sigsetsize: u64) -> u64 {
     if _act.is_null() && _oldact.is_null() {
         return 0;
     }
@@ -135,21 +165,28 @@ fn linux_rt_sigaction(
             if user_access::copy_from_user(
                 core::slice::from_raw_parts_mut(&mut handler as *mut _ as *mut u8, 8),
                 _act,
-            ).is_err() {
+            )
+            .is_err()
+            {
                 return -(errno::Errno::EFAULT as i64) as u64;
             }
             if user_access::copy_from_user(
                 core::slice::from_raw_parts_mut(&mut flags as *mut _ as *mut u8, 8),
                 _act.add(8),
-            ).is_err() {
+            )
+            .is_err()
+            {
                 return -(errno::Errno::EFAULT as i64) as u64;
             }
             // sa_restorer at offset 16 (x86_64 Linux sigaction)
-            if (flags & 0x04000000) != 0 { // SA_RESTORER
+            if (flags & 0x04000000) != 0 {
+                // SA_RESTORER
                 if user_access::copy_from_user(
                     core::slice::from_raw_parts_mut(&mut restorer as *mut _ as *mut u8, 8),
                     _act.add(16),
-                ).is_err() {
+                )
+                .is_err()
+                {
                     return -(errno::Errno::EFAULT as i64) as u64;
                 }
             }
@@ -170,18 +207,24 @@ fn linux_rt_sigaction(
     if !_oldact.is_null() {
         let handler = {
             let lock = crate::task::process::CURRENT_PROCESS.lock();
-            lock.as_ref().and_then(|proc| {
-                if _signum < 32 {
-                    Some(proc.signal_handlers.lock()[_signum as usize])
-                } else {
-                    None
-                }
-            }).unwrap_or(0)
+            lock.as_ref()
+                .and_then(|proc| {
+                    if _signum < 32 {
+                        Some(proc.signal_handlers.lock()[_signum as usize])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0)
         };
-        if unsafe { user_access::copy_to_user(
-            _oldact,
-            core::slice::from_raw_parts(&handler as *const _ as *const u8, 8),
-        ) }.is_err() {
+        if unsafe {
+            user_access::copy_to_user(
+                _oldact,
+                core::slice::from_raw_parts(&handler as *const _ as *const u8, 8),
+            )
+        }
+        .is_err()
+        {
             return -(errno::Errno::EFAULT as i64) as u64;
         }
     }
@@ -293,7 +336,7 @@ fn map_linux_to_vahi(linux_n: u64) -> u64 {
         // Phase 6: Container syscalls
         272 => numbers::SYS_UNSHARE,
         308 => numbers::SYS_SETNS, // Linux setns = 308 → Vahi 464
-        _ => 36, // SYS_SYNC as fallback (returns ENOSYS)
+        _ => 36,                   // SYS_SYNC as fallback (returns ENOSYS)
     }
 }
 

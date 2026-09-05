@@ -6,7 +6,8 @@ impl Compositor {
     pub(crate) fn show_desktop_context_menu(&mut self, x: usize, y: usize) {
         self.context_menu = ContextMenu {
             open: true,
-            x, y,
+            x,
+            y,
             items: alloc::vec![
                 ("Terminal", ContextAction::OpenTerminal),
                 ("File Manager", ContextAction::OpenFileManager),
@@ -21,7 +22,8 @@ impl Compositor {
     pub(crate) fn show_window_context_menu(&mut self, x: usize, y: usize, _win_idx: usize) {
         self.context_menu = ContextMenu {
             open: true,
-            x, y,
+            x,
+            y,
             items: alloc::vec![
                 ("Minimize", ContextAction::MinimizeWindow),
                 ("Maximize", ContextAction::MaximizeWindow),
@@ -32,7 +34,9 @@ impl Compositor {
     }
 
     pub(crate) fn execute_context_action(&mut self, idx: usize) {
-        if idx >= self.context_menu.items.len() { return; }
+        if idx >= self.context_menu.items.len() {
+            return;
+        }
         let action = &self.context_menu.items[idx].1;
         match action {
             ContextAction::OpenTerminal => self.create_terminal_window(),

@@ -1,8 +1,8 @@
 //! Input handling — mouse and keyboard dispatch for the compositor.
 //! Also hosts the async refresh loop that drives the GUI tick.
 
-use super::*;
 use super::window;
+use super::*;
 
 impl Compositor {
     pub fn handle_mouse(&mut self, x: usize, y: usize, buttons: u8) {
@@ -13,8 +13,12 @@ impl Compositor {
 
         let left_click = left_pressed && unsafe { !PREV_LEFT_PRESSED };
         let right_click_new = right_pressed && unsafe { !PREV_RIGHT_PRESSED };
-        unsafe { PREV_LEFT_PRESSED = left_pressed; }
-        unsafe { PREV_RIGHT_PRESSED = right_pressed; }
+        unsafe {
+            PREV_LEFT_PRESSED = left_pressed;
+        }
+        unsafe {
+            PREV_RIGHT_PRESSED = right_pressed;
+        }
 
         // Context menu is open — handle dismissal or item selection
         if self.context_menu.open {
@@ -22,8 +26,10 @@ impl Compositor {
                 let item_h = 24;
                 let menu_w = 160;
                 let menu_h = self.context_menu.items.len() * item_h + 8;
-                if x >= self.context_menu.x && x < self.context_menu.x + menu_w
-                    && y >= self.context_menu.y && y < self.context_menu.y + menu_h
+                if x >= self.context_menu.x
+                    && x < self.context_menu.x + menu_w
+                    && y >= self.context_menu.y
+                    && y < self.context_menu.y + menu_h
                 {
                     let idx = (y - self.context_menu.y).saturating_sub(4) / item_h;
                     if idx < self.context_menu.items.len() {
@@ -63,20 +69,24 @@ impl Compositor {
 
         // Original left-click handling
         if left_click {
-             // Check start menu button
-             if x >= 5 && x < 65 && y >= SCREEN_HEIGHT - 35 && y < SCREEN_HEIGHT - 5 {
-                 self.start_menu_open = !self.start_menu_open;
-                 return;
-             }
-              // Check start menu items
-               if self.start_menu_open {
-                   let (menu_x, menu_y, menu_w) = shell::start_menu_rects();
-                   let header_h = 24;
-                   if x >= menu_x && x < menu_x + menu_w && y >= menu_y && y < menu_y + header_h + shell::MENU_ITEM_COUNT * 36 + 10 {
-                       let clicked_idx = (y.saturating_sub(menu_y + header_h + 5)) / 36;
-                       if clicked_idx < shell::MENU_ITEM_COUNT {
-                           self.start_menu_open = false;
-                           match clicked_idx {
+            // Check start menu button
+            if x >= 5 && x < 65 && y >= SCREEN_HEIGHT - 35 && y < SCREEN_HEIGHT - 5 {
+                self.start_menu_open = !self.start_menu_open;
+                return;
+            }
+            // Check start menu items
+            if self.start_menu_open {
+                let (menu_x, menu_y, menu_w) = shell::start_menu_rects();
+                let header_h = 24;
+                if x >= menu_x
+                    && x < menu_x + menu_w
+                    && y >= menu_y
+                    && y < menu_y + header_h + shell::MENU_ITEM_COUNT * 36 + 10
+                {
+                    let clicked_idx = (y.saturating_sub(menu_y + header_h + 5)) / 36;
+                    if clicked_idx < shell::MENU_ITEM_COUNT {
+                        self.start_menu_open = false;
+                        match clicked_idx {
                                0 => self.create_file_manager_window(),
                                1 => self.create_terminal_window(),
                                2 => self.create_monitor_window(),
@@ -86,65 +96,72 @@ impl Compositor {
                                5 => self.shutdown_qemu(),
                                _ => {}
                            }
-                       }
-                       return;
-                   }
-                   self.start_menu_open = false;
-               }
+                    }
+                    return;
+                }
+                self.start_menu_open = false;
+            }
 
-                // Desktop icon clicks (SYSTEM, FILES)
-               if y >= 20 && y < 70 && x >= 20 && x < 68 {
-                    self.create_info_window("SYSTEM",
-                        "SARGA OS System\n\nKernel: Vahi v0.3.0\nCPU: x86_64\nMemory: Managed");
-                   return;
-               }
-               if y >= 100 && y < 150 && x >= 20 && x < 68 {
-                   self.create_file_manager_window();
-                   return;
-               }
-              // Check notification click-to-dismiss
-              let mut notif_y = 50usize;
-              for (n_idx, notif) in self.notifications.clone().iter().enumerate() {
-                  let text_w = notif.text.len() * 8 + 36;
-                  let nx = SCREEN_WIDTH - text_w - 10;
-                  if x >= nx && x < nx + text_w && y >= notif_y && y < notif_y + 30 {
-                      self.notifications.remove(n_idx);
-                      return;
-                  }
-                  notif_y += 36;
-              }
-              // Check minimize/close buttons on all windows (reverse order = top first)
-              for (i, win) in self.windows.iter().enumerate().rev() {
-                   if win.is_minimize_button(x, y) {
-                       self.damage.mark(self.windows[i].x, self.windows[i].y, self.windows[i].width, self.windows[i].height);
-                       self.windows[i].minimized = !self.windows[i].minimized;
-                       // Bring to front
-                       let w = self.windows.remove(i);
-                       self.windows.push(w);
-                       return;
-                   }
-                  if win.is_close_button(x, y) {
-                      self.close_pending = Some(i);
-                      return;
-                  }
-              }
-             // Check taskbar window buttons
-             let taskbar_y_start = SCREEN_HEIGHT - 40;
-             if y >= taskbar_y_start && y < SCREEN_HEIGHT - 5 {
-                 let btn_x = 70usize;
-                 for (i, _win) in self.windows.iter().enumerate() {
-                     let bx = btn_x + i * 120;
-                     if x >= bx && x < bx + 115 {
-                         if self.windows[i].minimized {
-                             self.windows[i].minimized = false;
-                         }
-                         // Bring to front
-                         let w = self.windows.remove(i);
-                         self.windows.push(w);
-                         return;
-                     }
-                 }
-             }
+            // Desktop icon clicks (SYSTEM, FILES)
+            if y >= 20 && y < 70 && x >= 20 && x < 68 {
+                self.create_info_window(
+                    "SYSTEM",
+                    "SARGA OS System\n\nKernel: Vahi v0.3.0\nCPU: x86_64\nMemory: Managed",
+                );
+                return;
+            }
+            if y >= 100 && y < 150 && x >= 20 && x < 68 {
+                self.create_file_manager_window();
+                return;
+            }
+            // Check notification click-to-dismiss
+            let mut notif_y = 50usize;
+            for (n_idx, notif) in self.notifications.clone().iter().enumerate() {
+                let text_w = notif.text.len() * 8 + 36;
+                let nx = SCREEN_WIDTH - text_w - 10;
+                if x >= nx && x < nx + text_w && y >= notif_y && y < notif_y + 30 {
+                    self.notifications.remove(n_idx);
+                    return;
+                }
+                notif_y += 36;
+            }
+            // Check minimize/close buttons on all windows (reverse order = top first)
+            for (i, win) in self.windows.iter().enumerate().rev() {
+                if win.is_minimize_button(x, y) {
+                    self.damage.mark(
+                        self.windows[i].x,
+                        self.windows[i].y,
+                        self.windows[i].width,
+                        self.windows[i].height,
+                    );
+                    self.windows[i].minimized = !self.windows[i].minimized;
+                    // Bring to front
+                    let w = self.windows.remove(i);
+                    self.windows.push(w);
+                    return;
+                }
+                if win.is_close_button(x, y) {
+                    self.close_pending = Some(i);
+                    return;
+                }
+            }
+            // Check taskbar window buttons
+            let taskbar_y_start = SCREEN_HEIGHT - 40;
+            if y >= taskbar_y_start && y < SCREEN_HEIGHT - 5 {
+                let btn_x = 70usize;
+                for (i, _win) in self.windows.iter().enumerate() {
+                    let bx = btn_x + i * 120;
+                    if x >= bx && x < bx + 115 {
+                        if self.windows[i].minimized {
+                            self.windows[i].minimized = false;
+                        }
+                        // Bring to front
+                        let w = self.windows.remove(i);
+                        self.windows.push(w);
+                        return;
+                    }
+                }
+            }
         }
 
         if left_pressed {
@@ -175,7 +192,8 @@ impl Compositor {
                     self.windows[idx].x = x.saturating_sub(self.drag_offset_x);
                     self.windows[idx].y = y.saturating_sub(self.drag_offset_y);
                     let new_win = &self.windows[idx];
-                    self.damage.mark(new_win.x, new_win.y, new_win.width, new_win.height);
+                    self.damage
+                        .mark(new_win.x, new_win.y, new_win.width, new_win.height);
                 }
             } else {
                 // Check if we started dragging or interacting with content
@@ -190,7 +208,9 @@ impl Compositor {
                     } else if win.is_within_title_bar(x, y) {
                         // Double-click check
                         let now = crate::interrupts::get_ticks();
-                        if self.prev_click_win == Some(i) && now.saturating_sub(self.prev_click_ticks) < 50 {
+                        if self.prev_click_win == Some(i)
+                            && now.saturating_sub(self.prev_click_ticks) < 50
+                        {
                             win.toggle_maximize();
                             self.prev_click_win = None;
                         } else {
@@ -280,22 +300,26 @@ impl Compositor {
                 if self.super_held {
                     if let Some(idx) = self.focused_window() {
                         match c {
-                            '\u{0010}' => { // Left arrow
+                            '\u{0010}' => {
+                                // Left arrow
                                 self.windows[idx].x = 0;
                                 self.windows[idx].y = 0;
                                 self.windows[idx].width = SCREEN_WIDTH / 2;
                                 self.windows[idx].height = SCREEN_HEIGHT - 40;
                             }
-                            '\u{0012}' => { // Right arrow
+                            '\u{0012}' => {
+                                // Right arrow
                                 self.windows[idx].x = SCREEN_WIDTH / 2;
                                 self.windows[idx].y = 0;
                                 self.windows[idx].width = SCREEN_WIDTH / 2;
                                 self.windows[idx].height = SCREEN_HEIGHT - 40;
                             }
-                            '\u{0011}' => { // Up arrow = maximize
+                            '\u{0011}' => {
+                                // Up arrow = maximize
                                 self.windows[idx].toggle_maximize();
                             }
-                            '\u{000E}' => { // Down arrow = restore/minimize
+                            '\u{000E}' => {
+                                // Down arrow = restore/minimize
                                 self.windows[idx].minimized = !self.windows[idx].minimized;
                             }
                             _ => {}
@@ -308,7 +332,11 @@ impl Compositor {
                 if self.alt_held && c == '\t' {
                     if !self.alt_tab_active {
                         self.alt_tab_active = true;
-                        self.alt_tab_index = if self.windows.len() > 1 { self.windows.len() - 1 } else { 0 };
+                        self.alt_tab_index = if self.windows.len() > 1 {
+                            self.windows.len() - 1
+                        } else {
+                            0
+                        };
                     } else {
                         self.alt_tab_index = if self.alt_tab_index > 0 {
                             self.alt_tab_index - 1
@@ -348,8 +376,8 @@ impl Compositor {
 /// Async task that drives the GUI refresh loop.
 /// Polls keyboard scancodes, mouse state, and composites at ~30 FPS.
 pub async fn gui_refresh_task() {
-    use pc_keyboard::{Keyboard, layouts, ScancodeSet1, HandleControl};
     use crate::task::keyboard::try_pop_scancode;
+    use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1};
 
     // 100Hz tick / 30 FPS = 3.33, floor to 3
     const TICKS_PER_FRAME: u64 = 3;
@@ -363,11 +391,19 @@ pub async fn gui_refresh_task() {
             {
                 let mut comp = crate::gui::COMPOSITOR.lock();
                 match scancode {
-                    0x38 => { comp.alt_held = true; }      // Left Alt make
-                    0xB8 => { comp.alt_held = false; }      // Left Alt break
+                    0x38 => {
+                        comp.alt_held = true;
+                    } // Left Alt make
+                    0xB8 => {
+                        comp.alt_held = false;
+                    } // Left Alt break
                     0xE0 => { /* Extended prefix — next byte is the real scancode */ }
-                    0x5B => { comp.super_held = true; }     // Left Win make (after 0xE0)
-                    0xDB => { comp.super_held = false; }    // Left Win break (after 0xE0)
+                    0x5B => {
+                        comp.super_held = true;
+                    } // Left Win make (after 0xE0)
+                    0xDB => {
+                        comp.super_held = false;
+                    } // Left Win break (after 0xE0)
                     // Alt+Tab: confirm selection when Alt is released
                     _ if !comp.alt_held && comp.alt_tab_active => {
                         if comp.alt_tab_index < comp.windows.len() {

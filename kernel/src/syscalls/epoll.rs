@@ -4,12 +4,12 @@
 //! Each epoll instance is backed by a file descriptor that monitors a set of
 //! other file descriptors for readiness events (EPOLLIN, EPOLLOUT, etc.).
 
+use crate::sync::IrqSafeMutex as Mutex;
+use crate::syscalls::errno;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::sync::IrqSafeMutex as Mutex;
-use crate::task::process::{CURRENT_PROCESS, FileDescriptor};
-use crate::syscalls::errno;
 
 // ── epoll event flags (Linux-compatible) ─────────────────────────────
 pub const EPOLLIN: u32 = 0x001;
@@ -66,7 +66,8 @@ pub static EPOLL_INSTANCES: crate::sync::IrqSafeMutex<BTreeMap<u64, Arc<Mutex<Ep
 
 /// Allocate a new epoll file descriptor number.
 fn alloc_epoll_fd() -> u64 {
-    static NEXT_EPOLL_FD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x1000);
+    static NEXT_EPOLL_FD: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0x1000);
     NEXT_EPOLL_FD.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
@@ -90,16 +91,18 @@ pub fn sys_epoll_create1(flags: i32) -> u64 {
             fd_table.resize(fd_num + 1, None);
         }
         // Use EventFd as a placeholder — epoll key is tracked in EPOLL_FD_MAP
-        fd_table[fd_num] = Some(FileDescriptor::EventFd(Arc::new(crate::sync::IrqSafeMutex::new(
-            crate::task::process::EventFdData {
+        fd_table[fd_num] = Some(FileDescriptor::EventFd(Arc::new(
+            crate::sync::IrqSafeMutex::new(crate::task::process::EventFdData {
                 counter: epoll_key,
                 semaphore: false,
                 nonblock: false,
                 key: 0, // epoll placeholder — not used for blocking
-            },
-        ))));
+            }),
+        )));
         // Map this fd to the epoll key
-        EPOLL_FD_MAP.lock().insert((proc.id, fd_num as u64), epoll_key);
+        EPOLL_FD_MAP
+            .lock()
+            .insert((proc.id, fd_num as u64), epoll_key);
         fd_num as u64
     } else {
         EPOLL_INSTANCES.lock().remove(&epoll_key);
@@ -171,13 +174,17 @@ pub fn sys_epoll_ctl(epfd: u64, op: i32, fd: i32, event_ptr: *const u8) -> u64 {
             if crate::syscalls::user_access::copy_from_user(
                 core::slice::from_raw_parts_mut(&mut events as *mut _ as *mut u8, 4),
                 event_ptr,
-            ).is_err() {
+            )
+            .is_err()
+            {
                 return errno::Errno::EFAULT as u64;
             }
             if crate::syscalls::user_access::copy_from_user(
                 core::slice::from_raw_parts_mut(&mut data as *mut _ as *mut u8, 8),
                 event_ptr.add(8),
-            ).is_err() {
+            )
+            .is_err()
+            {
                 return errno::Errno::EFAULT as u64;
             }
         }
@@ -280,7 +287,10 @@ fn poll_readiness(
                     }
                 }
                 FileDescriptor::IoUringFd(data) => {
-                    let pending = data.lock().peek_cqes();
+                    let pending = data
+                        .lock()
+                        .downcast_ref::<crate::syscalls::io_uring::IoUringInstance>()
+                        .map_or(0, |i| i.peek_cqes());
                     if (entry.events & EPOLLIN) != 0 && pending > 0 {
                         revents |= EPOLLIN | EPOLLRDNORM;
                     }
@@ -444,13 +454,17 @@ pub fn sys_epoll_wait(epfd: u64, events_ptr: *mut u8, maxevents: i32, timeout_ms
                 if crate::syscalls::user_access::copy_to_user(
                     dst,
                     core::slice::from_raw_parts(&revents as *const _ as *const u8, 4),
-                ).is_err() {
+                )
+                .is_err()
+                {
                     return errno::Errno::EFAULT as u64;
                 }
                 if crate::syscalls::user_access::copy_to_user(
                     dst.add(4),
                     core::slice::from_raw_parts(&data as *const _ as *const u8, 8),
-                ).is_err() {
+                )
+                .is_err()
+                {
                     return errno::Errno::EFAULT as u64;
                 }
             }

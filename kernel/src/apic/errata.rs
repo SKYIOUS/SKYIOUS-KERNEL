@@ -65,4 +65,3 @@ pub fn apply_ioapic_workarounds(io: &mut ioapic::IoApic, gsi: u8) {
 pub fn apply_lapic_workarounds(_lapic: &crate::apic::lapic::LocalApic) {
     lint0_8254_quirk(_lapic);
 }
-

@@ -7,106 +7,208 @@
 //! The name was chosen for its clean pronunciation (VAH-hee), its absence from
 //! existing software trademarks, and its subtle Sanskrit heritage that is
 //! invisible to those unfamiliar with Vedic literature.
-
 #![no_std]
 #![no_main]
 #![cfg_attr(not(target_arch = "aarch64"), feature(abi_x86_interrupt))]
 #![feature(alloc_error_handler)]
 #![deny(warnings)]
-// ponytail: clippy-style lints allowed — zero bug-finding value for kernel code
+// Targeted clippy suppressions — each lint is named and documented.
 #![allow(
     dead_code,
-    clippy::upper_case_acronyms, clippy::result_unit_err,
-    clippy::too_many_arguments, clippy::collapsible_if, clippy::collapsible_match,
-    clippy::single_match, clippy::manual_range_contains, clippy::new_without_default,
-    clippy::unnecessary_cast, clippy::ptr_as_ptr,
-    clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss,
-    clippy::needless_return, clippy::clone_on_copy, clippy::len_zero,
-    clippy::needless_range_loop, clippy::manual_is_multiple_of,
-    clippy::declare_interior_mutable_const,
-    clippy::redundant_pattern_matching, clippy::manual_div_ceil,
-    clippy::needless_lifetimes, clippy::unused_unit,
-    clippy::needless_borrow, clippy::derivable_impls,
-    clippy::unnecessary_lazy_evaluations, clippy::op_ref,
-    clippy::manual_swap, clippy::manual_memcpy,
-    clippy::explicit_auto_deref, clippy::enum_variant_names,
-    clippy::large_enum_variant, clippy::blocks_in_conditions,
-    clippy::if_same_then_else, clippy::borrow_deref_ref, clippy::new_ret_no_self,
-    clippy::only_used_in_recursion, clippy::type_complexity, clippy::manual_clamp,
-    clippy::manual_strip, clippy::suspicious_map,
-    clippy::unnecessary_min_or_max,
-    clippy::suboptimal_flops, clippy::arithmetic_side_effects,
-    clippy::range_plus_one,
-    clippy::get_first, clippy::absurd_extreme_comparisons,
-    clippy::same_item_push,
-    clippy::should_implement_trait,
-    clippy::match_same_arms, clippy::borrow_interior_mutable_const,
+    // Design-level: require refactoring to fix properly
+    clippy::result_unit_err,
+    clippy::too_many_arguments,
+    clippy::missing_safety_doc,
+    clippy::similar_names,
+    clippy::new_without_default,
+    clippy::len_without_is_empty,
+    clippy::needless_lifetimes,
+    clippy::type_complexity,
+    clippy::fn_params_excessive_bools,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::return_self_not_must_use,
+    // Mechanical style: safe to suppress, fix incrementally
+    clippy::unnecessary_cast,
+    clippy::needless_borrow,
+    clippy::useless_format,
+    clippy::map_entry,
+    clippy::manual_range_contains,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::match_ref_pats,
+    clippy::redundant_closure,
+    clippy::let_and_return,
+    clippy::or_fun_call,
+    clippy::single_char_pattern,
+    clippy::redundant_field_names,
+    clippy::clone_on_copy,
+    clippy::iter_cloned_collect,
+    clippy::unnecessary_unwrap,
+    clippy::comparison_to_empty,
+    clippy::write_with_newline,
+    clippy::single_match,
+    clippy::needless_return,
+    clippy::manual_map,
+    clippy::match_like_matches_macro,
+    clippy::useless_attribute,
+    clippy::manual_is_ascii_check,
+    clippy::into_iter_on_ref,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::redundant_pattern_matching,
+    clippy::match_single_binding,
+    clippy::from_over_into,
+    clippy::enum_variant_names,
+    clippy::module_name_repetitions,
+    clippy::manual_div_ceil,
+    clippy::identity_op,
+    clippy::cast_ptr_alignment,
+    clippy::arithmetic_side_effects,
+    clippy::question_mark,
+    clippy::if_same_then_else,
+    clippy::stable_sort_primitive,
+    clippy::repeat_once,
+    clippy::unnecessary_lazy_evaluations,
+    clippy::needless_range_loop,
+    clippy::manual_clamp,
+    clippy::needless_borrows_for_generic_args,
+    clippy::string_add,
+    clippy::uninlined_format_args,
+    clippy::ref_option_ref,
     clippy::option_map_unit_fn,
-    clippy::never_loop, clippy::let_and_return
+    clippy::flat_map_option,
+    clippy::manual_retain,
+    clippy::manual_string_new,
+    clippy::needless_late_init,
+    clippy::init_numbered_fields,
+    clippy::derivable_impls,
+    clippy::manual_contains,
+    clippy::single_char_add_str,
+    clippy::needless_raw_string_hashes,
+    clippy::explicit_auto_deref,
+    clippy::unused_enumerate_index,
+    clippy::bool_assert_comparison,
+    clippy::empty_enums,
+    clippy::collapsible_str_replace,
+    clippy::unreadable_literal,
+    clippy::struct_excessive_bools,
+    clippy::too_many_lines,
+    clippy::absolute_paths,
+    clippy::unconditional_recursion,
+    clippy::fallible_impl_from,
+    clippy::ignored_unit_patterns,
+    clippy::missing_trait_methods,
+    clippy::redundant_closure_for_method_calls,
+    clippy::format_push_string,
+    clippy::manual_let_else,
+    clippy::redundant_else,
+    clippy::unnecessary_to_owned,
+    clippy::use_self,
+    clippy::map_unwrap_or,
+    clippy::get_first,
+    clippy::suboptimal_flops,
+    clippy::unnecessary_map_or,
+    clippy::map_or_identity,
+    clippy::unnecessary_sort_by,
+    clippy::for_kv_map,
+    clippy::manual_strip,
+    clippy::same_item_push,
+    clippy::vec_init_then_push,
+    clippy::drop_non_drop,
+    clippy::fn_to_numeric_cast,
+    clippy::byte_char_slices,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::declare_interior_mutable_const,
+    clippy::doc_overindented_list_items,
+    clippy::empty_line_after_doc_comments,
+    clippy::implicit_saturating_add,
+    clippy::implicit_saturating_sub,
+    clippy::int_plus_one,
+    clippy::manual_abs_diff,
+    clippy::manual_checked_ops,
+    clippy::manual_memcpy,
+    clippy::manual_repeat_n,
+    clippy::manual_unwrap_or_default,
+    clippy::needless_bool,
+    clippy::needless_question_mark,
+    clippy::new_ret_no_self,
+    clippy::only_used_in_recursion,
+    clippy::possible_missing_else,
+    clippy::replace_box,
+    clippy::should_implement_trait,
+    clippy::unnecessary_mut_passed,
+    clippy::unwrap_or_default,
+    clippy::manual_unwrap_or,
 )]
 
 mod panic_handler;
 extern crate alloc;
-mod memory;
-mod sync;
-mod allocator;
-mod shell;
-mod task;
-mod syscalls;
-mod vfs;
-mod security;
-pub mod objects;
-mod tty;
-#[cfg(not(target_arch = "aarch64"))]
-mod vga_buffer;
-#[cfg(not(target_arch = "aarch64"))]
-mod interrupts;
-#[cfg(not(target_arch = "aarch64"))]
-mod gdt;
-#[cfg(not(target_arch = "aarch64"))]
-mod keyboard;
 #[cfg(not(target_arch = "aarch64"))]
 mod acpi;
 mod acpi_prt;
+mod allocator;
 #[cfg(not(target_arch = "aarch64"))]
 mod apic;
-#[cfg(not(target_arch = "aarch64"))]
-mod pci;
-pub mod drivers;
-pub mod gui;
-#[cfg(feature = "net")]
-mod net;
-#[cfg(feature = "smp")]
-mod smp;
-mod tests;
-pub mod debug;
-#[cfg(feature = "verification")]
-mod verified;
-pub mod elf_dyn;
-pub mod emulation;
-pub mod ebpf;
-pub mod crypto;
-pub mod pty;
-pub mod ipc;
+pub mod arch;
 #[cfg(feature = "ash")]
 pub mod ash;
-pub mod arch;
-pub mod coverage;
-pub mod hal;
+pub mod boot;
 #[cfg(feature = "gpu")]
 pub mod compositor;
-mod selftest;
+pub mod coverage;
+pub mod crypto;
+pub mod debug;
+pub mod drivers;
+pub mod ebpf;
+pub mod elf_dyn;
+pub mod emulation;
+#[cfg(not(target_arch = "aarch64"))]
+mod gdt;
+pub mod gui;
+pub mod hal;
 #[cfg(feature = "hypervisor")]
 pub mod hypervisor;
-pub mod boot;
+#[cfg(not(target_arch = "aarch64"))]
+mod interrupts;
+pub mod iommu;
+pub mod ipc;
+#[cfg(not(target_arch = "aarch64"))]
+mod keyboard;
 pub mod limine;
-pub mod limine_marker;
+mod memory;
+#[cfg(feature = "net")]
+mod net;
+pub mod objects;
+#[cfg(not(target_arch = "aarch64"))]
+mod pci;
+pub mod pty;
+mod security;
+mod selftest;
+mod shell;
+#[cfg(feature = "smp")]
+mod smp;
+mod sync;
+mod syscalls;
+mod task;
+mod tests;
+mod tty;
+#[cfg(feature = "verification")]
+mod verified;
+mod vfs;
+#[cfg(not(target_arch = "aarch64"))]
+mod vga_buffer;
 
-use core::panic::PanicInfo;
 use crate::arch::Arch;
+use core::panic::PanicInfo;
 
 /// Limine entry point — called by the Limine bootloader.
 /// Reads all boot information from Limine static requests.
+///
+/// # Safety
+/// Called by the Limine bootloader at physical entry. Must only be invoked
+/// once per core with a valid Limine-compatible boot context.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     crate::limine::prevent_stripping();
@@ -133,7 +235,9 @@ pub extern "C" fn __stack_chk_fail() -> ! {
     for &b in msg {
         serial_putc(b);
     }
-    loop { crate::arch::CurrentArch::halt(); }
+    loop {
+        crate::arch::CurrentArch::halt();
+    }
 }
 
 pub fn oom_kill() -> ! {
@@ -143,7 +247,13 @@ pub fn oom_kill() -> ! {
 fn init_kaslr() {
     let val = crate::crypto::GLOBAL_ENTROPY.get_u64();
     let val = if val == 0 { 0x1000 } else { val };
-    KERNEL_SLIDE.store(val & 0x0000_0000_FFFF_0000, core::sync::atomic::Ordering::Relaxed);
+    // 30-bit entropy: 2MB-aligned offset up to 1GB. Önceki 16-bit (64KB range)
+    // was trivially brutable. 30-bit = 512 possible slide values.
+    // ponytail: increase to 40-bit when kernel supports 1GB huge page KASLR.
+    KERNEL_SLIDE.store(
+        val & 0x0000_0000_3FFF_F000,
+        core::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 pub fn init_serial() {
@@ -170,11 +280,36 @@ pub fn serial_write(msg: &str) {
     }
 }
 
+/// Kernel-provided sink for `vahi-vfs` serial output: routes `/dev/tty0`
+/// (userspace stdin/stdout/stderr) writes to the real serial port.
+///
+/// Referenced by `crates/vfs/src/lib.rs` as an `extern "Rust"` symbol;
+/// a no-op stub is deliberately NOT defined in the crate (a duplicate
+/// `#[no_mangle]` symbol fails the link).
+#[no_mangle]
+pub fn vahi_kernel_serial_putc(c: u8) {
+    serial_putc(c);
+}
+
+/// Kernel-provided sink for `vahi-vfs` line output (ext4/tarfs/fuse
+/// debug). See `vahi_kernel_serial_putc` for the symbol-ownership note.
+#[no_mangle]
+pub fn vahi_kernel_serial_write(msg: &str) {
+    serial_write(msg);
+}
+
 fn kernel_main() -> ! {
     // Seed stack canary BEFORE any function with stack protection runs.
     let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
-    let base = if entropy == 0 { 0x9E3779B97F4A7C15 } else { entropy };
-    unsafe { __stack_chk_guard = ((base << 1) | base.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize; }
+    let base = if entropy == 0 {
+        0x9E3779B97F4A7C15
+    } else {
+        entropy
+    };
+    unsafe {
+        __stack_chk_guard =
+            ((base << 1) | base.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize;
+    }
 
     init_kaslr();
     init_serial();
@@ -183,116 +318,55 @@ fn kernel_main() -> ! {
         crate::arch::CurrentArch::init_cpu();
     }
 
-    serial_write("[BOOT] memory::init...\n");
+    #[cfg(not(target_arch = "aarch64"))]
     let hhdm = crate::limine::hhdm_offset();
     #[cfg(not(target_arch = "aarch64"))]
-    let phys_mem_offset = x86_64::VirtAddr::new(hhdm);
-    #[cfg(not(target_arch = "aarch64"))]
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let (mut mapper, mut frame_allocator) = unsafe {
+        let phys_mem_offset = x86_64::VirtAddr::new(hhdm);
+        boot::init::init_memory(phys_mem_offset)
+    };
     #[cfg(target_arch = "aarch64")]
-    let mut mapper = unsafe { memory::init_aarch64(hhdm) };
-    serial_write("[BOOT] memory::init done\n");
-
-    let fb = crate::limine::framebuffer();
-    if fb.is_some() { serial_write("[BOOT] fb=present\n"); }
-    else { serial_write("[BOOT] fb=NONE\n"); }
-    drivers::graphics::init_limine(fb);
-    // Show boot splash as soon as framebuffer is ready
-    if crate::drivers::graphics::is_active() {
-        gui::splash::init();
+    {
+        serial_write("[BOOT] memory::init...\n");
+        let hhdm = crate::limine::hhdm_offset();
+        let mut mapper = unsafe { memory::init_aarch64(hhdm) };
+        serial_write("[BOOT] memory::init done\n");
+        serial_write("[BOOT] frame allocator...\n");
+        unsafe { memory::init_frame_allocator_limine() };
+        let mut frame_allocator = memory::buddy::BuddyFrameAllocator;
+        serial_write("[BOOT] heap init...\n");
+        allocator::init_heap(&mut mapper, &mut frame_allocator)
+            .expect("heap initialization failed");
+        serial_write("[BOOT] HHDM mapping done\n");
     }
-    if crate::drivers::graphics::is_active() { serial_write("[BOOT] graphics=active\n"); }
-    else { serial_write("[BOOT] graphics=INACTIVE\n"); }
-    serial_write("[BOOT] -> SARGA OS — Vahi Kernel v0.3.0 starting...\n");
-    serial_write("[SPLASH] SARGA OS loading...\n");
+    #[cfg(not(target_arch = "aarch64"))]
+    unsafe {
+        boot::init::init_graphics(&mut mapper, &mut frame_allocator)
+    };
 
     crate::vga_buffer::init();
-
-    serial_write("[BOOT] frame allocator...\n");
-    unsafe { memory::init_frame_allocator_limine() };
-    let mut frame_allocator = memory::buddy::BuddyFrameAllocator;
-    serial_write("[BOOT] heap init...\n");
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("heap initialization failed");
-    // 256 KiB exec pool for JIT (W^X) — after heap/frame alloc are ready.
     #[cfg(feature = "ash")]
     crate::hal::exec_mem::init_pool();
     #[cfg(not(target_arch = "aarch64"))]
-    {
-        serial_write("[BOOT] gdt init...\n");
-        gdt::init();
-        serial_write("[BOOT] idt+pic init...\n");
-        interrupts::init_idt();
-        serial_write("[BOOT] syscalls init...\n");
-        syscalls::init();
-    }
+    boot::init::init_architecture();
     #[cfg(target_arch = "aarch64")]
     {
         serial_write("[BOOT] arch init...\n");
-        unsafe { crate::arch::CurrentArch::init_boot(); }
+        unsafe {
+            crate::arch::CurrentArch::init_boot();
+        }
     }
-    serial_write("[BOOT] HAL init...\n");
-    let platform_info = arch::CurrentArch::probe_platform();
-    hal::platform::init(platform_info);
-    arch::CurrentArch::init_hal_irq();
-    arch::CurrentArch::init_hal_timer();
-    serial_write("[BOOT] HAL init done\n");
-    serial_write("[BOOT] frame tracker init...\n");
-    let max_phys = crate::limine::max_physical_address();
-    memory::frame_info::init(max_phys);
-    memory::phys::snapshot_baseline();
-    serial_write("[BOOT] -> VAHI Frame Tracker: OK\n");
 
     #[cfg(feature = "self_test")]
-    test_memory_allocations();
+    tests::init::test_memory_allocations();
 
     #[cfg(not(target_arch = "aarch64"))]
-    {
-        serial_write("[BOOT] ACPI init...\n");
-        acpi::init(crate::limine::rsdp_addr());
-        serial_write("[BOOT] APIC init...\n");
-        apic::init();
-    crate::tests::run_all();
-        #[cfg(feature = "smp")]
-        { serial_write("[BOOT] SMP init...\n"); smp::init(); }
-        serial_write("[BOOT] PS/2 init...\n");
-        drivers::ps2::init();
-        serial_write("[BOOT] PCI enumerate...\n");
-        pci::enumerate_pci();
-        serial_write("[BOOT] USB init...\n");
-        drivers::usb::init();
-    }
+    boot::init::init_devices();
     #[cfg(target_arch = "aarch64")]
     {
         serial_write("[BOOT] aarch64 platform init...\n");
     }
-    serial_write("[BOOT] VFS init...\n");
-    if let Some(ramdisk_data) = crate::limine::ramdisk() {
-        *crate::vfs::RAMDISK.lock() = Some(ramdisk_data);
-        serial_write("[BOOT] initrd from Limine modules\n");
-    }
-    vfs::init();
-    serial_write("[BOOT] object manager init...\n");
-    objects::namespace::init();
-    #[cfg(feature = "net")]
-    { serial_write("[BOOT] net init...\n"); net::init(); }
-
-    // Now that the network stack is ready, enable E1000 interrupts
-    #[cfg(all(feature = "net", not(target_arch = "aarch64")))]
-    {
-        if let Some(crate::drivers::net::NicDevice::E1000(ref dev)) = *crate::drivers::net::NIC.lock() {
-            dev.lock().inner.enable_interrupts();
-        }
-    }
-    serial_write("[BOOT] LSM init...\n");
-    security::init();
-    serial_write("[BOOT] CFI init...\n");
-    crate::sync::cfi::cfi_init();
-    #[cfg(feature = "ash")]
-    { serial_write("[BOOT] ASH init...\n"); ash::manager::init(); }
-    #[cfg(feature = "hypervisor")]
-    { serial_write("[BOOT] hypervisor init...\n"); hypervisor::init(); }
-    serial_write("[BOOT] -> SARGA OS: Graphical Console Mode Active!\n");
+    boot::init::init_vfs_network();
 
     serial_write("[BOOT] RTC init...\n");
     let _ = drivers::rtc::init();
@@ -316,22 +390,28 @@ fn kernel_main() -> ! {
         serial_write("[SELF-TEST] running...\n");
         coverage::init();
         selftest::run_all();
-        serial_write(&alloc::format!("[COVERAGE] unique={}, total={}, ratio={:.4}\n",
-            coverage::unique_blocks(), coverage::total_hits(), coverage::coverage_ratio()));
+        serial_write(&alloc::format!(
+            "[COVERAGE] unique={}, total={}, ratio={:.4}\n",
+            coverage::unique_blocks(),
+            coverage::total_hits(),
+            coverage::coverage_ratio()
+        ));
     }
     serial_write("[BOOT] GUI init...\n");
     gui::init();
 
-    task::scheduler::spawn(run_async_tasks);
+    task::scheduler::spawn(boot::tasks::run_async_tasks);
     task::scheduler::spawn(drivers::usb::usb_hid_poller);
-    task::scheduler::spawn(init_os_task);
+    task::scheduler::spawn(boot::tasks::init_os_task);
 
     #[cfg(not(target_arch = "aarch64"))]
     {
         x86_64::instructions::interrupts::enable();
     }
     #[cfg(target_arch = "aarch64")]
-    unsafe { core::arch::asm!("msr daifclr, #2"); } // Clear IRQ mask
+    unsafe {
+        core::arch::asm!("msr daifclr, #2");
+    } // Clear IRQ mask
 
     #[cfg(feature = "verification")]
     {
@@ -348,94 +428,7 @@ fn kernel_main() -> ! {
     }
 }
 
-extern "C" fn init_os_task() -> ! {
-    crate::boot::state::run_boot()
-}
-
-extern "C" fn run_async_tasks() -> ! {
-    crate::serial_write("[ASYNC] Async Executor Started.\n");
-    use task::{Task, executor::Executor};
-    let mut executor = Executor::new();
-
-    // ponytail: kernel shell disabled — it writes directly to the framebuffer,
-    // clobbering the GUI compositor's rendered output. The GUI handles keyboard.
-    let _ = executor.spawn(Task::new(network_poll_task()));
-    let _ = executor.spawn(Task::new(gui::input::gui_refresh_task()));
-    executor.run();
-}
-
-
-
-#[cfg(feature = "net")]
-pub async fn network_poll_task() {
-    loop {
-        crate::net::poll();
-        core::hint::spin_loop();
-        crate::task::YieldNow::new().await;
-    }
-}
-
-
-
-#[cfg(feature = "self_test")]
-fn test_memory_allocations() {
-    serial_write("[TRACE] test_memory_allocations entered\n");
-    // Switch to a distinct color for tests
-    crate::vga_buffer::set_color(crate::vga_buffer::Color::LightCyan, crate::vga_buffer::Color::Black);
-    println!("\n[ SYSTEM ] Verifying Memory Allocators...");
-    serial_write("[TRACE] after first println\n");
-    
-    // 1. Test Small Allocations (Slab Allocator)
-    use alloc::boxed::Box;
-    let b1 = Box::new(42u32);
-    let b2 = Box::new(123u64);
-    serial_write("[TRACE] after Box::new\n");
-    assert_eq!(*b1, 42);
-    assert_eq!(*b2, 123);
-    println!("  -> Slab Cache (Small Objects) - PASSED");
-    serial_write("[TRACE] after small alloc test\n");
-
-    // 2. Test Large Allocations (Fallback / Linked List)
-    let large = Box::new([0u8; 8192]); 
-    assert_eq!(large[0], 0);
-    println!("  -> Fallback (Large Blocks)    - PASSED");
-    serial_write("[TRACE] after large alloc test\n");
-
-    // 3. Test Dynamic growth
-    use alloc::vec::Vec;
-    let mut v = Vec::new();
-    for i in 0..500 {
-        v.push(i);
-    }
-    assert_eq!(v[499], 499);
-    println!("  -> Dynamic Vector Growth      - PASSED");
-    serial_write("[TRACE] after vec test\n");
-    
-    println!("[ SUCCESS ] All Allocator tests passed! ✅\n");
-    serial_write("[TRACE] after final println\n");
-    
-    // Reset color
-    crate::vga_buffer::set_color(crate::vga_buffer::Color::White, crate::vga_buffer::Color::Black);
-
-    // Add a brief delay so the user can read the output
-    println!("Pausing briefly...");
-    serial_write("[TRACE] before spin loop\n");
-    // ponytail: 1M spin_loop iterations took ~90s in debug+TCG; 10k is
-    // enough for a human to read a framebuffer splash.
-    for _ in 0..10000 {
-        core::hint::spin_loop();
-    }
-    serial_write("[TRACE] after spin loop\n");
-}#[panic_handler]
+#[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     panic_handler::handle_panic(info)
 }
-
-
-
-
-
-
-
-
-

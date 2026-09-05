@@ -1,6 +1,7 @@
 # ADR-024: Container Scope
 
 ## Status
+Accepted
 
 **DECISION REQUIRED** — This ADR proposes a container architecture that requires team consensus.
 

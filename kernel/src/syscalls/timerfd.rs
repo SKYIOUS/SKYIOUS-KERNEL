@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sync::IrqSafeMutex as Mutex;
-use crate::task::process::{CURRENT_PROCESS, FileDescriptor, TimerFdData};
+use crate::task::process::{FileDescriptor, TimerFdData, CURRENT_PROCESS};
 
 // ─── Constants ───────────────────────────────────────────────────
 
@@ -119,7 +119,12 @@ pub fn sys_timerfd_create(clockid: u64, flags: u64) -> u64 {
 /// * `new_value` — pointer to `itimerspec { it_interval, it_value }`
 /// * `old_value` — if non-null, receives previous timer state
 /// * `flags` — TFD_TIMER_ABSTIME (1) for absolute time
-pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_value_ptr: *mut u8) -> u64 {
+pub fn sys_timerfd_settime(
+    fd: u64,
+    flags: u64,
+    new_value_ptr: *const u8,
+    old_value_ptr: *mut u8,
+) -> u64 {
     if new_value_ptr.is_null() {
         return crate::syscalls::errno::Errno::EINVAL as u64;
     }
@@ -132,9 +137,14 @@ pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_va
     };
     unsafe {
         if crate::syscalls::user_access::copy_from_user(
-            core::slice::from_raw_parts_mut(&mut new_val as *mut _ as *mut u8, core::mem::size_of::<ITimerspec>()),
+            core::slice::from_raw_parts_mut(
+                &mut new_val as *mut _ as *mut u8,
+                core::mem::size_of::<ITimerspec>(),
+            ),
             new_value_ptr,
-        ).is_err() {
+        )
+        .is_err()
+        {
             return crate::syscalls::errno::Errno::EFAULT as u64;
         }
     }
@@ -184,7 +194,10 @@ pub fn sys_timerfd_settime(fd: u64, flags: u64, new_value_ptr: *const u8, old_va
         unsafe {
             let _ = crate::syscalls::user_access::copy_to_user(
                 old_value_ptr,
-                core::slice::from_raw_parts(&old as *const _ as *const u8, core::mem::size_of::<ITimerspec>()),
+                core::slice::from_raw_parts(
+                    &old as *const _ as *const u8,
+                    core::mem::size_of::<ITimerspec>(),
+                ),
             );
         }
     }
@@ -273,8 +286,13 @@ pub fn sys_timerfd_gettime(fd: u64, cur_value_ptr: *mut u8) -> u64 {
     unsafe {
         if crate::syscalls::user_access::copy_to_user(
             cur_value_ptr,
-            core::slice::from_raw_parts(&cur as *const _ as *const u8, core::mem::size_of::<ITimerspec>()),
-        ).is_err() {
+            core::slice::from_raw_parts(
+                &cur as *const _ as *const u8,
+                core::mem::size_of::<ITimerspec>(),
+            ),
+        )
+        .is_err()
+        {
             return crate::syscalls::errno::Errno::EFAULT as u64;
         }
     }

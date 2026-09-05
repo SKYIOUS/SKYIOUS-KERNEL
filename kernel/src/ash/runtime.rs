@@ -1,17 +1,13 @@
-use crate::ebpf::vm::{EbpfVm, EbpfRegs, STACK_SIZE};
+use crate::ash::{AshError, AshResult, VerifiedAsh};
+use crate::ebpf::vm::{EbpfRegs, EbpfVm, STACK_SIZE};
 use crate::hal::exec_mem::ExecRegion;
-use crate::ash::{VerifiedAsh, AshResult, AshError};
 
 /// Execute a verified ASH handler with the given context and payload.
 /// R1 = pointer to context struct
 /// R2 = pointer to payload buffer
 /// R3 = payload length
 /// Return value maps to AshResult.
-pub fn execute_handler(
-    handler: &VerifiedAsh,
-    context: &[u8],
-    payload: &mut [u8],
-) -> AshResult {
+pub fn execute_handler(handler: &VerifiedAsh, context: &[u8], payload: &mut [u8]) -> AshResult {
     // Try JIT execution first if JIT-compiled code is available
     if !handler.jited.is_empty() {
         if let Ok(result) = execute_jit(handler, context, payload) {

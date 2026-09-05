@@ -1,0 +1,8 @@
+[package]
+name = "vahi-limine"
+version = "0.3.0"
+edition = "2021"
+description = "Limine boot protocol integration for the Vahi kernel"
+
+[dependencies]
+limine = "0.6.5"

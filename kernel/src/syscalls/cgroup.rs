@@ -3,10 +3,10 @@
 //! Implements a subset of Linux cgroup v2 for CPU, memory, and PID limits.
 //! Uses a hierarchical structure matching Linux cgroup v2.
 
-use alloc::vec::Vec;
-use alloc::string::String;
-use crate::syscalls::errno;
 use crate::sync::IrqSafeMutex as Mutex;
+use crate::syscalls::errno;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Cgroup controller names
 pub const CGROUP_CPU: &str = "cpu";
@@ -24,10 +24,10 @@ pub struct CgroupController {
 /// CPU controller limits
 #[derive(Clone, Debug)]
 pub struct CpuController {
-    pub max_usec: Option<u64>,    // cpu.max — max CPU time in microseconds per period
+    pub max_usec: Option<u64>, // cpu.max — max CPU time in microseconds per period
     pub period_usec: Option<u64>, // cpu.max — period in microseconds
-    pub weight: u32,              // cpu.weight — proportional share
-    pub nr_cpus: Option<u32>,     // cpu.max — max CPUs
+    pub weight: u32,           // cpu.weight — proportional share
+    pub nr_cpus: Option<u32>,  // cpu.max — max CPUs
 }
 
 impl Default for CpuController {
@@ -35,7 +35,7 @@ impl Default for CpuController {
         Self {
             max_usec: None,
             period_usec: Some(100_000), // 100ms default period
-            weight: 100, // default weight
+            weight: 100,                // default weight
             nr_cpus: None,
         }
     }
@@ -44,12 +44,12 @@ impl Default for CpuController {
 /// Memory controller limits
 #[derive(Clone, Debug)]
 pub struct MemoryController {
-    pub max: Option<u64>,         // memory.max — max memory in bytes
-    pub high: Option<u64>,        // memory.high — high watermark
-    pub low: Option<u64>,         // memory.low — best-effort protection
-    pub min: Option<u64>,         // memory.min — hard protection
-    pub swap_max: Option<u64>,    // memory.swap.max — max swap
-    pub current: u64,             // memory.current — current usage
+    pub max: Option<u64>,      // memory.max — max memory in bytes
+    pub high: Option<u64>,     // memory.high — high watermark
+    pub low: Option<u64>,      // memory.low — best-effort protection
+    pub min: Option<u64>,      // memory.min — hard protection
+    pub swap_max: Option<u64>, // memory.swap.max — max swap
+    pub current: u64,          // memory.current — current usage
 }
 
 impl Default for MemoryController {
@@ -68,8 +68,8 @@ impl Default for MemoryController {
 /// PID controller limits
 #[derive(Clone, Debug)]
 pub struct PidsController {
-    pub max: Option<u32>,    // pids.max — max number of processes
-    pub current: u32,        // pids.current — current number of processes
+    pub max: Option<u32>, // pids.max — max number of processes
+    pub current: u32,     // pids.current — current number of processes
 }
 
 impl Default for PidsController {
@@ -153,10 +153,22 @@ impl CgroupHierarchy {
     fn new() -> Self {
         let mut cgroups = hashbrown::HashMap::new();
         let mut root = Cgroup::new("/");
-        root.controllers.push(CgroupController { name: String::from("cpu"), enabled: true });
-        root.controllers.push(CgroupController { name: String::from("memory"), enabled: true });
-        root.controllers.push(CgroupController { name: String::from("pids"), enabled: true });
-        root.controllers.push(CgroupController { name: String::from("io"), enabled: true });
+        root.controllers.push(CgroupController {
+            name: String::from("cpu"),
+            enabled: true,
+        });
+        root.controllers.push(CgroupController {
+            name: String::from("memory"),
+            enabled: true,
+        });
+        root.controllers.push(CgroupController {
+            name: String::from("pids"),
+            enabled: true,
+        });
+        root.controllers.push(CgroupController {
+            name: String::from("io"),
+            enabled: true,
+        });
         cgroups.insert(String::from("/"), root);
         Self { cgroups }
     }
@@ -198,7 +210,11 @@ impl CgroupHierarchy {
         let mut current = path;
         loop {
             if let Some(cg) = self.cgroups.get(current) {
-                if cg.controllers.iter().any(|c| c.name == controller && c.enabled) {
+                if cg
+                    .controllers
+                    .iter()
+                    .any(|c| c.name == controller && c.enabled)
+                {
                     return Some(cg);
                 }
             }
@@ -236,7 +252,9 @@ pub fn cgroup_mkdir(path: &str) -> Result<(), errno::Errno> {
 /// cgroup_write_controller — Write to a cgroup controller
 pub fn cgroup_write(path: &str, controller: &str, value: &str) -> Result<(), errno::Errno> {
     let mut hierarchy = cgroup_ensure();
-    let cg = hierarchy.find_cgroup_mut(path).ok_or(errno::Errno::ENOENT)?;
+    let cg = hierarchy
+        .find_cgroup_mut(path)
+        .ok_or(errno::Errno::ENOENT)?;
 
     match controller {
         "cpu.max" => {
@@ -252,16 +270,28 @@ pub fn cgroup_write(path: &str, controller: &str, value: &str) -> Result<(), err
             cg.cpu.weight = value.trim().parse().unwrap_or(100);
         }
         "memory.max" => {
-            cg.memory.max = if value.trim() == "max" { None } else { value.trim().parse().ok() };
+            cg.memory.max = if value.trim() == "max" {
+                None
+            } else {
+                value.trim().parse().ok()
+            };
         }
         "memory.high" => {
-            cg.memory.high = if value.trim() == "max" { None } else { value.trim().parse().ok() };
+            cg.memory.high = if value.trim() == "max" {
+                None
+            } else {
+                value.trim().parse().ok()
+            };
         }
         "memory.min" => {
             cg.memory.min = value.trim().parse().ok();
         }
         "pids.max" => {
-            cg.pids.max = if value.trim() == "max" { None } else { value.trim().parse().ok() };
+            cg.pids.max = if value.trim() == "max" {
+                None
+            } else {
+                value.trim().parse().ok()
+            };
         }
         "io.max" => {
             // Format: "MAJ:MIN rbps=1234 wbps=5678 riops=100 wiops=200"
@@ -315,7 +345,9 @@ fn read_user_string(ptr: *const u8, max: usize) -> Result<String, errno::Errno> 
     if unsafe { crate::syscalls::user_access::copy_from_user(&mut buf[..copy_len], ptr) }.is_err() {
         return Err(errno::Errno::EFAULT);
     }
-    let trimmed = core::str::from_utf8(&buf).unwrap_or("").trim_matches(|c| c == '\0');
+    let trimmed = core::str::from_utf8(&buf)
+        .unwrap_or("")
+        .trim_matches(|c| c == '\0');
     Ok(alloc::format!("{}", trimmed))
 }
 
@@ -375,4 +407,9 @@ pub fn sys_cgroup_read(path_ptr: *const u8, ctrl_ptr: *const u8, out_ptr: *mut u
         }
         Err(e) => e as u64,
     }
+}
+
+/// Account memory usage for a cgroup path (stub — tracks but doesn't limit)
+pub fn cgroup_account_memory(_path: &str, _bytes: u64) {
+    // Memory accounting is tracked but not enforced in this kernel version
 }

@@ -1,0 +1,19 @@
+[package]
+name = "vahi-task"
+version = "0.3.0"
+edition = "2021"
+description = "Shared task vocabulary (PTY, async task types) for the Vahi kernel"
+
+[dependencies]
+vahi-types = { path = "../types" }
+vahi-sync = { path = "../sync" }
+spin = "0.9.8"
+bitflags = "2"
+lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
+crossbeam-queue = { version = "0.3.12", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3.31", default-features = false, features = ["alloc"] }
+
+[features]
+default = ["smp"]
+smp = []
+verification = []

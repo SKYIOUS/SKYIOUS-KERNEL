@@ -1,9 +1,9 @@
-use hashbrown::HashMap;
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::sync::Arc;
 use super::KernelObject;
 use crate::sync::IrqSafeMutex as Mutex;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 use lazy_static::lazy_static;
 
 /// A directory in the global object namespace.
@@ -14,7 +14,10 @@ pub struct ObjectDirectory {
 
 impl ObjectDirectory {
     pub fn new() -> Self {
-        ObjectDirectory { entries: HashMap::new(), subdirs: HashMap::new() }
+        ObjectDirectory {
+            entries: HashMap::new(),
+            subdirs: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, name: &str, obj: Arc<dyn KernelObject>) {
@@ -23,7 +26,9 @@ impl ObjectDirectory {
 
     pub fn lookup(&self, path: &str) -> Option<&Arc<dyn KernelObject>> {
         let path = path.trim_matches('/');
-        if path.is_empty() { return None; }
+        if path.is_empty() {
+            return None;
+        }
         let mut parts: Vec<&str> = path.split('/').collect();
         let name = parts.pop()?;
         let mut dir = self;
@@ -35,7 +40,9 @@ impl ObjectDirectory {
 
     pub fn lookup_mut(&mut self, path: &str) -> Option<&mut Arc<dyn KernelObject>> {
         let path = path.trim_matches('/');
-        if path.is_empty() { return None; }
+        if path.is_empty() {
+            return None;
+        }
         let mut parts: Vec<&str> = path.split('/').collect();
         let name = parts.pop()?;
         let mut dir = self;
@@ -47,7 +54,9 @@ impl ObjectDirectory {
 
     pub fn remove(&mut self, path: &str) -> Option<Arc<dyn KernelObject>> {
         let path = path.trim_matches('/');
-        if path.is_empty() { return None; }
+        if path.is_empty() {
+            return None;
+        }
         let mut parts: Vec<&str> = path.split('/').collect();
         let name = parts.pop()?;
         let mut dir = self;
@@ -58,7 +67,9 @@ impl ObjectDirectory {
     }
 
     pub fn mkdir(&mut self, path: &str) -> bool {
-        if path.is_empty() || path == "/" { return false; }
+        if path.is_empty() || path == "/" {
+            return false;
+        }
         let path = path.trim_matches('/');
         let parts: Vec<&str> = path.split('/').collect();
         self.mkdir_slice(&parts)
@@ -70,11 +81,15 @@ impl ObjectDirectory {
             Some(&n) => n,
         };
         if parts.len() == 1 {
-            if self.subdirs.contains_key(name) { return false; }
-            self.subdirs.insert(String::from(name), ObjectDirectory::new());
+            if self.subdirs.contains_key(name) {
+                return false;
+            }
+            self.subdirs
+                .insert(String::from(name), ObjectDirectory::new());
             true
         } else {
-            self.subdirs.get_mut(name)
+            self.subdirs
+                .get_mut(name)
                 .is_some_and(|d| d.mkdir_slice(&parts[1..]))
         }
     }
@@ -87,7 +102,9 @@ pub struct ObjectNamespace {
 
 impl ObjectNamespace {
     pub fn new() -> Self {
-        ObjectNamespace { root: ObjectDirectory::new() }
+        ObjectNamespace {
+            root: ObjectDirectory::new(),
+        }
     }
 
     pub fn root(&mut self) -> &mut ObjectDirectory {
@@ -100,13 +117,16 @@ impl ObjectNamespace {
 
     pub fn insert(&mut self, path: &str, obj: Arc<dyn KernelObject>) {
         let path = path.trim_matches('/');
-        if path.is_empty() { return; }
+        if path.is_empty() {
+            return;
+        }
         let mut parts: Vec<&str> = path.split('/').collect();
         let name = parts.pop().unwrap();
         let mut dir = &mut self.root;
         for part in parts {
             if !dir.subdirs.contains_key(part) {
-                dir.subdirs.insert(String::from(part), ObjectDirectory::new());
+                dir.subdirs
+                    .insert(String::from(part), ObjectDirectory::new());
             }
             dir = dir.subdirs.get_mut(part).unwrap();
         }

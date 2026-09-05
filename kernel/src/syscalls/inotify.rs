@@ -6,44 +6,53 @@
 //!
 //! Events are fired by calling `inotify_emit()` from VFS operations.
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use super::errno;
 use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::CURRENT_PROCESS;
-use super::errno;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 // ─── Public inotify event mask constants (Linux-compatible) ──────
 
-pub const IN_ACCESS: u32        = 0x0000_0001;
-pub const IN_MODIFY: u32        = 0x0000_0002;
-pub const IN_ATTRIB: u32        = 0x0000_0004;
-pub const IN_CLOSE_WRITE: u32   = 0x0000_0008;
+pub const IN_ACCESS: u32 = 0x0000_0001;
+pub const IN_MODIFY: u32 = 0x0000_0002;
+pub const IN_ATTRIB: u32 = 0x0000_0004;
+pub const IN_CLOSE_WRITE: u32 = 0x0000_0008;
 pub const IN_CLOSE_NOWRITE: u32 = 0x0000_0010;
-pub const IN_OPEN: u32          = 0x0000_0020;
-pub const IN_MOVED_FROM: u32    = 0x0000_0040;
-pub const IN_MOVED_TO: u32      = 0x0000_0080;
-pub const IN_CREATE: u32        = 0x0000_0100;
-pub const IN_DELETE: u32        = 0x0000_0200;
-pub const IN_DELETE_SELF: u32   = 0x0000_0400;
-pub const IN_MOVE_SELF: u32     = 0x0000_0800;
+pub const IN_OPEN: u32 = 0x0000_0020;
+pub const IN_MOVED_FROM: u32 = 0x0000_0040;
+pub const IN_MOVED_TO: u32 = 0x0000_0080;
+pub const IN_CREATE: u32 = 0x0000_0100;
+pub const IN_DELETE: u32 = 0x0000_0200;
+pub const IN_DELETE_SELF: u32 = 0x0000_0400;
+pub const IN_MOVE_SELF: u32 = 0x0000_0800;
 
-pub const IN_UNMOUNT: u32       = 0x0000_2000;
-pub const IN_Q_OVERFLOW: u32    = 0x0000_4000;
-pub const IN_IGNORED: u32       = 0x0000_8000;
-pub const IN_ONLYDIR: u32       = 0x0100_0000;
-pub const IN_DONT_FOLLOW: u32   = 0x0200_0000;
-pub const IN_EXCL_UNLINK: u32   = 0x0400_0000;
-pub const IN_MASK_CREATE: u32   = 0x1000_0000;
-pub const IN_MASK_ADD: u32      = 0x2000_0000;
-pub const IN_ISDIR: u32         = 0x4000_0000;
-pub const IN_ONESHOT: u32       = 0x8000_0000;
+pub const IN_UNMOUNT: u32 = 0x0000_2000;
+pub const IN_Q_OVERFLOW: u32 = 0x0000_4000;
+pub const IN_IGNORED: u32 = 0x0000_8000;
+pub const IN_ONLYDIR: u32 = 0x0100_0000;
+pub const IN_DONT_FOLLOW: u32 = 0x0200_0000;
+pub const IN_EXCL_UNLINK: u32 = 0x0400_0000;
+pub const IN_MASK_CREATE: u32 = 0x1000_0000;
+pub const IN_MASK_ADD: u32 = 0x2000_0000;
+pub const IN_ISDIR: u32 = 0x4000_0000;
+pub const IN_ONESHOT: u32 = 0x8000_0000;
 
 /// All event types that can be monitored
-pub const IN_ALL_EVENTS: u32 = IN_ACCESS | IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE
-    | IN_CLOSE_NOWRITE | IN_OPEN | IN_MOVED_FROM | IN_MOVED_TO
-    | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF;
+pub const IN_ALL_EVENTS: u32 = IN_ACCESS
+    | IN_MODIFY
+    | IN_ATTRIB
+    | IN_CLOSE_WRITE
+    | IN_CLOSE_NOWRITE
+    | IN_OPEN
+    | IN_MOVED_FROM
+    | IN_MOVED_TO
+    | IN_CREATE
+    | IN_DELETE
+    | IN_DELETE_SELF
+    | IN_MOVE_SELF;
 
 /// The `inotify_event` struct layout (variable-length due to optional name).
 /// Written as raw bytes to userspace via read().
@@ -124,8 +133,7 @@ lazy_static::lazy_static! {
 }
 
 /// Next global inotify handle (for generating unique fd keys).
-static NEXT_INOTIFY_KEY: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0x2000);
+static NEXT_INOTIFY_KEY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x2000);
 
 /// Fire an inotify event to all watching instances.
 ///
@@ -187,7 +195,7 @@ pub fn inotify_emit(path: &str, mask: u32, cookie: u32, name: &str) {
             } else {
                 String::new()
             };
-            let name_len = event_name.len() as u32;
+            let _name_len = event_name.len() as u32;
 
             inst.events.push(PendingEvent {
                 wd,
@@ -210,8 +218,8 @@ pub fn inotify_emit(path: &str, mask: u32, cookie: u32, name: &str) {
 ///
 /// Creates a new inotify instance. flags may include O_NONBLOCK, O_CLOEXEC.
 pub fn sys_inotify_init(flags: u64) -> u64 {
-    let nonblock = (flags & 0x800 /* O_NONBLOCK */) != 0;
-    let _cloexec = (flags & 0x80000 /* O_CLOEXEC */) != 0;
+    let nonblock = (flags & 0x800/* O_NONBLOCK */) != 0;
+    let _cloexec = (flags & 0x80000/* O_CLOEXEC */) != 0;
 
     let key = NEXT_INOTIFY_KEY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let instance = Arc::new(Mutex::new(InotifyInstance::new(nonblock)));
@@ -225,10 +233,8 @@ pub fn sys_inotify_init(flags: u64) -> u64 {
         if fd_num >= files.fd_table.len() {
             files.fd_table.resize(fd_num + 1, None);
         }
-        files.fd_table[fd_num] = Some(crate::task::process::FileDescriptor::InotifyFd {
-            instance_key: key,
-            _instance: instance,
-        });
+        files.fd_table[fd_num] =
+            Some(crate::task::process::FileDescriptor::InotifyFd { instance_key: key });
         fd_num as u64
     } else {
         INOTIFY_INSTANCES.lock().remove(&key);
@@ -267,7 +273,9 @@ pub fn sys_inotify_add_watch(fd: u64, pathname: *const u8, mask: u32) -> u64 {
                     return errno::Errno::EBADF as u64;
                 }
                 match &files.fd_table[fd as usize] {
-                    Some(crate::task::process::FileDescriptor::InotifyFd { instance_key, .. }) => *instance_key,
+                    Some(crate::task::process::FileDescriptor::InotifyFd { instance_key }) => {
+                        *instance_key
+                    }
                     _ => return errno::Errno::EINVAL as u64,
                 }
             }
@@ -337,7 +345,9 @@ pub fn sys_inotify_rm_watch(fd: u64, wd: u32) -> u64 {
                     return errno::Errno::EBADF as u64;
                 }
                 match &files.fd_table[fd as usize] {
-                    Some(crate::task::process::FileDescriptor::InotifyFd { instance_key, .. }) => *instance_key,
+                    Some(crate::task::process::FileDescriptor::InotifyFd { instance_key }) => {
+                        *instance_key
+                    }
                     _ => return errno::Errno::EINVAL as u64,
                 }
             }
@@ -416,9 +426,8 @@ pub fn inotify_read(key: u64, buf: &mut [u8]) -> Result<usize, errno::Errno> {
         };
 
         // Write the 16-byte header
-        let header_bytes = unsafe {
-            core::slice::from_raw_parts(&header as *const _ as *const u8, 16)
-        };
+        let header_bytes =
+            unsafe { core::slice::from_raw_parts(&header as *const _ as *const u8, 16) };
         buf[offset..offset + 16].copy_from_slice(header_bytes);
         offset += 16;
 
@@ -479,7 +488,8 @@ fn resolve_path(path: &str) -> String {
     } else {
         // Prepend cwd
         let lock = CURRENT_PROCESS.lock();
-        let cwd = lock.as_ref()
+        let cwd = lock
+            .as_ref()
             .map(|p| p.files.lock().cwd.clone())
             .unwrap_or_else(|| String::from("/"));
         if cwd == "/" {
@@ -494,14 +504,18 @@ fn resolve_path(path: &str) -> String {
     for part in path.split('/') {
         match part {
             "" | "." => continue,
-            ".." => { components.pop(); }
+            ".." => {
+                components.pop();
+            }
             other => components.push(other),
         }
     }
 
     let mut result = String::from("/");
     for (i, comp) in components.iter().enumerate() {
-        if i > 0 { result.push('/'); }
+        if i > 0 {
+            result.push('/');
+        }
         result.push_str(comp);
     }
 

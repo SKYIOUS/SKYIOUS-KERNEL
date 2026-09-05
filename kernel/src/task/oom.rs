@@ -74,11 +74,7 @@ pub fn compute_oom_score_from_proc(
 
 /// Compute OOM score — locks PROCESS_TABLE internally.
 /// Use compute_oom_score_from_proc when you already hold the lock.
-pub fn compute_oom_score(
-    pid: u64,
-    rss_bytes: u64,
-    total_memory_bytes: u64,
-) -> (i32, i32, i32) {
+pub fn compute_oom_score(pid: u64, rss_bytes: u64, total_memory_bytes: u64) -> (i32, i32, i32) {
     let table = crate::task::process::PROCESS_TABLE.lock();
     if let Some(proc) = table.get(&pid) {
         compute_oom_score_from_proc(pid, proc, rss_bytes, total_memory_bytes)
@@ -89,11 +85,7 @@ pub fn compute_oom_score(
 
 /// Get the OOM score adjustment for a process.
 pub fn get_oom_score_adj(pid: u64) -> i32 {
-    OOM_ADJUSTMENTS
-        .lock()
-        .get(&pid)
-        .copied()
-        .unwrap_or(0)
+    OOM_ADJUSTMENTS.lock().get(&pid).copied().unwrap_or(0)
 }
 
 /// Set the OOM score adjustment for a process.
@@ -314,7 +306,7 @@ fn kill_victim(pid: u64) {
     // Send SIGKILL (signal 9) to all threads of the process
     proc.signals
         .lock()
-        .raise(crate::syscalls::signal::Signal::_SIGKILL);
+        .raise(crate::syscalls::signal::Signal::SIGKILL);
 
     // Free swap mappings
     {
@@ -364,14 +356,25 @@ fn kill_victim(pid: u64) {
 
     // Notify parent with SIGCHLD
     if let Some(parent_id) = proc.parent_id {
-        let table = crate::task::process::PROCESS_TABLE.lock();
-        if let Some(parent) = table.get(&parent_id) {
+        // Clone the parent out from under the table guard: raise/route below
+        // take per-process locks (I2: never nested under the table).
+        let parent = {
+            let table = crate::task::process::PROCESS_TABLE.lock();
+            table.get(&parent_id).cloned()
+        };
+        if let Some(parent) = parent {
             parent
                 .signals
                 .lock()
                 .raise(crate::syscalls::signal::Signal::SIGCHLD);
-            crate::task::process::route_signal_to_signalfd(
-                parent.id, 17, crate::task::process::SI_CHILD, pid, 0, 0,
+            // Arc already resolved: route via the IRQ-safe variant (no table re-lock).
+            crate::task::process::route_signal_to_signalfd_for(
+                &parent,
+                17,
+                crate::task::process::SI_CHILD,
+                pid,
+                0,
+                0,
             );
         }
     }
@@ -504,7 +507,10 @@ fn write_pressure_msg<'a>(buf: &'a mut [u8], free: u64, threshold: u64) -> &'a s
 /// Write a u64 as decimal into buf at offset, return new offset.
 fn write_u64(buf: &mut [u8], mut pos: usize, val: u64) -> usize {
     if val == 0 {
-        if pos < buf.len() { buf[pos] = b'0'; pos += 1; }
+        if pos < buf.len() {
+            buf[pos] = b'0';
+            pos += 1;
+        }
         return pos;
     }
     // Write digits in reverse, then flip.

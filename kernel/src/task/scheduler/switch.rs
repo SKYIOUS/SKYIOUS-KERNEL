@@ -4,7 +4,10 @@
 //! `schedule` is the blocking scheduler loop (used by syscalls).
 //! `try_schedule` is the non-blocking version (used by timer IRQ and idle loop).
 
-use super::{PerCpuScheduler, SCHED_QUIESCE, this_cpu_sched, route_outgoing, route_switching_old, should_preempt};
+use super::{
+    route_outgoing, route_switching_old, should_preempt, this_cpu_sched, PerCpuScheduler,
+    SCHED_QUIESCE,
+};
 use core::sync::atomic::Ordering;
 
 // ─── Architecture-specific interrupt helpers ────────────────────
@@ -13,7 +16,9 @@ use core::sync::atomic::Ordering;
 #[inline(always)]
 fn save_and_cli() -> u64 {
     let flags: u64;
-    unsafe { core::arch::asm!("pushfq; pop {0}; cli", out(reg) flags, options(att_syntax)); }
+    unsafe {
+        core::arch::asm!("pushfq; pop {0}; cli", out(reg) flags, options(att_syntax));
+    }
     flags
 }
 
@@ -21,7 +26,9 @@ fn save_and_cli() -> u64 {
 #[inline(always)]
 fn restore_if(flags: u64) {
     if flags & 0x200 != 0 {
-        unsafe { core::arch::asm!("sti"); }
+        unsafe {
+            core::arch::asm!("sti");
+        }
     }
 }
 
@@ -29,14 +36,18 @@ fn restore_if(flags: u64) {
 #[inline(always)]
 fn save_and_cli() -> u64 {
     let daif: u64;
-    unsafe { core::arch::asm!("mrs {0}, daif; msr daifset, #2", out(reg) daif); }
+    unsafe {
+        core::arch::asm!("mrs {0}, daif; msr daifset, #2", out(reg) daif);
+    }
     daif
 }
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn restore_if(daif: u64) {
-    unsafe { core::arch::asm!("msr daif, {0}", in(reg) daif); }
+    unsafe {
+        core::arch::asm!("msr daif, {0}", in(reg) daif);
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -48,7 +59,9 @@ fn hlt() {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn hlt() {
-    unsafe { core::arch::asm!("wfi"); }
+    unsafe {
+        core::arch::asm!("wfi");
+    }
 }
 
 impl PerCpuScheduler {
@@ -117,6 +130,10 @@ impl PerCpuScheduler {
                 process.address_space.activate();
             }
             *cur_proto = Some(process.clone());
+            // Also update PerCpuData for assembly-level tracing
+            crate::syscalls::get_per_cpu()
+                .current_process
+                .store(process.id, core::sync::atomic::Ordering::Relaxed);
         }
 
         // Lazily allocate FPU state buffer for the incoming thread (x86_64 only)
@@ -157,7 +174,32 @@ impl PerCpuScheduler {
             &raw mut self.dummy
         };
 
+        let announce = next.process.as_ref().map(|p| p.id);
         self.current_thread = Some(next);
+        if let Some(pid) = announce {
+            if !self.first_user_announced {
+                self.first_user_announced = true;
+                // One-time per-CPU line: first userspace thread scheduled on
+                // this CPU. IRQ context (timer tick can drive try_schedule), so
+                // format into a stack buffer — no allocation.
+                let mut scratch = [0u8; 96];
+                let mut w = crate::interrupts::diag::IrqFmtBuf {
+                    buf: &mut scratch,
+                    len: 0,
+                };
+                let _ = core::fmt::write(
+                    &mut w,
+                    format_args!(
+                        "[SMP] CPU {} first user thread pid={}\n",
+                        crate::smp::get_cpu_id(),
+                        pid
+                    ),
+                );
+                let n = w.len;
+                drop(w);
+                crate::serial_write(core::str::from_utf8(&scratch[..n]).unwrap_or(""));
+            }
+        }
         crate::syscalls::set_kernel_stack(stack_top);
         crate::gdt::set_privilege_stack(stack_top);
 
@@ -165,15 +207,27 @@ impl PerCpuScheduler {
     }
 
     #[cfg(target_arch = "x86_64")]
-    pub fn prepare_switch_tls(&mut self) -> Option<(*mut u64, u64, u64, *mut crate::task::thread::FpuArea, *const crate::task::thread::FpuArea)> {
-        let old_fpu_ptr = self.current_thread.as_ref()
+    pub fn prepare_switch_tls(
+        &mut self,
+    ) -> Option<(
+        *mut u64,
+        u64,
+        u64,
+        *mut crate::task::thread::FpuArea,
+        *const crate::task::thread::FpuArea,
+    )> {
+        let old_fpu_ptr = self
+            .current_thread
+            .as_ref()
             .and_then(|t| t.fpu_state.as_ref())
             .map(|b| b.as_ref() as *const _ as *mut crate::task::thread::FpuArea)
             .unwrap_or(core::ptr::null_mut());
         let (old, new) = self.prepare_switch()?;
         let cur = self.current_thread.as_ref()?;
         let fs_base = cur.fs_base;
-        let new_fpu = cur.fpu_state.as_ref()
+        let new_fpu = cur
+            .fpu_state
+            .as_ref()
             .map(|b| b.as_ref() as *const _ as *const crate::task::thread::FpuArea)
             .unwrap_or(core::ptr::null());
         Some((old, new, fs_base, old_fpu_ptr, new_fpu))
@@ -203,12 +257,23 @@ pub fn schedule() {
         let (old_ptr, new_sp, new_fs, old_fpu, new_fpu) = {
             let mut s = this_cpu_sched().lock();
             s.prepare_switch_tls()
-        }.map_or((core::ptr::null_mut(), 0, 0, core::ptr::null_mut(), core::ptr::null()), |(a, b, c, d, e)| (a, b, c, d, e));
+        }
+        .map_or(
+            (
+                core::ptr::null_mut(),
+                0,
+                0,
+                core::ptr::null_mut(),
+                core::ptr::null(),
+            ),
+            |(a, b, c, d, e)| (a, b, c, d, e),
+        );
         #[cfg(target_arch = "aarch64")]
         let (old_ptr, new_sp, new_fs) = {
             let mut s = this_cpu_sched().lock();
             s.prepare_switch_tls()
-        }.map_or((core::ptr::null_mut(), 0, 0), |(a, b, c)| (a, b, c));
+        }
+        .map_or((core::ptr::null_mut(), 0, 0), |(a, b, c)| (a, b, c));
 
         if !old_ptr.is_null() {
             #[cfg(target_arch = "x86_64")]
@@ -228,10 +293,11 @@ pub fn schedule() {
                     return;
                 }
                 if cur.status == crate::task::thread::ThreadStatus::Blocked {
-                    let time_wake = cur.sleep_until
+                    let time_wake = cur
+                        .sleep_until
                         .map_or(false, |t| crate::interrupts::get_ticks() >= t);
-                    let sig_wake = cur.sleep_until.is_some()
-                        && crate::syscalls::check_signal_interrupt();
+                    let sig_wake =
+                        cur.sleep_until.is_some() && crate::syscalls::check_signal_interrupt();
                     if time_wake || sig_wake {
                         cur.status = crate::task::thread::ThreadStatus::Running;
                         cur.sleep_until = None;
@@ -264,7 +330,9 @@ pub fn try_schedule() {
         return;
     }
     let saved: u64;
-    unsafe { core::arch::asm!("pushfq; pop {0}; cli", out(reg) saved, options(att_syntax)); }
+    unsafe {
+        core::arch::asm!("pushfq; pop {0}; cli", out(reg) saved, options(att_syntax));
+    }
 
     let switch = {
         let mut s = this_cpu_sched().try_lock();
@@ -297,13 +365,17 @@ pub fn try_schedule() {
     }
     // aarch64: DAIF flags are in PSTATE; save and disable IRQs
     let saved: u64;
-    unsafe { core::arch::asm!("mrs {0}, daif; msr daifset, #2", out(reg) saved); }
+    unsafe {
+        core::arch::asm!("mrs {0}, daif; msr daifset, #2", out(reg) saved);
+    }
 
     let switch = {
         let mut s = this_cpu_sched().try_lock();
         if let Some(ref mut sched) = s {
             if sched.current_thread.is_none() {
-                unsafe { core::arch::asm!("msr daif, {0}", in(reg) saved); }
+                unsafe {
+                    core::arch::asm!("msr daif, {0}", in(reg) saved);
+                }
                 return;
             }
             sched.prepare_switch_tls()
@@ -320,5 +392,7 @@ pub fn try_schedule() {
         }
     }
 
-    unsafe { core::arch::asm!("msr daif, {0}", in(reg) saved); }
+    unsafe {
+        core::arch::asm!("msr daif, {0}", in(reg) saved);
+    }
 }

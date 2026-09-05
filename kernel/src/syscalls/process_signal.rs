@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, dead_code, unused_doc_comments)]
+#![allow(unused_imports)]
 //! Process signal syscalls: rt_sigaction, rt_sigreturn, kill, sigprocmask,
 //! pause, sigaltstack, signalfd4.
 //! Extracted from process.rs to keep each module under 1k lines.
@@ -6,20 +6,22 @@
 use super::errno;
 use super::numbers;
 use super::*;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use crate::objects::KernelObject;
-use crate::vfs::{VFS, VfsNode, Stat};
 use crate::sync::IrqSafeMutex as Mutex;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use crate::vfs::{Stat, VfsNode, VFS};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 
 pub fn sys_rt_sigaction(sig: u64, act: *const u64, oldact: *mut u64, _sigsetsize: u64) -> u64 {
     const SIG_DFL: u64 = 0;
     const SIG_IGN: u64 = 1;
 
-    if sig == 0 || sig > 32 { return errno::Errno::EINVAL as u64; }
+    if sig == 0 || sig > 32 {
+        return errno::Errno::EINVAL as u64;
+    }
     let proc_lock = CURRENT_PROCESS.lock();
     if let Some(ref proc) = *proc_lock {
         let idx = (sig - 1) as usize;
@@ -34,8 +36,14 @@ pub fn sys_rt_sigaction(sig: u64, act: *const u64, oldact: *mut u64, _sigsetsize
                 sa_mask: 0,
             };
             unsafe {
-                if user_access::copy_to_user(oldact as *mut u8,
-                    core::slice::from_raw_parts(&old as *const _ as *const u8, core::mem::size_of::<SigAction>())).is_err()
+                if user_access::copy_to_user(
+                    oldact as *mut u8,
+                    core::slice::from_raw_parts(
+                        &old as *const _ as *const u8,
+                        core::mem::size_of::<SigAction>(),
+                    ),
+                )
+                .is_err()
                 {
                     return errno::Errno::EFAULT as u64;
                 }
@@ -98,16 +106,16 @@ pub fn sys_rt_sigreturn(regs_ptr: *mut u64) -> u64 {
 
     // Restore registers from saved context
     unsafe {
-        *regs_ptr.add(0)  = ctx.r15;
-        *regs_ptr.add(1)  = ctx.r14;
-        *regs_ptr.add(2)  = ctx.r13;
-        *regs_ptr.add(3)  = ctx.r12;
-        *regs_ptr.add(4)  = ctx.r11;
-        *regs_ptr.add(5)  = ctx.r10;
-        *regs_ptr.add(6)  = ctx.r9;
-        *regs_ptr.add(7)  = ctx.r8;
-        *regs_ptr.add(8)  = ctx.rdi;
-        *regs_ptr.add(9)  = ctx.rsi;
+        *regs_ptr.add(0) = ctx.r15;
+        *regs_ptr.add(1) = ctx.r14;
+        *regs_ptr.add(2) = ctx.r13;
+        *regs_ptr.add(3) = ctx.r12;
+        *regs_ptr.add(4) = ctx.r11;
+        *regs_ptr.add(5) = ctx.r10;
+        *regs_ptr.add(6) = ctx.r9;
+        *regs_ptr.add(7) = ctx.r8;
+        *regs_ptr.add(8) = ctx.rdi;
+        *regs_ptr.add(9) = ctx.rsi;
         *regs_ptr.add(10) = ctx.rbp;
         *regs_ptr.add(11) = ctx.rbx;
         *regs_ptr.add(12) = ctx.rdx;
@@ -124,16 +132,21 @@ pub fn sys_kill(pid: i64, sig: u32) -> u64 {
     let sig_enum = match sig {
         1 => crate::syscalls::signal::Signal::SIGHUP,
         2 => crate::syscalls::signal::Signal::SIGINT,
-        9 => crate::syscalls::signal::Signal::_SIGKILL,
-        10 => crate::syscalls::signal::Signal::_SIGUSR1,
-        11 => crate::syscalls::signal::Signal::_SIGSEGV,
-        15 => crate::syscalls::signal::Signal::_SIGTERM,
+        9 => crate::syscalls::signal::Signal::SIGKILL,
+        10 => crate::syscalls::signal::Signal::SIGUSR1,
+        11 => crate::syscalls::signal::Signal::SIGSEGV,
+        15 => crate::syscalls::signal::Signal::SIGTERM,
         _ => return errno::Errno::EINVAL as u64,
     };
 
     let euid = get_current_euid();
-    let table = crate::task::process::PROCESS_TABLE.lock();
-    if let Some(proc) = table.get(&(pid as u64)) {
+    // Clone the target out from under the table guard: raise/route/wake below
+    // take per-process locks (I2: never nested under the table).
+    let proc = {
+        let table = crate::task::process::PROCESS_TABLE.lock();
+        table.get(&(pid as u64)).cloned()
+    };
+    if let Some(proc) = proc {
         // Only root or same user (or CAP_KILL) can send signals
         let target_uid = proc.creds.lock().uid;
         if euid != 0 && euid != target_uid && !has_capability(CAP_KILL) {
@@ -161,10 +174,17 @@ pub fn sys_kill(pid: i64, sig: u32) -> u64 {
 
         // Route to signalfd instances via centralized dispatcher
         let sender_uid = get_current_euid();
-        crate::task::process::route_signal_to_signalfd(
-            pid, sig as u32, crate::task::process::SI_USER,
-            crate::task::process::CURRENT_PROCESS.lock().as_ref().map(|p| p.id).unwrap_or(0),
-            sender_uid, 0,
+        crate::task::process::route_signal_to_signalfd_for(
+            &proc,
+            sig as u32,
+            crate::task::process::SI_USER,
+            crate::task::process::CURRENT_PROCESS
+                .lock()
+                .as_ref()
+                .map(|p| p.id)
+                .unwrap_or(0),
+            sender_uid,
+            0,
         );
 
         // Wake threads blocked on futex/pipe so they can see the signal
@@ -177,13 +197,17 @@ pub fn sys_kill(pid: i64, sig: u32) -> u64 {
 
 pub fn sys_sigprocmask(how: i32, set_ptr: *const u64, oldset_ptr: *mut u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
-    let proc = match *lock { Some(ref p) => p, None => return errno::Errno::ESRCH as u64 };
+    let proc = match *lock {
+        Some(ref p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
     let mut sigstate = proc.signals.lock();
     let blocked = &mut sigstate.blocked;
 
     if !oldset_ptr.is_null() {
         let old = *blocked;
-        if unsafe { user_access::copy_to_user(oldset_ptr as *mut u8, &old.to_ne_bytes()) }.is_err() {
+        if unsafe { user_access::copy_to_user(oldset_ptr as *mut u8, &old.to_ne_bytes()) }.is_err()
+        {
             return errno::Errno::EFAULT as u64;
         }
     }
@@ -191,9 +215,9 @@ pub fn sys_sigprocmask(how: i32, set_ptr: *const u64, oldset_ptr: *mut u64) -> u
     if !set_ptr.is_null() {
         let val = unsafe { *set_ptr };
         match how {
-            0 => *blocked |= val,    // SIG_BLOCK
-            1 => *blocked &= !val,   // SIG_UNBLOCK
-            2 => *blocked = val,     // SIG_SETMASK
+            0 => *blocked |= val,  // SIG_BLOCK
+            1 => *blocked &= !val, // SIG_UNBLOCK
+            2 => *blocked = val,   // SIG_SETMASK
             _ => return errno::Errno::EINVAL as u64,
         }
     }
@@ -204,10 +228,12 @@ pub fn sys_pause() -> u64 {
     loop {
         let has_pending = {
             let lock = CURRENT_PROCESS.lock();
-            lock.as_ref().map(|p| {
-                let sig = p.signals.lock();
-                sig.has_unmasked_pending(sig.blocked)
-            }).unwrap_or(false)
+            lock.as_ref()
+                .map(|p| {
+                    let sig = p.signals.lock();
+                    sig.has_unmasked_pending(sig.blocked)
+                })
+                .unwrap_or(false)
         };
         if has_pending {
             return errno::Errno::EINTR as u64;
@@ -234,7 +260,10 @@ pub fn sys_sigaltstack(ss_ptr: *const u8, old_ss_ptr: *mut u8) -> u64 {
     if !old_ss_ptr.is_null() {
         let cur = process.altstack.lock();
         let slice = unsafe {
-            core::slice::from_raw_parts(&*cur as *const stack_t as *const u8, core::mem::size_of::<stack_t>())
+            core::slice::from_raw_parts(
+                &*cur as *const stack_t as *const u8,
+                core::mem::size_of::<stack_t>(),
+            )
         };
         if unsafe { user_access::copy_to_user(old_ss_ptr, slice) }.is_err() {
             return errno::Errno::EFAULT as u64;
@@ -248,7 +277,10 @@ pub fn sys_sigaltstack(ss_ptr: *const u8, old_ss_ptr: *mut u8) -> u64 {
             ss_size: 0,
         };
         let slice = unsafe {
-            core::slice::from_raw_parts_mut(&mut new_ss as *mut stack_t as *mut u8, core::mem::size_of::<stack_t>())
+            core::slice::from_raw_parts_mut(
+                &mut new_ss as *mut stack_t as *mut u8,
+                core::mem::size_of::<stack_t>(),
+            )
         };
         if unsafe { user_access::copy_from_user(slice, ss_ptr) }.is_err() {
             return errno::Errno::EFAULT as u64;
@@ -287,7 +319,7 @@ pub fn sys_signalfd(fd: u64, mask_ptr: *const u64, sigmasksize: u64) -> u64 {
 ///
 /// The fd becomes readable via epoll/poll/select when signals matching
 /// the mask are pending. Reading returns signalfd_siginfo structs.
-pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, sigmasksize: u64, flags: i32) -> u64 {
+pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, sigmasksize: u64, _flags: i32) -> u64 {
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
@@ -305,10 +337,14 @@ pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, sigmasksize: u64, flags: i32
     // Read the signal mask from userspace (read up to sigmasksize bytes)
     let mut mask_val = 0u64;
     let read_len = core::cmp::min(sigmasksize as usize, 8);
-    if unsafe { user_access::copy_from_user(
-        core::slice::from_raw_parts_mut(&mut mask_val as *mut u64 as *mut u8, read_len),
-        mask_ptr as *const u8,
-    ) }.is_err() {
+    if unsafe {
+        user_access::copy_from_user(
+            core::slice::from_raw_parts_mut(&mut mask_val as *mut u64 as *mut u8, read_len),
+            mask_ptr as *const u8,
+        )
+    }
+    .is_err()
+    {
         return errno::Errno::EFAULT as u64;
     }
 
@@ -334,14 +370,13 @@ pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, sigmasksize: u64, flags: i32
     }
 
     // Create new signalfd
-    static NEXT_SIGNALFD_HANDLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    static NEXT_SIGNALFD_HANDLE: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(1);
     let handle = NEXT_SIGNALFD_HANDLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     let data = alloc::sync::Arc::new(crate::sync::IrqSafeMutex::new(SignalFdData {
         mask: mask_val,
         pending: alloc::collections::VecDeque::new(),
-        nonblock: (flags & SFD_NONBLOCK) != 0,
-        cloexec: (flags & SFD_CLOEXEC) != 0,
     }));
 
     SIGNAL_FDS.lock().insert(handle, data.clone());
@@ -369,4 +404,3 @@ pub fn sys_signalfd4(fd: u64, mask_ptr: *const u64, sigmasksize: u64, flags: i32
     };
     fd_num as u64
 }
-

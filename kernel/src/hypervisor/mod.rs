@@ -1,24 +1,24 @@
-#[cfg(target_arch = "x86_64")]
-pub mod vmx;
-#[cfg(target_arch = "x86_64")]
-pub mod svm;
+pub mod boot;
+pub mod devices;
 #[cfg(target_arch = "x86_64")]
 pub mod ept;
-pub mod vcpu;
-pub mod memory;
 pub mod hypercalls;
+pub mod memory;
 pub mod sched;
-pub mod devices;
-pub mod boot;
+#[cfg(target_arch = "x86_64")]
+pub mod svm;
+pub mod vcpu;
+#[cfg(target_arch = "x86_64")]
+pub mod vmx;
 
-use core::sync::atomic::AtomicBool;
 use alloc::boxed::Box;
-use hashbrown::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicBool;
+use hashbrown::HashMap;
 
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::hypervisor::ept::EptManager;
+use crate::sync::IrqSafeMutex as Mutex;
 
 /// Check if virtualization is supported on this CPU.
 pub fn is_virtualization_available() -> bool {
@@ -41,7 +41,9 @@ pub fn is_virtualization_available() -> bool {
         (ecx & (1 << 5)) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { false }
+    {
+        false
+    }
 }
 
 /// Global hypervisor state.
@@ -96,10 +98,20 @@ pub struct GuestCrashInfo {
 }
 
 pub enum OsType {
-    Linux { kernel: u64, initrd: u64, cmdline: String },
-    Windows { kernel: u64 },
-    SkyOS { bootinfo: u64 },
-    BareMetal { entry: u64 },
+    Linux {
+        kernel: u64,
+        initrd: u64,
+        cmdline: String,
+    },
+    Windows {
+        kernel: u64,
+    },
+    SkyOS {
+        bootinfo: u64,
+    },
+    BareMetal {
+        entry: u64,
+    },
 }
 
 /// Probe hardware virtualization capabilities via CPUID.
@@ -135,7 +147,9 @@ fn is_vm_supported() -> bool {
         (ecx & (1 << 5)) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { false }
+    {
+        false
+    }
 }
 
 fn is_svm_supported() -> bool {
@@ -158,7 +172,9 @@ fn is_svm_supported() -> bool {
         (ecx & (1 << 2)) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { false }
+    {
+        false
+    }
 }
 
 fn has_ept_capability() -> bool {
@@ -177,7 +193,9 @@ fn has_ept_capability() -> bool {
         (msr_val & (1 << 1)) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { false }
+    {
+        false
+    }
 }
 
 fn has_npt_capability() -> bool {
@@ -201,7 +219,9 @@ fn has_npt_capability() -> bool {
         (edx & 1) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { false }
+    {
+        false
+    }
 }
 
 fn has_vpid_capability() -> bool {
@@ -220,7 +240,9 @@ fn has_vpid_capability() -> bool {
         (msr_val & (1 << 5)) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { false }
+    {
+        false
+    }
 }
 
 /// Initialize the hypervisor (probe capabilities, enable VMX/SVM on BSP).
@@ -297,7 +319,12 @@ pub fn create_guest(name: &str, os_type: OsType, mem_size: usize) -> Option<u64>
 
     let mut ept_mappings = Vec::new();
     for region in &memory_regions {
-        if ept_manager.map_guest(region.guest_phys, region.host_phys, region.size, crate::hypervisor::ept::EptFlags::read_write()) {
+        if ept_manager.map_guest(
+            region.guest_phys,
+            region.host_phys,
+            region.size,
+            crate::hypervisor::ept::EptFlags::read_write(),
+        ) {
             ept_mappings.push(region.clone());
         }
     }

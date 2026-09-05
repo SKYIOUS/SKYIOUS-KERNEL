@@ -18,7 +18,8 @@ pub struct VmcsRegion {
 impl VmcsRegion {
     pub fn new() -> Option<&'static mut VmcsRegion> {
         let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()?;
-        let frame = crate::memory::buddy::BUDDY_ALLOCATOR.lock()
+        let frame = crate::memory::buddy::BUDDY_ALLOCATOR
+            .lock()
             .allocate_contiguous(0)?;
         let virt = (frame.as_u64() + offset) as *mut VmcsRegion;
         // SAFETY: frame is valid and zeroed, mapped at virt addr.
@@ -78,10 +79,12 @@ impl VmxHandler {
         let vmcs = VmcsRegion::new()?;
         let vmcs_phys = PhysAddr::new(vmcs.phys_addr()?);
 
-        let msr_frame = crate::memory::buddy::BUDDY_ALLOCATOR.lock()
+        let msr_frame = crate::memory::buddy::BUDDY_ALLOCATOR
+            .lock()
             .allocate_contiguous(0)?;
         let msr_phys = PhysAddr::new(msr_frame.as_u64());
-        let io_frame = crate::memory::buddy::BUDDY_ALLOCATOR.lock()
+        let io_frame = crate::memory::buddy::BUDDY_ALLOCATOR
+            .lock()
             .allocate_contiguous(0)?;
         let io_phys = PhysAddr::new(io_frame.as_u64());
         let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()?;
@@ -89,10 +92,14 @@ impl VmxHandler {
         // Zero MSR bitmap
         let msr_virt = msr_phys.as_u64() + offset;
         // SAFETY: allocated frame is mapped.
-        unsafe { core::ptr::write_bytes(msr_virt as *mut u8, 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes(msr_virt as *mut u8, 0, 4096);
+        }
         let io_virt = io_phys.as_u64() + offset;
         // SAFETY: allocated frame is mapped.
-        unsafe { core::ptr::write_bytes(io_virt as *mut u8, 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes(io_virt as *mut u8, 0, 4096);
+        }
 
         Some(VmxHandler {
             vmcs_region: vmcs_phys,
@@ -182,7 +189,7 @@ impl VmxHandler {
 
         // Set MSR bitmap address
         vmwrite(0x4006, self.msr_bitmap.as_u64()); // MSR_BITMAP
-        // Set I/O bitmap addresses
+                                                   // Set I/O bitmap addresses
         vmwrite(0x4008, self.io_bitmap.as_u64()); // IO_BITMAP_A
         vmwrite(0x400A, self.io_bitmap.as_u64()); // IO_BITMAP_B
 
@@ -214,7 +221,11 @@ impl VmxHandler {
         Some(decode_exit_reason(exit_reason))
     }
 
-    pub fn handle_vmexit(&self, vcpu: &mut crate::hypervisor::vcpu::Vcpu, reason: VmExitReason) -> bool {
+    pub fn handle_vmexit(
+        &self,
+        vcpu: &mut crate::hypervisor::vcpu::Vcpu,
+        reason: VmExitReason,
+    ) -> bool {
         match reason {
             VmExitReason::EptViolation { gpa } => {
                 crate::serial_write(&alloc::format!("[VMX] EPT violation at GPA 0x{:x}\n", gpa));
@@ -222,8 +233,18 @@ impl VmxHandler {
                 // add when EPT manager is fully wired
                 false
             }
-            VmExitReason::IoInstruction { port, size, direction, data: _ } => {
-                crate::serial_write(&alloc::format!("[VMX] I/O port 0x{:x} size={} dir={:?}\n", port, size, direction));
+            VmExitReason::IoInstruction {
+                port,
+                size,
+                direction,
+                data: _,
+            } => {
+                crate::serial_write(&alloc::format!(
+                    "[VMX] I/O port 0x{:x} size={} dir={:?}\n",
+                    port,
+                    size,
+                    direction
+                ));
                 // ponytail: emulate I/O via device model
                 // add device dispatch when virtio devices are registered
                 true
@@ -246,12 +267,23 @@ impl VmxHandler {
                 true
             }
             VmExitReason::Exception { vector, code } => {
-                crate::serial_write(&alloc::format!("[VMX] Guest exception #{} code={}\n", vector, code));
+                crate::serial_write(&alloc::format!(
+                    "[VMX] Guest exception #{} code={}\n",
+                    vector,
+                    code
+                ));
                 false
             }
             VmExitReason::VmxCall => {
                 let rax = vcpu.regs.rax;
-                let args = [vcpu.regs.rdi, vcpu.regs.rsi, vcpu.regs.rdx, vcpu.regs.r10, vcpu.regs.r8, vcpu.regs.r9];
+                let args = [
+                    vcpu.regs.rdi,
+                    vcpu.regs.rsi,
+                    vcpu.regs.rdx,
+                    vcpu.regs.r10,
+                    vcpu.regs.r8,
+                    vcpu.regs.r9,
+                ];
                 let result = crate::hypervisor::hypercalls::handle_hypercall(vcpu, rax, args);
                 match result {
                     crate::hypervisor::hypercalls::HypercallResult::Success(val) => {
@@ -387,7 +419,8 @@ pub unsafe fn vmx_on() -> bool {
 
     // 3. Allocate VMXON region
     let vmxon_phys = {
-        let frame = crate::memory::buddy::BUDDY_ALLOCATOR.lock()
+        let frame = crate::memory::buddy::BUDDY_ALLOCATOR
+            .lock()
             .allocate_contiguous(0);
         match frame {
             Some(addr) => addr.as_u64(),
@@ -440,16 +473,33 @@ pub unsafe fn vmx_off() {
 /// VM-exit reasons decoded from the VMCS exit reason field.
 #[derive(Debug, Clone, Copy)]
 pub enum VmExitReason {
-    Exception { vector: u8, code: u32 },
+    Exception {
+        vector: u8,
+        code: u32,
+    },
     ExternalInterrupt,
     TripleFault,
     Cpuid,
     Hlt,
-    IoInstruction { port: u16, size: u8, direction: IoDirection, data: u32 },
-    MsrRead { msr: u32 },
-    MsrWrite { msr: u32, value: u64 },
-    EptViolation { gpa: u64 },
-    EptMisconfig { gpa: u64 },
+    IoInstruction {
+        port: u16,
+        size: u8,
+        direction: IoDirection,
+        data: u32,
+    },
+    MsrRead {
+        msr: u32,
+    },
+    MsrWrite {
+        msr: u32,
+        value: u64,
+    },
+    EptViolation {
+        gpa: u64,
+    },
+    EptMisconfig {
+        gpa: u64,
+    },
     VmxCall,
     Unknown(u64),
 }
@@ -464,7 +514,10 @@ pub enum IoDirection {
 pub fn decode_exit_reason(reason: u64) -> VmExitReason {
     let basic = reason & 0xFFFF;
     match basic {
-        0 => VmExitReason::Exception { vector: ((reason >> 8) & 0xFF) as u8, code: ((reason >> 32) & 0xFFFFFFFF) as u32 },
+        0 => VmExitReason::Exception {
+            vector: ((reason >> 8) & 0xFF) as u8,
+            code: ((reason >> 32) & 0xFFFFFFFF) as u32,
+        },
         1 => VmExitReason::ExternalInterrupt,
         2 => VmExitReason::TripleFault,
         10 => VmExitReason::Cpuid,
@@ -474,8 +527,17 @@ pub fn decode_exit_reason(reason: u64) -> VmExitReason {
             // I/O instruction
             let port = ((reason >> 24) & 0xFFFF) as u16;
             let size = ((reason >> 40) & 0x7) as u8 + 1;
-            let dir = if (reason & (1 << 20)) != 0 { IoDirection::Out } else { IoDirection::In };
-            VmExitReason::IoInstruction { port, size, direction: dir, data: 0 }
+            let dir = if (reason & (1 << 20)) != 0 {
+                IoDirection::Out
+            } else {
+                IoDirection::In
+            };
+            VmExitReason::IoInstruction {
+                port,
+                size,
+                direction: dir,
+                data: 0,
+            }
         }
         31 => {
             // MSR read — ponytail: extract MSR from VMCS
@@ -501,6 +563,10 @@ pub fn get_io_info() -> (u16, u8, IoDirection) {
     let info = vmread(0x6402); // IO_INSNS_INFO
     let port = ((info >> 24) & 0xFFFF) as u16;
     let size = ((info >> 40) & 0x7) as u8 + 1;
-    let dir = if (info & (1 << 20)) != 0 { IoDirection::Out } else { IoDirection::In };
+    let dir = if (info & (1 << 20)) != 0 {
+        IoDirection::Out
+    } else {
+        IoDirection::In
+    };
     (port, size, dir)
 }

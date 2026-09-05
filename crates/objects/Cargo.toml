@@ -1,0 +1,14 @@
+[package]
+name = "vahi-objects"
+version.workspace = true
+edition.workspace = true
+description = "Kernel object namespace, handles, and unified resource trait"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+vahi-types = { path = "../types" }
+spin = "0.9"
+hashbrown = { version = "0.14", default-features = false, features = ["alloc", "ahash"] }
+
+[features]
+default = []

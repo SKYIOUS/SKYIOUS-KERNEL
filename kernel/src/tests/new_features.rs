@@ -1,5 +1,5 @@
-use crate::selftest;
 use super::pata_read_test;
+use crate::selftest;
 
 pub fn test_entropy() -> Result<(), &'static str> {
     let e1 = crate::crypto::GLOBAL_ENTROPY.get_u64();
@@ -19,7 +19,9 @@ pub fn test_page_cache() -> Result<(), &'static str> {
     let data = [0xAAu8; 4096];
     GLOBAL_PAGE_CACHE.insert_page(ino, 0, data);
 
-    let cached = GLOBAL_PAGE_CACHE.get_page(ino, 0).ok_or("Page not found in cache")?;
+    let cached = GLOBAL_PAGE_CACHE
+        .get_page(ino, 0)
+        .ok_or("Page not found in cache")?;
     if cached.lock().data[0] != 0xAA {
         return Err("Cached data mismatch");
     }
@@ -62,7 +64,9 @@ pub fn test_tss_stack() -> Result<(), &'static str> {
 
 pub fn test_ticks() -> Result<(), &'static str> {
     let t1 = crate::interrupts::get_ticks();
-    for _ in 0..100_000 { core::hint::spin_loop(); }
+    for _ in 0..100_000 {
+        core::hint::spin_loop();
+    }
     let t2 = crate::interrupts::get_ticks();
     if t2 < t1 {
         return Err("Ticks decreased");
@@ -134,10 +138,13 @@ pub fn test_ash_hook() -> Result<(), &'static str> {
     // The verifier loads 1 insn; the VM executes it and returns R0=2,
     // which map_return maps to AshResult::Drop.
     let prog = &[
-        0x07, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    let hook = HookPoint::NetReceive { interface: 0, port: 9999, protocol: Protocol::Udp };
+    let hook = HookPoint::NetReceive {
+        interface: 0,
+        port: 9999,
+        protocol: Protocol::Udp,
+    };
     let id = crate::ash::manager::register(999, prog, hook.clone(), 16, None)
         .map_err(|_| "ash register failed")?;
     let mut packet = [0x42u8; 32];
@@ -151,7 +158,7 @@ pub fn test_ash_hook() -> Result<(), &'static str> {
 
 #[cfg(feature = "gpu")]
 pub fn test_compositor_empty_scene() -> Result<(), &'static str> {
-    use crate::compositor::{HwCompositor, GuiScene};
+    use crate::compositor::{GuiScene, HwCompositor};
     let mut comp = HwCompositor::new();
     let scene = GuiScene {
         backbuffer: core::ptr::null(),
@@ -175,10 +182,16 @@ pub fn register_all() {
     selftest::register("phys::bitmap_alloc_free", test_phys_alloc);
     selftest::register("virt::page_constants", test_virt_constants);
     selftest::register("pata::mbr_signature", pata_read_test::test_pata_mbr_sig);
-    selftest::register("user_copy::fault_abort_recovers", test_user_copy_fault_abort);
+    selftest::register(
+        "user_copy::fault_abort_recovers",
+        test_user_copy_fault_abort,
+    );
     selftest::register("shell::dispatch_table", test_shell_dispatch);
     #[cfg(feature = "ash")]
     selftest::register("ash::net_hook_fires", test_ash_hook);
     #[cfg(feature = "gpu")]
-    selftest::register("compositor::empty_scene_compose", test_compositor_empty_scene);
+    selftest::register(
+        "compositor::empty_scene_compose",
+        test_compositor_empty_scene,
+    );
 }

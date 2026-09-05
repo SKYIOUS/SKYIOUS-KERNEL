@@ -31,7 +31,8 @@ static POLICY: crate::sync::IrqSafeMutex<Vec<LsmRule>> = crate::sync::IrqSafeMut
 // Syscall filter: bitmask of allowed syscalls per process
 // 0 = denied, 1 = allowed. Default is all allowed (u64::MAX)
 lazy_static! {
-    static ref SYSCALL_FILTER: crate::sync::IrqSafeMutex<hashbrown::HashMap<u64, u64>> = crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new());
+    static ref SYSCALL_FILTER: crate::sync::IrqSafeMutex<hashbrown::HashMap<u64, u64>> =
+        crate::sync::IrqSafeMutex::new(hashbrown::HashMap::new());
 }
 
 pub fn set_syscall_filter(pid: u64, filter_mask: u64) {
@@ -58,9 +59,13 @@ pub fn load_policy(text: &str) -> bool {
     let mut new_rules = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let parts: Vec<&str> = line.splitn(5, ':').collect();
-        if parts.len() < 5 { continue; }
+        if parts.len() < 5 {
+            continue;
+        }
         let allow = match parts[4] {
             "allow" => true,
             "deny" => false,
@@ -79,7 +84,11 @@ pub fn load_policy(text: &str) -> bool {
         *rules = new_rules;
         LSM_ENABLED.store(true, Ordering::Relaxed);
         LSM_VERSION.fetch_add(1, Ordering::Release);
-        crate::println!("LSM: {} rules loaded, version {}", rules.len(), LSM_VERSION.load(Ordering::Acquire));
+        crate::println!(
+            "LSM: {} rules loaded, version {}",
+            rules.len(),
+            LSM_VERSION.load(Ordering::Acquire)
+        );
         true
     } else {
         false
@@ -87,7 +96,9 @@ pub fn load_policy(text: &str) -> bool {
 }
 
 fn check(subject: &str, object: &str, class: &str, perm: &str) -> bool {
-    if !LSM_ENABLED.load(Ordering::Relaxed) { return true; }
+    if !LSM_ENABLED.load(Ordering::Relaxed) {
+        return true;
+    }
     let mut allowed = true;
     for rule in POLICY.lock().iter() {
         if (rule.subject == "*" || rule.subject == subject)
@@ -123,7 +134,11 @@ pub fn hook_setuid_exec(subject: &str, path: &str) -> bool {
 }
 
 pub fn hook_socket_create(subject: &str, family: u64) -> bool {
-    let fam = match family { 2 => "ipv4", 10 => "ipv6", _ => "raw" };
+    let fam = match family {
+        2 => "ipv4",
+        10 => "ipv6",
+        _ => "raw",
+    };
     check(subject, fam, "socket", "create")
 }
 
@@ -133,7 +148,8 @@ pub fn hook_socket_connect(subject: &str, addr: &str) -> bool {
 
 pub fn current_subject() -> String {
     let lock = crate::task::process::CURRENT_PROCESS.lock();
-    lock.as_ref().map_or("kernel".into(), |p| alloc::format!("pid:{}", p.id))
+    lock.as_ref()
+        .map_or("kernel".into(), |p| alloc::format!("pid:{}", p.id))
 }
 
 pub fn reload_policy() -> bool {

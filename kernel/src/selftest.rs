@@ -1,7 +1,6 @@
-use alloc::vec::Vec;
-use core::fmt::Write;
-use core::sync::atomic::Ordering;
 use crate::sync::IrqSafeMutex as Mutex;
+use alloc::vec::Vec;
+use core::sync::atomic::Ordering;
 
 pub type TestFn = fn() -> Result<(), &'static str>;
 
@@ -19,58 +18,69 @@ pub fn register(name: &'static str, func: TestFn) {
 pub fn run_all() {
     let tests = TESTS.lock();
     let count = tests.len();
-    
+
     // TAP header to serial (CI gate)
     crate::serial_write("TAP version 13\n");
     crate::serial_write(&alloc::format!("1..{}\n", count));
-    
-    // VGA output for local debugging
-    let mut wr = crate::vga_buffer::WRITER.lock();
-    wr.write_str("[self-test] ").ok();
+
     if count == 0 {
-        wr.write_str("no tests registered\n").ok();
         crate::serial_write("Bail out! No tests registered\n");
         return;
     }
-    
+
     let mut passed = 0usize;
     crate::task::scheduler::SCHED_QUIESCE.store(true, Ordering::Relaxed);
-    for (i, t) in tests.iter().enumerate() {
+    for i in 0..count {
+        let t = &tests[i];
         let test_num = i + 1;
+        crate::serial_write(&alloc::format!(
+            "[SELF-TEST] running test {}/{}: {}\n",
+            test_num,
+            count,
+            t.name
+        ));
+        if (t.func as usize) == 0 {
+            crate::serial_write(&alloc::format!(
+                "not ok {} - {} # NULL function pointer\n",
+                test_num,
+                t.name
+            ));
+            continue;
+        }
         match (t.func)() {
             Ok(()) => {
-                // TAP ok line to serial
                 crate::serial_write(&alloc::format!("ok {} - {}\n", test_num, t.name));
-                // VGA output
-                wr.write_str("  OK  ").ok();
-                wr.write_str(t.name).ok();
-                wr.write_str("\n").ok();
                 passed += 1;
             }
             Err(msg) => {
-                // TAP not ok line to serial (CI will fail)
-                crate::serial_write(&alloc::format!("not ok {} - {} # {}\n", test_num, t.name, msg));
-                // VGA output
-                wr.write_str("  FAIL ").ok();
-                wr.write_str(t.name).ok();
-                wr.write_str(": ").ok();
-                wr.write_str(msg).ok();
-                wr.write_str("\n").ok();
+                crate::serial_write(&alloc::format!(
+                    "not ok {} - {} # {}\n",
+                    test_num,
+                    t.name,
+                    msg
+                ));
             }
         }
     }
-    
+
     // TAP summary to serial
-    crate::serial_write(&alloc::format!("# {}/{} passed, {} failed\n", passed, count, count - passed));
+    crate::serial_write(&alloc::format!(
+        "# {}/{} passed, {} failed\n",
+        passed,
+        count,
+        count - passed
+    ));
     crate::task::scheduler::SCHED_QUIESCE.store(false, Ordering::Relaxed);
 
     // Drain test-injected threads from the global queues: with wake paths now
     // marking ready queues dirty, woken test threads (bogus contexts) would be
     // picked by the real scheduler once quiesce clears.
-    for q in [&crate::task::scheduler::GLOBAL.pending_queue,
-              &crate::task::scheduler::GLOBAL.sleep_queue,
-              &crate::task::scheduler::GLOBAL.block_queue,
-              &crate::task::scheduler::GLOBAL.futex_queue] {
+    for q in [
+        &crate::task::scheduler::GLOBAL.pending_queue,
+        &crate::task::scheduler::GLOBAL.sleep_queue,
+        &crate::task::scheduler::GLOBAL.block_queue,
+        &crate::task::scheduler::GLOBAL.futex_queue,
+    ] {
         while q.lock().pop_front().is_some() {}
     }
     for i in 0..crate::task::scheduler::MAX_CPUS {
@@ -78,13 +88,9 @@ pub fn run_all() {
             s.lock().reset_runnable_state();
         }
     }
-    
-    // VGA summary
-    let summary = alloc::format!("  {}/{} passed, {} failed\n", passed, count, count - passed);
-    wr.write_str(&summary).ok();
-    drop(wr);
+
     drop(tests);
-    
+
     if passed < count {
         panic!("self-test: {} test(s) failed", count - passed);
     }

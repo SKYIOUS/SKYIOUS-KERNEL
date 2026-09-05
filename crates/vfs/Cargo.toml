@@ -1,0 +1,28 @@
+[package]
+name = "vahi-vfs"
+version = "0.3.0"
+edition = "2021"
+description = "Virtual filesystem layer for the Vahi kernel"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+vahi-memory = { path = "../memory" }
+vahi-drivers = { path = "../drivers" }
+vahi-syscalls = { path = "../syscalls" }
+vahi-objects = { path = "../objects" }
+vahi-acpi = { path = "../acpi" }
+vahi-net = { path = "../net" }
+vahi-crypto = { path = "../crypto" }
+vahi-types = { path = "../types" }
+vahi-hal = { path = "../hal" }
+spin = "0.9.8"
+hashbrown = { version = "0.14", default-features = false, features = ["alloc", "ahash"] }
+lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
+crossbeam-queue = { version = "0.3.12", default-features = false, features = ["alloc"] }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "c4b88477b22ca7e5131fbd8891f62a5deaa88e6e", default-features = false, features = ["alloc"] }
+
+[features]
+default = ["ext4"]
+ext4 = []
+net = []
+verification = []

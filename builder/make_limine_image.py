@@ -85,13 +85,13 @@ def create_fat16_image(output_path, files_dict, total_size_mb=64):
     struct.pack_into('<H', boot, 14, RESERVED_SECTORS)  # Reserved sectors
     boot[16] = NUM_FATS  # Number of FATs
     struct.pack_into('<H', boot, 17, ROOT_DIR_ENTRIES)  # Root dir entries
-    struct.pack_into('<H', boot, 19, total_sectors)  # Total sectors (16-bit)
+    struct.pack_into('<H', boot, 19, total_sectors if total_sectors <= 0xFFFF else 0)  # Total sectors (16-bit, 0 if >65535)
     boot[21] = 0xF8  # Media type (hard disk)
     struct.pack_into('<H', boot, 22, fat_size_sectors)  # FAT size (sectors)
     struct.pack_into('<H', boot, 24, 63)  # Sectors per track
     struct.pack_into('<H', boot, 26, 255)  # Number of heads
     struct.pack_into('<I', boot, 28, 0)  # Hidden sectors
-    struct.pack_into('<I', boot, 32, total_sectors if total_sectors < 0x10000 else 0)  # Total sectors (32-bit)
+    struct.pack_into('<I', boot, 32, total_sectors)  # Total sectors (32-bit)
     boot[36] = 0x80  # Drive number
     boot[38] = 0x29  # Extended boot signature
     boot[39:43] = b'\x01\x02\x03\x04'  # Volume serial number

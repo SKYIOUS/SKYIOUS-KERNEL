@@ -1,6 +1,6 @@
+use super::{current_credentials, KernelObject};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use super::{KernelObject, security, current_credentials};
 
 pub type HandleValue = u64;
 pub const INVALID_HANDLE: HandleValue = u64::MAX;
@@ -40,22 +40,54 @@ impl HandleTable {
     }
 
     /// Insert an object with a bind-time security check.
-    pub fn insert(&mut self, object: Arc<dyn KernelObject>, desired_access: u32, flags: u64) -> Result<HandleValue, ()> {
+    pub fn insert(
+        &mut self,
+        object: Arc<dyn KernelObject>,
+        desired_access: u32,
+        flags: u64,
+    ) -> Result<HandleValue, ()> {
         let cred = current_credentials();
         let sec = object.header().security.lock();
-        if !security::access_check(&cred, &sec, desired_access) {
+        // Use vahi_objects access_check since ObjectHeader.security is vahi_objects::SecurityDescriptor.
+        if !vahi_objects::security::access_check(
+            &vahi_objects::security::Credentials {
+                uid: cred.uid,
+                gid: cred.gid,
+                euid: cred.euid,
+                egid: cred.egid,
+                fsuid: cred.fsuid,
+                fsgid: cred.fsgid,
+                cap_effective: cred.cap_effective,
+            },
+            &*sec,
+            desired_access,
+        ) {
             return Err(());
         }
         drop(sec);
         let audit_id = NEXT_HANDLE_AUDIT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         for (i, slot) in self.table.iter_mut().enumerate() {
             if slot.is_none() {
-                *slot = Some(HandleEntry { object, access_mask: desired_access, flags, offset: 0, audit_id, create_time: 0 });
+                *slot = Some(HandleEntry {
+                    object,
+                    access_mask: desired_access,
+                    flags,
+                    offset: 0,
+                    audit_id,
+                    create_time: 0,
+                });
                 return Ok(i as HandleValue);
             }
         }
         let handle = self.table.len() as HandleValue;
-        self.table.push(Some(HandleEntry { object, access_mask: desired_access, flags, offset: 0, audit_id, create_time: 0 }));
+        self.table.push(Some(HandleEntry {
+            object,
+            access_mask: desired_access,
+            flags,
+            offset: 0,
+            audit_id,
+            create_time: 0,
+        }));
         Ok(handle)
     }
 
@@ -64,23 +96,50 @@ impl HandleTable {
         let audit_id = NEXT_HANDLE_AUDIT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         for (i, slot) in self.table.iter_mut().enumerate() {
             if slot.is_none() {
-                *slot = Some(HandleEntry { object, access_mask: 0xFFFF, flags, offset: 0, audit_id, create_time: 0 });
+                *slot = Some(HandleEntry {
+                    object,
+                    access_mask: 0xFFFF,
+                    flags,
+                    offset: 0,
+                    audit_id,
+                    create_time: 0,
+                });
                 return i as HandleValue;
             }
         }
         let handle = self.table.len() as HandleValue;
-        self.table.push(Some(HandleEntry { object, access_mask: 0xFFFF, flags, offset: 0, audit_id, create_time: 0 }));
+        self.table.push(Some(HandleEntry {
+            object,
+            access_mask: 0xFFFF,
+            flags,
+            offset: 0,
+            audit_id,
+            create_time: 0,
+        }));
         handle
     }
 
     /// Insert an object at a specific handle index. The slot must be free;
     /// the caller coordinates the index across all per-process fd tables.
-    pub fn insert_at(&mut self, handle: HandleValue, object: Arc<dyn KernelObject>, access_mask: u32, flags: u64) {
+    pub fn insert_at(
+        &mut self,
+        handle: HandleValue,
+        object: Arc<dyn KernelObject>,
+        access_mask: u32,
+        flags: u64,
+    ) {
         if handle as usize >= self.table.len() {
             self.table.resize(handle as usize + 1, None);
         }
         let audit_id = NEXT_HANDLE_AUDIT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        self.table[handle as usize] = Some(HandleEntry { object, access_mask, flags, offset: 0, audit_id, create_time: 0 });
+        self.table[handle as usize] = Some(HandleEntry {
+            object,
+            access_mask,
+            flags,
+            offset: 0,
+            audit_id,
+            create_time: 0,
+        });
     }
 
     /// Number of allocated slots (including freed holes).
@@ -91,12 +150,20 @@ impl HandleTable {
     /// Close a handle, returning a reference to the object for further cleanup.
     pub fn close(&mut self, handle: HandleValue) -> Option<Arc<dyn KernelObject>> {
         let entry = self.table.get_mut(handle as usize)?;
-        entry.take().map(|e| { e.object.on_close(); e.object })
+        entry.take().map(|e| {
+            e.object.on_close();
+            e.object
+        })
     }
 
     /// Duplicate a handle (dup/dup2).
     pub fn dup(&mut self, old_handle: HandleValue) -> Result<HandleValue, ()> {
-        let entry = self.table.get(old_handle as usize).ok_or(())?.as_ref().ok_or(())?;
+        let entry = self
+            .table
+            .get(old_handle as usize)
+            .ok_or(())?
+            .as_ref()
+            .ok_or(())?;
         let audit_id = NEXT_HANDLE_AUDIT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let new_entry = HandleEntry {
             object: entry.object.clone(),
@@ -118,8 +185,17 @@ impl HandleTable {
     }
 
     /// Duplicate into a specific slot (dup2).
-    pub fn dup_into(&mut self, old_handle: HandleValue, new_handle: HandleValue) -> Result<HandleValue, ()> {
-        let entry = self.table.get(old_handle as usize).ok_or(())?.as_ref().ok_or(())?;
+    pub fn dup_into(
+        &mut self,
+        old_handle: HandleValue,
+        new_handle: HandleValue,
+    ) -> Result<HandleValue, ()> {
+        let entry = self
+            .table
+            .get(old_handle as usize)
+            .ok_or(())?
+            .as_ref()
+            .ok_or(())?;
         let audit_id = NEXT_HANDLE_AUDIT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let new_entry = HandleEntry {
             object: entry.object.clone(),
@@ -142,44 +218,79 @@ impl HandleTable {
     }
 
     pub fn audit_trail(&self) -> Vec<(HandleValue, u64)> {
-        self.table.iter().enumerate().filter_map(|(i, slot)| {
-            slot.as_ref().map(|e| (i as HandleValue, e.audit_id))
-        }).collect()
+        self.table
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_ref().map(|e| (i as HandleValue, e.audit_id)))
+            .collect()
     }
 
     pub fn enumerate(&self) -> Vec<Arc<dyn KernelObject>> {
-        self.table.iter().filter_map(|s| s.as_ref().map(|e| e.object.clone())).collect()
+        self.table
+            .iter()
+            .filter_map(|s| s.as_ref().map(|e| e.object.clone()))
+            .collect()
     }
 
     pub fn find_by_type(&self, type_id: super::ObjectTypeId) -> Vec<HandleValue> {
-        self.table.iter().enumerate().filter_map(|(i, slot)| {
-            slot.as_ref().and_then(|e| {
-                if e.object.header().object_type == type_id { Some(i as HandleValue) } else { None }
+        self.table
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.as_ref().and_then(|e| {
+                    if e.object.header().object_type == type_id {
+                        Some(i as HandleValue)
+                    } else {
+                        None
+                    }
+                })
             })
-        }).collect()
+            .collect()
     }
 
     pub fn handle_count_by_type(&self, type_id: super::ObjectTypeId) -> usize {
-        self.table.iter().filter(|slot| {
-            slot.as_ref().is_some_and(|e| e.object.header().object_type == type_id)
-        }).count()
+        self.table
+            .iter()
+            .filter(|slot| {
+                slot.as_ref()
+                    .is_some_and(|e| e.object.header().object_type == type_id)
+            })
+            .count()
     }
 
     pub fn reserve_handle(&mut self) -> HandleValue {
-        let idx = self.table.iter().position(|s| s.is_none()).unwrap_or_else(|| {
-            let len = self.table.len();
-            self.table.push(None);
-            len
-        });
+        let idx = self
+            .table
+            .iter()
+            .position(|s| s.is_none())
+            .unwrap_or_else(|| {
+                let len = self.table.len();
+                self.table.push(None);
+                len
+            });
         idx as HandleValue
     }
 
-    pub fn fill_handle(&mut self, handle: HandleValue, object: Arc<dyn KernelObject>, access_mask: u32, flags: u64, audit_id: u64) {
+    pub fn fill_handle(
+        &mut self,
+        handle: HandleValue,
+        object: Arc<dyn KernelObject>,
+        access_mask: u32,
+        flags: u64,
+        audit_id: u64,
+    ) {
         let idx = handle as usize;
         if idx >= self.table.len() {
             self.table.resize(idx + 1, None);
         }
-        self.table[idx] = Some(HandleEntry { object, access_mask, flags, offset: 0, audit_id, create_time: 0 });
+        self.table[idx] = Some(HandleEntry {
+            object,
+            access_mask,
+            flags,
+            offset: 0,
+            audit_id,
+            create_time: 0,
+        });
     }
 
     /// Clone the entire table (for fork).

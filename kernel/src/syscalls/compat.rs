@@ -2,9 +2,9 @@
 //!
 //! These are needed for glibc/musl userspace compatibility.
 
-use alloc::vec::Vec;
-use crate::task::process::{CURRENT_PROCESS, FileDescriptor};
 use crate::syscalls::errno;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use alloc::vec::Vec;
 
 /// iovec structure (Linux x86_64 layout)
 #[repr(C)]
@@ -43,43 +43,59 @@ pub fn sys_readv(fd: u64, iov_ptr: *const u8, iovcnt: i64) -> u64 {
             if crate::syscalls::user_access::copy_from_user(
                 core::slice::from_raw_parts_mut(&mut iovec as *mut _ as *mut u8, iovec_size),
                 iov_ptr.add(i * iovec_size),
-            ).is_err() {
-                if total_bytes > 0 { return total_bytes as u64; }
+            )
+            .is_err()
+            {
+                if total_bytes > 0 {
+                    return total_bytes as u64;
+                }
                 return errno::Errno::EFAULT as u64;
             }
         }
 
-        if iovec.iov_len == 0 { continue; }
+        if iovec.iov_len == 0 {
+            continue;
+        }
         let remaining = iovec.iov_len as usize;
 
         match &fd_table[fd as usize] {
-            Some(FileDescriptor::File { node, offset }) => {
-                match node.read(remaining) {
-                    Ok(data) => {
-                        let off = *offset.lock();
-                        let available = if off < data.len() { data.len() - off } else { 0 };
-                        let copy_len = core::cmp::min(remaining, available);
-                        if copy_len > 0 {
-                            unsafe {
-                                if crate::syscalls::user_access::copy_to_user(
-                                    iovec.iov_base as *mut u8,
-                                    &data[off..off + copy_len],
-                                ).is_err() {
-                                    if total_bytes > 0 { return total_bytes as u64; }
-                                    return errno::Errno::EFAULT as u64;
+            Some(FileDescriptor::File { node, offset }) => match node.read(remaining) {
+                Ok(data) => {
+                    let off = *offset.lock();
+                    let available = if off < data.len() {
+                        data.len() - off
+                    } else {
+                        0
+                    };
+                    let copy_len = core::cmp::min(remaining, available);
+                    if copy_len > 0 {
+                        unsafe {
+                            if crate::syscalls::user_access::copy_to_user(
+                                iovec.iov_base as *mut u8,
+                                &data[off..off + copy_len],
+                            )
+                            .is_err()
+                            {
+                                if total_bytes > 0 {
+                                    return total_bytes as u64;
                                 }
+                                return errno::Errno::EFAULT as u64;
                             }
-                            *offset.lock() += copy_len;
-                            total_bytes += copy_len;
                         }
-                        if copy_len < remaining { break; }
+                        *offset.lock() += copy_len;
+                        total_bytes += copy_len;
                     }
-                    Err(_) => {
-                        if total_bytes > 0 { return total_bytes as u64; }
-                        return errno::Errno::EIO as u64;
+                    if copy_len < remaining {
+                        break;
                     }
                 }
-            }
+                Err(_) => {
+                    if total_bytes > 0 {
+                        return total_bytes as u64;
+                    }
+                    return errno::Errno::EIO as u64;
+                }
+            },
             _ => {
                 return errno::Errno::EINVAL as u64;
             }
@@ -119,35 +135,45 @@ pub fn sys_writev(fd: u64, iov_ptr: *const u8, iovcnt: i64) -> u64 {
             if crate::syscalls::user_access::copy_from_user(
                 core::slice::from_raw_parts_mut(&mut iovec as *mut _ as *mut u8, iovec_size),
                 iov_ptr.add(i * iovec_size),
-            ).is_err() {
-                if total_bytes > 0 { return total_bytes as u64; }
+            )
+            .is_err()
+            {
+                if total_bytes > 0 {
+                    return total_bytes as u64;
+                }
                 return errno::Errno::EFAULT as u64;
             }
         }
 
-        if iovec.iov_len == 0 { continue; }
+        if iovec.iov_len == 0 {
+            continue;
+        }
         let write_len = iovec.iov_len as usize;
         let mut buf: Vec<u8> = alloc::vec![0u8; write_len];
 
         unsafe {
-            if crate::syscalls::user_access::copy_from_user(&mut buf, iovec.iov_base as *const u8).is_err() {
-                if total_bytes > 0 { return total_bytes as u64; }
+            if crate::syscalls::user_access::copy_from_user(&mut buf, iovec.iov_base as *const u8)
+                .is_err()
+            {
+                if total_bytes > 0 {
+                    return total_bytes as u64;
+                }
                 return errno::Errno::EFAULT as u64;
             }
         }
 
         match &fd_table[fd as usize] {
-            Some(FileDescriptor::File { node, .. }) => {
-                match node.write(&buf) {
-                    Ok(()) => {
-                        total_bytes += write_len;
-                    }
-                    Err(_) => {
-                        if total_bytes > 0 { return total_bytes as u64; }
-                        return errno::Errno::EIO as u64;
-                    }
+            Some(FileDescriptor::File { node, .. }) => match node.write(&buf) {
+                Ok(()) => {
+                    total_bytes += write_len;
                 }
-            }
+                Err(_) => {
+                    if total_bytes > 0 {
+                        return total_bytes as u64;
+                    }
+                    return errno::Errno::EIO as u64;
+                }
+            },
             _ => {
                 return errno::Errno::EINVAL as u64;
             }
@@ -183,14 +209,16 @@ pub fn sys_pipe2(fds_ptr: *mut u32, flags: i32) -> u64 {
 
     // Use the same handle-based approach as sys_pipe
     let r_fd = {
-        let obj = crate::vfs::VfsObject::new(reader, crate::objects::TYPE_FILE) as Arc<dyn crate::objects::KernelObject>;
+        let obj = crate::vfs::VfsObject::new(reader, crate::objects::TYPE_FILE)
+            as Arc<dyn crate::objects::KernelObject>;
         match proc.new_handle(obj, crate::objects::security::ACCESS_READ, 0) {
             Ok(fd) => fd,
             Err(_) => return errno::Errno::EACCES as u64,
         }
     };
     let w_fd = {
-        let obj = crate::vfs::VfsObject::new(writer, crate::objects::TYPE_FILE) as Arc<dyn crate::objects::KernelObject>;
+        let obj = crate::vfs::VfsObject::new(writer, crate::objects::TYPE_FILE)
+            as Arc<dyn crate::objects::KernelObject>;
         match proc.new_handle(obj, crate::objects::security::ACCESS_WRITE, 1) {
             Ok(fd) => fd,
             Err(_) => {
@@ -203,8 +231,12 @@ pub fn sys_pipe2(fds_ptr: *mut u32, flags: i32) -> u64 {
     // Apply flags (O_CLOEXEC)
     if (flags & 0x80000) != 0 {
         let mut fd_flags = proc.files.lock().fd_flags.clone();
-        if fd_flags.len() <= r_fd as usize { fd_flags.resize(r_fd as usize + 1, 0); }
-        if fd_flags.len() <= w_fd as usize { fd_flags.resize(w_fd as usize + 1, 0); }
+        if fd_flags.len() <= r_fd as usize {
+            fd_flags.resize(r_fd as usize + 1, 0);
+        }
+        if fd_flags.len() <= w_fd as usize {
+            fd_flags.resize(w_fd as usize + 1, 0);
+        }
         fd_flags[r_fd as usize] |= 0x80000;
         fd_flags[w_fd as usize] |= 0x80000;
     }
@@ -213,7 +245,9 @@ pub fn sys_pipe2(fds_ptr: *mut u32, flags: i32) -> u64 {
     let r = r_fd as u32;
     let w = w_fd as u32;
     let fds = [r, w];
-    let bytes = unsafe { core::slice::from_raw_parts(&fds as *const _ as *const u8, core::mem::size_of_val(&fds)) };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(&fds as *const _ as *const u8, core::mem::size_of_val(&fds))
+    };
     unsafe {
         if crate::syscalls::user_access::copy_to_user(fds_ptr as *mut u8, bytes).is_err() {
             return errno::Errno::EFAULT as u64;
@@ -281,30 +315,30 @@ pub fn sys_pread64(fd: u64, buf_ptr: *mut u8, count: usize, offset: u64) -> u64 
     }
 
     match &fd_table[fd as usize] {
-        Some(FileDescriptor::File { node, .. }) => {
-            match node.read(count) {
-                Ok(data) => {
-                    let available = if (offset as usize) < data.len() {
-                        data.len() - offset as usize
-                    } else {
-                        0
-                    };
-                    let copy_len = core::cmp::min(count, available);
-                    if copy_len > 0 {
-                        unsafe {
-                            if crate::syscalls::user_access::copy_to_user(
-                                buf_ptr,
-                                &data[offset as usize..offset as usize + copy_len],
-                            ).is_err() {
-                                return errno::Errno::EFAULT as u64;
-                            }
+        Some(FileDescriptor::File { node, .. }) => match node.read(count) {
+            Ok(data) => {
+                let available = if (offset as usize) < data.len() {
+                    data.len() - offset as usize
+                } else {
+                    0
+                };
+                let copy_len = core::cmp::min(count, available);
+                if copy_len > 0 {
+                    unsafe {
+                        if crate::syscalls::user_access::copy_to_user(
+                            buf_ptr,
+                            &data[offset as usize..offset as usize + copy_len],
+                        )
+                        .is_err()
+                        {
+                            return errno::Errno::EFAULT as u64;
                         }
                     }
-                    copy_len as u64
                 }
-                Err(_) => errno::Errno::EIO as u64,
+                copy_len as u64
             }
-        }
+            Err(_) => errno::Errno::EIO as u64,
+        },
         _ => errno::Errno::EINVAL as u64,
     }
 }
@@ -312,7 +346,7 @@ pub fn sys_pread64(fd: u64, buf_ptr: *mut u8, count: usize, offset: u64) -> u64 
 /// pwrite64(fd, buf, count, offset) → bytes written
 ///
 /// Write to file descriptor at a specific offset without modifying the file offset.
-pub fn sys_pwrite64(fd: u64, buf_ptr: *const u8, count: usize, offset: u64) -> u64 {
+pub fn sys_pwrite64(fd: u64, buf_ptr: *const u8, count: usize, _offset: u64) -> u64 {
     let proc_lock = CURRENT_PROCESS.lock();
     let proc = match proc_lock.as_ref() {
         Some(p) => p.clone(),

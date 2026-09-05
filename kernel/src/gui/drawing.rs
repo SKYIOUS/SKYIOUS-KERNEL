@@ -12,32 +12,63 @@ pub fn draw_pixel(buffer: &mut [u32], width: usize, height: usize, x: usize, y: 
 }
 
 /// Draws a filled rectangle to the buffer.
-pub fn draw_rect(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+pub fn draw_rect(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+) {
     for dy in 0..h {
         let py = y + dy;
-        if py >= height { break; }
+        if py >= height {
+            break;
+        }
         for dx in 0..w {
             let px = x + dx;
-            if px >= width { break; }
+            if px >= width {
+                break;
+            }
             buffer[py * width + px] = color;
         }
     }
 }
 
 /// Draws a filled rectangle with alpha blending (color has AA in upper 8 bits).
-pub fn draw_rect_alpha(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+pub fn draw_rect_alpha(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+) {
     let a = (color >> 24) & 0xFF;
-    if a == 0 { return; }
-    if a >= 254 { draw_rect(buffer, width, height, x, y, w, h, color); return; }
+    if a == 0 {
+        return;
+    }
+    if a >= 254 {
+        draw_rect(buffer, width, height, x, y, w, h, color);
+        return;
+    }
     let src_r = (color >> 16) & 0xFF;
     let src_g = (color >> 8) & 0xFF;
     let src_b = color & 0xFF;
     for dy in 0..h {
         let py = y + dy;
-        if py >= height { break; }
+        if py >= height {
+            break;
+        }
         for dx in 0..w {
             let px = x + dx;
-            if px >= width { break; }
+            if px >= width {
+                break;
+            }
             let idx = py * width + px;
             let dst = buffer[idx];
             let dst_r = (dst >> 16) & 0xFF;
@@ -52,21 +83,45 @@ pub fn draw_rect_alpha(buffer: &mut [u32], width: usize, height: usize, x: usize
 }
 
 /// Draws a horizontal line to the buffer.
-pub fn draw_line_h(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, w: usize, color: u32) {
-    if y >= height { return; }
+pub fn draw_line_h(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    color: u32,
+) {
+    if y >= height {
+        return;
+    }
     for dx in 0..w {
         let px = x + dx;
-        if px >= width { break; }
+        if px >= width {
+            break;
+        }
         buffer[y * width + px] = color;
     }
 }
 
 /// Draws a vertical line to the buffer.
-pub fn draw_line_v(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, h: usize, color: u32) {
-    if x >= width { return; }
+pub fn draw_line_v(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    h: usize,
+    color: u32,
+) {
+    if x >= width {
+        return;
+    }
     for dy in 0..h {
         let py = y + dy;
-        if py >= height { break; }
+        if py >= height {
+            break;
+        }
         buffer[py * width + x] = color;
     }
 }
@@ -74,12 +129,30 @@ pub fn draw_line_v(buffer: &mut [u32], width: usize, height: usize, x: usize, y:
 use font8x8::{UnicodeFonts, BASIC_FONTS};
 
 /// Draws a character using the font8x8 crate with scaling.
-pub fn draw_char_scaled(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, c: char, color: u32, scale: usize) {
+pub fn draw_char_scaled(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    c: char,
+    color: u32,
+    scale: usize,
+) {
     if let Some(glyph) = BASIC_FONTS.get(c) {
         for (dy, row) in glyph.iter().enumerate() {
             for dx in 0..8 {
                 if (row >> dx) & 1 != 0 {
-                    draw_rect(buffer, width, height, x + dx * scale, y + dy * scale, scale, scale, color);
+                    draw_rect(
+                        buffer,
+                        width,
+                        height,
+                        x + dx * scale,
+                        y + dy * scale,
+                        scale,
+                        scale,
+                        color,
+                    );
                 }
             }
         }
@@ -87,16 +160,35 @@ pub fn draw_char_scaled(buffer: &mut [u32], width: usize, height: usize, x: usiz
 }
 
 /// Draws a string of characters using the bitmap font.
-pub fn draw_string(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, s: &str, color: u32) {
+pub fn draw_string(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    s: &str,
+    color: u32,
+) {
     draw_string_scaled(buffer, width, height, x, y, s, color, 1);
 }
 
 /// Draws a string of characters using the bitmap font with scaling.
-pub fn draw_string_scaled(buffer: &mut [u32], width: usize, height: usize, x: usize, y: usize, s: &str, color: u32, scale: usize) {
+pub fn draw_string_scaled(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    s: &str,
+    color: u32,
+    scale: usize,
+) {
     let mut curr_x = x;
     for c in s.chars() {
         draw_char_scaled(buffer, width, height, curr_x, y, c, color, scale);
         curr_x += 8 * scale;
-        if curr_x >= width { break; }
+        if curr_x >= width {
+            break;
+        }
     }
 }

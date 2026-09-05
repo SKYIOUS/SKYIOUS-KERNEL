@@ -13,7 +13,13 @@ pub struct EbpfInsn {
 
 impl EbpfInsn {
     pub fn new(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Self {
-        EbpfInsn { code, dst_reg: dst, src_reg: src, off, imm }
+        EbpfInsn {
+            code,
+            dst_reg: dst,
+            src_reg: src,
+            off,
+            imm,
+        }
     }
 }
 
@@ -21,16 +27,32 @@ impl EbpfInsn {
 pub struct EbpfRegs(pub [u64; 11]);
 
 impl EbpfRegs {
-    pub fn new() -> Self { EbpfRegs([0u64; 11]) }
-    pub fn r0(&self) -> u64 { self.0[0] }
-    pub fn set_r0(&mut self, v: u64) { self.0[0] = v; }
-    pub fn r1(&self) -> u64 { self.0[1] }
-    pub fn set_r1(&mut self, v: u64) { self.0[1] = v; }
+    pub fn new() -> Self {
+        EbpfRegs([0u64; 11])
+    }
+    pub fn r0(&self) -> u64 {
+        self.0[0]
+    }
+    pub fn set_r0(&mut self, v: u64) {
+        self.0[0] = v;
+    }
+    pub fn r1(&self) -> u64 {
+        self.0[1]
+    }
+    pub fn set_r1(&mut self, v: u64) {
+        self.0[1] = v;
+    }
     pub fn r(&self, i: usize) -> u64 {
-        if i < 11 { self.0[i] } else { 0 }
+        if i < 11 {
+            self.0[i]
+        } else {
+            0
+        }
     }
     pub fn set_r(&mut self, i: usize, v: u64) {
-        if i < 11 { self.0[i] = v; }
+        if i < 11 {
+            self.0[i] = v;
+        }
     }
 }
 
@@ -105,19 +127,35 @@ impl<'a> EbpfVm<'a> {
                 BPF_ALU | BPF_ALU64 => {
                     let is64 = cls == BPF_ALU64;
                     let op = insn.code & 0xf0;
-                    let src_val = if insn.code & 0x08 != 0 { imm } else { regs.r(src) as i64 };
+                    let src_val = if insn.code & 0x08 != 0 {
+                        imm
+                    } else {
+                        regs.r(src) as i64
+                    };
                     let dst_val = regs.r(dst) as i64;
 
                     let result = match op {
                         BPF_ADD => dst_val.wrapping_add(src_val),
                         BPF_SUB => dst_val.wrapping_sub(src_val),
                         BPF_MUL => dst_val.wrapping_mul(src_val),
-                        BPF_DIV => { if src_val == 0 { 0 } else { dst_val / src_val } }
+                        BPF_DIV => {
+                            if src_val == 0 {
+                                0
+                            } else {
+                                dst_val / src_val
+                            }
+                        }
                         BPF_OR => dst_val | src_val,
                         BPF_AND => dst_val & src_val,
                         BPF_LSH => dst_val.wrapping_shl(src_val as u32),
                         BPF_RSH => (dst_val as u64).wrapping_shr(src_val as u32) as i64,
-                        BPF_MOD => { if src_val == 0 { 0 } else { dst_val % src_val } }
+                        BPF_MOD => {
+                            if src_val == 0 {
+                                0
+                            } else {
+                                dst_val % src_val
+                            }
+                        }
                         BPF_XOR => dst_val ^ src_val,
                         BPF_MOV => src_val,
                         BPF_ARSH => (dst_val as u64).wrapping_shr(src_val as u32) as i64,
@@ -125,18 +163,29 @@ impl<'a> EbpfVm<'a> {
                         _ => 0i64,
                     };
 
-                    let final_val = if is64 { result as u64 } else { (result as i32) as u64 };
+                    let final_val = if is64 {
+                        result as u64
+                    } else {
+                        (result as i32) as u64
+                    };
                     regs.set_r(dst, final_val);
                     pc += 1;
                 }
 
                 BPF_JMP | BPF_JMP32 => {
                     let op = insn.code & 0xf0;
-                    let src_val = if op == BPF_JA { 0 }
-                        else if cls == BPF_JMP32 { regs.r(src) as i32 as i64 }
-                        else { regs.r(src) as i64 };
-                    let dst_val = if cls == BPF_JMP32 { regs.r(dst) as i32 as i64 }
-                        else { regs.r(dst) as i64 };
+                    let src_val = if op == BPF_JA {
+                        0
+                    } else if cls == BPF_JMP32 {
+                        regs.r(src) as i32 as i64
+                    } else {
+                        regs.r(src) as i64
+                    };
+                    let dst_val = if cls == BPF_JMP32 {
+                        regs.r(dst) as i32 as i64
+                    } else {
+                        regs.r(dst) as i64
+                    };
 
                     let taken = match op {
                         BPF_JA => true,
@@ -153,7 +202,9 @@ impl<'a> EbpfVm<'a> {
                                     let map_fd = regs.r(1) as u64;
                                     let key_off = regs.r(2) as usize;
                                     let val_off = regs.r(3) as usize;
-                                    let ret = super::helpers::bpf_helper_map_lookup_elem(stack, map_fd, key_off, val_off);
+                                    let ret = super::helpers::bpf_helper_map_lookup_elem(
+                                        stack, map_fd, key_off, val_off,
+                                    );
                                     regs.set_r0(ret as u64);
                                 }
                                 2 => {
@@ -224,7 +275,11 @@ impl<'a> EbpfVm<'a> {
 
                 BPF_LD => {
                     if insn.code & BPF_SIZE_MASK == BPF_DW && insn.code & 0xe0 == BPF_IMM {
-                        let next = if pc + 1 < insns.len() { &insns[pc + 1] } else { &EbpfInsn::new(0, 0, 0, 0, 0) };
+                        let next = if pc + 1 < insns.len() {
+                            &insns[pc + 1]
+                        } else {
+                            &EbpfInsn::new(0, 0, 0, 0, 0)
+                        };
                         let imm64 = (insn.imm as u64) | ((next.imm as u64) << 32);
                         regs.set_r(dst, imm64);
                         pc += 2;
@@ -238,7 +293,10 @@ impl<'a> EbpfVm<'a> {
                     let base = regs.r(src) as usize;
                     let addr = base.wrapping_add(off as usize);
 
-                    if addr + size_bytes(size) > STACK_SIZE { pc += 1; continue; }
+                    if addr + size_bytes(size) > STACK_SIZE {
+                        pc += 1;
+                        continue;
+                    }
                     let val = match size {
                         0x00 => unsafe { *(stack.as_ptr().add(addr) as *const u64) },
                         0x08 => unsafe { *(stack.as_ptr().add(addr) as *const u32) as u64 },
@@ -252,9 +310,14 @@ impl<'a> EbpfVm<'a> {
 
                 BPF_ST => {
                     let addr = regs.r(dst) as usize + off as usize;
-                    if addr + 8 > STACK_SIZE { pc += 1; continue; }
+                    if addr + 8 > STACK_SIZE {
+                        pc += 1;
+                        continue;
+                    }
                     let val = imm as u64;
-                    unsafe { *(stack.as_mut_ptr().add(addr) as *mut u64) = val; }
+                    unsafe {
+                        *(stack.as_mut_ptr().add(addr) as *mut u64) = val;
+                    }
                     pc += 1;
                 }
 
@@ -262,7 +325,10 @@ impl<'a> EbpfVm<'a> {
                     let size = insn.code & BPF_SIZE_MASK;
                     let base = regs.r(dst) as usize;
                     let addr = base.wrapping_add(off as usize);
-                    if addr + size_bytes(size) > STACK_SIZE { pc += 1; continue; }
+                    if addr + size_bytes(size) > STACK_SIZE {
+                        pc += 1;
+                        continue;
+                    }
                     let val = regs.r(src);
                     match size {
                         0x00 => unsafe { *(stack.as_mut_ptr().add(addr) as *mut u64) = val },
@@ -274,7 +340,9 @@ impl<'a> EbpfVm<'a> {
                     pc += 1;
                 }
 
-                _ => { pc += 1; }
+                _ => {
+                    pc += 1;
+                }
             }
         }
         regs.r0()

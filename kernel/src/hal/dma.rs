@@ -1,6 +1,6 @@
-use x86_64::PhysAddr;
 use crate::sync::IrqSafeMutex as Mutex;
 use alloc::collections::VecDeque;
+use x86_64::PhysAddr;
 
 /// Pre-sized DMA buffer pool for hot-path allocations.
 /// Eliminates per-transfer buddy-allocator churn in NVMe and xHCI.
@@ -45,18 +45,20 @@ pub struct PooledDma {
 
 impl PooledDma {
     /// Allocate a pooled DMA buffer of at least `min_size` bytes.
+    /// `bdf` is the PCI Bus/Device/Function — used for IOMMU DMA mapping.
     /// Falls back to direct DmaBuf::new if the pool is exhausted or
     /// the requested size exceeds all buckets.
-    pub fn alloc(min_size: usize) -> Option<Self> {
+    pub fn alloc(min_size: usize, bdf: u16) -> Option<Self> {
         if let Some(mut pool) = DMA_POOL.try_lock() {
             // Find smallest bucket >= min_size (by index, then pop)
-            let target = pool.buckets.iter()
-                .position(|&(size, _)| size >= min_size);
+            let target = pool.buckets.iter().position(|&(size, _)| size >= min_size);
             if let Some(idx) = target {
                 if let Some(buf) = pool.buckets[idx].1.pop_front() {
                     let phys = buf.phys();
                     let virt = buf.virt();
                     let sz = buf.size();
+                    // Map the buffer through IOMMU for this device.
+                    crate::iommu::iommu_map(bdf, phys, phys, sz as u64, 0x3 /* RD | WR */);
                     core::mem::forget(buf); // prevent DmaBuf::drop (pool owns it)
                     return Some(PooledDma {
                         phys_addr: phys,
@@ -73,6 +75,8 @@ impl PooledDma {
         let phys = buf.phys();
         let virt = buf.virt();
         let sz = buf.size();
+        // Map the buffer through IOMMU for this device.
+        crate::iommu::iommu_map(bdf, phys, phys, sz as u64, 0x3 /* RD | WR */);
         core::mem::forget(buf);
         Some(PooledDma {
             phys_addr: phys,
@@ -83,11 +87,21 @@ impl PooledDma {
         })
     }
 
-    pub fn phys(&self) -> u64 { self.phys_addr }
-    pub fn virt(&self) -> *mut u8 { self.virt_addr }
-    pub fn size(&self) -> usize { self.size }
-    pub fn as_ptr(&self) -> *const u8 { self.virt_addr }
-    pub fn as_mut_ptr(&mut self) -> *mut u8 { self.virt_addr }
+    pub fn phys(&self) -> u64 {
+        self.phys_addr
+    }
+    pub fn virt(&self) -> *mut u8 {
+        self.virt_addr
+    }
+    pub fn size(&self) -> usize {
+        self.size
+    }
+    pub fn as_ptr(&self) -> *const u8 {
+        self.virt_addr
+    }
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.virt_addr
+    }
 }
 
 impl Drop for PooledDma {
@@ -119,7 +133,6 @@ unsafe impl Sync for PooledDma {}
 
 // ─── Direct DmaBuf (controller-lifetime allocations) ────────────────────────
 
-#[allow(dead_code)]
 pub struct DmaBuf {
     pub(crate) phys_addr: u64,
     pub(crate) virt_addr: *mut u8,
@@ -138,7 +151,8 @@ impl DmaBuf {
     /// The returned buffer is zeroed and physically contiguous.
     pub fn new(size: usize) -> Option<Self> {
         let order = size_to_order(size);
-        let phys = crate::memory::buddy::BUDDY_ALLOCATOR.lock()
+        let phys = crate::memory::buddy::BUDDY_ALLOCATOR
+            .lock()
             .allocate_contiguous(order)?;
         let phys_u64 = phys.as_u64();
         let virt = (phys_u64 + crate::memory::PHYSICAL_MEMORY_OFFSET.get().copied()?) as *mut u8;
@@ -151,12 +165,22 @@ impl DmaBuf {
         })
     }
 
-    pub fn phys(&self) -> u64 { self.phys_addr }
-    pub fn virt(&self) -> *mut u8 { self.virt_addr }
-    pub fn size(&self) -> usize { self.size }
+    pub fn phys(&self) -> u64 {
+        self.phys_addr
+    }
+    pub fn virt(&self) -> *mut u8 {
+        self.virt_addr
+    }
+    pub fn size(&self) -> usize {
+        self.size
+    }
 
-    pub fn as_ptr(&self) -> *const u8 { self.virt_addr }
-    pub fn as_mut_ptr(&mut self) -> *mut u8 { self.virt_addr }
+    pub fn as_ptr(&self) -> *const u8 {
+        self.virt_addr
+    }
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.virt_addr
+    }
 
     pub fn as_slice(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.virt_addr, self.size) }

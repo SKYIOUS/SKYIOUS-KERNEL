@@ -62,10 +62,16 @@ pub fn cfi_init() {
 
     // Register core kernel functions that are called via transmuted pointers.
     // SMP entry point — called when APs boot
-    register_static(&mut targets, crate::smp::ap_kernel_entry as *const () as usize);
+    register_static(
+        &mut targets,
+        crate::smp::ap_kernel_entry as *const () as usize,
+    );
 
     // RCU synchronize — called via function pointer
-    register_static(&mut targets, crate::sync::rcu::synchronize_rcu as *const () as usize);
+    register_static(
+        &mut targets,
+        crate::sync::rcu::synchronize_rcu as *const () as usize,
+    );
 
     // Sort for binary search
     targets.sort_unstable();

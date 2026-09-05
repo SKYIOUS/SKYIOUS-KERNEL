@@ -1,13 +1,13 @@
+use crate::memory::buddy::BUDDY_ALLOCATOR;
+use crate::memory::{active_level_4_table, physical_memory_offset};
+use alloc::vec::Vec;
 /// W^X executable-memory allocator.
 ///
 /// Allocates physical page frames and maps them RW (read-write, not executable).
 /// Provides `flip_to_rx()` to remap the page table entry from RW to RX
 /// (clear the NX/execute-disable bit). Never simultaneously RW+RX.
 use core::sync::atomic::{AtomicU64, Ordering};
-use alloc::vec::Vec;
-use crate::memory::buddy::BUDDY_ALLOCATOR;
-use crate::memory::{physical_memory_offset, active_level_4_table};
-use x86_64::structures::paging::{PhysFrame, PageTableFlags, PageTable, Size4KiB};
+use x86_64::structures::paging::{PageTable, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::VirtAddr;
 
 // Base VA for exec pool; bump-allocated per ExecRegion (avoids PTE collision on multi-alloc).
@@ -35,13 +35,21 @@ pub fn init_pool() {
     let mut pool = POOL.lock();
     pool.reserve(POOL_PAGES);
     for _ in 0..POOL_PAGES {
-        if let Some(frame) = crate::memory::buddy::BUDDY_ALLOCATOR.lock().allocate_frame() {
+        if let Some(frame) = crate::memory::buddy::BUDDY_ALLOCATOR
+            .lock()
+            .allocate_frame()
+        {
             pool.push(PhysFrame::containing_address(frame.start_address()));
         } else {
             break;
         }
     }
-    crate::println!("exec_mem: pool ready: {}/{} pages ({} KiB)", pool.len(), POOL_PAGES, pool.len()*4);
+    crate::println!(
+        "exec_mem: pool ready: {}/{} pages ({} KiB)",
+        pool.len(),
+        POOL_PAGES,
+        pool.len() * 4
+    );
 }
 
 /// An executable-memory region allocated via the W^X allocator.
@@ -103,44 +111,56 @@ impl ExecRegion {
             // Allocate a new PDP table frame
             let mut buddy = BUDDY_ALLOCATOR.lock();
             let new_frame = buddy.allocate_frame().ok_or("no free frames for PDP")?;
-            pde.set_frame(new_frame, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+            pde.set_frame(
+                new_frame,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+            );
             new_frame
         } else {
             PhysFrame::containing_address(pde.addr())
         };
         let pdp_virt = VirtAddr::new(phys_offset) + pdp_frame.start_address().as_u64();
-        let pdp_table: &mut PageTable = unsafe { &mut *(pdp_virt.as_mut_ptr() as *mut PageTable) };
+        let pdp_table: &mut PageTable = unsafe { &mut *(pdp_virt.as_mut_ptr::<PageTable>()) };
 
         // PDP entry
         let pdpe = &mut pdp_table[pdp_idx as usize];
         let pd_frame: PhysFrame<Size4KiB> = if pdpe.is_unused() {
             let mut buddy = BUDDY_ALLOCATOR.lock();
             let new_frame = buddy.allocate_frame().ok_or("no free frames for PD")?;
-            pdpe.set_frame(new_frame, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+            pdpe.set_frame(
+                new_frame,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+            );
             new_frame
         } else {
             PhysFrame::containing_address(pdpe.addr())
         };
         let pd_virt = VirtAddr::new(phys_offset) + pd_frame.start_address().as_u64();
-        let pd_table: &mut PageTable = unsafe { &mut *(pd_virt.as_mut_ptr() as *mut PageTable) };
+        let pd_table: &mut PageTable = unsafe { &mut *(pd_virt.as_mut_ptr::<PageTable>()) };
 
         // PD entry
         let pde_entry = &mut pd_table[pd_idx as usize];
         let pt_frame: PhysFrame<Size4KiB> = if pde_entry.is_unused() {
             let mut buddy = BUDDY_ALLOCATOR.lock();
             let new_frame = buddy.allocate_frame().ok_or("no free frames for PT")?;
-            pde_entry.set_frame(new_frame, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+            pde_entry.set_frame(
+                new_frame,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+            );
             new_frame
         } else {
             PhysFrame::containing_address(pde_entry.addr())
         };
         let pt_virt = VirtAddr::new(phys_offset) + pt_frame.start_address().as_u64();
-        let pt_table: &mut PageTable = unsafe { &mut *(pt_virt.as_mut_ptr() as *mut PageTable) };
+        let pt_table: &mut PageTable = unsafe { &mut *(pt_virt.as_mut_ptr::<PageTable>()) };
 
         // PT entry (PTE) - the actual page mapping
         let pte = &mut pt_table[pt_idx as usize];
         // W^X: initially RW without X (PRESENT|WRITABLE|NO_EXECUTE)
-        pte.set_frame(frame, PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE);
+        pte.set_frame(
+            frame,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+        );
 
         // Invalidate TLB for this page
         x86_64::instructions::tlb::flush(virt);
@@ -176,7 +196,7 @@ impl ExecRegion {
         }
         let pdp_frame: PhysFrame<Size4KiB> = PhysFrame::containing_address(pde.addr());
         let pdp_virt = VirtAddr::new(phys_offset) + pdp_frame.start_address().as_u64();
-        let pdp_table: &PageTable = unsafe { &*(pdp_virt.as_ptr() as *const PageTable) };
+        let pdp_table: &PageTable = unsafe { &*(pdp_virt.as_ptr::<PageTable>()) };
 
         let pdpe = &pdp_table[pdp_idx as usize];
         if pdpe.is_unused() {
@@ -184,7 +204,7 @@ impl ExecRegion {
         }
         let pd_frame: PhysFrame<Size4KiB> = PhysFrame::containing_address(pdpe.addr());
         let pd_virt = VirtAddr::new(phys_offset) + pd_frame.start_address().as_u64();
-        let pd_table: &PageTable = unsafe { &*(pd_virt.as_ptr() as *const PageTable) };
+        let pd_table: &PageTable = unsafe { &*(pd_virt.as_ptr::<PageTable>()) };
 
         let pde_entry = &pd_table[pd_idx as usize];
         if pde_entry.is_unused() {
@@ -192,7 +212,7 @@ impl ExecRegion {
         }
         let pt_frame: PhysFrame<Size4KiB> = PhysFrame::containing_address(pde_entry.addr());
         let pt_virt = VirtAddr::new(phys_offset) + pt_frame.start_address().as_u64();
-        let pt_table: &PageTable = unsafe { &*(pt_virt.as_ptr() as *const PageTable) };
+        let pt_table: &PageTable = unsafe { &*(pt_virt.as_ptr::<PageTable>()) };
 
         let pte = &pt_table[pt_idx as usize];
 
@@ -206,15 +226,16 @@ impl ExecRegion {
         let pde_mut = &mut pml4_mut[pml4_idx as usize];
         let pdp_frame_mut: PhysFrame<Size4KiB> = PhysFrame::containing_address(pde_mut.addr());
         let pdp_virt_mut = VirtAddr::new(phys_offset) + pdp_frame_mut.start_address().as_u64();
-        let pdp_table_mut: &mut PageTable = unsafe { &mut *(pdp_virt_mut.as_mut_ptr() as *mut PageTable) };
+        let pdp_table_mut: &mut PageTable =
+            unsafe { &mut *(pdp_virt_mut.as_mut_ptr::<PageTable>()) };
         let pdpe_mut = &mut pdp_table_mut[pdp_idx as usize];
         let pd_frame_mut: PhysFrame<Size4KiB> = PhysFrame::containing_address(pdpe_mut.addr());
         let pd_virt_mut = VirtAddr::new(phys_offset) + pd_frame_mut.start_address().as_u64();
-        let pd_table_mut: &mut PageTable = unsafe { &mut *(pd_virt_mut.as_mut_ptr() as *mut PageTable) };
+        let pd_table_mut: &mut PageTable = unsafe { &mut *(pd_virt_mut.as_mut_ptr::<PageTable>()) };
         let pde_entry_mut = &mut pd_table_mut[pd_idx as usize];
         let pt_frame_mut: PhysFrame<Size4KiB> = PhysFrame::containing_address(pde_entry_mut.addr());
         let pt_virt_mut = VirtAddr::new(phys_offset) + pt_frame_mut.start_address().as_u64();
-        let pt_table_mut: &mut PageTable = unsafe { &mut *(pt_virt_mut.as_mut_ptr() as *mut PageTable) };
+        let pt_table_mut: &mut PageTable = unsafe { &mut *(pt_virt_mut.as_mut_ptr::<PageTable>()) };
         let pte_mut = &mut pt_table_mut[pt_idx as usize];
         pte_mut.set_flags(new_flags);
 

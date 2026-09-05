@@ -1,8 +1,8 @@
+use crate::ash::manager;
+use crate::ash::{AshError, AshResult, AshStats, HookPoint, Protocol};
 use crate::syscalls::errno::Errno;
 use crate::syscalls::user_access;
 use crate::task::process::CURRENT_PROCESS;
-use crate::ash::{HookPoint, Protocol, AshStats, AshResult, AshError};
-use crate::ash::manager;
 
 /// ponytail: inline capability check to avoid exporting private syscall helpers
 fn ash_check_priv() -> u64 {
@@ -77,7 +77,10 @@ pub fn sys_ash_stats(_handler_id: u64, stats_ptr: *mut AshStats) -> u64 {
 
     // SAFETY: stats is a simple repr(C) struct
     let slice = unsafe {
-        core::slice::from_raw_parts(&stats as *const _ as *const u8, core::mem::size_of::<AshStats>())
+        core::slice::from_raw_parts(
+            &stats as *const _ as *const u8,
+            core::mem::size_of::<AshStats>(),
+        )
     };
     if unsafe { user_access::copy_to_user(stats_ptr as *mut u8, slice) }.is_err() {
         return Errno::EFAULT as u64;
@@ -115,11 +118,21 @@ fn parse_hook_info(info: u64) -> HookPoint {
             port,
             protocol: Protocol::from_u8(protocol).unwrap_or(Protocol::Raw),
         },
-        2 => HookPoint::SyscallEntry { syscall_num: port as u64 },
-        3 => HookPoint::SyscallExit { syscall_num: port as u64 },
-        4 => HookPoint::TimerFired { timer_id: extra as u64 },
-        5 => HookPoint::SignalDelivery { signal: port as u32 },
-        6 => HookPoint::MessageReceive { channel: extra as u64 },
+        2 => HookPoint::SyscallEntry {
+            syscall_num: port as u64,
+        },
+        3 => HookPoint::SyscallExit {
+            syscall_num: port as u64,
+        },
+        4 => HookPoint::TimerFired {
+            timer_id: extra as u64,
+        },
+        5 => HookPoint::SignalDelivery {
+            signal: port as u32,
+        },
+        6 => HookPoint::MessageReceive {
+            channel: extra as u64,
+        },
         _ => HookPoint::NetReceive {
             interface: 0,
             port: 0,

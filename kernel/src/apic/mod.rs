@@ -1,7 +1,7 @@
-pub mod lapic;
-pub mod ioapic;
-pub mod msi;
 pub mod errata;
+pub mod ioapic;
+pub mod lapic;
+pub mod msi;
 
 // ---------------------------------------------------------------------------
 // x2APIC support
@@ -40,7 +40,9 @@ impl ApicMode {
             return ApicMode::Xapic;
         }
 
-        let x2apic_enabled = unsafe { (x86_64::registers::model_specific::Msr::new(IA32_APIC_BASE_MSR).read() >> 10) & 1 != 0 };
+        let x2apic_enabled = unsafe {
+            (x86_64::registers::model_specific::Msr::new(IA32_APIC_BASE_MSR).read() >> 10) & 1 != 0
+        };
 
         if x2apic_enabled {
             ApicMode::X2Apic
@@ -156,7 +158,10 @@ fn override_flags(isa_irq: u8) -> (bool, bool, u8) {
 /// Returns ISA bus defaults when no override covers this GSI.
 fn override_flags_by_gsi(gsi: u8) -> (bool, bool) {
     if let Some(overrides) = crate::acpi::OVERRIDES.get() {
-        if let Some(o) = overrides.iter().find(|o| o.global_system_interrupt == gsi as u32) {
+        if let Some(o) = overrides
+            .iter()
+            .find(|o| o.global_system_interrupt == gsi as u32)
+        {
             let active_low = o.polarity == crate::acpi::Polarity::ActiveLow;
             let level = o.trigger_mode == crate::acpi::TriggerMode::Level;
             return (active_low, level);
@@ -277,7 +282,9 @@ fn lapic_write32(offset: u32, value: u32) {
     } else {
         let pmo = crate::memory::physical_memory_offset();
         let ptr = (pmo + LAPIC_PHYS_BASE + offset as u64) as *mut u32;
-        unsafe { core::ptr::write_volatile(ptr, value); }
+        unsafe {
+            core::ptr::write_volatile(ptr, value);
+        }
     }
 }
 
@@ -408,19 +415,3 @@ fn route_gsi(gsi: u8, vector: u8, active_low: bool, level: bool) {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

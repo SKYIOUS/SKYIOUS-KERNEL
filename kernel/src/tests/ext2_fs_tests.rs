@@ -2,12 +2,12 @@
 //! Creates a minimal valid ext2 filesystem in memory, mounts it,
 //! and exercises read/write/mkdir/create operations.
 
-use crate::drivers::block::{BlockDevice, BlockDeviceError};
 use crate::alloc::sync::Arc;
 use crate::alloc::vec;
 use crate::alloc::vec::Vec;
-use crate::vfs::FileSystem;
+use crate::drivers::block::{BlockDevice, BlockDeviceError};
 use crate::sync::IrqSafeMutex as Mutex;
+use crate::vfs::FileSystem;
 
 const SECTOR_SIZE: usize = 512;
 const BLOCK_SIZE: usize = 1024;
@@ -20,21 +20,30 @@ struct RamBlock {
 impl BlockDevice for RamBlock {
     fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let start = sector as usize * SECTOR_SIZE;
-        if start + buf.len() > self.data.len() { return Err(BlockDeviceError::InvalidSector); }
+        if start + buf.len() > self.data.len() {
+            return Err(BlockDeviceError::InvalidSector);
+        }
         buf.copy_from_slice(&self.data[start..start + buf.len()]);
         Ok(())
     }
     fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let start = sector as usize * SECTOR_SIZE;
-        if start + buf.len() > self.data.len() { return Err(BlockDeviceError::InvalidSector); }
+        if start + buf.len() > self.data.len() {
+            return Err(BlockDeviceError::InvalidSector);
+        }
         self.data[start..start + buf.len()].copy_from_slice(buf);
         Ok(())
     }
-    fn sector_count(&self) -> Result<u64, BlockDeviceError> { Ok(self.sectors) }
+    fn sector_count(&self) -> Result<u64, BlockDeviceError> {
+        Ok(self.sectors)
+    }
 }
 
 fn ram_disk(sectors: u64) -> Arc<Mutex<dyn BlockDevice>> {
-    Arc::new(Mutex::new(RamBlock { data: vec![0u8; sectors as usize * SECTOR_SIZE], sectors }))
+    Arc::new(Mutex::new(RamBlock {
+        data: vec![0u8; sectors as usize * SECTOR_SIZE],
+        sectors,
+    }))
 }
 
 // ─── Minimal ext2 filesystem formatter ─────────────────────────────────
@@ -43,17 +52,21 @@ const EXT2_MAGIC: u16 = 0xEF53;
 const EXT2_INODE_SIZE: u16 = 128;
 
 fn write_le32(buf: &mut [u8], pos: usize, val: u32) {
-    buf[pos..pos+4].copy_from_slice(&val.to_le_bytes());
+    buf[pos..pos + 4].copy_from_slice(&val.to_le_bytes());
 }
 
 fn write_le16(buf: &mut [u8], pos: usize, val: u16) {
-    buf[pos..pos+2].copy_from_slice(&val.to_le_bytes());
+    buf[pos..pos + 2].copy_from_slice(&val.to_le_bytes());
 }
 
-fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_group: u16) -> Result<(), &'static str> {
+fn format_ext2(
+    dev: &Arc<Mutex<dyn BlockDevice>>,
+    total_blocks: u32,
+    inodes_per_group: u16,
+) -> Result<(), &'static str> {
     // Pre-compute layout: see blocks used below
     let inodes_per_block = BLOCK_SIZE as u16 / EXT2_INODE_SIZE;
-    let inode_blocks = (inodes_per_group + inodes_per_block - 1) / inodes_per_block;
+    let inode_blocks = inodes_per_group.div_ceil(inodes_per_block);
     let data_start_block = 5u32 + inode_blocks as u32;
     // We place root dir at data_start_block, test file at data_start_block+1
     let used_blocks = data_start_block + 2;
@@ -100,9 +113,13 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
     let sb_sector = (1u64 * BLOCK_SIZE as u64) / SECTOR_SIZE as u64;
     let mut sector_buf = [0u8; SECTOR_SIZE];
     sector_buf.copy_from_slice(&sb[..SECTOR_SIZE]);
-    dev.lock().write_sector(sb_sector, &sector_buf).map_err(|_| "sb write failed")?;
+    dev.lock()
+        .write_sector(sb_sector, &sector_buf)
+        .map_err(|_| "sb write failed")?;
     sector_buf.copy_from_slice(&sb[SECTOR_SIZE..]);
-    dev.lock().write_sector(sb_sector + 1, &sector_buf).map_err(|_| "sb write2 failed")?;
+    dev.lock()
+        .write_sector(sb_sector + 1, &sector_buf)
+        .map_err(|_| "sb write2 failed")?;
 
     // Block group descriptor at block 2
     let mut gd = [0u8; BLOCK_SIZE];
@@ -121,7 +138,9 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
 
     let gd_sector = (2u64 * BLOCK_SIZE as u64) / SECTOR_SIZE as u64;
     sector_buf.copy_from_slice(&gd[..SECTOR_SIZE]);
-    dev.lock().write_sector(gd_sector, &sector_buf).map_err(|_| "gd write failed")?;
+    dev.lock()
+        .write_sector(gd_sector, &sector_buf)
+        .map_err(|_| "gd write failed")?;
 
     // Block bitmap at block 3: mark blocks 0..used_blocks as used
     let mut bmap = [0u8; BLOCK_SIZE];
@@ -134,7 +153,9 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
         let off = i * SECTOR_SIZE;
         let mut sec = [0u8; SECTOR_SIZE];
         sec.copy_from_slice(&bmap[off..off + SECTOR_SIZE]);
-        dev.lock().write_sector(bmap_sector + i as u64, &sec).map_err(|_| "bmap write failed")?;
+        dev.lock()
+            .write_sector(bmap_sector + i as u64, &sec)
+            .map_err(|_| "bmap write failed")?;
     }
 
     // Inode bitmap at block 4: mark inodes 0, 1, 2, 3 as used
@@ -146,7 +167,9 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
         let off = i * SECTOR_SIZE;
         let mut sec = [0u8; SECTOR_SIZE];
         sec.copy_from_slice(&imap[off..off + SECTOR_SIZE]);
-        dev.lock().write_sector(imap_sector + i as u64, &sec).map_err(|_| "imap write failed")?;
+        dev.lock()
+            .write_sector(imap_sector + i as u64, &sec)
+            .map_err(|_| "imap write failed")?;
     }
 
     // Inode table at blocks 5..5+inode_blocks-1
@@ -175,9 +198,13 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
     let sector_num = sector_offset / SECTOR_SIZE as u64;
     let byte_off = (sector_offset % SECTOR_SIZE as u64) as usize;
     let mut sec = [0u8; SECTOR_SIZE];
-    dev.lock().read_sector(sector_num, &mut sec).map_err(|_| "itable read failed")?;
+    dev.lock()
+        .read_sector(sector_num, &mut sec)
+        .map_err(|_| "itable read failed")?;
     sec[byte_off..byte_off + 128].copy_from_slice(&inode_buf);
-    dev.lock().write_sector(sector_num, &sec).map_err(|_| "itable write failed")?;
+    dev.lock()
+        .write_sector(sector_num, &sec)
+        .map_err(|_| "itable write failed")?;
 
     // Root directory data block: "." and ".." entries
     let mut dir_block = [0u8; BLOCK_SIZE];
@@ -200,7 +227,9 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
         let off = i * SECTOR_SIZE;
         let mut sec = [0u8; SECTOR_SIZE];
         sec.copy_from_slice(&dir_block[off..off + SECTOR_SIZE]);
-        dev.lock().write_sector(root_data_sector + i as u64, &sec).map_err(|_| "rootdir write failed")?;
+        dev.lock()
+            .write_sector(root_data_sector + i as u64, &sec)
+            .map_err(|_| "rootdir write failed")?;
     }
 
     // Inode 3: a test file "hello.txt" with content "Hello ext2!"
@@ -220,18 +249,25 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
 
     let inode3_offset = 2u64 * EXT2_INODE_SIZE as u64;
     let sector3_num = (itable_sector * SECTOR_SIZE as u64 + inode3_offset) / SECTOR_SIZE as u64;
-    let byte3_off = ((itable_sector * SECTOR_SIZE as u64 + inode3_offset) % SECTOR_SIZE as u64) as usize;
+    let byte3_off =
+        ((itable_sector * SECTOR_SIZE as u64 + inode3_offset) % SECTOR_SIZE as u64) as usize;
     let mut sec3 = [0u8; SECTOR_SIZE];
-    dev.lock().read_sector(sector3_num, &mut sec3).map_err(|_| "itable3 read failed")?;
+    dev.lock()
+        .read_sector(sector3_num, &mut sec3)
+        .map_err(|_| "itable3 read failed")?;
     sec3[byte3_off..byte3_off + 128].copy_from_slice(&test_inode);
-    dev.lock().write_sector(sector3_num, &sec3).map_err(|_| "itable3 write failed")?;
+    dev.lock()
+        .write_sector(sector3_num, &sec3)
+        .map_err(|_| "itable3 write failed")?;
 
     // Test file data block
     let test_data_sector = (test_data_block as u64 * BLOCK_SIZE as u64) / SECTOR_SIZE as u64;
     let mut tsec = [0u8; SECTOR_SIZE];
     let copy_len = core::cmp::min(SECTOR_SIZE, test_content.len());
     tsec[..copy_len].copy_from_slice(&test_content[..copy_len]);
-    dev.lock().write_sector(test_data_sector, &tsec).map_err(|_| "testfile write failed")?;
+    dev.lock()
+        .write_sector(test_data_sector, &tsec)
+        .map_err(|_| "testfile write failed")?;
 
     // Add "hello.txt" entry to root directory
     // Need to shrink the ".." entry to make room
@@ -242,10 +278,14 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
 
     // Re-read root dir block
     let mut rsec = [0u8; SECTOR_SIZE];
-    dev.lock().read_sector(root_data_sector, &mut rsec).map_err(|_| "reread root failed")?;
+    dev.lock()
+        .read_sector(root_data_sector, &mut rsec)
+        .map_err(|_| "reread root failed")?;
     let mut dir_data = [0u8; BLOCK_SIZE];
     dir_data[..SECTOR_SIZE].copy_from_slice(&rsec);
-    dev.lock().read_sector(root_data_sector + 1, &mut rsec).map_err(|_| "reread root2 failed")?;
+    dev.lock()
+        .read_sector(root_data_sector + 1, &mut rsec)
+        .map_err(|_| "reread root2 failed")?;
     dir_data[SECTOR_SIZE..].copy_from_slice(&rsec[..SECTOR_SIZE]);
 
     // Modify ".." entry: shrink from BLOCK_SIZE-12 to 12
@@ -262,7 +302,9 @@ fn format_ext2(dev: &Arc<Mutex<dyn BlockDevice>>, total_blocks: u32, inodes_per_
         let off = i * SECTOR_SIZE;
         let mut sec = [0u8; SECTOR_SIZE];
         sec.copy_from_slice(&dir_data[off..off + SECTOR_SIZE]);
-        dev.lock().write_sector(root_data_sector + i as u64, &sec).map_err(|_| "root update failed")?;
+        dev.lock()
+            .write_sector(root_data_sector + i as u64, &sec)
+            .map_err(|_| "root update failed")?;
     }
 
     Ok(())
@@ -273,7 +315,9 @@ fn test_ext2_format_mount() -> Result<(), &'static str> {
     format_ext2(&dev, 8192, 256)?;
     let fs = crate::vfs::ext2::mount(dev).map_err(|_| "ext2 mount failed")?;
     let root = fs.root().map_err(|_| "root failed")?;
-    if !root.is_dir() { return Err("root must be dir"); }
+    if !root.is_dir() {
+        return Err("root must be dir");
+    }
     Ok(())
 }
 
@@ -283,7 +327,9 @@ fn test_ext2_read_file() -> Result<(), &'static str> {
     let fs = crate::vfs::ext2::mount(dev).map_err(|_| "ext2 mount failed")?;
     let root = fs.root().map_err(|_| "root failed")?;
     let file = root.find_child("hello.txt").ok_or("hello.txt not found")?;
-    if file.is_dir() { return Err("hello.txt must not be dir"); }
+    if file.is_dir() {
+        return Err("hello.txt must not be dir");
+    }
     let data = file.read(256).map_err(|_| "read failed")?;
     let expected = b"Hello from ext2!\n";
     if data.as_slice() != expected {
@@ -325,7 +371,9 @@ fn test_ext2_mkdir_and_stat() -> Result<(), &'static str> {
 
     root.mkdir("subdir").map_err(|_| "mkdir failed")?;
     let dir = root.find_child("subdir").ok_or("subdir missing")?;
-    if !dir.is_dir() { return Err("subdir must be dir"); }
+    if !dir.is_dir() {
+        return Err("subdir must be dir");
+    }
 
     // Verify stat on the new dir
     let stat = dir.stat().map_err(|_| "stat failed")?;
@@ -359,8 +407,12 @@ fn test_ext2_permissions() -> Result<(), &'static str> {
         return Err("permission bits incorrect");
     }
     // uid should be 0
-    if stat.st_uid != 0 { return Err("uid mismatch"); }
-    if stat.st_gid != 0 { return Err("gid mismatch"); }
+    if stat.st_uid != 0 {
+        return Err("uid mismatch");
+    }
+    if stat.st_gid != 0 {
+        return Err("gid mismatch");
+    }
     Ok(())
 }
 
@@ -369,40 +421,43 @@ fn test_ext2_hardlink() -> Result<(), &'static str> {
     format_ext2(&dev, 8192, 256)?;
     let fs = crate::vfs::ext2::mount(dev).map_err(|_| "ext2 mount failed")?;
     let root = fs.root().map_err(|_| "root failed")?;
-    
+
     // Create a file to link to
-    let file = root.create("link_target.txt").map_err(|_| "create failed")?;
+    let file = root
+        .create("link_target.txt")
+        .map_err(|_| "create failed")?;
     let content = b"Hard link test content";
     file.write(content).map_err(|_| "write failed")?;
-    
+
     // Get initial stat
     let stat_before = file.stat().map_err(|_| "stat failed")?;
     if stat_before.st_nlink != 1 {
         return Err("initial link count should be 1");
     }
-    
+
     // Create hard link
-    root.link(file.clone(), "link_alias.txt").map_err(|_| "link failed")?;
-    
+    root.link(file.clone(), "link_alias.txt")
+        .map_err(|_| "link failed")?;
+
     // Verify link count increased
     let stat_after = file.stat().map_err(|_| "stat after link failed")?;
     if stat_after.st_nlink != 2 {
         return Err("link count should be 2 after link");
     }
-    
+
     // Verify both paths point to same inode
     let alias = root.find_child("link_alias.txt").ok_or("alias not found")?;
     let alias_stat = alias.stat().map_err(|_| "alias stat failed")?;
     if alias_stat.st_ino != stat_after.st_ino {
         return Err("alias should have same inode number");
     }
-    
+
     // Verify content is identical
     let alias_data = alias.read(512).map_err(|_| "alias read failed")?;
     if alias_data.as_slice() != content {
         return Err("alias content mismatch");
     }
-    
+
     Ok(())
 }
 

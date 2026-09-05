@@ -21,21 +21,22 @@
 //! - `Blocked` — waiting on a pipe, futex, or sleep timer.
 //! - `Exited` — finished; cleaned up on next context switch.
 
-pub mod tick;
-pub mod switch;
 pub mod spawn;
+pub mod switch;
+pub mod tick;
 
 // Re-export public functions at the scheduler:: level for backward compatibility.
-pub use tick::tick;
+pub use spawn::{
+    add_futex_thread, block_on_pipe, boost_thread_priority, spawn, spawn_thread, wake_futex,
+    wake_pipe, wake_process_blocked, wake_process_futex, with_current_thread,
+};
 pub use switch::{schedule, try_schedule};
-pub use spawn::{spawn, spawn_thread, block_on_pipe, wake_pipe, wake_futex,
-    wake_process_futex, wake_process_blocked, boost_thread_priority,
-    add_futex_thread, with_current_thread};
+pub use tick::tick;
 
-use alloc::collections::{VecDeque, BinaryHeap};
 use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::thread::{Thread, ThreadId};
 use alloc::boxed::Box;
+use alloc::collections::{BinaryHeap, VecDeque};
 use core::sync::atomic::AtomicBool;
 
 // ─── Scheduling policy constants ────────────────────────────────
@@ -75,8 +76,6 @@ pub static GLOBAL: GlobalScheduler = GlobalScheduler::new();
 
 // ─── Per-CPU Run Queues (additive SMP infrastructure) ─────────
 
-
-
 // ─── Types ──────────────────────────────────────────────────────
 
 /// Wrapper that orders threads by ascending `pass` so BinaryHeap (a max-heap)
@@ -84,11 +83,15 @@ pub static GLOBAL: GlobalScheduler = GlobalScheduler::new();
 pub struct PassOrd(pub Box<Thread>);
 
 impl PartialEq for PassOrd {
-    fn eq(&self, other: &Self) -> bool { self.0.pass == other.0.pass }
+    fn eq(&self, other: &Self) -> bool {
+        self.0.pass == other.0.pass
+    }
 }
 impl Eq for PassOrd {}
 impl PartialOrd for PassOrd {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for PassOrd {
     /// Reverse ordering: smallest pass = highest priority in a max-heap.
@@ -117,6 +120,10 @@ pub struct PerCpuScheduler {
     pub idle: Option<Box<Thread>>,
     /// ThreadId of `idle`, used to recognize a preempted idle thread.
     idle_id: Option<ThreadId>,
+    /// One-shot: set when this CPU first schedules a process-bearing
+    /// (userspace) thread, so the boot log can show multi-CPU execution
+    /// with a single line per CPU instead of per-switch tracing.
+    pub first_user_announced: bool,
 }
 
 impl PerCpuScheduler {
@@ -124,8 +131,14 @@ impl PerCpuScheduler {
         PerCpuScheduler {
             stride_heap: BinaryHeap::new(),
             ready_queues: [
-                VecDeque::new(), VecDeque::new(), VecDeque::new(), VecDeque::new(),
-                VecDeque::new(), VecDeque::new(), VecDeque::new(), VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::new(),
             ],
             ready_queues_dirty: false,
             current_thread: None,
@@ -133,6 +146,7 @@ impl PerCpuScheduler {
             switching_old: None,
             idle: None,
             idle_id: None,
+            first_user_announced: false,
         }
     }
 
@@ -151,21 +165,20 @@ impl PerCpuScheduler {
     }
 
     /// Mark ready queues as dirty - should be called when adding to ready queues
-    #[allow(dead_code)]
     pub fn mark_ready_queues_dirty(&mut self) {
         self.ready_queues_dirty = true;
     }
 
     /// Drop all runnable state (selftest).
-    #[allow(dead_code)]
     pub fn reset_runnable_state(&mut self) {
         self.stride_heap.clear();
-        for q in &mut self.ready_queues { q.clear(); }
+        for q in &mut self.ready_queues {
+            q.clear();
+        }
         self.ready_queues_dirty = false;
     }
 
     /// Push a thread directly into the stride heap.
-    #[allow(dead_code)]
     pub fn push_thread(&mut self, thread: Box<Thread>) {
         self.stride_heap.push(PassOrd(thread));
     }
@@ -182,7 +195,9 @@ impl PerCpuScheduler {
         let mut woken = 0u32;
         let n = queue.len();
         for _ in 0..n {
-            let Some(mut thread) = queue.pop_front() else { break };
+            let Some(mut thread) = queue.pop_front() else {
+                break;
+            };
             if woken < max_wake && matches(&thread) {
                 clear_block(&mut thread);
                 thread.status = crate::task::thread::ThreadStatus::Ready;
@@ -202,43 +217,67 @@ impl PerCpuScheduler {
     /// Check scheduler invariants on a snapshot of pass values.
     #[cfg(feature = "verification")]
     fn check_pick_invariants(context: &str, selected_pass: u64, passes: &[u64]) {
-        if passes.is_empty() { return; }
+        if passes.is_empty() {
+            return;
+        }
         if let Some(min_pass) = passes.iter().min() {
             if selected_pass > *min_pass {
                 let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                runner.record_failure(context, &alloc::format!(
-                    "SelectedNotMinPass: selected={} min={} among {} ready threads",
-                    selected_pass, min_pass, passes.len()
-                ));
+                runner.record_failure(
+                    context,
+                    &alloc::format!(
+                        "SelectedNotMinPass: selected={} min={} among {} ready threads",
+                        selected_pass,
+                        min_pass,
+                        passes.len()
+                    ),
+                );
             }
         }
         if let (Some(max_pass), Some(min_pass)) = (passes.iter().max(), passes.iter().min()) {
             let limit = crate::verified::scheduler::STRIDE_MAX.saturating_mul(2);
             if max_pass.saturating_sub(*min_pass) > limit {
                 let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                runner.record_failure(context, &alloc::format!(
-                    "StretchViolation: max={} min={} limit={}",
-                    max_pass, min_pass, limit
-                ));
+                runner.record_failure(
+                    context,
+                    &alloc::format!(
+                        "StretchViolation: max={} min={} limit={}",
+                        max_pass,
+                        min_pass,
+                        limit
+                    ),
+                );
             }
         }
         let total_pass: u64 = passes.iter().sum();
-        let max_possible = crate::interrupts::get_ticks().saturating_mul(crate::verified::scheduler::STRIDE_MAX);
+        let max_possible =
+            crate::interrupts::get_ticks().saturating_mul(crate::verified::scheduler::STRIDE_MAX);
         if total_pass > max_possible.saturating_mul(2) {
             let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-            runner.record_failure(context, &alloc::format!(
-                "PassSumMismatch: sum={} >> expected max={} (ticks={})",
-                total_pass, max_possible, crate::interrupts::get_ticks()
-            ));
+            runner.record_failure(
+                context,
+                &alloc::format!(
+                    "PassSumMismatch: sum={} >> expected max={} (ticks={})",
+                    total_pass,
+                    max_possible,
+                    crate::interrupts::get_ticks()
+                ),
+            );
         }
         if let Some(min_pass) = passes.iter().min() {
             for pass in passes {
                 let gap = pass.saturating_sub(*min_pass);
                 if gap > crate::verified::scheduler::STRIDE_MAX.saturating_mul(4) {
                     let mut runner = crate::verified::runner::VERIFICATION_RUNNER.lock();
-                    runner.record_failure(context, &alloc::format!(
-                        "StarvationRisk: pass={} min={} gap={}", pass, min_pass, gap
-                    ));
+                    runner.record_failure(
+                        context,
+                        &alloc::format!(
+                            "StarvationRisk: pass={} min={} gap={}",
+                            pass,
+                            min_pass,
+                            gap
+                        ),
+                    );
                 }
             }
         }
@@ -250,7 +289,11 @@ impl PerCpuScheduler {
         let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
 
         // 1. Global pending queue first
-        if let Some(t) = GLOBAL.pending_queue.try_lock().and_then(|mut q| q.pop_front()) {
+        if let Some(t) = GLOBAL
+            .pending_queue
+            .try_lock()
+            .and_then(|mut q| q.pop_front())
+        {
             return Some(t);
         }
 
@@ -264,8 +307,12 @@ impl PerCpuScheduler {
         for level in (0..8).rev() {
             for idx in 0..self.ready_queues[level].len() {
                 let t = &self.ready_queues[level][idx];
-                if t.policy == 0 { continue; } // Not RT
-                if t.affinity_mask & (1u64 << current_cpu) == 0 { continue; }
+                if t.policy == 0 {
+                    continue;
+                } // Not RT
+                if t.affinity_mask & (1u64 << current_cpu) == 0 {
+                    continue;
+                }
                 let dominates = match best_level {
                     None => true,
                     Some(_) => {
@@ -294,7 +341,9 @@ impl PerCpuScheduler {
 
         // 3. SCHED_OTHER stride heap — respect CPU affinity
         #[cfg(feature = "verification")]
-        let snapshot_passes: alloc::vec::Vec<u64> = self.stride_heap.iter().map(|p| (&*p.0).pass).collect();
+        let snapshot_passes: alloc::vec::Vec<u64> =
+            self.stride_heap.iter().map(|p| (&*p.0).pass).collect();
+        #[allow(clippy::never_loop)]
         while let Some(PassOrd(t)) = self.stride_heap.pop() {
             if t.affinity_mask & (1u64 << current_cpu) != 0 {
                 #[cfg(feature = "verification")]
@@ -308,7 +357,9 @@ impl PerCpuScheduler {
 
         // 4. Work stealing — steal from other CPUs' RT queues first, then SCHED_OTHER
         for i in 0..MAX_CPUS {
-            if i == current_cpu { continue; }
+            if i == current_cpu {
+                continue;
+            }
             if let Some(mut other) = PER_CPU[i].try_lock() {
                 other.flush_ready_queues();
                 // Steal RT threads first — find best candidate by index
@@ -318,8 +369,12 @@ impl PerCpuScheduler {
                 for level in (0..8).rev() {
                     for idx in 0..other.ready_queues[level].len() {
                         let t = &other.ready_queues[level][idx];
-                        if t.policy == 0 { continue; }
-                        if t.affinity_mask & (1u64 << current_cpu) == 0 { continue; }
+                        if t.policy == 0 {
+                            continue;
+                        }
+                        if t.affinity_mask & (1u64 << current_cpu) == 0 {
+                            continue;
+                        }
                         if steal_level.is_none() || t.rt_priority > steal_prio {
                             steal_level = Some(level);
                             steal_idx = Some(idx);
@@ -334,11 +389,16 @@ impl PerCpuScheduler {
                 }
                 // Fall back to stride heap
                 #[cfg(feature = "verification")]
-                let stolen_passes: alloc::vec::Vec<u64> = other.stride_heap.iter().map(|p| (&*p.0).pass).collect();
+                let stolen_passes: alloc::vec::Vec<u64> =
+                    other.stride_heap.iter().map(|p| (&*p.0).pass).collect();
                 if let Some(PassOrd(t)) = other.stride_heap.pop() {
                     if t.affinity_mask & (1u64 << current_cpu) != 0 {
                         #[cfg(feature = "verification")]
-                        Self::check_pick_invariants("scheduler::pick_next::work_steal", t.pass, &stolen_passes);
+                        Self::check_pick_invariants(
+                            "scheduler::pick_next::work_steal",
+                            t.pass,
+                            &stolen_passes,
+                        );
                         return Some(t);
                     }
                 }
@@ -359,14 +419,20 @@ impl PerCpuScheduler {
             }
         }
         let total: usize = counts.iter().sum();
-        if total < 2 { return; }
+        if total < 2 {
+            return;
+        }
         let avg = total / MAX_CPUS;
         // If this CPU has more than avg+2 threads, try to push to a CPU with fewer
         if let Some(mut sched) = PER_CPU[current_cpu].try_lock() {
             if sched.stride_heap.len() > avg + 2 {
                 for target in 0..MAX_CPUS {
-                    if target == current_cpu { continue; }
-                    if counts[target] >= avg { continue; }
+                    if target == current_cpu {
+                        continue;
+                    }
+                    if counts[target] >= avg {
+                        continue;
+                    }
                     if let Some(mut target_sched) = PER_CPU[target].try_lock() {
                         // Steal one non-RT thread from this CPU's stride heap.
                         // RT threads (FIFO/RR) stay on their CPU — migrating them
@@ -418,20 +484,33 @@ impl GlobalScheduler {
     }
 
     /// Wake threads blocked on a pipe key.
-    pub fn wake_blocked_threads(&self, key: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
+    pub fn wake_blocked_threads(
+        &self,
+        key: u64,
+        max_wake: u32,
+        target_ready: &mut PerCpuScheduler,
+    ) -> u32 {
         let mut block = self.block_queue.lock();
-        target_ready.drain_wake(&mut block, max_wake,
+        target_ready.drain_wake(
+            &mut block,
+            max_wake,
             |t| t.pipe_block_key == Some(key),
-            |t| { t.pipe_block_key = None; },
+            |t| {
+                t.pipe_block_key = None;
+            },
         )
     }
 
     /// Wake threads waiting on a futex.
     pub fn wake_futex(&self, uaddr: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
         let mut futex = self.futex_queue.lock();
-        target_ready.drain_wake(&mut futex, max_wake,
+        target_ready.drain_wake(
+            &mut futex,
+            max_wake,
             |t| t.futex_wake_addr == Some(uaddr),
-            |t| { t.futex_wake_addr = None; },
+            |t| {
+                t.futex_wake_addr = None;
+            },
         )
     }
 }
@@ -516,8 +595,41 @@ pub fn yield_now() {
     }
 }
 
+/// Number of threads in the run queue (not currently running).
+pub fn runqueue_depth() -> u64 {
+    let mut total = 0u64;
+    if let Some(sched) = PER_CPU[0].try_lock() {
+        for q in sched.ready_queues.iter() {
+            total += q.len() as u64;
+        }
+        total += GLOBAL.pending_queue.lock().len() as u64;
+    }
+    total
+}
+
+/// Total thread count across all CPUs.
+pub fn total_thread_count() -> u64 {
+    let mut total = 0u64;
+    if let Some(sched) = PER_CPU[0].try_lock() {
+        for q in sched.ready_queues.iter() {
+            total += q.len() as u64;
+        }
+        total += GLOBAL.pending_queue.lock().len() as u64;
+        total += GLOBAL.sleep_queue.lock().len() as u64;
+        total += GLOBAL.futex_queue.lock().len() as u64;
+        total += GLOBAL.block_queue.lock().len() as u64;
+        if sched.current_thread.is_some() {
+            total += 1;
+        }
+    }
+    total
+}
+
 pub fn init() {
     crate::println!("Scheduler: Initializing Thread Engine...");
+    // The kernel is the single owner of process identity — register the
+    // provider so vahi-types consumers (net, drivers) read live state.
+    crate::task::process::init_process_provider();
     GLOBAL.pending_queue.lock().reserve(64);
     GLOBAL.sleep_queue.lock().reserve(64);
     GLOBAL.block_queue.lock().reserve(64);
@@ -533,4 +645,18 @@ pub fn init() {
             sched.idle = Some(idle);
         }
     }
+}
+
+/// Thread-context sleep until tick `target` — the shared body of
+/// sys_nanosleep's mark-Blocked-with-deadline + yield. Exposed through
+/// vahi-types' sleep facade so drivers sleep via the one live scheduler.
+pub fn sleep_until_tick(target: u64) {
+    {
+        let mut sched = this_cpu_sched().lock();
+        if let Some(current) = sched.current_thread.as_mut() {
+            current.status = crate::task::thread::ThreadStatus::Blocked;
+            current.sleep_until = Some(target);
+        }
+    }
+    schedule();
 }

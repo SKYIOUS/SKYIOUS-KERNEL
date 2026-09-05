@@ -4,7 +4,7 @@
 //! Implements CPU init, exception vectors, syscall entry, and context switch.
 
 use super::Arch;
-use crate::hal::platform::{PlatformInfo, PlatformArch};
+use crate::hal::platform::{PlatformArch, PlatformInfo};
 #[allow(unused_imports)]
 use alloc::sync::Arc;
 
@@ -46,18 +46,24 @@ impl Arch for AArch64Arch {
 
     fn read_sp() -> u64 {
         let sp: u64;
-        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("mov {}, sp", out(reg) sp, options(nostack, preserves_flags));
+        }
         sp
     }
 
     fn read_fp() -> u64 {
         let fp: u64;
-        unsafe { core::arch::asm!("mov {}, x29", out(reg) fp, options(nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("mov {}, x29", out(reg) fp, options(nostack, preserves_flags));
+        }
         fp
     }
 
     fn halt() {
-        unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("wfi", options(nostack, preserves_flags));
+        }
     }
 
     unsafe fn jump_to_usermode(entry: u64, rsp: u64) -> ! {
@@ -133,7 +139,9 @@ impl Arch for AArch64Arch {
 
     fn read_thread_pointer() -> u64 {
         let tp: u64;
-        unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) tp, options(nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("mrs {}, tpidr_el0", out(reg) tp, options(nostack, preserves_flags));
+        }
         tp
     }
 
@@ -160,8 +168,7 @@ impl Arch for AArch64Arch {
         crate::hal::cpu::register_cpu_context(&CONTEXT);
     }
 
-    fn init_hal_timer() {
-    }
+    fn init_hal_timer() {}
 }
 
 /// Initialize the exception vector table (VBAR_EL1).
@@ -272,14 +279,13 @@ core::arch::global_asm!(
     "mrs     x0,  elr_el1",
     "mrs     x1,  spsr_el1",
     "mrs     x2,  sp_el0",
-    "stp     x30, x0,  [sp, #(30 * 8)]",  // x30 (LR) + ELR_EL1
-    "stp     x1,  x2,  [sp, #(32 * 8)]",  // SPSR_EL1 + SP_EL0
+    "stp     x30, x0,  [sp, #(30 * 8)]", // x30 (LR) + ELR_EL1
+    "stp     x1,  x2,  [sp, #(32 * 8)]", // SPSR_EL1 + SP_EL0
     ".endm",
-
     // ====== Macro: restore all GP registers from stack and ERET ======
     ".macro  restore_all",
-    "ldp     x1,  x2,  [sp, #(32 * 8)]",  // SPSR_EL1 + SP_EL0
-    "ldp     x30, x0,  [sp, #(30 * 8)]",  // x30 (LR) + ELR_EL1
+    "ldp     x1,  x2,  [sp, #(32 * 8)]", // SPSR_EL1 + SP_EL0
+    "ldp     x30, x0,  [sp, #(30 * 8)]", // x30 (LR) + ELR_EL1
     "msr     spsr_el1, x1",
     "msr     elr_el1,  x0",
     "msr     sp_el0,   x2",
@@ -301,29 +307,26 @@ core::arch::global_asm!(
     "add     sp, sp, #(34 * 8)",
     "eret",
     ".endm",
-
     // ====== Default handler: save all, print, restore ======
     ".macro  default_handler, label:req",
-    ".align  7",  // each entry padded to 0x80 bytes
+    ".align  7", // each entry padded to 0x80 bytes
     "\\label" + ":",
     "save_all",
-    "mov     x0, sp",     // arg1 = context frame
+    "mov     x0, sp", // arg1 = context frame
     "bl      aarch64_default_exception",
     "restore_all",
     ".endm",
-
     // ====== SVC handler (EL0 Sync) — syscall entry ======
     ".macro  svc_handler, label:req",
     ".align  7",
     "\\label" + ":",
     "save_all",
-    "mov     x0, sp",     // arg1 = context frame
+    "mov     x0, sp", // arg1 = context frame
     "bl      aarch64_syscall_entry",
     // syscall_entry modifies registers in the saved context before return
     // restore_all will pick up the modified values
     "restore_all",
     ".endm",
-
     // ====== IRQ handler ======
     ".macro  irq_handler, label:req",
     ".align  7",
@@ -333,31 +336,26 @@ core::arch::global_asm!(
     "bl      aarch64_irq_handler",
     "restore_all",
     ".endm",
-
     // ====== Vector Table ======
     ".section .text._vector_table, \"ax\"",
     ".global exception_vector_table",
     ".balign 0x800",
     "exception_vector_table:",
-
     // EL1t (SP_EL0) — should never happen when using SP_EL1 in kernel
     "default_handler label=el1t_sync",
     "default_handler label=el1t_irq",
     "default_handler label=el1t_fiq",
     "default_handler label=el1t_serror",
-
     // EL1h (SP_EL1) — kernel exceptions
     "default_handler label=el1h_sync",
     "default_handler label=el1h_irq",
     "default_handler label=el1h_fiq",
     "default_handler label=el1h_serror",
-
     // EL0 AArch64 — userspace exceptions
-    "svc_handler   label=el0_64_sync",      // SVC #0 syscalls land here
+    "svc_handler   label=el0_64_sync", // SVC #0 syscalls land here
     "irq_handler   label=el0_64_irq",
     "default_handler label=el0_64_fiq",
     "default_handler label=el0_64_serror",
-
     // EL0 AArch32 — not used in this kernel
     "default_handler label=el0_32_sync",
     "default_handler label=el0_32_irq",
@@ -501,13 +499,13 @@ pub extern "C" fn aarch64_syscall_entry(frame: *mut u64) {
     // Args are in x0-x5 (indices 0-5)
     // Return value goes in x0 (index 0)
     unsafe {
-        let n = *frame.add(8);          // x8 = syscall number
-        let arg1 = *frame.add(0);       // x0
-        let arg2 = *frame.add(1);       // x1
-        let arg3 = *frame.add(2);       // x2
-        let arg4 = *frame.add(3);       // x3
-        let arg5 = *frame.add(4);       // x4
-        let arg6 = *frame.add(5);       // x5
+        let n = *frame.add(8); // x8 = syscall number
+        let arg1 = *frame.add(0); // x0
+        let arg2 = *frame.add(1); // x1
+        let arg3 = *frame.add(2); // x2
+        let arg4 = *frame.add(3); // x3
+        let arg5 = *frame.add(4); // x4
+        let arg6 = *frame.add(5); // x5
 
         // Dispatch through the arch-neutral syscall_handler
         let ret = crate::syscalls::do_syscall(n, arg1, arg2, arg3, arg4, arg5, frame);

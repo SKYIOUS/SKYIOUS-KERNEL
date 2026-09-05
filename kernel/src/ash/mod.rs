@@ -1,23 +1,39 @@
-#![allow(dead_code)]
-
-pub mod verifier;
-pub mod runtime;
-pub mod manager;
-pub mod syscalls;
 pub mod hooks;
+pub mod manager;
+pub mod runtime;
+pub mod syscalls;
+pub mod verifier;
 
 use alloc::vec::Vec;
 
 /// Hook point identifiers — where an ASH handler is attached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookPoint {
-    NetReceive { interface: u8, port: u16, protocol: Protocol },
-    NetTransmit { interface: u8, port: u16, protocol: Protocol },
-    SyscallEntry { syscall_num: u64 },
-    SyscallExit { syscall_num: u64 },
-    TimerFired { timer_id: u64 },
-    SignalDelivery { signal: u32 },
-    MessageReceive { channel: u64 },
+    NetReceive {
+        interface: u8,
+        port: u16,
+        protocol: Protocol,
+    },
+    NetTransmit {
+        interface: u8,
+        port: u16,
+        protocol: Protocol,
+    },
+    SyscallEntry {
+        syscall_num: u64,
+    },
+    SyscallExit {
+        syscall_num: u64,
+    },
+    TimerFired {
+        timer_id: u64,
+    },
+    SignalDelivery {
+        signal: u32,
+    },
+    MessageReceive {
+        channel: u64,
+    },
 }
 
 /// Network protocols filterable by ASH handlers.

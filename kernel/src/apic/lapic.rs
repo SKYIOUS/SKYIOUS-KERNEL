@@ -2,8 +2,8 @@ use crate::acpi;
 use x86_64::instructions::port::Port;
 
 use super::{
-    LAPIC_ID, LAPIC_LVT_ERROR, LAPIC_LVT_LINT0, LAPIC_LVT_LINT1, LAPIC_LVT_TIMER,
-    LAPIC_SPURIOUS, LAPIC_TIMER_CCR, LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_TPR, LAPIC_VERSION,
+    LAPIC_ID, LAPIC_LVT_ERROR, LAPIC_LVT_LINT0, LAPIC_LVT_LINT1, LAPIC_LVT_TIMER, LAPIC_SPURIOUS,
+    LAPIC_TIMER_CCR, LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_TPR, LAPIC_VERSION,
 };
 /// LVT Timer register bit 17: Timer Mode (0 = one-shot, 1 = periodic).
 const LAPIC_LVT_TIMER_PERIODIC: u32 = 1 << 17;
@@ -90,7 +90,9 @@ impl LocalApic {
 
         crate::serial_write(&alloc::format!(
             "[APIC] timer bus_freq={} divider={} count={}\n",
-            bus_freq, divider, count
+            bus_freq,
+            divider,
+            count
         ));
 
         count
@@ -112,7 +114,8 @@ impl LocalApic {
 
         crate::serial_write(&alloc::format!(
             "[APIC] TSC deadline timer tsc_hz={} deadline={}\n",
-            tsc_hz, deadline
+            tsc_hz,
+            deadline
         ));
 
         0
@@ -179,7 +182,9 @@ impl LocalApic {
         if let Some(freq) = self.probe_cpuid_bus_freq() {
             return freq;
         }
-        self.pit_calibrate().filter(|&f| f > 0).unwrap_or(100_000_000)
+        self.pit_calibrate()
+            .filter(|&f| f > 0)
+            .unwrap_or(100_000_000)
     }
 
     /// Try CPUID.0x15 and CPUID.0x16 for bus/crystal frequency.
@@ -270,23 +275,6 @@ impl LocalApic {
 
 /// Return the local APIC ID for a given CPU index.
 ///
-/// CPU 0 is the BSP; its LAPIC ID comes from the current CPU's LAPIC ID
-/// register. CPUs 1..N are application processors; their LAPIC IDs come
-/// from the `acpi::AP_LAPIC_IDS` table built during ACPI MADT parsing.
-/// Returns 0xFF if the CPU index is out of range.
-pub fn apic_id_for_cpu(cpu: u8) -> u8 {
-    if cpu == 0 {
-        return crate::apic::current_lapic_id();
-    }
-    let ap_index = (cpu - 1) as usize;
-    if let Some(ids) = crate::acpi::AP_LAPIC_IDS.get() {
-        if let Some(&id) = ids.get(ap_index) {
-            return id;
-        }
-    }
-    0xFF
-}
-
 fn divider_code(divider: u32) -> u32 {
     match divider {
         1 => 0x0B,
@@ -311,45 +299,10 @@ pub fn init() {
     let timer_count = lapic.init_timer();
     crate::serial_write("[APIC] timer started\n");
 
-    crate::println!("LAPIC: Initialized (ID: {}, Version: 0x{:x}, timer_count={})", lapic.id(), lapic.version(), timer_count);
+    crate::println!(
+        "LAPIC: Initialized (ID: {}, Version: 0x{:x}, timer_count={})",
+        lapic.id(),
+        lapic.version(),
+        timer_count
+    );
 }
-
-
-
-
-
-
-
-/// Initialize the APIC timer with a specific CPU frequency and target Hz.
-pub fn init_timer_count(cpu_freq_hz: u64, target_hz: u32) -> u32 {
-    let divider = 1;
-    let count = ((cpu_freq_hz / divider) / target_hz as u64) as u32;
-    let count = count.max(1);
-
-    let mut lapic = unsafe { LocalApic::new() }.expect("LocalApic::new failed in init_timer_count");
-    lapic.write(LAPIC_TIMER_DCR, divider_code(divider as u32));
-    lapic.write(LAPIC_LVT_TIMER, 0x20000 | 32);
-    lapic.write(LAPIC_TIMER_ICR, count);
-
-    crate::serial_write(&alloc::format!(
-        "[APIC] timer cpu_freq={} target_hz={} count={}\n",
-        cpu_freq_hz, target_hz, count
-    ));
-
-    count
-}
-
-/// Set the APIC timer initial count register directly.
-pub fn set_timer_count(count: u32) {
-    let mut lapic = unsafe { LocalApic::new() }.expect("LocalApic::new failed in set_timer_count");
-    lapic.write(LAPIC_TIMER_ICR, count);
-}
-
-/// Read the current APIC timer count (decrements at bus rate).
-pub fn timer_ticks() -> u32 {
-    let lapic = unsafe { LocalApic::new() }.expect("LocalApic::new failed in timer_ticks");
-    lapic.read(LAPIC_TIMER_CCR)
-}
-
-
-

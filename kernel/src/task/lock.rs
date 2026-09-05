@@ -7,27 +7,24 @@
 //! - Must NOT be used from interrupt context (block_on_pipe requires a thread).
 //! - Fairness ≈ FIFO (wake_pipe wakes in insertion order).
 
-use core::sync::atomic::{AtomicU64, Ordering::*};
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering::*};
 
 /// A mutex that blocks rather than spins when contended.
 /// Used by the VFS global lock (vfs/mod.rs). Deploy on BUDDY_ALLOCATOR or the
 /// compositor when contention is measured via profiling (add a counter to
 /// SchedLock::lock slow path).
-#[allow(dead_code)]
 pub struct SchedLock<T> {
-    held: AtomicU64,       // 0 = free, 1 = held
-    key: AtomicU64,        // unique pipe-block key
+    held: AtomicU64, // 0 = free, 1 = held
+    key: AtomicU64,  // unique pipe-block key
     data: UnsafeCell<T>,
 }
 
 unsafe impl<T: Send> Send for SchedLock<T> {}
 unsafe impl<T: Send> Sync for SchedLock<T> {}
 
-#[allow(dead_code)]
 static NEXT_LOCK_KEY: AtomicU64 = AtomicU64::new(0x1000_0000_0000);
 
-#[allow(dead_code)]
 impl<T> SchedLock<T> {
     pub const fn new(val: T) -> Self {
         SchedLock {
@@ -61,13 +58,19 @@ impl<T> SchedLock<T> {
     pub fn lock(&self) -> SchedLockGuard<'_, T> {
         // Fast path: try once
         if self.held.swap(1, Acquire) == 0 {
-            return SchedLockGuard { lock: self, data: unsafe { &mut *self.data.get() } };
+            return SchedLockGuard {
+                lock: self,
+                data: unsafe { &mut *self.data.get() },
+            };
         }
         // Slow path: block until we acquire
         loop {
             crate::task::scheduler::block_on_pipe(self.key());
             if self.held.swap(1, Acquire) == 0 {
-                return SchedLockGuard { lock: self, data: unsafe { &mut *self.data.get() } };
+                return SchedLockGuard {
+                    lock: self,
+                    data: unsafe { &mut *self.data.get() },
+                };
             }
         }
     }
@@ -75,7 +78,10 @@ impl<T> SchedLock<T> {
     /// Non-blocking try_lock
     pub fn try_lock(&self) -> Option<SchedLockGuard<'_, T>> {
         if self.held.swap(1, Acquire) == 0 {
-            Some(SchedLockGuard { lock: self, data: unsafe { &mut *self.data.get() } })
+            Some(SchedLockGuard {
+                lock: self,
+                data: unsafe { &mut *self.data.get() },
+            })
         } else {
             None
         }
@@ -89,11 +95,15 @@ pub struct SchedLockGuard<'a, T> {
 
 impl<T> core::ops::Deref for SchedLockGuard<'_, T> {
     type Target = T;
-    fn deref(&self) -> &T { self.data }
+    fn deref(&self) -> &T {
+        self.data
+    }
 }
 
 impl<T> core::ops::DerefMut for SchedLockGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T { self.data }
+    fn deref_mut(&mut self) -> &mut T {
+        self.data
+    }
 }
 
 impl<T> Drop for SchedLockGuard<'_, T> {

@@ -1,6 +1,7 @@
 # ADR-017: KASLR (Kernel Address Space Layout Randomization)
 
 ## Status
+Accepted
 
 **Proposed** — No team decision required; straightforward security feature.
 

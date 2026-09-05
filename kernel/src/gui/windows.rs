@@ -40,13 +40,20 @@ impl Compositor {
         let w = 400;
         let h = 300;
         let mut fm_win = window::Window::new(130, 70, w, h, "File Manager");
-        fm_win.file_manager = Some(crate::gui::filemanager::FileManagerWidget::new(w - 4, h - 24));
+        fm_win.file_manager = Some(crate::gui::filemanager::FileManagerWidget::new(
+            w - 4,
+            h - 24,
+        ));
         self.windows.push(fm_win);
     }
 
     pub(crate) fn shutdown_qemu(&mut self) {
-        unsafe { x86_64::instructions::port::Port::<u16>::new(0x604).write(0x2000); }
+        unsafe {
+            x86_64::instructions::port::Port::<u16>::new(0x604).write(0x2000);
+        }
         x86_64::instructions::interrupts::disable();
-        loop { x86_64::instructions::hlt(); }
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
 }

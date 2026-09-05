@@ -1,11 +1,11 @@
-use core::sync::atomic::{AtomicU64, Ordering};
-use alloc::vec::Vec;
+use crate::compositor::blend::BlendMode;
+use crate::compositor::scene::GuiScene;
+use crate::compositor::shadow::ShadowParams;
+use crate::compositor::vsync::FpsCounter;
 use crate::drivers::gpu::ring::{GpuCommand, GpuOpcode, COMMAND_RING};
 use crate::drivers::gpu::virtio_gpu::VirtioGpu;
-use crate::compositor::vsync::FpsCounter;
-use crate::compositor::blend::BlendMode;
-use crate::compositor::shadow::ShadowParams;
-use crate::compositor::scene::GuiScene;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub struct WindowSurface {
     pub window_id: u64,
@@ -68,35 +68,55 @@ impl HwCompositor {
     }
 
     pub fn set_opacity(&mut self, window_id: u64, opacity: f32) {
-        if let Some(ws) = self.window_surfaces.iter_mut().find(|w| w.window_id == window_id) {
+        if let Some(ws) = self
+            .window_surfaces
+            .iter_mut()
+            .find(|w| w.window_id == window_id)
+        {
             ws.opacity = opacity.clamp(0.0, 1.0);
             ws.dirty = true;
         }
     }
 
     pub fn set_blur(&mut self, window_id: u64, radius: u32) {
-        if let Some(ws) = self.window_surfaces.iter_mut().find(|w| w.window_id == window_id) {
+        if let Some(ws) = self
+            .window_surfaces
+            .iter_mut()
+            .find(|w| w.window_id == window_id)
+        {
             ws.blur_radius = radius;
             ws.dirty = true;
         }
     }
 
     pub fn set_shadow(&mut self, window_id: u64, params: ShadowParams) {
-        if let Some(ws) = self.window_surfaces.iter_mut().find(|w| w.window_id == window_id) {
+        if let Some(ws) = self
+            .window_surfaces
+            .iter_mut()
+            .find(|w| w.window_id == window_id)
+        {
             ws.shadow = Some(params);
             ws.dirty = true;
         }
     }
 
     pub fn move_window(&mut self, window_id: u64, x: i32, y: i32) {
-        if let Some(ws) = self.window_surfaces.iter_mut().find(|w| w.window_id == window_id) {
+        if let Some(ws) = self
+            .window_surfaces
+            .iter_mut()
+            .find(|w| w.window_id == window_id)
+        {
             ws.position = (x, y);
             ws.dirty = true;
         }
     }
 
     pub fn resize_window(&mut self, window_id: u64, w: u32, h: u32) {
-        if let Some(ws) = self.window_surfaces.iter_mut().find(|w| w.window_id == window_id) {
+        if let Some(ws) = self
+            .window_surfaces
+            .iter_mut()
+            .find(|w| w.window_id == window_id)
+        {
             ws.size = (w, h);
             ws.dirty = true;
         }
@@ -110,7 +130,9 @@ impl HwCompositor {
 
         for &idx in &sorted {
             let ws = &self.window_surfaces[idx];
-            if !ws.dirty { continue; }
+            if !ws.dirty {
+                continue;
+            }
 
             // Submit shadow first (behind window)
             if let Some(ref shadow_params) = ws.shadow {
@@ -118,8 +140,10 @@ impl HwCompositor {
                     &COMMAND_RING,
                     ws.gpu_surface,
                     shadow_params,
-                    ws.position.0, ws.position.1,
-                    ws.size.0, ws.size.1,
+                    ws.position.0,
+                    ws.position.1,
+                    ws.size.0,
+                    ws.size.1,
                 )?;
             }
 
@@ -132,14 +156,22 @@ impl HwCompositor {
             // Submit alpha-blended window content
             if ws.opacity < 1.0 {
                 crate::compositor::blend::blend_surface(
-                    &COMMAND_RING, self.display_surface, ws.gpu_surface,
-                    ws.position, ws.opacity, BlendMode::Normal,
+                    &COMMAND_RING,
+                    self.display_surface,
+                    ws.gpu_surface,
+                    ws.position,
+                    ws.opacity,
+                    BlendMode::Normal,
                 )?;
             } else {
                 // Opaque window: full copy via normal blend w/ opacity=1
                 crate::compositor::blend::blend_surface(
-                    &COMMAND_RING, self.display_surface, ws.gpu_surface,
-                    ws.position, 1.0, BlendMode::Normal,
+                    &COMMAND_RING,
+                    self.display_surface,
+                    ws.gpu_surface,
+                    ws.position,
+                    1.0,
+                    BlendMode::Normal,
                 )?;
             }
         }
@@ -147,8 +179,11 @@ impl HwCompositor {
         // Submit flip
         let cmd = GpuCommand {
             opcode: GpuOpcode::Flip as u32,
-            flags: 0, payload_offset: 0, payload_len: 0,
-            fence_id: 0, reserved: [0; 8],
+            flags: 0,
+            payload_offset: 0,
+            payload_len: 0,
+            fence_id: 0,
+            reserved: [0; 8],
         };
         let fence = COMMAND_RING.submit(&cmd, &[])?;
 
@@ -171,7 +206,11 @@ impl HwCompositor {
     }
 
     pub fn composite_window(&mut self, window_id: u64) -> Result<(), ()> {
-        let idx = match self.window_surfaces.iter().position(|w| w.window_id == window_id) {
+        let idx = match self
+            .window_surfaces
+            .iter()
+            .position(|w| w.window_id == window_id)
+        {
             Some(i) => i,
             None => return Err(()),
         };
@@ -179,8 +218,13 @@ impl HwCompositor {
 
         if let Some(ref shadow_params) = ws.shadow {
             crate::compositor::shadow::render_shadow(
-                &COMMAND_RING, ws.gpu_surface, shadow_params,
-                ws.position.0, ws.position.1, ws.size.0, ws.size.1,
+                &COMMAND_RING,
+                ws.gpu_surface,
+                shadow_params,
+                ws.position.0,
+                ws.position.1,
+                ws.size.0,
+                ws.size.1,
             )?;
         }
         if ws.blur_radius > 0 {
@@ -189,14 +233,21 @@ impl HwCompositor {
         }
         if ws.opacity < 1.0 {
             crate::compositor::blend::blend_surface(
-                &COMMAND_RING, self.display_surface, ws.gpu_surface,
-                ws.position, ws.opacity, BlendMode::Normal,
+                &COMMAND_RING,
+                self.display_surface,
+                ws.gpu_surface,
+                ws.position,
+                ws.opacity,
+                BlendMode::Normal,
             )?;
         }
         let cmd = GpuCommand {
             opcode: GpuOpcode::Flip as u32,
-            flags: 0, payload_offset: 0, payload_len: 0,
-            fence_id: 0, reserved: [0; 8],
+            flags: 0,
+            payload_offset: 0,
+            payload_len: 0,
+            fence_id: 0,
+            reserved: [0; 8],
         };
         let fence = COMMAND_RING.submit(&cmd, &[])?;
         while !COMMAND_RING.poll_completion(fence) {
@@ -234,8 +285,10 @@ impl HwCompositor {
                     &COMMAND_RING,
                     ws.gpu_surface,
                     shadow_params,
-                    ws.position.0, ws.position.1,
-                    ws.size.0, ws.size.1,
+                    ws.position.0,
+                    ws.position.1,
+                    ws.size.0,
+                    ws.size.1,
                 )?;
             }
 
@@ -248,14 +301,22 @@ impl HwCompositor {
             // Submit alpha-blended window content
             if ws.opacity < 1.0 {
                 crate::compositor::blend::blend_surface(
-                    &COMMAND_RING, self.display_surface, ws.gpu_surface,
-                    ws.position, ws.opacity, BlendMode::Normal,
+                    &COMMAND_RING,
+                    self.display_surface,
+                    ws.gpu_surface,
+                    ws.position,
+                    ws.opacity,
+                    BlendMode::Normal,
                 )?;
             } else {
                 // Opaque window: full copy via normal blend w/ opacity=1
                 crate::compositor::blend::blend_surface(
-                    &COMMAND_RING, self.display_surface, ws.gpu_surface,
-                    ws.position, 1.0, BlendMode::Normal,
+                    &COMMAND_RING,
+                    self.display_surface,
+                    ws.gpu_surface,
+                    ws.position,
+                    1.0,
+                    BlendMode::Normal,
                 )?;
             }
         }
@@ -263,8 +324,11 @@ impl HwCompositor {
         // Submit flip
         let cmd = GpuCommand {
             opcode: GpuOpcode::Flip as u32,
-            flags: 0, payload_offset: 0, payload_len: 0,
-            fence_id: 0, reserved: [0; 8],
+            flags: 0,
+            payload_offset: 0,
+            payload_len: 0,
+            fence_id: 0,
+            reserved: [0; 8],
         };
         let fence = COMMAND_RING.submit(&cmd, &[])?;
 

@@ -1,0 +1,16 @@
+[package]
+name = "vahi-ebpf"
+version = "0.3.0"
+edition = "2021"
+description = "eBPF virtual machine, verifier, JIT, and maps"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+vahi-types = { path = "../types" }
+vahi-syscalls = { path = "../syscalls" }
+spin = "0.9.8"
+lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
+
+[features]
+default = []
+jit = []

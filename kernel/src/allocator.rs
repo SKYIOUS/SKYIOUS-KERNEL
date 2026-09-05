@@ -1,16 +1,17 @@
+use crate::memory::slab::{FixedSizeBlockAllocator, Locked};
 use x86_64::{
     structures::paging::{
         mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
     },
     VirtAddr,
 };
-use crate::memory::slab::{FixedSizeBlockAllocator, Locked};
 
 pub const HEAP_START: usize = 0xFFFF_C000_0000_0000;
 pub const HEAP_SIZE: usize = 128 * 1024 * 1024; // 128 MiB
 
 #[global_allocator]
-static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
+pub(crate) static ALLOCATOR: Locked<FixedSizeBlockAllocator> =
+    Locked::new(FixedSizeBlockAllocator::new());
 
 pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,
@@ -30,9 +31,7 @@ pub fn init_heap(
             .ok_or(MapToError::FrameAllocationFailed)?;
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         // SAFETY: mapper.map_to is safe when frame is valid and flags are appropriate
-        unsafe {
-            mapper.map_to(page, frame, flags, frame_allocator)?.flush()
-        };
+        unsafe { mapper.map_to(page, frame, flags, frame_allocator)?.flush() };
     }
 
     // SAFETY: ALLOCATOR.init is safe when HEAP_START and HEAP_SIZE are valid and within mapped memory

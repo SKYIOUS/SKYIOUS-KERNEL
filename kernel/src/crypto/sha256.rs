@@ -31,7 +31,7 @@ pub fn sha256(data: &[u8], out: &mut [u8]) {
     ];
 
     let data_len_bits = (data.len() as u64) * 8;
-    let total_blocks = (data.len() + 9 + 63) / 64;
+    let total_blocks = (data.len() + 9).div_ceil(64);
     let mut block = [0u8; 64];
 
     for b in 0..total_blocks {
@@ -171,7 +171,7 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8], out: &mut [u8]) {
 /// Writes to `out` (must be at least `dk_len` bytes).
 pub fn pbkdf2(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize, out: &mut [u8]) {
     let hlen = 32; // SHA256 output length
-    let l = (dk_len + hlen - 1) / hlen; // number of blocks
+    let l = dk_len.div_ceil(hlen); // number of blocks
     let mut t = alloc::vec![0u8; l * hlen];
     let mut u = [0u8; 32];
 

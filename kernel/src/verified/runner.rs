@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Runtime verification harness.
 //!
 //! The `VerificationRunner` samples invariant checkpoints during kernel
@@ -18,8 +16,8 @@
 //! }
 //! ```
 
-use crate::verified::{Invariant, VerificationFailure, VerificationReport};
 use crate::sync::IrqSafeMutex as Mutex;
+use crate::verified::{Invariant, VerificationFailure, VerificationReport};
 
 /// Global verification runner instance.
 ///
@@ -59,11 +57,7 @@ impl VerificationRunner {
     /// If the runner is enabled and the state's invariant returns `false`,
     /// the violation is recorded.  Always increments the checkpoint counter
     /// so that coverage statistics are meaningful.
-    pub fn checkpoint<S>(
-        &mut self,
-        name: &str,
-        state: &dyn Invariant<State = S>,
-    ) {
+    pub fn checkpoint<S>(&mut self, name: &str, state: &dyn Invariant<State = S>) {
         self.checkpoints += 1;
         if !self.enabled {
             return;
@@ -99,11 +93,28 @@ impl VerificationRunner {
     pub fn dump_report(&self) {
         use crate::serial_write;
         serial_write("[VERIFY] ===== Verification Report =====\n");
-        serial_write(&alloc::format!("[VERIFY] Checkpoints: {}\n", self.checkpoints));
-        serial_write(&alloc::format!("[VERIFY] Violations:  {}\n", self.violations));
-        serial_write(&alloc::format!("[VERIFY] Status:     {}\n", if self.failures.is_empty() { "PASS" } else { "FAIL" }));
+        serial_write(&alloc::format!(
+            "[VERIFY] Checkpoints: {}\n",
+            self.checkpoints
+        ));
+        serial_write(&alloc::format!(
+            "[VERIFY] Violations:  {}\n",
+            self.violations
+        ));
+        serial_write(&alloc::format!(
+            "[VERIFY] Status:     {}\n",
+            if self.failures.is_empty() {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        ));
         for f in &self.failures {
-            serial_write(&alloc::format!("[VERIFY]  FAIL: {} — {}\n", f.checkpoint, f.detail));
+            serial_write(&alloc::format!(
+                "[VERIFY]  FAIL: {} — {}\n",
+                f.checkpoint,
+                f.detail
+            ));
         }
         serial_write("[VERIFY] ==============================\n");
     }

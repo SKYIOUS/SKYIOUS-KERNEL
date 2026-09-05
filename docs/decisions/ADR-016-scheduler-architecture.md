@@ -1,6 +1,7 @@
 # ADR-016: Scheduler Architecture
 
 ## Status
+Accepted
 
 **DECISION REQUIRED** — This ADR proposes a scheduler architecture that requires team consensus.
 

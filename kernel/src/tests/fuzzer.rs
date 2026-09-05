@@ -18,8 +18,8 @@
 //! - Maintains a corpus of inputs that triggered interesting behavior
 //! - Reports pass/fail/crash counts via TAP output
 
-use alloc::vec::Vec;
 use crate::selftest;
+use alloc::vec::Vec;
 
 /// Fuzzer statistics
 pub struct FuzzerStats {
@@ -64,7 +64,9 @@ struct Xorshift64 {
 
 impl Xorshift64 {
     fn new(seed: u64) -> Self {
-        Self { state: if seed == 0 { 1 } else { seed } }
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -100,10 +102,10 @@ impl Xorshift64 {
     /// Generate a "interesting" pointer-like value
     fn interesting_ptr(&mut self) -> u64 {
         match self.next_u32() % 8 {
-            0 => 0, // null
-            1 => 0x1000, // valid-ish userspace
-            2 => 0xFFFF_8000_0000_0000, // kernel space (should fault)
-            3 => 0xFFFF_FFFF_FFFF_FFFF, // max
+            0 => 0,                                       // null
+            1 => 0x1000,                                  // valid-ish userspace
+            2 => 0xFFFF_8000_0000_0000,                   // kernel space (should fault)
+            3 => 0xFFFF_FFFF_FFFF_FFFF,                   // max
             _ => self.next_u64() & 0x0000_FFFF_FFFF_FFFF, // userspace range
         }
     }
@@ -124,19 +126,43 @@ fn get_syscall_test_cases() -> Vec<SyscallTestCase> {
     cases.push(SyscallTestCase {
         name: "sys_open",
         nr: 2, // SYS_OPEN
-        generate_args: |rng| (rng.interesting_ptr(), rng.next_u64() & 0x7FFF, rng.next_u64() & 0xFFFF, 0, 0),
+        generate_args: |rng| {
+            (
+                rng.interesting_ptr(),
+                rng.next_u64() & 0x7FFF,
+                rng.next_u64() & 0xFFFF,
+                0,
+                0,
+            )
+        },
     });
 
     cases.push(SyscallTestCase {
         name: "sys_read",
         nr: 0, // SYS_READ
-        generate_args: |rng| (rng.next_u64() % 256, rng.interesting_ptr(), rng.interesting_u64() & 0xFFFF, 0, 0),
+        generate_args: |rng| {
+            (
+                rng.next_u64() % 256,
+                rng.interesting_ptr(),
+                rng.interesting_u64() & 0xFFFF,
+                0,
+                0,
+            )
+        },
     });
 
     cases.push(SyscallTestCase {
         name: "sys_write",
         nr: 1, // SYS_WRITE
-        generate_args: |rng| (rng.next_u64() % 256, rng.interesting_ptr(), rng.interesting_u64() & 0xFFFF, 0, 0),
+        generate_args: |rng| {
+            (
+                rng.next_u64() % 256,
+                rng.interesting_ptr(),
+                rng.interesting_u64() & 0xFFFF,
+                0,
+                0,
+            )
+        },
     });
 
     cases.push(SyscallTestCase {
@@ -168,13 +194,29 @@ fn get_syscall_test_cases() -> Vec<SyscallTestCase> {
     cases.push(SyscallTestCase {
         name: "sys_mmap",
         nr: 9, // SYS_MMAP
-        generate_args: |rng| (rng.interesting_ptr(), rng.interesting_u64() & 0xFFFF, rng.next_u64() & 0x7, rng.next_u64() % 3, 0),
+        generate_args: |rng| {
+            (
+                rng.interesting_ptr(),
+                rng.interesting_u64() & 0xFFFF,
+                rng.next_u64() & 0x7,
+                rng.next_u64() % 3,
+                0,
+            )
+        },
     });
 
     cases.push(SyscallTestCase {
         name: "sys_munmap",
         nr: 11, // SYS_MUNMAP
-        generate_args: |rng| (rng.interesting_ptr(), rng.interesting_u64() & 0xFFFF, 0, 0, 0),
+        generate_args: |rng| {
+            (
+                rng.interesting_ptr(),
+                rng.interesting_u64() & 0xFFFF,
+                0,
+                0,
+                0,
+            )
+        },
     });
 
     // Signal operations
@@ -194,7 +236,15 @@ fn get_syscall_test_cases() -> Vec<SyscallTestCase> {
     cases.push(SyscallTestCase {
         name: "sys_bind",
         nr: 49, // SYS_BIND
-        generate_args: |rng| (rng.next_u64() % 256, rng.interesting_ptr(), rng.next_u64() & 0xFF, 0, 0),
+        generate_args: |rng| {
+            (
+                rng.next_u64() % 256,
+                rng.interesting_ptr(),
+                rng.next_u64() & 0xFF,
+                0,
+                0,
+            )
+        },
     });
 
     cases.push(SyscallTestCase {
@@ -274,7 +324,15 @@ fn get_syscall_test_cases() -> Vec<SyscallTestCase> {
     cases.push(SyscallTestCase {
         name: "sys_ioctl",
         nr: 16, // SYS_IOCTL
-        generate_args: |rng| (rng.next_u64() % 256, rng.next_u64() & 0xFFFF, rng.interesting_ptr(), 0, 0),
+        generate_args: |rng| {
+            (
+                rng.next_u64() % 256,
+                rng.next_u64() & 0xFFFF,
+                rng.interesting_ptr(),
+                0,
+                0,
+            )
+        },
     });
 
     cases
@@ -375,25 +433,49 @@ fn test_boundary_cases() -> Result<(), &'static str> {
 
     for _ in 0..1000 {
         let val = rng.interesting_u64();
-        if val == 0 { saw_zero = true; }
-        if val == 0xFFFF_FFFF_FFFF_FFFF { saw_max = true; }
+        if val == 0 {
+            saw_zero = true;
+        }
+        if val == 0xFFFF_FFFF_FFFF_FFFF {
+            saw_max = true;
+        }
 
         let ptr = rng.interesting_ptr();
-        if ptr == 0xFFFF_8000_0000_0000 { saw_kernel = true; }
+        if ptr == 0xFFFF_8000_0000_0000 {
+            saw_kernel = true;
+        }
     }
 
-    if !saw_zero { return Err("Boundary: never generated 0"); }
-    if !saw_max { return Err("Boundary: never generated max"); }
-    if !saw_kernel { return Err("Boundary: never generated kernel ptr"); }
+    if !saw_zero {
+        return Err("Boundary: never generated 0");
+    }
+    if !saw_max {
+        return Err("Boundary: never generated max");
+    }
+    if !saw_kernel {
+        return Err("Boundary: never generated kernel ptr");
+    }
 
     Ok(())
 }
 
 /// Test crash signature deduplication
 fn test_crash_dedup() -> Result<(), &'static str> {
-    let sig1 = CrashSignature { syscall_nr: 2, arg1: 0, arg2: 0 };
-    let sig2 = CrashSignature { syscall_nr: 2, arg1: 1, arg2: 2 };
-    let sig3 = CrashSignature { syscall_nr: 3, arg1: 0, arg2: 0 };
+    let sig1 = CrashSignature {
+        syscall_nr: 2,
+        arg1: 0,
+        arg2: 0,
+    };
+    let sig2 = CrashSignature {
+        syscall_nr: 2,
+        arg1: 1,
+        arg2: 2,
+    };
+    let sig3 = CrashSignature {
+        syscall_nr: 3,
+        arg1: 0,
+        arg2: 0,
+    };
 
     if sig1 != sig2 {
         return Err("Dedup: same syscall should be equal");

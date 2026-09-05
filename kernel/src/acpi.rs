@@ -1,13 +1,17 @@
-use acpi::{AcpiHandler, PhysicalMapping, AcpiTables};
-use core::ptr::NonNull;
 use crate::memory;
 use crate::println;
+use acpi::{AcpiHandler, AcpiTables, PhysicalMapping};
+use core::ptr::NonNull;
 
 #[derive(Clone, Copy)]
 pub struct SkyAcpiHandler;
 
 impl AcpiHandler for SkyAcpiHandler {
-    unsafe fn map_physical_region<T>(&self, physical_address: usize, size: usize) -> PhysicalMapping<Self, T> {
+    unsafe fn map_physical_region<T>(
+        &self,
+        physical_address: usize,
+        size: usize,
+    ) -> PhysicalMapping<Self, T> {
         let offset = memory::physical_memory_offset();
         let virtual_address = offset + physical_address as u64;
         PhysicalMapping::new(
@@ -66,7 +70,10 @@ pub fn init(boot_rsdp: Option<u64>) {
     let handler = SkyAcpiHandler;
     crate::serial_write("[ACPI] find_rsdp...\n");
     let rsdp_addr = match boot_rsdp.or_else(|| find_rsdp().map(|a| a as u64)) {
-        Some(addr) => { crate::serial_write(&alloc::format!("[ACPI] RSDP at 0x{:x}\n", addr)); addr as usize }
+        Some(addr) => {
+            crate::serial_write(&alloc::format!("[ACPI] RSDP at 0x{:x}\n", addr));
+            addr as usize
+        }
         None => {
             println!("ERROR: Failed to find ACPI RSDP");
             crate::serial_write("[ACPI] FATAL: RSDP not found\n");
@@ -77,7 +84,10 @@ pub fn init(boot_rsdp: Option<u64>) {
     crate::serial_write("[ACPI] loading tables...\n");
     let tables = unsafe {
         match AcpiTables::from_rsdp(handler, rsdp_addr) {
-            Ok(t) => { crate::serial_write("[ACPI] tables loaded\n"); t }
+            Ok(t) => {
+                crate::serial_write("[ACPI] tables loaded\n");
+                t
+            }
             Err(e) => {
                 println!("ERROR: Failed to load ACPI tables: {:?}", e);
                 crate::serial_write(&alloc::format!("[ACPI] table error: {:?}\n", e));
@@ -94,8 +104,12 @@ pub fn init(boot_rsdp: Option<u64>) {
     crate::serial_write("[ACPI] platform_info...\n");
     if let Ok(platform_info) = tables.platform_info() {
         crate::serial_write("[ACPI] got platform_info\n");
-        if let acpi::platform::interrupt::InterruptModel::Apic(apic) = platform_info.interrupt_model {
-            crate::serial_write(&alloc::format!("[ACPI] LAPIC addr=0x{:x}\n", apic.local_apic_address));
+        if let acpi::platform::interrupt::InterruptModel::Apic(apic) = platform_info.interrupt_model
+        {
+            crate::serial_write(&alloc::format!(
+                "[ACPI] LAPIC addr=0x{:x}\n",
+                apic.local_apic_address
+            ));
             LAPIC_ADDR.call_once(|| apic.local_apic_address as usize);
             println!("ACPI: LAPIC Address: 0x{:x}", apic.local_apic_address);
 
@@ -137,8 +151,9 @@ pub fn init(boot_rsdp: Option<u64>) {
         if let Some(processor_info) = platform_info.processor_info {
             let mut ap_ids = alloc::vec::Vec::new();
             for ap in processor_info.application_processors.iter() {
-                if ap.state == ::acpi::platform::ProcessorState::WaitingForSipi ||
-                   ap.state == ::acpi::platform::ProcessorState::Running {
+                if ap.state == ::acpi::platform::ProcessorState::WaitingForSipi
+                    || ap.state == ::acpi::platform::ProcessorState::Running
+                {
                     ap_ids.push(ap.local_apic_id as u8);
                 }
             }
@@ -189,7 +204,10 @@ fn parse_fadt(tables: &AcpiTables<SkyAcpiHandler>) {
                 let reset_val = fadt.reset_value;
                 if reset_reg.address_space == acpi::platform::address::AddressSpace::SystemIo {
                     RESET_REG_PORT.call_once(|| Some((reset_reg.address as u16, reset_val)));
-                    println!("ACPI: RESET_REG at port 0x{:x} (val 0x{:x})", reset_reg.address, reset_val);
+                    println!(
+                        "ACPI: RESET_REG at port 0x{:x} (val 0x{:x})",
+                        reset_reg.address, reset_val
+                    );
                 } else {
                     println!("ACPI: RESET_REG at non-I/O address space, skipping");
                     RESET_REG_PORT.call_once(|| None);
@@ -223,31 +241,45 @@ pub fn acpi_shutdown() {
 
     if let Some(Some(pm1b_port)) = PM1B_CNT_PORT.get() {
         let mut pm1b_port = x86_64::instructions::port::Port::<u16>::new(*pm1b_port);
-        unsafe { pm1b_port.write(pm1a_val); }
+        unsafe {
+            pm1b_port.write(pm1a_val);
+        }
     }
 
     let mut pm1a_port = x86_64::instructions::port::Port::<u16>::new(pm1a_port);
-    unsafe { pm1a_port.write(pm1a_val); }
+    unsafe {
+        pm1a_port.write(pm1a_val);
+    }
 
     // Wait for power loss
     x86_64::instructions::interrupts::disable();
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// ACPI system reset via RESET_REG.
 pub fn acpi_reboot() {
     if let Some(&Some((port, reset_val))) = RESET_REG_PORT.get() {
         let mut port = x86_64::instructions::port::Port::<u8>::new(port);
-        unsafe { port.write(reset_val); }
+        unsafe {
+            port.write(reset_val);
+        }
         x86_64::instructions::interrupts::disable();
-        loop { x86_64::instructions::hlt(); }
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
 
     // Fallback: legacy keyboard controller reset
     let mut kbc = x86_64::instructions::port::Port::<u8>::new(0x64);
-    unsafe { kbc.write(0xFE); }
+    unsafe {
+        kbc.write(0xFE);
+    }
     x86_64::instructions::interrupts::disable();
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 fn find_rsdp() -> Option<usize> {
@@ -267,8 +299,7 @@ fn find_rsdp() -> Option<usize> {
         }
     }
 
-    search_range(offset + 0xE0000, offset + 0x100000)
-        .map(|addr| (addr - offset) as usize)
+    search_range(offset + 0xE0000, offset + 0x100000).map(|addr| (addr - offset) as usize)
 }
 
 fn search_range(start: u64, end: u64) -> Option<u64> {
@@ -280,5 +311,3 @@ fn search_range(start: u64, end: u64) -> Option<u64> {
     }
     None
 }
-
-

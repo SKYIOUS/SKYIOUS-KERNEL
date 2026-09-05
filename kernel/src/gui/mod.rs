@@ -3,32 +3,34 @@
 //! Provides window management, compositing, and double-buffering.
 
 pub mod drawing;
-pub mod mouse;
-pub mod window;
-pub mod shell;
-pub mod terminal;
-pub mod widgets;
 pub mod filemanager;
+pub mod mouse;
+pub mod shell;
 pub mod splash;
+pub mod terminal;
 pub mod wallpaper;
+pub mod widgets;
+pub mod window;
 
-pub mod surface;
 pub mod input;
-pub mod windows;
 pub mod menu;
 pub mod paint;
+pub mod surface;
+pub mod windows;
 
-use alloc::vec::Vec;
-use alloc::boxed::Box;
-use crate::sync::IrqSafeMutex as Mutex;
 use self::surface::DamageTracker;
+use crate::sync::IrqSafeMutex as Mutex;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 pub const SCREEN_WIDTH: usize = 800;
 pub const SCREEN_HEIGHT: usize = 600;
 
 pub static mut ACCENT_COLOR: u32 = 0xFF0078D4;
 
-pub fn accent_color() -> u32 { unsafe { ACCENT_COLOR } }
+pub fn accent_color() -> u32 {
+    unsafe { ACCENT_COLOR }
+}
 
 lazy_static::lazy_static! {
     pub static ref COMPOSITOR: Mutex<Compositor> = Mutex::new(Compositor::new());
@@ -79,8 +81,8 @@ impl Notification {
     pub fn notif_color(&self) -> u32 {
         match self.kind {
             NotifKind::Info => 0xFF2196F3,    // Blue
-            NotifKind::Warning => 0xFFFF9800,  // Orange
-            NotifKind::Error => 0xFFF44336,    // Red
+            NotifKind::Warning => 0xFFFF9800, // Orange
+            NotifKind::Error => 0xFFF44336,   // Red
         }
     }
 }
@@ -114,11 +116,15 @@ impl Compositor {
     pub fn new() -> Self {
         let size = SCREEN_WIDTH * SCREEN_HEIGHT;
         let mut buffer = Vec::with_capacity(size);
-        for _ in 0..size { buffer.push(0x001A237E); } // Deep Blue Background
+        for _ in 0..size {
+            buffer.push(0x001A237E);
+        } // Deep Blue Background
 
         let backbuffer = buffer.into_boxed_slice();
         let mut bg_cache = alloc::vec::Vec::with_capacity(size);
-        for _ in 0..size { bg_cache.push(0x001A237E); }
+        for _ in 0..size {
+            bg_cache.push(0x001A237E);
+        }
         let bg_cache = bg_cache.into_boxed_slice();
         Self {
             backbuffer,
@@ -140,7 +146,8 @@ impl Compositor {
             alt_tab_index: 0,
             context_menu: ContextMenu {
                 open: false,
-                x: 0, y: 0,
+                x: 0,
+                y: 0,
                 items: alloc::vec::Vec::new(),
                 selected: None,
             },
@@ -154,7 +161,8 @@ impl Compositor {
     pub fn add_window(&mut self, mut window: window::Window) {
         let idx = self.windows.len();
         window.dirty = true;
-        self.damage.mark(window.x, window.y, window.width, window.height);
+        self.damage
+            .mark(window.x, window.y, window.width, window.height);
         self.windows.push(window);
         self.animations.push(WindowAnimation {
             window_idx: idx,
@@ -196,25 +204,41 @@ impl Compositor {
     }
 
     pub fn load_wallpaper(&mut self) {
-        if !self.wallpaper_dirty { return; }
+        if !self.wallpaper_dirty {
+            return;
+        }
         self.wallpaper_dirty = false;
         let path = match &self.wallpaper_path {
             Some(p) => p.clone(),
-            None => { shell::draw_background(&mut self.background_cache); return; }
+            None => {
+                shell::draw_background(&mut self.background_cache);
+                return;
+            }
         };
         let vfs = crate::vfs::VFS.lock();
         let node = match vfs.resolve_path(&path) {
             Some(n) => n,
-            None => { drop(vfs); shell::draw_background(&mut self.background_cache); return; }
+            None => {
+                drop(vfs);
+                shell::draw_background(&mut self.background_cache);
+                return;
+            }
         };
         let data = match node.read(usize::MAX) {
             Ok(d) => d,
-            Err(_) => { drop(vfs); shell::draw_background(&mut self.background_cache); return; }
+            Err(_) => {
+                drop(vfs);
+                shell::draw_background(&mut self.background_cache);
+                return;
+            }
         };
         drop(vfs);
         let img = match wallpaper::decode_bmp(&data) {
             Some(i) => i,
-            None => { shell::draw_background(&mut self.background_cache); return; }
+            None => {
+                shell::draw_background(&mut self.background_cache);
+                return;
+            }
         };
         let scaled = wallpaper::scale_to_screen(&img, SCREEN_WIDTH, SCREEN_HEIGHT);
         self.background_cache = scaled.into_boxed_slice();

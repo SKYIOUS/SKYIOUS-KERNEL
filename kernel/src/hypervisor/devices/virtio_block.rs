@@ -1,12 +1,11 @@
-#![allow(dead_code)]
 //! VirtIO Block device.
 //!
 //! Emulates a virtio-blk device backed by a host file or memory buffer.
 //! Uses the VirtIO MMIO transport for simplicity (no PCI required).
 
+use crate::hypervisor::devices::{VirtDevice, VirtDeviceType};
 use alloc::vec::Vec;
 use x86_64::PhysAddr;
-use crate::hypervisor::devices::{VirtDevice, VirtDeviceType};
 
 /// VirtIO block device.
 pub struct VirtioBlock {
@@ -63,10 +62,10 @@ impl VirtDevice for VirtioBlock {
         let offset = addr.as_u64() - self.mmio_base.as_u64();
         // ponytail: minimal VirtIO MMIO register emulation
         match offset {
-            0x000 => Some(0x0), // Magic value
-            0x004 => Some(0x2), // Version
-            0x008 => Some(0xFF), // Device ID (block = 0x02)
-            0x00C => Some(0x1), // Vendor ID
+            0x000 => Some(0x0),           // Magic value
+            0x004 => Some(0x2),           // Version
+            0x008 => Some(0xFF),          // Device ID (block = 0x02)
+            0x00C => Some(0x1),           // Vendor ID
             0x010 => Some(self.capacity), // Device features
             _ => Some(0),
         }

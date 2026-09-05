@@ -1,17 +1,19 @@
+use crate::memory::buddy::BuddyFrameAllocator;
 use crate::sync::IrqSafeMutex as Mutex;
-use hashbrown::HashMap;
+use crate::syscalls::errno;
+use crate::syscalls::get_current_euid;
+use crate::syscalls::get_current_process;
+use crate::syscalls::has_capability;
+use crate::syscalls::user_access;
+use crate::syscalls::CAP_SYS_ADMIN;
+use crate::task::process::{FileDescriptor, Vma, CURRENT_PROCESS};
+use crate::vfs::FileSystem;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use crate::syscalls::errno;
-use crate::vfs::FileSystem;
-use crate::syscalls::user_access;
-use crate::syscalls::get_current_process;
-use crate::syscalls::get_current_euid;
-use crate::syscalls::has_capability;
-use crate::syscalls::CAP_SYS_ADMIN;
-use crate::task::process::{CURRENT_PROCESS, Vma, FileDescriptor};
-use crate::memory::buddy::BuddyFrameAllocator;
-use x86_64::structures::paging::{Page, Size4KiB, Mapper, FrameAllocator, PageTableFlags, PhysFrame};
+use hashbrown::HashMap;
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
+};
 use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
@@ -22,8 +24,8 @@ pub struct ShmSegment {
     pub id: u32,
     pub key: i32,
     pub size: usize,
-    pub pages: Vec<u64>,     // physical page addresses
-    pub perms: u16,          // permission bits (mode & 0x1FF)
+    pub pages: Vec<u64>, // physical page addresses
+    pub perms: u16,      // permission bits (mode & 0x1FF)
     pub uid: u32,
     pub gid: u32,
     pub cpid: u64,
@@ -118,7 +120,9 @@ fn alloc_segment_pages(num_pages: usize) -> Result<Vec<u64>, errno::Errno> {
                 // SAFETY: freeing frames we just allocated; no aliasing
                 for &paddr in &pages {
                     let f = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(paddr));
-                    crate::memory::buddy::BUDDY_ALLOCATOR.lock().deallocate_frame(f);
+                    crate::memory::buddy::BUDDY_ALLOCATOR
+                        .lock()
+                        .deallocate_frame(f);
                 }
                 return Err(errno::Errno::ENOMEM);
             }
@@ -131,7 +135,9 @@ fn alloc_segment_pages(num_pages: usize) -> Result<Vec<u64>, errno::Errno> {
 fn free_segment_pages(pages: &[u64]) {
     for &paddr in pages {
         let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(paddr));
-        crate::memory::buddy::BUDDY_ALLOCATOR.lock().deallocate_frame(frame);
+        crate::memory::buddy::BUDDY_ALLOCATOR
+            .lock()
+            .deallocate_frame(frame);
         crate::memory::frame_info::decrement(frame.start_address());
     }
 }
@@ -227,9 +233,13 @@ pub fn sys_shmat(shmid: i32, shmaddr: *const u8, shmflg: i32) -> u64 {
     let euid = get_current_euid();
     let egid = current_egid();
     let read_only = (shmflg & SHM_RDONLY) != 0;
-    let perm_bits = if euid == seg_uid { (perms >> 6) & 7 }
-                    else if egid == seg_gid { (perms >> 3) & 7 }
-                    else { perms & 7 };
+    let perm_bits = if euid == seg_uid {
+        (perms >> 6) & 7
+    } else if egid == seg_gid {
+        (perms >> 3) & 7
+    } else {
+        perms & 7
+    };
     // Read permission required for any attach
     if (perm_bits & 4) == 0 {
         return -(errno::Errno::EACCES as i64) as u64;
@@ -252,7 +262,8 @@ pub fn sys_shmat(shmid: i32, shmaddr: *const u8, shmflg: i32) -> u64 {
     let mmap_addr = if shmaddr.is_null() {
         const SHM_MIN: u64 = 0x4000_0000_0000;
         const SHM_MAX: u64 = 0x7F00_0000_0000;
-        static SHM_NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(SHM_MIN);
+        static SHM_NEXT: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(SHM_MIN);
         let addr = SHM_NEXT.fetch_add(len_aligned as u64, Ordering::Relaxed);
         let addr_aligned = addr & !0xFFF;
         if addr_aligned + len_aligned as u64 > SHM_MAX {
@@ -280,7 +291,8 @@ pub fn sys_shmat(shmid: i32, shmaddr: *const u8, shmflg: i32) -> u64 {
     let mut frame_allocator = BuddyFrameAllocator;
 
     for (i, &paddr) in pages.iter().enumerate() {
-        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(mmap_addr + (i as u64) * 4096));
+        let page =
+            Page::<Size4KiB>::containing_address(VirtAddr::new(mmap_addr + (i as u64) * 4096));
         let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(paddr));
         unsafe {
             match mapper.map_to(page, frame, page_flags, &mut frame_allocator) {
@@ -288,7 +300,9 @@ pub fn sys_shmat(shmid: i32, shmaddr: *const u8, shmflg: i32) -> u64 {
                 Err(_) => {
                     // Unmap already-mapped pages on failure
                     for j in 0..i {
-                        let p = Page::<Size4KiB>::containing_address(VirtAddr::new(mmap_addr + (j as u64) * 4096));
+                        let p = Page::<Size4KiB>::containing_address(VirtAddr::new(
+                            mmap_addr + (j as u64) * 4096,
+                        ));
                         if let Ok((f, t)) = mapper.unmap(p) {
                             t.flush();
                             crate::memory::frame_info::decrement(f.start_address());
@@ -404,7 +418,9 @@ pub fn shm_detach_all(proc: &crate::task::process::Process) {
         let vmas = proc.memory.lock();
         vmas.vmas.iter().filter_map(|v| v.shm_id).collect()
     };
-    if shm_ids.is_empty() { return; }
+    if shm_ids.is_empty() {
+        return;
+    }
 
     // Segments to physically free, collected while holding SHM_SEGMENTS.
     let mut to_free: Vec<(u32, i32, Vec<u64>)> = Vec::new();
@@ -446,9 +462,8 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: *mut u8) -> u64 {
                 0, // shmmni (default 4096)
                 0, // shmall (default)
             ];
-            let bytes = unsafe {
-                core::slice::from_raw_parts(info.as_ptr() as *const u8, info.len() * 8)
-            };
+            let bytes =
+                unsafe { core::slice::from_raw_parts(info.as_ptr() as *const u8, info.len() * 8) };
             if unsafe { user_access::copy_to_user(buf, bytes) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
@@ -457,7 +472,11 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: *mut u8) -> u64 {
 
         IPC_STAT | SHM_STAT | SHM_STAT_ANY => {
             let segments = SHM_SEGMENTS.lock();
-            let seg_id = if cmd == IPC_STAT { shmid as u32 } else { shmid as u32 };
+            let seg_id = if cmd == IPC_STAT {
+                shmid as u32
+            } else {
+                shmid as u32
+            };
             let seg = match segments.get(&seg_id) {
                 Some(s) => s,
                 None => return errno::Errno::EINVAL as u64,
@@ -485,18 +504,28 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: *mut u8) -> u64 {
                 shm_internal: [0u8; 16],
             };
             let bytes = unsafe {
-                core::slice::from_raw_parts(&ds as *const _ as *const u8, core::mem::size_of::<shmid_ds>())
+                core::slice::from_raw_parts(
+                    &ds as *const _ as *const u8,
+                    core::mem::size_of::<shmid_ds>(),
+                )
             };
             if unsafe { user_access::copy_to_user(buf, bytes) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
-            if cmd == SHM_STAT { seg.id as u64 } else { 0 }
+            if cmd == SHM_STAT {
+                seg.id as u64
+            } else {
+                0
+            }
         }
 
         IPC_SET => {
             let mut ds: shmid_ds = unsafe { core::mem::zeroed() };
             let bytes = unsafe {
-                core::slice::from_raw_parts_mut(&mut ds as *mut _ as *mut u8, core::mem::size_of::<shmid_ds>())
+                core::slice::from_raw_parts_mut(
+                    &mut ds as *mut _ as *mut u8,
+                    core::mem::size_of::<shmid_ds>(),
+                )
             };
             if unsafe { user_access::copy_from_user(bytes, buf) }.is_err() {
                 return errno::Errno::EFAULT as u64;
@@ -581,7 +610,10 @@ pub fn sys_memfd_create(name_ptr: *const u8, flags: u32) -> u64 {
         None => return errno::Errno::ESRCH as u64,
     };
 
-    let fd_obj = FileDescriptor::File { node, offset: crate::sync::IrqSafeMutex::new(0) };
+    let fd_obj = FileDescriptor::File {
+        node,
+        offset: crate::sync::IrqSafeMutex::new(0),
+    };
     let mut fd_table = process.files.lock().fd_table.clone();
     let fd = {
         let mut slot = None;
@@ -604,7 +636,9 @@ pub fn sys_memfd_create(name_ptr: *const u8, flags: u32) -> u64 {
     // MFD_CLOEXEC
     if (flags & 0x0001) != 0 {
         let mut fd_flags = process.files.lock().fd_flags.clone();
-        if fd >= fd_flags.len() { fd_flags.resize(fd + 1, 0); }
+        if fd >= fd_flags.len() {
+            fd_flags.resize(fd + 1, 0);
+        }
         fd_flags[fd] |= 0x80000; // FD_CLOEXEC
     }
 

@@ -1,0 +1,20 @@
+[build]
+jobs = 1
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "target-feature=-sse",
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "relocation-model=static",
+]
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "target-feature=+soft-float,+strict-align",
+    "-C", "link-arg=-Taarch64-linker.ld",
+    "-C", "relocation-model=static",
+]
+
+[env]
+SMOLTCP_IFACE_MAX_ADDR_COUNT = "4"
+SMOLTCP_IFACE_MAX_ROUTE_COUNT = "4"

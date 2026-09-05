@@ -1,0 +1,13 @@
+[package]
+name = "vahi-apic"
+version = "0.3.0"
+edition = "2021"
+description = "x86_64 APIC (Local APIC + I/O APIC + MSI) for the Vahi kernel"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+vahi-types = { path = "../types" }
+x86_64 = { version = "0.14", default-features = false, features = ["instructions"] }
+volatile = "0.2.6"
+pic8259 = "0.10"
+spin = "0.9"

@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, dead_code, unused_doc_comments)]
+#![allow(unused_imports)]
 //! fs syscalls — re-exports from submodules for backward compatibility.
 //!
 //! Original 2625-line monolith split into:
@@ -7,7 +7,7 @@
 //! - fs_mount.rs: mount, umount, mkfs, swapon, swapoff, sync
 //! - fs_io.rs: read, write, lseek, brk, mmap, munmap, mprotect, ioctl, getdents, fallocate, sendfile
 
+pub use super::fs_io::*;
+pub use super::fs_mount::*;
 pub use super::fs_open::*;
 pub use super::fs_stat::*;
-pub use super::fs_mount::*;
-pub use super::fs_io::*;

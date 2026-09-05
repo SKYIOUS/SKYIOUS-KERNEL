@@ -1,7 +1,7 @@
 # ADR-010: Decompose the Syscall Layer
 
 ## Status
-Proposed
+Accepted — mod.rs decomposed to 433 lines (from 7,301)
 
 ## Date
 2026-08-20

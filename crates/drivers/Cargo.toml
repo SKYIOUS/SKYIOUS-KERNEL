@@ -1,0 +1,41 @@
+[package]
+name = "vahi-drivers"
+version = "0.3.0"
+edition = "2021"
+description = "Device drivers for the Vahi kernel"
+
+[dependencies]
+vahi-types = { path = "../types" }
+vahi-sync = { path = "../sync" }
+vahi-memory = { path = "../memory" }
+vahi-hal = { path = "../hal" }
+vahi-pci = { path = "../pci" }
+vahi-apic = { path = "../apic" }
+vahi-limine = { path = "../limine" }
+vahi-syscalls = { path = "../syscalls" }
+vahi-arch = { path = "../arch" }
+spin = "0.9.8"
+volatile = "0.2.6"
+linked_list_allocator = "0.10.5"
+lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
+crossbeam-queue = { version = "0.3.12", default-features = false, features = ["alloc"] }
+smoltcp = { version = "0.10", default-features = false, features = ["alloc", "log", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-icmp", "socket-udp", "socket-tcp", "socket-dhcpv4"] }
+xmas-elf = "0.9.1"
+font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "c4b88477b22ca7e5131fbd8891f62a5deaa88e6e", default-features = false, features = ["alloc"] }
+embedded-io = "0.6.1"
+mbr-nostd = "0.1.0"
+hashbrown = { version = "0.14", default-features = false, features = ["alloc", "ahash"] }
+heapless = { version = "0.8", default-features = false }
+pc-keyboard = "0.5.1"
+limine = "0.6.5"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "0.14.2"
+
+[features]
+default = []
+net = []
+gpu = []
+uhci = []
+smp = []

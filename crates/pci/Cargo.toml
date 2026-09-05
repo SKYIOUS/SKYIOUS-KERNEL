@@ -1,0 +1,15 @@
+[package]
+name = "vahi-pci"
+version = "0.3.0"
+edition = "2021"
+description = "PCI bus enumeration and configuration space access"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+vahi-memory = { path = "../memory" }
+vahi-limine = { path = "../limine" }
+vahi-apic = { path = "../apic" }
+spin = "0.9.8"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "0.14.2"

@@ -1,6 +1,6 @@
-use crate::ebpf::vm::EbpfInsn;
+use crate::ash::{AshError, AshHandler, AshResult, HookPoint, VerifiedAsh};
 use crate::ebpf::verifier::{self, tnum_verify};
-use crate::ash::{AshHandler, HookPoint, VerifiedAsh, AshResult, AshError};
+use crate::ebpf::vm::EbpfInsn;
 use alloc::vec::Vec;
 
 /// Maximum number of eBPF instructions allowed for an ASH handler.
@@ -11,7 +11,9 @@ pub const ASH_MAX_MEMORY_BUDGET: usize = 512;
 
 /// Verify an ASH handler's bytecode against the hook point.
 pub fn verify_handler(handler: &AshHandler) -> Result<VerifiedAsh, AshResult> {
-    if handler.bytecode.is_empty() || handler.bytecode.len() > ASH_MAX_INSNS * core::mem::size_of::<EbpfInsn>() {
+    if handler.bytecode.is_empty()
+        || handler.bytecode.len() > ASH_MAX_INSNS * core::mem::size_of::<EbpfInsn>()
+    {
         return Err(AshResult::Error(AshError::VerifierRejected));
     }
 
@@ -22,10 +24,7 @@ pub fn verify_handler(handler: &AshHandler) -> Result<VerifiedAsh, AshResult> {
 
     // SAFETY: We check the slice is aligned & sized correctly
     let insns: &[EbpfInsn] = unsafe {
-        core::slice::from_raw_parts(
-            handler.bytecode.as_ptr() as *const EbpfInsn,
-            insn_count,
-        )
+        core::slice::from_raw_parts(handler.bytecode.as_ptr() as *const EbpfInsn, insn_count)
     };
 
     if !verifier::verify(insns) {

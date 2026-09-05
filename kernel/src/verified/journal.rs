@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! SkyFS journal crash-consistency proof.
 //!
 //! # Journal state machine
@@ -100,16 +98,26 @@ impl core::fmt::Display for JournalViolation {
                 write!(f, "InvalidTransition: {from:?} --[{event:?}]--> {to:?}")
             }
             JournalViolation::UncommittedData { txn } => {
-                write!(f, "UncommittedData: txn {} not committed before crash", txn.0)
+                write!(
+                    f,
+                    "UncommittedData: txn {} not committed before crash",
+                    txn.0
+                )
             }
             JournalViolation::LostCommit { txn } => {
                 write!(f, "LostCommit: txn {} committed but data lost", txn.0)
             }
             JournalViolation::ChecksumMismatch { expected, actual } => {
-                write!(f, "ChecksumMismatch: expected {expected:#x} got {actual:#x}")
+                write!(
+                    f,
+                    "ChecksumMismatch: expected {expected:#x} got {actual:#x}"
+                )
             }
             JournalViolation::OutOfOrderSequence { expected, actual } => {
-                write!(f, "OutOfOrderSequence: expected seq {expected} got {actual}")
+                write!(
+                    f,
+                    "OutOfOrderSequence: expected seq {expected} got {actual}"
+                )
             }
             JournalViolation::DoubleBegin => write!(f, "DoubleBegin: already collecting"),
             JournalViolation::DoubleCommit => write!(f, "DoubleCommit: already committing"),
@@ -174,7 +182,9 @@ impl JournalStateMachine {
             (_, JournalEvent::Crash, JournalState::Recovering) => Ok(()),
 
             // Recovering ──► Idle: recovery finished successfully
-            (JournalState::Recovering, JournalEvent::RecoveryComplete, JournalState::Idle) => Ok(()),
+            (JournalState::Recovering, JournalEvent::RecoveryComplete, JournalState::Idle) => {
+                Ok(())
+            }
 
             // Everything else is invalid
             _ => Err(JournalViolation::InvalidTransition {
@@ -198,7 +208,9 @@ impl JournalStateMachine {
             }
             (JournalState::Idle, JournalEvent::RecoveryComplete) => JournalState::Idle,
             (JournalState::Collecting, JournalEvent::CommitTxn) => {
-                let txn = self.current_txn.ok_or(JournalViolation::CommitWithoutData)?;
+                let txn = self
+                    .current_txn
+                    .ok_or(JournalViolation::CommitWithoutData)?;
                 self.committed_txns.push(txn);
                 JournalState::Committing
             }
@@ -210,9 +222,7 @@ impl JournalStateMachine {
                 self.current_txn = None;
                 JournalState::Idle
             }
-            (_, JournalEvent::Crash) => {
-                JournalState::Recovering
-            }
+            (_, JournalEvent::Crash) => JournalState::Recovering,
             (JournalState::Recovering, JournalEvent::RecoveryComplete) => {
                 // Emit recovery markers for committed but not-yet-persisted
                 // transactions — these were replayed.
