@@ -100,10 +100,18 @@ pub unsafe fn init_graphics(
 
     if crate::drivers::graphics::is_active() {
         crate::serial_write("[BOOT] graphics=active\n");
+        // Show boot splash as soon as framebuffer is ready.
+        crate::gui::splash::init();
     } else {
         crate::serial_write("[BOOT] graphics=INACTIVE\n");
     }
     crate::serial_write("[BOOT] -> SARGA OS \u{2014} Vahi Kernel v0.3.0 starting...\n");
+    crate::serial_write("[SPLASH] SARGA OS loading...\n");
+    // ponytail: 1M spin_loop iterations took ~90s in debug+TCG; 10k is
+    // enough for a human to read a framebuffer splash.
+    for _ in 0..10_000 {
+        core::hint::spin_loop();
+    }
 }
 
 /// Initialize architecture-specific subsystems: GDT, IDT, syscalls, HAL,
