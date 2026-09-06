@@ -91,6 +91,15 @@ pub fn init_gs_base(cpu_id: usize) {
         areas.resize(cpu_id + 1, PerCpuPtr(core::ptr::null_mut()));
     }
     areas[cpu_id] = PerCpuPtr(data as *mut PerCpuData);
+    
+    // Register fast CPU ID provider for vahi-sync's IrqSafeMutex
+    // Uses GS-based per-CPU data instead of expensive CPUID instruction
+    unsafe { vahi_sync::set_cpu_id_provider(|| {
+        let base: u64;
+        core::arch::asm!("mov {0}, gs:0x0", out(reg) base);
+        let cpu_data = &*(base as *const PerCpuData);
+        cpu_data.cpu_id as u16
+    })};
 }
 
 // ─── Typed dispatch ─────────────────────────────────────────────

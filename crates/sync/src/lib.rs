@@ -191,6 +191,14 @@ impl<T: ?Sized> Drop for IrqSafeMutexGuard<'_, T> {
 #[cfg(not(all(test, not(target_os = "none"))))]
 #[inline(always)]
 fn this_cpu() -> u16 {
+    // Use custom provider if registered, otherwise fall back to CPUID.
+    // The provider is set by the kernel during early boot to use the
+    // GS-based per-CPU data which is much faster than CPUID.
+    unsafe {
+        if let Some(f) = CPU_ID_PROVIDER {
+            return f();
+        }
+    }
     // __cpuid(1) is the LLVM CPUID builtin (handles the callee-saved rbx
     // internally); leaf 1 never faults on x86_64 and EBX[31:24] is the
     // caller's initial APIC ID, unique per CPU.
@@ -203,6 +211,33 @@ fn this_cpu() -> u16 {
 #[inline(always)]
 fn this_cpu() -> u16 {
     0
+}
+
+/// Function pointer type for custom CPU ID provider.
+///
+/// The kernel can register a faster implementation (e.g., GS-based per-CPU data)
+/// during early boot. This avoids the expensive CPUID instruction on every
+/// lock acquisition.
+type CpuIdProvider = fn() -> u16;
+
+/// Optional custom CPU ID provider. Set by the kernel during init.
+/// Defaults to None (uses CPUID fallback).
+static mut CPU_ID_PROVIDER: Option<CpuIdProvider> = None;
+
+/// Register a custom CPU ID provider function.
+///
+/// This should be called once during kernel initialization, before any
+/// `IrqSafeMutex` is used. The provider must be safe to call from any
+/// context (including interrupt context with interrupts disabled).
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - The function is safe to call with interrupts disabled
+/// - The function returns a unique identifier per CPU
+/// - The function does not panic or allocate
+pub unsafe fn set_cpu_id_provider(f: CpuIdProvider) {
+    CPU_ID_PROVIDER = Some(f);
 }
 
 /// Save RFLAGS and disable interrupts. Returns the captured RFLAGS.

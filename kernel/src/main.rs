@@ -247,11 +247,14 @@ pub fn oom_kill() -> ! {
 fn init_kaslr() {
     let val = crate::crypto::GLOBAL_ENTROPY.get_u64();
     let val = if val == 0 { 0x1000 } else { val };
-    // 30-bit entropy: 2MB-aligned offset up to 1GB. Önceki 16-bit (64KB range)
-    // was trivially brutable. 30-bit = 512 possible slide values.
-    // ponytail: increase to 40-bit when kernel supports 1GB huge page KASLR.
+    // 30-bit address space (1GB range), 2MB alignment => 9 bits entropy (512 slots).
+    // Mask: 0xFFE0_0000 = bits 0-20 zeroed (2MB alignment), bits 21-30 random.
+    // Previous mask 0x3FFF_F000 gave 4KB alignment (not 2MB as claimed).
+    // NOTE: KERNEL_SLIDE is stored but NOT applied to relocate the kernel.
+    // Full KASLR requires runtime relocation of kernel image and fixups,
+    // which is not yet implemented. This provides entropy generation only.
     KERNEL_SLIDE.store(
-        val & 0x0000_0000_3FFF_F000,
+        val & 0x0000_0000_FFE0_0000,
         core::sync::atomic::Ordering::Relaxed,
     );
 }
