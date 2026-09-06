@@ -16,8 +16,8 @@ crates/
   objects/     ← vahi-objects: kernel object handles (EXTRACTED)
   ipc/         ← vahi-ipc: IPC endpoints, messages, ports (EXTRACTED)
   pci/         ← vahi-pci: PCI config space, BAR mapping (PARTIAL)
-  syscalls/    ← vahi-syscalls: errno, numbers (SCAFFOLDED)
-  ebpf/        ← vahi-ebpf: eBPF VM, verifier, JIT (SCAFFOLDED)
+  syscalls/    ← vahi-syscalls: errno (SCAFFOLDED)
+  ebpf/        ← kernel-owned: eBPF VM, verifier, JIT
   gui/         ← vahi-gui: compositor, windows, input (SCAFFOLDED)
   interrupts/  ← vahi-interrupts: IRQ, page fault, exceptions (SCAFFOLDED)
   task/        ← vahi-task: process, thread, scheduler, OOM (SCAFFOLDED)
@@ -25,7 +25,7 @@ crates/
   net/         ← vahi-net: TCP, UDP, DHCP, DNS (SCAFFOLDED)
   drivers/     ← vahi-drivers: serial, PS/2, E1000, VirtIO (SCAFFOLDED)
   arch/        ← vahi-arch: x86_64, aarch64, HAL (SCAFFOLDED)
-  boot/        ← vahi-boot: boot state machine, init (SCAFFOLDED)
+  boot/        ← kernel-owned: boot state machine, init, logger, tasks
   gdt/         ← vahi-gdt: GDT/TSS management (EXTRACTED)
   acpi/        ← vahi-acpi: ACPI tables, MADT, PRT (EXTRACTED)
 kernel/
@@ -46,7 +46,6 @@ Tier 0 (no kernel deps):
 Tier 1 (depends on Tier 0):
   vahi-memory ← vahi-sync + x86_64
   vahi-arch   ← vahi-sync + x86_64
-  vahi-boot   ← vahi-sync + vahi-arch
   vahi-objects ← vahi-sync + vahi-types
 
 Tier 2 (depends on Tier 0-1):
@@ -59,7 +58,6 @@ Tier 2 (depends on Tier 0-1):
   vahi-pci        ← vahi-sync + vahi-apic + vahi-limine + vahi-memory
   vahi-syscalls   ← vahi-sync + vahi-types + vahi-ipc + vahi-task + ...
   vahi-gui        ← vahi-sync + vahi-types + vahi-vfs + vahi-drivers + ...
-  vahi-ebpf       ← vahi-sync + vahi-types + vahi-syscalls
 
 Tier 3+ (depends on Tier 0-2):
   vahi_kernel ← everything above
@@ -131,7 +129,6 @@ Tier 3+ (depends on Tier 0-2):
 | Module | Path | Owner | Files | Lines | Status |
 |--------|------|-------|-------|-------|--------|
 | `memory` | `kernel/src/memory/` | TBD | 12 | 2,556 | Partial |
-| `boot` | `crates/boot/` | TBD | 5 | 587 | Stable |
 | `objects` | `crates/objects/` | TBD | 4 | 1400 | Stable |
 | `ipc` | `crates/ipc/` | TBD | 1 | 402 | Extracted |
 | `pci` | `kernel/src/pci/` | TBD | 1 | 341 | Partial |

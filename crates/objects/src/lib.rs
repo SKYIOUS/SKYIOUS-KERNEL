@@ -32,7 +32,6 @@
 
 extern crate alloc;
 
-pub mod namespace;
 pub mod security;
 
 use alloc::sync::Arc;

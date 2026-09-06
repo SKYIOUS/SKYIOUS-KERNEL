@@ -28,14 +28,12 @@ Layer 2 (Subsystem Interfaces):
     vahi-net            TCP/UDP networking, DNS, DHCP, congestion control, Unix sockets
     vahi-drivers        NVMe, E1000, xHCI, HDA audio, VirtIO-GPU, PS/2
     vahi-apic           x86_64 APIC: LAPIC, I/O APIC, MSI, timer calibration
-    vahi-boot           Boot state machine, early init, serial logging
 
 Layer 3 (Advanced Subsystems):
-    vahi-objects        Kernel object handles, namespace, security descriptors
+    vahi-objects        Kernel object handles, security descriptors
     vahi-syscalls       Syscall dispatch, errno, user memory access, signal types
     vahi-ipc            Pipes, shared memory, message queues
     vahi-pci            PCI bus enumeration, config space access
-    vahi-ebpf           eBPF VM, JIT compiler, verifier, maps
     vahi-gui            Compositor, windowing, input, rendering pipeline
 ```
 
@@ -53,7 +51,6 @@ vahi-apic ← vahi-sync, x86_64, volatile, pic8259
 vahi-acpi ← x86_64, spin
 vahi-gdt ← x86_64, spin
 vahi-arch ← x86_64, spin
-vahi-boot ← spin
 vahi-interrupts ← spin
 vahi-task ← vahi-types, vahi-sync, vahi-memory, vahi-hal, vahi-arch, vahi-objects, vahi-gdt
 vahi-vfs ← vahi-sync, vahi-memory, vahi-drivers, vahi-syscalls, vahi-objects, hashbrown
@@ -63,7 +60,6 @@ vahi-objects ← vahi-sync
 vahi-syscalls ← vahi-sync, vahi-types
 vahi-ipc ← vahi-sync, vahi-types
 vahi-pci ← vahi-sync, vahi-memory, vahi-limine, vahi-apic
-vahi-ebpf ← vahi-sync, vahi-types, vahi-syscalls
 vahi-gui ← vahi-sync, vahi-types, vahi-memory, vahi-drivers, vahi-vfs, font8x8
 ```
 
@@ -103,18 +99,17 @@ vahi_types::register_page_fault_handler(&HANDLER);
 | vahi-vfs | ✅ Scaffolded + Code | 6861 | Full ext2/ext4/SkyFS/FAT32/ramfs/devfs/FUSE |
 | vahi-net | ✅ Scaffolded | 500+ | TCP, DNS, DHCP, Unix sockets, zerocopy |
 | vahi-drivers | ✅ Scaffolded | 600+ | NVMe, E1000, xHCI, HDA, VirtIO-GPU, PS/2 |
-| vahi-objects | ✅ Extracted | 662 | Handle table, namespace, security |
+| vahi-objects | ✅ Extracted | 660 | Handle table, security |
 | vahi-syscalls | ✅ Scaffolded | 200+ | Dispatch, errno, user access, signal types |
 | vahi-ipc | ✅ Scaffolded | 120 | Pipe, shared memory, message queue traits |
 | vahi-pci | ✅ Scaffolded | 150 | Config space, BAR, enumeration |
-| vahi-ebpf | ✅ Scaffolded | 300+ | VM, verifier, JIT, maps |
 | vahi-gui | ✅ Scaffolded | 500+ | Compositor, windows, input, rendering |
 
 **Total crate code:** ~12,000+ lines of Rust
 
 ## Kernel Integration Status
 
-The kernel depends on all 22 crates. The remaining integration work is
+The kernel depends on all 20 crates. The remaining integration work is
 making the kernel's internal modules re-export crate types instead of
 defining their own copies. This affects:
 

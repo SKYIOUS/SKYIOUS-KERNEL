@@ -69,7 +69,6 @@ See `docs/syscall-classification.md` for honest syscall classification.
 | `vahi-types` | `crates/types/` | ✅ Extracted | Shared types, Errno, credentials, VMA |
 | `vahi-objects` | `crates/objects/` | ✅ Extracted | KernelObject trait, handle table, security |
 | `vahi-arch` | `crates/arch/` | ✅ Extracted | x86_64, aarch64, HAL |
-| `vahi-boot` | `crates/boot/` | ✅ Extracted | Boot state machine, init |
 | `vahi-gdt` | `crates/gdt/` | ✅ Extracted | GDT/IDT/TSS management |
 | `vahi-interrupts` | `crates/interrupts/` | ✅ Extracted | IRQ, page fault, exceptions |
 | `vahi-task` | `crates/task/` | ✅ Extracted | process, thread, scheduler, OOM |
@@ -79,12 +78,11 @@ See `docs/syscall-classification.md` for honest syscall classification.
 | `vahi-drivers` | `crates/drivers/` | ✅ Extracted | NVMe, E1000, VirtIO, PS/2, xHCI, HDA, GPU |
 | `vahi-acpi` | `crates/acpi/` | ✅ Extracted | ACPI tables, MADT, PRT |
 | `vahi-gui` | `crates/gui/` | ✅ Extracted | Compositor, terminal, window management |
-| `vahi-ebpf` | `crates/ebpf/` | ✅ Extracted | eBPF stubs |
 | `vahi_kernel` | `kernel/` | ✅ Main | Kernel binary, integration layer |
 
 ### Build Status (2026-09-02)
 
-- **All 22 crates**: Build clean (release mode) ✅
+- **All 20 crates**: Build clean (release mode) ✅
 - **Kernel debug build**: 0 compilation errors ✅
 - **Kernel release build**: 0 compilation errors ✅
 - **Kernel release link**: 0 duplicate symbols ✅ (removed vahi-interrupts from transitive deps)

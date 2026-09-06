@@ -128,7 +128,6 @@ Keep  as a thin facade.
 |------|-------|------|
 | objects/mod.rs | 119 | ObjectTypeId, ObjectHeader, KernelObject trait |
 | objects/handle.rs | 203 | HandleTable with dup/close/lookup |
-| objects/namespace.rs | 144 | ObjectNamespace for named objects |
 | objects/security.rs | 187 | SecurityDescriptor, ACL |
 | objects/syscalls.rs | 149 | OBJMGR syscalls |
 | 6 integration files | 11-79 each | Thin wrappers (gui, fs, proc, net, thread, window) |
@@ -147,7 +146,7 @@ The objects/ module defines a KernelObject trait and ObjectHeader with ref-count
 
 **Option A (Deepen):** Make KernelObject the canonical handle for all resources. Route VFS, process, and socket operations through the handle table. See ADR-019.
 
-**Option B (Prune):** Delete thin wrappers. Keep handle.rs and namespace.rs only. Let subsystems manage their own types directly.
+**Option B (Prune):** Delete thin wrappers. Keep handle.rs and security.rs only. Let subsystems manage their own types directly.
 
 ### Benefits (if deepened)
 

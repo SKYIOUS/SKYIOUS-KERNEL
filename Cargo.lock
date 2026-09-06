@@ -781,16 +781,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vahi-boot"
-version = "0.3.0"
-dependencies = [
- "limine",
- "spin",
- "vahi-arch",
- "vahi-sync",
-]
-
-[[package]]
 name = "vahi-crypto"
 version = "0.3.0"
 
@@ -823,17 +813,6 @@ dependencies = [
  "volatile 0.2.7",
  "x86_64",
  "xmas-elf",
-]
-
-[[package]]
-name = "vahi-ebpf"
-version = "0.3.0"
-dependencies = [
- "lazy_static",
- "spin",
- "vahi-sync",
- "vahi-syscalls",
- "vahi-types",
 ]
 
 [[package]]
@@ -998,10 +977,8 @@ dependencies = [
  "vahi-acpi",
  "vahi-apic",
  "vahi-arch",
- "vahi-boot",
  "vahi-crypto",
  "vahi-drivers",
- "vahi-ebpf",
  "vahi-gdt",
  "vahi-hal",
  "vahi-ipc",

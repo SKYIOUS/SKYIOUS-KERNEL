@@ -42,13 +42,11 @@ Layer 5 (L4):          gui
 | `vahi-acpi` | MADT parsing, PRT parsing | AML interpreter |
 | `vahi-apic` | Local APIC, I/O APIC, MSI allocator, IPI | Interrupt vector registration |
 | `vahi-interrupts` | Exception vectors, IRQ dispatch, page fault handler | — |
-| `vahi-ebpf` | eBPF VM, verifier, JIT compiler | — |
 | `vahi-gui` | Compositor, widgets, drawing, input handling | Framebuffer initialization |
 | `vahi-arch` | CPUID, register manipulation | — |
 | `vahi-gdt` | GDT/IDT/TSS setup | — |
 | `vahi-limine` | Boot protocol requests | — |
 | `vahi-pci` | Config space read/write, BAR reading | — |
-| `vahi-boot` | Boot state machine | — |
 
 ### Kernel (integration, glue, kernel-specific logic)
 
@@ -89,7 +87,7 @@ Layer 5 (L4):          gui
 | `ipc/` | ✅ Clean | Pure re-export |
 | `pci/` | ✅ Clean | Pure re-export |
 | `hal/` | ✅ Clean | Re-exports + kernel-specific DMA/exec_mem |
-| `objects/` | ⚠️ Partial | 3 files duplicate crate (handle, namespace, security), 8 files kernel-specific |
+| `objects/` | ⚠️ Partial | 2 files duplicate crate (handle, security), 8 files kernel-specific; dead crate `namespace.rs` removed |
 | `drivers/` | ✅ Clean | Dead files deleted; only `pub use vahi_drivers::*` re-export remains |
 | `vfs/` | ✅ Clean | Dead files deleted; only `pub use vahi_vfs::*` re-export remains |
 | `task/` | ⚠️ Partial | Kernel owns Process/Thread (transitive types: real syscall security state, vfs VfsNode); re-exports PtyPair, Task/YieldNow, FORK_CHILD_* |

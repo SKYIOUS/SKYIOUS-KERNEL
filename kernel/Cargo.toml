@@ -13,7 +13,6 @@ vahi-hal = { path = "../crates/hal" }
 vahi-limine = { path = "../crates/limine" }
 vahi-ipc = { path = "../crates/ipc" }
 vahi-pci = { path = "../crates/pci" }
-vahi-ebpf = { path = "../crates/ebpf", optional = true }
 vahi-syscalls = { path = "../crates/syscalls" }
 vahi-vfs = { path = "../crates/vfs" }
 vahi-apic = { path = "../crates/apic" }
@@ -25,7 +24,6 @@ vahi-acpi = { path = "../crates/acpi" }
 vahi-net = { path = "../crates/net" }
 vahi-gdt = { path = "../crates/gdt" }
 vahi-arch = { path = "../crates/arch" }
-vahi-boot = { path = "../crates/boot" }
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"
 volatile = "0.2.6"
@@ -53,7 +51,7 @@ acpi = "4.1.1"
 aml = { version = "0.16.4", optional = true }
 
 [features]
-default = ["smp", "net", "ext4"]
+default = ["smp", "net", "ext4", "iommu"]
 verification = []
 smp = []
 net = []
@@ -62,8 +60,8 @@ ext4 = []
 self_test = []
 ash = []
 gpu = []
-ebpf = []
 hypervisor = []
+iommu = []
 
 [profile.dev]
 panic = "abort"

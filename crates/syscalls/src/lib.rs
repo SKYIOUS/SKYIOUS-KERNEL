@@ -13,23 +13,13 @@
 
 extern crate alloc;
 
-pub mod cgroup;
 pub mod errno;
-pub mod futex;
-pub mod inotify;
-pub mod io_uring;
 pub mod landlock;
-pub mod mqueue;
 pub mod namespaces;
 pub mod net_helpers;
-pub mod numbers;
-pub mod posix_timers;
-pub mod process_lifecycle;
 pub mod ptrace;
 pub mod seccomp;
-pub mod shm;
 pub mod signal;
-pub mod timerfd;
 pub mod user_access;
 
 use core::sync::atomic::AtomicU64;

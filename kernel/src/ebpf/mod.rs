@@ -1,22 +1,12 @@
 //! eBPF subsystem.
 //!
 //! Provides a verifier, JIT compiler, and eBPF virtual machine.
-//! The implementation is in `vahi-ebpf` when the `ebpf` feature is enabled.
 
-#[cfg(feature = "ebpf")]
-pub use vahi_ebpf::*;
-
-#[cfg(not(feature = "ebpf"))]
 pub mod helpers;
-#[cfg(not(feature = "ebpf"))]
 pub mod jit;
-#[cfg(not(feature = "ebpf"))]
 pub mod maps;
-#[cfg(not(feature = "ebpf"))]
 pub mod tnum;
-#[cfg(not(feature = "ebpf"))]
 pub mod verifier;
-#[cfg(not(feature = "ebpf"))]
 pub mod vm;
 
 use crate::sync::IrqSafeMutex as Mutex;
@@ -26,13 +16,10 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 
 use crate::syscalls::errno::Errno;
-#[cfg(not(feature = "ebpf"))]
 use maps::{
     Map, BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_PERF_EVENT_ARRAY, BPF_MAP_TYPE_RINGBUF,
 };
-#[cfg(not(feature = "ebpf"))]
 use verifier::verify;
-#[cfg(not(feature = "ebpf"))]
 use vm::EbpfInsn;
 
 pub const BPF_MAP_CREATE: u32 = 0;

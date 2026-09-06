@@ -8,7 +8,6 @@ members = [
     "crates/sync",
     "crates/memory",
     "crates/arch",
-    "crates/boot",
     "crates/task",
     "crates/vfs",
     "crates/net",
@@ -23,7 +22,6 @@ members = [
     "crates/objects",
     "crates/ipc",
     "crates/pci",
-    "crates/ebpf",
     "crates/syscalls",
 ]
 
@@ -33,7 +31,6 @@ default-members = [
     "crates/sync",
     "crates/memory",
     "crates/arch",
-    "crates/boot",
     "crates/task",
     "crates/vfs",
     "crates/net",
@@ -48,7 +45,6 @@ default-members = [
     "crates/objects",
     "crates/ipc",
     "crates/pci",
-    "crates/ebpf",
     "crates/syscalls",
 ]
 

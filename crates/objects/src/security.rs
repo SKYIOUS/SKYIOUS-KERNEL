@@ -29,13 +29,6 @@ impl Credentials {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Get credentials for the current process.
-    ///
-    /// Stub: real implementation reads from CURRENT_PROCESS.
-    pub fn current() -> Self {
-        Self::default()
-    }
 }
 
 /// Access rights bitfield.

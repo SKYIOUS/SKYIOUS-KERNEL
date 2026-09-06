@@ -77,7 +77,6 @@ identical) definitions. This is the **primary design debt** in the codebase.
 | Everything in `vahi-memory` | `vahi-memory` | `kernel/src/memory/mod.rs:1` (`pub use vahi_memory::*`) |
 | Everything in `vahi-pci` | `vahi-pci` | `kernel/src/pci/mod.rs:6` (`pub use vahi_pci::*`) |
 | Everything in `vahi-limine` | `vahi-limine` | `kernel/src/limine.rs:3` (`pub use vahi_limine::*`) |
-| Everything in `vahi-ebpf` | `vahi-ebpf` | `kernel/src/ebpf/mod.rs:7` (`pub use vahi_ebpf::*`) |
 | Everything in `vahi-hal` | `vahi-hal` | `kernel/src/hal/mod.rs:6-8` (selective re-exports) |
 
 ### Types Duplicated (Kernel Has Its Own Copy)
@@ -134,9 +133,8 @@ The correct fix is to make crates the single source of truth:
 | `vahi-memory` | `smp` | — |
 | `vahi-vfs` | `ext4`, `net`, `verification` | `ext4` |
 | `vahi-syscalls` | `self_test` | — |
-| `vahi-drivers` | `net`, `gpu`, `uhci`, `smp`, `ebpf` | — |
+| `vahi-drivers` | `net`, `gpu`, `uhci`, `smp` | — |
 | `vahi-gui` | `gpu` | `gpu` |
-| `vahi-ebpf` | `jit` | — |
 | `vahi-interrupts` | `net` | — |
 | `vahi-acpi` | `aml` (optional) | — |
 | `vahi-objects` | — | — |
@@ -160,9 +158,9 @@ The kernel's source tree mirrors the crate structure:
 ```
 kernel/src/
 ├── arch/           ← vahi-arch + kernel-specific (syscall entry, context switch)
-├── boot/           ← vahi-boot + kernel-specific (init process, shell)
+├── boot/           ← kernel-owned boot state machine, init, logger, tasks
 ├── drivers/        ← DUPLICATE of vahi-drivers (should be deleted)
-├── ebpf/           ← re-exports vahi-ebpf
+├── ebpf/           ← kernel-owned eBPF VM, verifier, JIT
 ├── gui/            ← kernel-specific GUI init (vahi-gui provides rendering)
 ├── hal/            ← re-exports vahi-hal (irq, timer, platform)
 ├── interrupts/     ← DUPLICATE of vahi-interrupts (should be deleted)
