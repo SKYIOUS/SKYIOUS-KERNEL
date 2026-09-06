@@ -48,7 +48,7 @@ timeout "$TIMEOUT" bash -c "
         -serial \"file:$WIN_LOG\" \
         -display none -no-reboot -accel tcg \
         >/dev/null 2>&1
-" || true
+"
 QEMU_RC=$?
 
 # Ensure QEMU is dead (timeout may leave it running on some platforms)
