@@ -10,11 +10,47 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    name: Host Validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            kernel/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --check --workspace
+
+      - name: Workspace build
+        run: cargo build --workspace
+
+      - name: Workspace clippy
+        run: cargo clippy --workspace -- -D warnings
+
   build-kernel:
+    name: Kernel Build Matrix
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: kernel
+    needs: validate
     steps:
       - uses: actions/checkout@v4
 
@@ -32,28 +68,32 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             kernel/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-kernel-${{ hashFiles('kernel/Cargo.lock') }}
 
       - name: Build (default features)
-        run: cargo build
+        run: cargo build --target x86_64-unknown-none
 
       - name: Build (default + smp + net)
-        run: cargo build --features "smp,net"
+        run: cargo build --target x86_64-unknown-none --features "smp,net"
 
       - name: Build (all features, no default)
-        run: cargo build --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu"
+        run: cargo build --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu"
 
       - name: Build (each feature solo)
         run: |
           for feat in smp net ext4 self_test ash hypervisor verification gpu; do
             echo "Building with feature: $feat"
-            cargo build --no-default-features --features "$feat" || exit 1
+            cargo build --target x86_64-unknown-none --no-default-features --features "$feat" || exit 1
           done
 
       - name: Check (self_test feature compiles in bin mode)
-        run: cargo check --features self_test
+        run: cargo check --target x86_64-unknown-none --features self_test
+
+      - name: Build release (self_test)
+        run: cargo build --release --target x86_64-unknown-none --features "smp,net,self_test"
 
   build-bootimage:
+    name: Build Boot Image
     runs-on: ubuntu-latest
     needs: build-kernel
     steps:
@@ -66,63 +106,70 @@ jobs:
           rustup target add x86_64-unknown-none --toolchain nightly
           rustup override set nightly
 
-      - name: Build kernel
-        run: cargo build
-        working-directory: kernel
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            kernel/target/
+          key: ${{ runner.os }}-kernel-${{ hashFiles('kernel/Cargo.lock') }}
 
-      - name: Build bootimage
-        run: cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
+      - name: Build kernel (self_test)
+        working-directory: kernel
+        run: cargo build --target x86_64-unknown-none --features "smp,net,self_test"
+
+      - name: Build bootimage (Rust builder)
         working-directory: builder
+        run: cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
+
+      - name: Copy bootimage to root
+        run: |
+          cp target/x86_64-vahi/debug/bootimage-vahi_kernel.bin ../bootimage-vahi_kernel.bin
+          ls -la ../bootimage-vahi_kernel.bin
+
+      - name: Upload bootimage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootimage-vahi_kernel
+          path: bootimage-vahi_kernel.bin
+          retention-days: 1
 
   selftest:
-    name: Selftest (QEMU)
+    name: Selftest Gate (QEMU)
     runs-on: ubuntu-latest
     needs: build-bootimage
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nightly Rust
-        run: |
-          rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview
-          rustup target add x86_64-unknown-none --toolchain nightly
-          rustup override set nightly
+      - name: Download bootimage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bootimage-vahi_kernel
+          path: .
 
       - name: Install QEMU + OVMF
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 ovmf
 
-      - name: Build kernel (self_test)
-        working-directory: kernel
-        run: cargo build --features net,smp,self_test
-
-      - name: Build bootimage
-        working-directory: builder
-        run: cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
-
-      - name: Boot + verify selftest TAP (smp1 + smp2)
+      - name: Run selftest gate (SMP=1)
         run: |
-          IMG=$(find . -name "bootimage-vahi_kernel.bin" | head -1)
-          [ -n "$IMG" ] || { echo "FAIL: no bootimage produced"; exit 1; }
-          for SMP in 1 2; do
-            rm -f serial.log
-            timeout 300 qemu-system-x86_64 \
-              -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
-              -drive format=raw,file="$IMG" \
-              -m 512M -smp $SMP -nographic -no-reboot \
-              -serial file:serial.log 2>/dev/null || true
-            grep -q "TAP version 13" serial.log || { echo "FAIL (smp $SMP): no TAP output"; tail -20 serial.log; exit 1; }
-            grep -q "# .* passed, 0 failed" serial.log || { echo "FAIL (smp $SMP): suite incomplete/failed"; grep -E "not ok|# [0-9]" serial.log; tail -20 serial.log; exit 1; }
-            grep -q "not ok" serial.log && { echo "FAIL (smp $SMP): TAP failures"; grep "not ok" serial.log; exit 1; }
-            echo "SMP $SMP SELFTEST PASS"
-          done
+          chmod +x tests/selftest_gate.sh
+          bash tests/selftest_gate.sh 180 1
+
+      - name: Run selftest gate (SMP=2)
+        run: |
+          bash tests/selftest_gate.sh 180 2
 
   clippy:
+    name: Clippy Lints
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: kernel
+    needs: validate
     steps:
       - uses: actions/checkout@v4
 
@@ -143,14 +190,14 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('kernel/Cargo.lock') }}
 
       - name: Clippy (default features)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --target x86_64-unknown-none -- -D warnings
 
       - name: Clippy (all features)
-        run: cargo clippy --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu" -- -D warnings
+        run: cargo clippy --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu" -- -D warnings
 
       - name: Clippy (extracted crates)
         run: |
-          for crate in vahi-sync vahi-crypto vahi-hal vahi-limine vahi-memory; do
+          for crate in vahi-sync vahi-crypto vahi-hal vahi-limine vahi-memory vahi-arch vahi-task vahi-syscalls vahi-drivers vahi-vfs vahi-net vahi-objects vahi-types vahi-ipc vahi-acpi vahi-pci vahi-gdt; do
             echo "Clippy: $crate"
             cargo clippy -p "$crate" --target x86_64-unknown-none -- -D warnings || exit 1
           done

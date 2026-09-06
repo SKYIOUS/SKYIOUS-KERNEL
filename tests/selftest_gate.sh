@@ -39,14 +39,20 @@ echo "Image: $IMAGE | SMP: $SMP | Timeout: ${TIMEOUT}s"
 
 # Timeout 124 = kernel kept running past the window; the gate reads what serial
 # captured regardless, since TAP output lands early in the boot.
-timeout "$TIMEOUT" qemu-system-x86_64 \
-    -drive "if=pflash,format=raw,file=$WIN_OVMF" \
-    -drive "format=raw,file=$WIN_IMAGE" \
-    -m 512 -smp "$SMP" \
-    -serial "file:$WIN_LOG" \
-    -display none -no-reboot -accel tcg \
-    >/dev/null 2>&1
+# Use a subshell to ensure QEMU is killed on timeout
+timeout "$TIMEOUT" bash -c "
+    qemu-system-x86_64 \
+        -drive \"if=pflash,format=raw,file=$WIN_OVMF\" \
+        -drive \"format=raw,file=$WIN_IMAGE\" \
+        -m 512 -smp \"$SMP\" \
+        -serial \"file:$WIN_LOG\" \
+        -display none -no-reboot -accel tcg \
+        >/dev/null 2>&1
+" || true
 QEMU_RC=$?
+
+# Ensure QEMU is dead (timeout may leave it running on some platforms)
+pkill -f "qemu-system-x86_64.*$WIN_IMAGE" 2>/dev/null || true
 
 if [ ! -f "$LOG" ] || [ ! -s "$LOG" ]; then
     echo "GATE FAIL: no serial output captured (qemu rc=$QEMU_RC)"
