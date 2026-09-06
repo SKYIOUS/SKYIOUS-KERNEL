@@ -1,5 +1,6 @@
-//! CPU detection and feature queries.
+//! CPU detection and feature queries (x86_64 only).
 
+#[cfg(target_arch = "x86_64")]
 /// Read the Time Stamp Counter.
 ///
 /// Returns a monotonically increasing 64-bit counter that ticks at the
@@ -15,6 +16,7 @@ pub fn rdtsc() -> u64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Read the Model-Specific Register.
 ///
 /// # Safety
@@ -34,6 +36,7 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
     ((hi as u64) << 32) | (lo as u64)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Write to a Model-Specific Register.
 ///
 /// # Safety
@@ -52,6 +55,7 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Invalidate the TLB entry for a single virtual address.
 ///
 /// Must be called after a page table modification to ensure the CPU
@@ -69,6 +73,7 @@ pub fn invlpg(addr: u64) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Flush the entire TLB by reloading CR3.
 pub fn flush_tlb() {
     // SAFETY: Reading CR3 and writing it back forces the CPU to reload
@@ -81,6 +86,7 @@ pub fn flush_tlb() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Halt the CPU until the next interrupt.
 ///
 /// The CPU enters a low-power state and resumes when an unmasked
@@ -92,6 +98,7 @@ pub fn hlt() {
     unsafe { core::arch::asm!("hlt") };
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Disable interrupts and halt (for idle without preemption).
 pub fn cli_hlt() {
     // SAFETY: CLI disables maskable interrupts, then HLT puts the CPU

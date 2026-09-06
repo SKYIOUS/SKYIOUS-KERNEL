@@ -31,6 +31,7 @@ pub trait Timer: Send + Sync {
     fn calibrate(&self);
 }
 
+#[cfg(target_arch = "x86_64")]
 /// TSC-based timer using the x86_64 Time Stamp Counter.
 ///
 /// Resolution is ~1 ns on modern CPUs with constant TSC.
@@ -41,6 +42,7 @@ pub struct TscTimer {
     tsc_start: AtomicU64,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl TscTimer {
     /// Create a new uninitialized TSC timer.
     pub const fn new() -> Self {
@@ -63,12 +65,14 @@ impl TscTimer {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Default for TscTimer {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Timer for TscTimer {
     fn ticks(&self) -> u64 {
         let freq = self.tsc_freq.load(Ordering::Relaxed);

@@ -29,6 +29,7 @@
 
 pub mod cpu;
 pub mod iommu;
+pub mod smp;
 
 /// CPU feature detection.
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +45,8 @@ pub struct CpuFeatures {
     pub max_extended_leaf: u32,
 }
 
+/// CPU feature detection (x86_64 only).
+#[cfg(target_arch = "x86_64")]
 impl CpuFeatures {
     /// Detect CPU features via CPUID leaves 0x01, 0x07, and 0x80000001.
     pub fn detect() -> Self {
@@ -95,6 +98,25 @@ impl CpuFeatures {
             has_tsc_deadline,
             has_rdrand,
             max_extended_leaf: 0x8000_0001,
+        }
+    }
+}
+
+/// Stub implementation for non-x86_64 targets.
+#[cfg(not(target_arch = "x86_64"))]
+impl CpuFeatures {
+    /// Detect CPU features — returns defaults for unsupported architectures.
+    pub fn detect() -> Self {
+        Self {
+            has_x2apic: false,
+            has_xsave: false,
+            has_fsgsbase: false,
+            has_smep: false,
+            has_smap: false,
+            has_pku: false,
+            has_tsc_deadline: false,
+            has_rdrand: false,
+            max_extended_leaf: 0,
         }
     }
 }

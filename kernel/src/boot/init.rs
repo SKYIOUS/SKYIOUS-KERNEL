@@ -162,6 +162,8 @@ pub fn init_devices() {
     crate::pci::enumerate_pci();
     crate::serial_write("[BOOT] IOMMU init...\n");
     crate::iommu::init();
+    #[cfg(feature = "iommu")]
+    crate::iommu::register_vahi_arch_iommu();
     crate::serial_write("[BOOT] USB init...\n");
     crate::drivers::usb::init();
 }

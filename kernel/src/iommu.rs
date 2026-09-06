@@ -1189,3 +1189,38 @@ pub fn set_context_mmio(device_bdf: u16, mmio_base: u64) {
         ctx.mmio_base = mmio_base;
     }
 }
+
+/// vahi-arch IOMMU trait implementation for the kernel's IOMMU subsystem.
+#[cfg(feature = "iommu")]
+mod vahi_arch_iommu {
+    use alloc::sync::Arc;
+    use vahi_arch::iommu::Iommu;
+
+    struct KernelIommu;
+
+    impl Iommu for KernelIommu {
+        fn map(&self, device_bdf: u16, iova: u64, phys: u64, size: u64, flags: u64) -> u64 {
+            super::iommu_map(device_bdf, iova, phys, size, flags)
+        }
+
+        fn unmap(&self, device_bdf: u16, iova: u64, size: u64) -> bool {
+            super::iommu_unmap(device_bdf, iova, size)
+        }
+
+        fn translate(&self, device_bdf: u16, iova: u64) -> Option<u64> {
+            super::iommu_translate(device_bdf, iova)
+        }
+
+        fn is_enabled(&self) -> bool {
+            super::is_enabled()
+        }
+    }
+
+    /// Register the kernel's IOMMU implementation with vahi-arch.
+    pub fn register() {
+        vahi_arch::iommu::register_iommu(Arc::new(KernelIommu));
+    }
+}
+
+#[cfg(feature = "iommu")]
+pub use vahi_arch_iommu::register as register_vahi_arch_iommu;
