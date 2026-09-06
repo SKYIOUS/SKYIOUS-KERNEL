@@ -15,7 +15,7 @@ TIMEOUT=${1:-180}
 SMP=${2:-1}
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 IMAGE="${VAHI_IMAGE:-$ROOT_DIR/bootimage-vahi_kernel.bin}"
-OVMF="$ROOT_DIR/OVMF.fd"
+OVMF="${VAHI_OVMF:-$ROOT_DIR/OVMF.fd}"
 LOG="${VAHI_GATE_LOG:-$ROOT_DIR/tests/gate_last_run.log}"
 
 if [ ! -f "$IMAGE" ]; then
@@ -42,7 +42,7 @@ echo "Image: $IMAGE | SMP: $SMP | Timeout: ${TIMEOUT}s"
 # Use a subshell to ensure QEMU is killed on timeout
 timeout "$TIMEOUT" bash -c "
     qemu-system-x86_64 \
-        -drive \"if=pflash,format=raw,file=$WIN_OVMF\" \
+        -drive \"if=pflash,format=raw,readonly=on,file=$WIN_OVMF\" \
         -drive \"format=raw,file=$WIN_IMAGE\" \
         -m 512 -smp \"$SMP\" \
         -serial \"file:$WIN_LOG\" \
