@@ -12,6 +12,7 @@ pub mod ebpf_tests;
 pub mod ext2_fs_tests;
 pub mod futex_test;
 pub mod fuzzer;
+pub mod harness_tests;
 pub mod init;
 pub mod memory_tests;
 pub mod new_features;
@@ -19,6 +20,7 @@ pub mod panic_path_tests;
 pub mod pata_read_test;
 pub mod process_lifecycle_tests;
 pub mod scheduler_tests;
+pub mod security_tests;
 pub mod skyfs_tests;
 pub mod stress;
 #[cfg(not(target_arch = "aarch64"))]
@@ -46,8 +48,14 @@ pub fn register_all() {
     vfs_tests::register();
     memory_tests::register();
     scheduler_tests::register();
+    security_tests::register();
     stress::register();
     fuzzer::register();
+    // T-00 harness validation demos. The registered variant is selected at
+    // build time via VAHI_SELFTEST_MODE; the default registers only the
+    // deterministic-pass test, so normal builds are unaffected.
+    #[cfg(feature = "self_test")]
+    harness_tests::register();
     benchmarks::register();
     contract_tests::register();
     panic_path_tests::register();

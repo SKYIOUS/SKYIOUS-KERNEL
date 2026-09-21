@@ -553,15 +553,11 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> u64 {
 }
 
 pub fn sys_chdir(path_ptr: *const u8) -> u64 {
-    let mut len = 0;
-    unsafe {
-        while *path_ptr.add(len) != 0 {
-            len += 1;
-        }
-    }
-    let path_slice = unsafe { core::slice::from_raw_parts(path_ptr, len) };
-    let path_str = core::str::from_utf8(path_slice).unwrap_or("");
-    if let Some(node) = VFS.lock().resolve_path(path_str) {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+        Ok(s) => s,
+        Err(_) => return errno::Errno::EFAULT as u64,
+    };
+    if let Some(node) = VFS.lock().resolve_path(&path_str) {
         if !node.is_dir() {
             return errno::Errno::ENOTDIR as u64;
         }
@@ -570,7 +566,7 @@ pub fn sys_chdir(path_ptr: *const u8) -> u64 {
         }
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let mut new_cwd = String::from(path_str);
+            let mut new_cwd = path_str;
             if !new_cwd.starts_with('/') {
                 let cur_cwd = process.files.lock().cwd.clone();
                 if cur_cwd == "/" {
