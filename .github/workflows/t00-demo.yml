@@ -1,0 +1,123 @@
+name: T-00 Harness Demo Matrix
+
+# Proves the T-00 harness detects FAIL, TIMEOUT and PANIC — i.e. that the
+# runner fails correctly when the kernel under test fails. Runs on demand
+# (workflow_dispatch) because these are demonstration builds, not gates:
+# the PASS suite (ci.yml t00-harness job) is the every-PR gate.
+on:
+  workflow_dispatch:
+
+jobs:
+  fail-demo:
+    name: Controlled FAIL detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf
+      - name: Build kernel (self_test, VAHI_SELFTEST_MODE=fail)
+        working-directory: kernel
+        run: VAHI_SELFTEST_MODE=fail cargo build --release --target x86_64-unknown-none --features self_test -Zbuild-std=core,alloc
+      - name: Build bootimage (Limine)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_fail.bin
+      # The step must fail (exit 1 = FAIL classification) for the demo to pass.
+      - name: Expect FAIL classification (exit 1)
+        run: |
+          python3 tests/run_qemu_tests.py \
+            --image tests/t00_fail.bin \
+            --ovmf /usr/share/OVMF/OVMF_CODE.fd \
+            --timeout 1800 \
+            --qemu-extra "-vga none" \
+            --log tests/t00_fail_run.log
+          rc=$?
+          echo "runner exit=$rc"
+          if [ "$rc" -ne 1 ]; then
+            echo "DEMO FAILED: expected exit 1 (FAIL), got $rc"
+            exit 1
+          fi
+          echo "DEMO OK: harness reported FAIL"
+
+  panic-demo:
+    name: Controlled PANIC detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf
+      - name: Build kernel (self_test, VAHI_SELFTEST_MODE=panic)
+        working-directory: kernel
+        run: VAHI_SELFTEST_MODE=panic cargo build --release --target x86_64-unknown-none --features self_test -Zbuild-std=core,alloc
+      - name: Build bootimage (Limine)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_panic.bin
+      # The step must exit 2 (PANIC classification) for the demo to pass.
+      - name: Expect PANIC classification (exit 2)
+        run: |
+          python3 tests/run_qemu_tests.py \
+            --image tests/t00_panic.bin \
+            --ovmf /usr/share/OVMF/OVMF_CODE.fd \
+            --timeout 1800 \
+            --qemu-extra "-vga none" \
+            --log tests/t00_panic_run.log
+          rc=$?
+          echo "runner exit=$rc"
+          if [ "$rc" -ne 2 ]; then
+            echo "DEMO FAILED: expected exit 2 (PANIC), got $rc"
+            exit 1
+          fi
+          echo "DEMO OK: harness reported PANIC"
+
+  timeout-demo:
+    name: Controlled TIMEOUT detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf
+      - name: Build kernel (self_test, VAHI_SELFTEST_MODE=timeout)
+        working-directory: kernel
+        run: VAHI_SELFTEST_MODE=timeout cargo build --release --target x86_64-unknown-none --features self_test -Zbuild-std=core,alloc
+      - name: Build bootimage (Limine)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_timeout.bin
+      # The step must exit 3 (TIMEOUT classification) for the demo to pass.
+      - name: Expect TIMEOUT classification (exit 3)
+        run: |
+          python3 tests/run_qemu_tests.py \
+            --image tests/t00_timeout.bin \
+            --ovmf /usr/share/OVMF/OVMF_CODE.fd \
+            --timeout 120 \
+            --qemu-extra "-vga none" \
+            --log tests/t00_timeout_run.log
+          rc=$?
+          echo "runner exit=$rc"
+          if [ "$rc" -ne 3 ]; then
+            echo "DEMO FAILED: expected exit 3 (TIMEOUT), got $rc"
+            exit 1
+          fi
+          echo "DEMO OK: harness reported TIMEOUT"

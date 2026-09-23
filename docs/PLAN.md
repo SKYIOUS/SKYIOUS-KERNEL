@@ -10,21 +10,24 @@
 This plan is written against what the code **actually contains**, not what any previous document claimed.
 
 ### What exists and works
-- **259 Rust source files, ~55,400 lines** across kernel subsystems
-- **187 syscalls** (`pub fn sys_*`) decomposed across36 files in `syscalls/` (ADR-010 done, mod.rs is 429 lines)
-- **27 driver files** across storage, networking, audio, GPU, USB, input, serial, RTC, watchdog
-- **9 filesystems**: SkyFS (journaling, 6 files), ext2 (R+W, 5 files), ext4 (read-only), FAT32, TarFS, ramfs/tmpfs, devfs, ctlfs, FUSE bridge
+- **344 Rust source files, ~82,266 lines** across kernel + 18 extracted crates
+- **216 kernel src files** in `kernel/src/` across 30+ subsystems
+- **207 syscalls** (`pub fn sys_*`) decomposed across 36 files in `syscalls/` (ADR-010 done)
+- **18 extracted crates** in `crates/` (sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci)
+- **9 filesystems**: SkyFS (journaling), ext2 (R+W), ext4 (read-only), FAT32, TarFS, ramfs/tmpfs, devfs, ctlfs, FUSE bridge
 - **Scheduler**: Stride heap + SCHED_FIFO/SCHED_RR + CPU affinity + work stealing
 - **Memory**: Buddy allocator, slab, page tables (COW), page cache, swap, frame tracking, stack allocator
 - **Networking**: smoltcp TCP/UDP, DHCP, DNS, Unix sockets, zero-copy, RSS, TSO
 - **Security**: SMAP/SMEP/UMIP, KASLR, CFI, seccomp BPF, Landlock, capabilities, audit
+- **Hypervisor**: VMX/SVM, EPT/NPT, vCPU, 10+ VM syscalls (16 files)
+- **eBPF**: Full VM, verifier, JIT (x86_64), 4 helpers, maps (7 files)
+- **ASH**: Verifier, interpreter, manager, hooks (net, syscall), JIT via ebpf/jit.rs, W^X exec-memory allocator (8 files)
+- **GUI**: Compositor at 30 FPS, window manager, terminal, splash, notifications, clipboard (15 files)
+- **Crypto**: SHA-256, HMAC, PBKDF2, entropy (3 files)
+- **Objects**: KernelObject trait, handle table, security, namespace (12 files)
 - **Containers**: PID/Mount/Net/IPC/UTS/User namespaces, cgroup v2, unshare/setns
-- **Hypervisor**: VMX/SVM, EPT/NPT, vCPU, 10+ VM syscalls
-- **eBPF**: Full VM, verifier, JIT (x86_64), 4 helpers, maps
-- **ASH**: Verifier, interpreter, manager, hooks (net, syscall), JIT via ebpf/jit.rs, W^X exec-memory allocator
-- **GUI**: Compositor at30 FPS, window manager, terminal, splash, notifications, clipboard
 - **SMP**: SIPI boot, work stealing, per-CPU schedulers
-- **Testing**: 92+ selftests, stress tests, syscall fuzzer, coverage tracking
+- **Testing**: 146 selftests, stress tests, syscall fuzzer, coverage tracking
 - **Boot**: Limine bootloader, UEFI, KASLR, boot state machine
 
 ### Thermo-Nuclear Review Findings (verified against code)
@@ -58,14 +61,28 @@ This plan is written against what the code **actually contains**, not what any p
 | 27 clippy lints suppressed in main.rs | Masks style issues like `too_many_arguments`, `collapsible_if` | Low |
 | APIC unused public functions | `apic_id_for_cpu`, `init_timer_count`, `set_timer_count`, `timer_ticks` — never called | Low |
 
-### Files approaching the1k-line threshold
+### Files approaching the 1k-line threshold
 | File | Lines | Risk |
 |------|-------|------|
-| `interrupts.rs` | 979 | Impending |
-| `task/scheduler.rs` | 913 | Impending |
-| `task/process.rs` | 886 | Impending |
-| `syscalls/process_lifecycle.rs` | 842 | Acceptable |
-| `vfs/mod.rs` | 700 | OK |
+| `syscalls/dispatch.rs` | 1692 | Over — needs split |
+| `task/process.rs` | 1320 | Over — needs split |
+| `syscalls/process_lifecycle.rs` | 1287 | Over — needs split |
+| `iommu.rs` | 1226 | Over — needs split |
+| `syscalls/fs_stat.rs` | 1152 | Over — needs split |
+| `syscalls/net_options.rs` | 949 | Impending |
+| `crates/vfs/src/defs.rs` | 933 | Impending |
+| `crates/drivers/src/usb/xhci/mod.rs` | 899 | Impending |
+| `task/thread.rs` | 896 | Impending |
+| `crates/vfs/src/skyfs/mod.rs` | 893 | Impending |
+| `syscalls/fs_io.rs` | 832 | Acceptable |
+| `syscalls/misc.rs` | 819 | Acceptable |
+| `crates/drivers/src/storage/nvme.rs` | 786 | Acceptable |
+| `syscalls/net_helpers.rs` | 760 | Acceptable |
+| `crates/vfs/src/ext4.rs` | 754 | Acceptable |
+| `syscalls/process_creds.rs` | 741 | Acceptable |
+| `crates/drivers/src/net/e1000.rs` | 729 | Acceptable |
+| `crates/drivers/src/storage/ahci.rs` | 699 | OK |
+| `task/scheduler/mod.rs` | 662 | OK |
 
 ---
 
@@ -102,7 +119,7 @@ The plan has three tiers:
 |------|------|-----------|
 | F2.1 | **Remove module-level `#![allow(dead_code)]`** from all19 modules one at a time. Fix or remove each resulting warning. Modules: ash/, drivers/audio/, drivers/usb/uhci+xhci, hypervisor/svm+devices, memory/phys+virt, shell.rs, task/keyboard, verified/*, vfs/skyfs/* | Each module builds without blanket suppression |
 | F2.2 | **Remove function-level `allow(dead_code)`** from the remaining ~76 annotations. Fix or remove each. | Total `allow(dead_code)` count drops to near zero |
-| F2.3 | **Decompose main.rs** (614 lines, 14 functions): Move `gui_refresh_task` to `gui/input.rs`, move `spawn_userspace_app`+`app_starter` to `boot/launcher.rs`, move `test_memory_allocations` behind `#[cfg(feature = "self_test")]` or delete, keep only `kernel_main`, `panic`, serial I/O, KASLR in main.rs | main.rs under300 lines; gui input logic in gui/; ELF loading in boot/ |
+| F2.3 | **Decompose main.rs** (539 lines): Move `gui_refresh_task` to `gui/input.rs`, move `spawn_userspace_app`+`app_starter` to `boot/launcher.rs`, move `test_memory_allocations` behind `#[cfg(feature = "self_test")]` or delete, keep only `kernel_main`, `panic`, serial I/O, KASLR in main.rs | main.rs under300 lines; gui input logic in gui/; ELF loading in boot/ |
 | F2.4 | **Remove boot-trace spam**: Delete the8 `[TRACE]` serial_write lines in `test_memory_allocations` and the 10k spin_loop. If the memory test is worth keeping, gate it behind self_test. | Clean serial output: only BOOT/TEST/SELF-TEST messages |
 | F2.5 | **Remove APIC dead code**: Delete or `#[cfg(test)]` gate unused functions `apic_id_for_cpu`, `init_timer_count`, `set_timer_count`, `timer_ticks` | No unused public functions in apic/ |
 | F2.6 | **Grep for TODO/FIXME/HACK**: 4 found (3 in apic/errata.rs stubs, 1 in vfs/fuse.rs). Categorize each — errata stubs are intentional placeholders, fuse TODO needs a real fix | Zero actionable TODOs left in code |

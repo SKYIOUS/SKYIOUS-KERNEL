@@ -4,6 +4,13 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+// K-03 (D-23): kernel-stack sizing. Release frames fit comfortably in 8 pages
+// (135/135 at -smp 2 on 8-page stacks). Debug builds measure ~29 KiB for the
+// largest frame (CreateAddressSpace; K-00 evidence: RSP walked from the 8 KiB
+// stack top down past its guard), so debug gets a measured 64 KiB — 2×
+// headroom over the observed worst frame. Debug-configuration bound only.
+const KERNEL_STACK_PAGES: usize = if cfg!(debug_assertions) { 16 } else { 8 };
+
 // ─── FPU/SSE/XSAVE state (x86_64 only) ─────────────────────────
 
 #[cfg(target_arch = "x86_64")]
@@ -243,8 +250,7 @@ pub struct AArch64ContextFrame {
 
 impl Thread {
     pub fn new(entry_point: extern "C" fn() -> !) -> Self {
-        let stack_pages = 8; // 32 KB
-        let stack = alloc_stack(stack_pages).expect("Failed to allocate thread stack");
+        let stack = alloc_stack(KERNEL_STACK_PAGES).expect("Failed to allocate thread stack");
 
         let stack_top = stack.top;
 
@@ -369,7 +375,7 @@ impl Thread {
         parent_regs: *const u64,
         child_stack: u64,
     ) -> Option<Self> {
-        let stack_pages = 8;
+        let stack_pages = KERNEL_STACK_PAGES;
         let new_stack = alloc_stack(stack_pages)?;
 
         let stack_top = new_stack.top;
@@ -459,7 +465,7 @@ impl Thread {
         parent_regs: *const u64,
         child_stack: u64,
     ) -> Option<Self> {
-        let stack_pages = 8;
+        let stack_pages = KERNEL_STACK_PAGES;
         let new_stack = alloc_stack(stack_pages)?;
         let stack_top = new_stack.top;
         let mut new_sp = stack_top & !0xF;
@@ -543,7 +549,7 @@ impl Thread {
 
     #[cfg(target_arch = "x86_64")]
     pub fn clone_fork(&self, new_process: Arc<Process>, parent_regs: *const u64) -> Option<Self> {
-        let stack_pages = 8;
+        let stack_pages = KERNEL_STACK_PAGES;
         let new_stack = alloc_stack(stack_pages)?;
 
         // Build a switch_context-compatible context near the top of the child's
@@ -633,7 +639,7 @@ impl Thread {
 
     #[cfg(target_arch = "aarch64")]
     pub fn clone_fork(&self, new_process: Arc<Process>, parent_regs: *const u64) -> Option<Self> {
-        let stack_pages = 8;
+        let stack_pages = KERNEL_STACK_PAGES;
         let new_stack = alloc_stack(stack_pages)?;
         let stack_top = new_stack.top;
         let mut new_sp = stack_top & !0xF;

@@ -63,6 +63,51 @@ pub fn get_per_cpu() -> &'static mut PerCpuData {
     unsafe { &mut *(base as *mut PerCpuData) }
 }
 
+/// GS-aware CPU-ID provider installed for vahi-sync's `IrqSafeMutex`.
+///
+/// Invariant: every CPU that executes this function either has a valid GS
+/// base (it has run `init_gs_base`) or has GS base == 0 (an AP between
+/// trampoline entry and `init_gs_base`, or any CPU before the BSP's own
+/// `init_gs_base`). The naive implementation read `gs:0x0` directly, which
+/// dereferences linear address 0 while GS base is still 0 — with no IDT
+/// loaded yet that page fault became a double fault and a triple fault
+/// (the K-02 `-smp 2` boot failure, faulting PC inside the provider
+/// closure). Here the base is obtained from IA32_GS_BASE — an MSR read,
+/// which never faults and performs no memory access — and the CPUID
+/// fallback (leaf 1 EBX[31:24] = initial APIC ID, valid from reset) is
+/// used while the base is still 0.
+fn current_cpu_id() -> u16 {
+    const IA32_GS_BASE: u32 = 0xC000_0101;
+    // SAFETY: `rdmsr` on IA32_GS_BASE is architecturally defined on every
+    // long-mode CPU (the only target of this kernel) and does not access
+    // memory or the stack. Only ecx/edx/eax are touched.
+    let base = unsafe {
+        let (lo, hi): (u32, u32);
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") IA32_GS_BASE,
+            out("eax") lo,
+            out("edx") hi,
+            options(nostack, nomem)
+        );
+        ((hi as u64) << 32) | lo as u64
+    };
+    if base == 0 {
+        // GS not yet initialized on this CPU (pre-per-CPU window).
+        // __cpuid(1) never faults and EBX[31:24] is this CPU's initial
+        // APIC ID — unique per CPU from reset.
+        let r = core::arch::x86_64::__cpuid(1);
+        return ((r.ebx >> 24) & 0xFF) as u16;
+    }
+    // SAFETY: base != 0 and is the address at which this CPU's
+    // `init_gs_base` leaked its `PerCpuData`; `self_ptr` (offset 0) was
+    // written before GS base was installed, so the struct is fully
+    // initialized. Only the owning CPU writes its own PerCpuData, and this
+    // read is of `cpu_id`, which never changes after init.
+    let data = unsafe { &*(base as *const PerCpuData) };
+    data.cpu_id as u16
+}
+
 pub fn init_gs_base(cpu_id: usize) {
     use x86_64::registers::model_specific::GsBase;
     use x86_64::registers::model_specific::KernelGsBase;
@@ -91,15 +136,18 @@ pub fn init_gs_base(cpu_id: usize) {
         areas.resize(cpu_id + 1, PerCpuPtr(core::ptr::null_mut()));
     }
     areas[cpu_id] = PerCpuPtr(data as *mut PerCpuData);
-    
-    // Register fast CPU ID provider for vahi-sync's IrqSafeMutex
-    // Uses GS-based per-CPU data instead of expensive CPUID instruction
-    unsafe { vahi_sync::set_cpu_id_provider(|| {
-        let base: u64;
-        core::arch::asm!("mov {0}, gs:0x0", out(reg) base);
-        let cpu_data = &*(base as *const PerCpuData);
-        cpu_data.cpu_id as u16
-    })};
+
+    // Register the GS-aware CPU-ID provider for vahi-sync's IrqSafeMutex.
+    // `current_cpu_id` is safe on pre-per-CPU CPUs (CPUID fallback while
+    // GS base is 0), so this registration is correct even though APs run
+    // it before their own GS is live. Every CPU registers the identical
+    // fn item, so cross-CPU registration is value-idempotent.
+    // SAFETY: the provider contract requires: safe with interrupts
+    // disabled (rdmsr/cpuid are), unique per CPU (initial APIC id / stored
+    // cpu_id), and no panic or allocation (none present).
+    unsafe {
+        vahi_sync::set_cpu_id_provider(current_cpu_id);
+    }
 }
 
 // ─── Typed dispatch ─────────────────────────────────────────────
@@ -170,285 +218,1245 @@ const TABLE_SIZE: usize = 475;
 /// Build the dispatch table. Called once; the result is cached.
 const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     let mut t: [Option<SyscallHandler>; TABLE_SIZE] = [None; TABLE_SIZE];
-    sys_handler!(t, args, numbers::SYS_READ, fs::sys_read(args.a1, args.a2 as *mut u8, args.a3 as usize));
-    sys_handler!(t, args, numbers::SYS_WRITE, fs::sys_write(args.a1, args.a2 as *const u8, args.a3 as usize));
-    sys_handler!(t, args, numbers::SYS_OPEN, fs::sys_open(args.a1 as *const u8, args.a2 as i32, args.a3 as u32));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_READ,
+        fs::sys_read(args.a1, args.a2 as *mut u8, args.a3 as usize)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_WRITE,
+        fs::sys_write(args.a1, args.a2 as *const u8, args.a3 as usize)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_OPEN,
+        fs::sys_open(args.a1 as *const u8, args.a2 as i32, args.a3 as u32)
+    );
     sys_handler!(t, args, numbers::SYS_CLOSE, fs::sys_close(args.a1));
-    sys_handler!(t, args, numbers::SYS_STAT, fs::sys_stat(args.a1 as *const u8, args.a2 as *mut crate::vfs::Stat));
-    sys_handler!(t, args, numbers::SYS_FSTAT, fs::sys_fstat(args.a1, args.a2 as *mut crate::vfs::Stat));
-    sys_handler!(t, args, numbers::SYS_LSTAT, fs::sys_lstat(args.a1 as *const u8, args.a2 as *mut crate::vfs::Stat));
-    sys_handler!(t, args, numbers::SYS_POLL, misc::sys_poll(args.a1 as *const u8, args.a2 as usize, args.a3 as i32));
-    sys_handler!(t, args, numbers::SYS_LSEEK, fs::sys_lseek(args.a1, args.a2 as i64, args.a3 as i32));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_STAT,
+        fs::sys_stat(args.a1 as *const u8, args.a2 as *mut crate::vfs::Stat)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_FSTAT,
+        fs::sys_fstat(args.a1, args.a2 as *mut crate::vfs::Stat)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_LSTAT,
+        fs::sys_lstat(args.a1 as *const u8, args.a2 as *mut crate::vfs::Stat)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_POLL,
+        misc::sys_poll(args.a1 as *const u8, args.a2 as usize, args.a3 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_LSEEK,
+        fs::sys_lseek(args.a1, args.a2 as i64, args.a3 as i32)
+    );
     sys_handler!(t, args, numbers::SYS_MMAP, mmap_entry(args));
-    sys_handler!(t, args, numbers::SYS_MPROTECT, fs::sys_mprotect(args.a1, args.a2, args.a3));
-    sys_handler!(t, args, numbers::SYS_MUNMAP, fs::sys_munmap(args.a1, args.a2));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MPROTECT,
+        fs::sys_mprotect(args.a1, args.a2, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MUNMAP,
+        fs::sys_munmap(args.a1, args.a2)
+    );
     sys_handler!(t, args, numbers::SYS_BRK, fs::sys_brk(args.a1));
-    sys_handler!(t, args, numbers::SYS_RT_SIGACTION, process::sys_rt_sigaction(args.a1, args.a2 as *const u64, args.a3 as *mut u64, args.a4));
-    sys_handler!(t, args, numbers::SYS_RT_SIGRETURN, process::sys_rt_sigreturn(args.regs));
-    sys_handler!(t, args, numbers::SYS_IOCTL, fs::sys_ioctl(args.a1, args.a2, args.a3 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_ACCESS, fs::sys_access(args.a1 as *const u8, args.a2 as i32));
-    sys_handler!(t, args, numbers::SYS_PIPE, fs::sys_pipe(args.a1 as *mut u32));
-    sys_handler!(t, args, numbers::SYS_SELECT, misc::sys_select(
-        args.a1,
-        args.a2 as *mut u64,
-        args.a3 as *mut u64,
-        args.a4 as *mut u64,
-        args.a5 as *const u64,
-    ));
-    sys_handler!(t, args, numbers::SYS_SCHED_YIELD, process::sys_sched_yield());
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_RT_SIGACTION,
+        process::sys_rt_sigaction(args.a1, args.a2 as *const u64, args.a3 as *mut u64, args.a4)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_RT_SIGRETURN,
+        process::sys_rt_sigreturn(args.regs)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_IOCTL,
+        fs::sys_ioctl(args.a1, args.a2, args.a3 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_ACCESS,
+        fs::sys_access(args.a1 as *const u8, args.a2 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_PIPE,
+        fs::sys_pipe(args.a1 as *mut u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SELECT,
+        misc::sys_select(
+            args.a1,
+            args.a2 as *mut u64,
+            args.a3 as *mut u64,
+            args.a4 as *mut u64,
+            args.a5 as *const u64,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SCHED_YIELD,
+        process::sys_sched_yield()
+    );
     sys_handler!(t, args, numbers::SYS_DUP, fs::sys_dup(args.a1));
     sys_handler!(t, args, numbers::SYS_DUP2, fs::sys_dup2(args.a1, args.a2));
     sys_handler!(t, args, numbers::SYS_PAUSE, process::sys_pause());
-    sys_handler!(t, args, numbers::SYS_NANOSLEEP, process::sys_nanosleep(args.a1, args.a2));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_NANOSLEEP,
+        process::sys_nanosleep(args.a1, args.a2)
+    );
     sys_handler!(t, args, numbers::SYS_SYNC, fs::sys_sync());
     sys_handler!(t, args, numbers::SYS_GETPID, process::sys_getpid());
-    sys_handler!(t, args, numbers::SYS_SENDFILE, fs::sys_sendfile(args.a1, args.a2, args.a3 as *mut u64, args.a4));
-    sys_handler!(t, args, numbers::SYS_SOCKET, net::sys_socket(args.a1, args.a2, args.a3));
-    sys_handler!(t, args, numbers::SYS_CONNECT, net::sys_connect(args.a1, args.a2 as *const u8, args.a3));
-    sys_handler!(t, args, numbers::SYS_ACCEPT, net::sys_accept(args.a1, args.a2 as *mut u8, args.a3 as *mut u32));
-    sys_handler!(t, args, numbers::SYS_SENDTO, net::sys_sendto(args.a1, args.a2 as *const u8, args.a3, args.a4 as *const u8, args.a5));
-    sys_handler!(t, args, numbers::SYS_RECVFROM, net::sys_recvfrom(
-        args.a1,
-        args.a2 as *mut u8,
-        args.a3,
-        args.a4 as *mut u8,
-        args.a5 as *mut u32,
-    ));
-    sys_handler!(t, args, numbers::SYS_SENDMSG, net::sys_sendmsg(args.a1 as i64, args.a2 as *const msghdr, args.a3 as i32));
-    sys_handler!(t, args, numbers::SYS_RECVMSG, net::sys_recvmsg(args.a1 as i64, args.a2 as *mut msghdr, args.a3 as i32));
-    sys_handler!(t, args, numbers::SYS_BIND, net::sys_bind(args.a1, args.a2 as *const u8, args.a3));
-    sys_handler!(t, args, numbers::SYS_LISTEN, net::sys_listen(args.a1, args.a2));
-    sys_handler!(t, args, numbers::SYS_GETSOCKNAME, net::sys_getsockname(args.a1, args.a2 as *mut u8, args.a3 as *mut u32));
-    sys_handler!(t, args, numbers::SYS_GETPEERNAME, misc::sys_getpeername(args.a1, args.a2 as *mut u8, args.a3 as *mut u32));
-    sys_handler!(t, args, numbers::SYS_SOCKETPAIR, net::sys_socketpair(args.a1, args.a2, args.a3, args.a4 as *mut i32));
-    sys_handler!(t, args, numbers::SYS_SETSOCKOPT, net::sys_setsockopt(args.a1, args.a2 as i32, args.a3 as i32, args.a4 as *const u8, args.a5));
-    sys_handler!(t, args, numbers::SYS_GETSOCKOPT, net::sys_getsockopt(
-        args.a1,
-        args.a2 as i32,
-        args.a3 as i32,
-        args.a4 as *mut u8,
-        args.a5 as *mut u32,
-    ));
-    sys_handler!(t, args, numbers::SYS_CLONE, process::sys_clone(args.a1, args.a2, args.a3 as *mut u32, args.a4, args.a5 as *mut u32, args.regs));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SENDFILE,
+        fs::sys_sendfile(args.a1, args.a2, args.a3 as *mut u64, args.a4)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SOCKET,
+        net::sys_socket(args.a1, args.a2, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CONNECT,
+        net::sys_connect(args.a1, args.a2 as *const u8, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_ACCEPT,
+        net::sys_accept(args.a1, args.a2 as *mut u8, args.a3 as *mut u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SENDTO,
+        net::sys_sendto(
+            args.a1,
+            args.a2 as *const u8,
+            args.a3,
+            args.a4 as *const u8,
+            args.a5
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_RECVFROM,
+        net::sys_recvfrom(
+            args.a1,
+            args.a2 as *mut u8,
+            args.a3,
+            args.a4 as *mut u8,
+            args.a5 as *mut u32,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SENDMSG,
+        net::sys_sendmsg(args.a1 as i64, args.a2 as *const msghdr, args.a3 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_RECVMSG,
+        net::sys_recvmsg(args.a1 as i64, args.a2 as *mut msghdr, args.a3 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_BIND,
+        net::sys_bind(args.a1, args.a2 as *const u8, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_LISTEN,
+        net::sys_listen(args.a1, args.a2)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETSOCKNAME,
+        net::sys_getsockname(args.a1, args.a2 as *mut u8, args.a3 as *mut u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETPEERNAME,
+        misc::sys_getpeername(args.a1, args.a2 as *mut u8, args.a3 as *mut u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SOCKETPAIR,
+        net::sys_socketpair(args.a1, args.a2, args.a3, args.a4 as *mut i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SETSOCKOPT,
+        net::sys_setsockopt(
+            args.a1,
+            args.a2 as i32,
+            args.a3 as i32,
+            args.a4 as *const u8,
+            args.a5
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETSOCKOPT,
+        net::sys_getsockopt(
+            args.a1,
+            args.a2 as i32,
+            args.a3 as i32,
+            args.a4 as *mut u8,
+            args.a5 as *mut u32,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CLONE,
+        process::sys_clone(
+            args.a1,
+            args.a2,
+            args.a3 as *mut u32,
+            args.a4,
+            args.a5 as *mut u32,
+            args.regs
+        )
+    );
     sys_handler!(t, args, numbers::SYS_FORK, process::sys_fork(args.regs));
-    sys_handler!(t, args, numbers::SYS_EXECVE, process::sys_execve(
-        args.a1 as *const u8,
-        args.a2 as *const *const u8,
-        args.a3 as *const *const u8,
-        args.regs,
-    ));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EXECVE,
+        process::sys_execve(
+            args.a1 as *const u8,
+            args.a2 as *const *const u8,
+            args.a3 as *const *const u8,
+            args.regs,
+        )
+    );
     sys_handler!(t, args, numbers::SYS_EXIT, process::sys_exit(args.a1));
-    sys_handler!(t, args, numbers::SYS_WAIT4, process::sys_wait4(args.a1 as i64, args.a2 as *mut i32, args.a3 as i32, args.a4 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_KILL, process::sys_kill(args.a1 as i64, args.a2 as u32));
-    sys_handler!(t, args, numbers::SYS_UNAME, process::sys_uname(args.a1 as *mut UtsName));
-    sys_handler!(t, args, numbers::SYS_FCNTL, fs::sys_fcntl(args.a1, args.a2 as i32, args.a3));
-    sys_handler!(t, args, numbers::SYS_TRUNCATE, fs::sys_truncate(args.a1 as *const u8, args.a2 as i64));
-    sys_handler!(t, args, numbers::SYS_FTRUNCATE, fs::sys_ftruncate(args.a1, args.a2 as i64));
-    sys_handler!(t, args, numbers::SYS_GETCWD, fs::sys_getcwd(args.a1 as *mut u8, args.a2 as usize));
-    sys_handler!(t, args, numbers::SYS_CHDIR, fs::sys_chdir(args.a1 as *const u8));
-    sys_handler!(t, args, numbers::SYS_RENAME, fs::sys_rename(args.a1 as *const u8, args.a2 as *const u8));
-    sys_handler!(t, args, numbers::SYS_MKDIR, fs::sys_mkdir(args.a1 as *const u8, args.a2 as u32));
-    sys_handler!(t, args, numbers::SYS_LINK, fs::sys_link(args.a1 as *const u8, args.a2 as *const u8));
-    sys_handler!(t, args, numbers::SYS_UNLINK, fs::sys_unlink(args.a1 as *const u8));
-    sys_handler!(t, args, numbers::SYS_SYMLINK, fs::sys_symlink(args.a1 as *const u8, args.a2 as *const u8));
-    sys_handler!(t, args, numbers::SYS_READLINK, fs::sys_readlink(args.a1 as *const u8, args.a2 as *mut u8, args.a3));
-    sys_handler!(t, args, numbers::SYS_CHMOD, fs::sys_chmod(args.a1 as *const u8, args.a2 as u32));
-    sys_handler!(t, args, numbers::SYS_FCHMOD, fs::sys_fchmod(args.a1, args.a2 as u32));
-    sys_handler!(t, args, numbers::SYS_CHOWN, fs::sys_chown(args.a1 as *const u8, args.a2 as u32, args.a3 as u32));
-    sys_handler!(t, args, numbers::SYS_FCHOWN, fs::sys_fchown(args.a1, args.a2 as u32, args.a3 as u32));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_WAIT4,
+        process::sys_wait4(
+            args.a1 as i64,
+            args.a2 as *mut i32,
+            args.a3 as i32,
+            args.a4 as *mut u8
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_KILL,
+        process::sys_kill(args.a1 as i64, args.a2 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_UNAME,
+        process::sys_uname(args.a1 as *mut UtsName)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_FCNTL,
+        fs::sys_fcntl(args.a1, args.a2 as i32, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TRUNCATE,
+        fs::sys_truncate(args.a1 as *const u8, args.a2 as i64)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_FTRUNCATE,
+        fs::sys_ftruncate(args.a1, args.a2 as i64)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETCWD,
+        fs::sys_getcwd(args.a1 as *mut u8, args.a2 as usize)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CHDIR,
+        fs::sys_chdir(args.a1 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_RENAME,
+        fs::sys_rename(args.a1 as *const u8, args.a2 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MKDIR,
+        fs::sys_mkdir(args.a1 as *const u8, args.a2 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_LINK,
+        fs::sys_link(args.a1 as *const u8, args.a2 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_UNLINK,
+        fs::sys_unlink(args.a1 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SYMLINK,
+        fs::sys_symlink(args.a1 as *const u8, args.a2 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_READLINK,
+        fs::sys_readlink(args.a1 as *const u8, args.a2 as *mut u8, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CHMOD,
+        fs::sys_chmod(args.a1 as *const u8, args.a2 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_FCHMOD,
+        fs::sys_fchmod(args.a1, args.a2 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CHOWN,
+        fs::sys_chown(args.a1 as *const u8, args.a2 as u32, args.a3 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_FCHOWN,
+        fs::sys_fchown(args.a1, args.a2 as u32, args.a3 as u32)
+    );
     sys_handler!(t, args, numbers::SYS_UMASK, fs::sys_umask(args.a1 as u32));
-    sys_handler!(t, args, numbers::SYS_GETRLIMIT, process::sys_getrlimit(args.a1, args.a2 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_SETRLIMIT, process::sys_setrlimit(args.a1, args.a2 as *const u8));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETRLIMIT,
+        process::sys_getrlimit(args.a1, args.a2 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SETRLIMIT,
+        process::sys_setrlimit(args.a1, args.a2 as *const u8)
+    );
     sys_handler!(t, args, numbers::SYS_GETPPID, process::sys_getppid());
     sys_handler!(t, args, numbers::SYS_GETPGRP, process::sys_getpgrp());
     sys_handler!(t, args, numbers::SYS_SETSID, process::sys_setsid());
-    sys_handler!(t, args, numbers::SYS_GETGROUPS, process::sys_getgroups(args.a1 as i32, args.a2 as *mut u32));
-    sys_handler!(t, args, numbers::SYS_SETGROUPS, process::sys_setgroups(args.a1 as i64, args.a2 as *const u32));
-    sys_handler!(t, args, numbers::SYS_GETRESUID, process::sys_getresuid(args.a1 as *mut u32, args.a2 as *mut u32, args.a3 as *mut u32));
-    sys_handler!(t, args, numbers::SYS_SETRESUID, process::sys_setresuid(args.a1 as u32, args.a2 as u32, args.a3 as u32));
-    sys_handler!(t, args, numbers::SYS_SIGALTSTACK, process::sys_sigaltstack(args.a1 as *const u8, args.a2 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_STATFS, fs::sys_statfs(args.a1 as *const u8, args.a2 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_SCHED_SETATTR, process::sys_sched_setattr(args.a1 as i64, args.a2 as *const u8, args.a3));
-    sys_handler!(t, args, numbers::SYS_SCHED_GETATTR, process::sys_sched_getattr(args.a1 as i64, args.a2 as *mut u8, args.a3, args.a4));
-    sys_handler!(t, args, numbers::SYS_SETPGID, process::sys_setpgid(args.a1, args.a2));
-    sys_handler!(t, args, numbers::SYS_ARCH_PRCTL, process::sys_arch_prctl(args.a1, args.a2));
-    sys_handler!(t, args, numbers::SYS_MOUNT, fs::sys_mount(
-        args.a1 as *const u8,
-        args.a2 as *const u8,
-        args.a3 as *const u8,
-        args.a4,
-        args.a5 as *const u8,
-    ));
-    sys_handler!(t, args, numbers::SYS_UMOUNT2, fs::sys_umount2(args.a1 as *const u8, args.a2));
-    sys_handler!(t, args, numbers::SYS_REBOOT, misc::sys_reboot(args.a1, args.a2));
-    sys_handler!(t, args, numbers::SYS_RESOLVE, misc::sys_resolve(args.a1 as *const u8, args.a2 as *mut u8));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETGROUPS,
+        process::sys_getgroups(args.a1 as i32, args.a2 as *mut u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SETGROUPS,
+        process::sys_setgroups(args.a1 as i64, args.a2 as *const u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETRESUID,
+        process::sys_getresuid(
+            args.a1 as *mut u32,
+            args.a2 as *mut u32,
+            args.a3 as *mut u32
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SETRESUID,
+        process::sys_setresuid(args.a1 as u32, args.a2 as u32, args.a3 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SIGALTSTACK,
+        process::sys_sigaltstack(args.a1 as *const u8, args.a2 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_STATFS,
+        fs::sys_statfs(args.a1 as *const u8, args.a2 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SCHED_SETATTR,
+        process::sys_sched_setattr(args.a1 as i64, args.a2 as *const u8, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SCHED_GETATTR,
+        process::sys_sched_getattr(args.a1 as i64, args.a2 as *mut u8, args.a3, args.a4)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SETPGID,
+        process::sys_setpgid(args.a1, args.a2)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_ARCH_PRCTL,
+        process::sys_arch_prctl(args.a1, args.a2)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MOUNT,
+        fs::sys_mount(
+            args.a1 as *const u8,
+            args.a2 as *const u8,
+            args.a3 as *const u8,
+            args.a4,
+            args.a5 as *const u8,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_UMOUNT2,
+        fs::sys_umount2(args.a1 as *const u8, args.a2)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_REBOOT,
+        misc::sys_reboot(args.a1, args.a2)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_RESOLVE,
+        misc::sys_resolve(args.a1 as *const u8, args.a2 as *mut u8)
+    );
     sys_handler!(t, args, numbers::SYS_FUTEX, futex_entry(args));
-    sys_handler!(t, args, numbers::SYS_SCHED_SETAFFINITY, process::sys_sched_setaffinity(args.a1 as i64, args.a2, args.a3));
-    sys_handler!(t, args, numbers::SYS_SCHED_GETAFFINITY, process::sys_sched_getaffinity(args.a1 as i64, args.a2, args.a3));
-    sys_handler!(t, args, numbers::SYS_SYSINFO, process::sys_sysinfo(args.a1 as *mut u64));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SCHED_SETAFFINITY,
+        process::sys_sched_setaffinity(args.a1 as i64, args.a2, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SCHED_GETAFFINITY,
+        process::sys_sched_getaffinity(args.a1 as i64, args.a2, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SYSINFO,
+        process::sys_sysinfo(args.a1 as *mut u64)
+    );
     sys_handler!(t, args, numbers::SYS_OPENPTY, gui::sys_openpty());
-    sys_handler!(t, args, numbers::SYS_GETDENTS64, fs::sys_getdents64(args.a1, args.a2 as *mut u8, args.a3 as usize));
-    sys_handler!(t, args, numbers::SYS_SET_TID_ADDRESS, process::sys_set_tid_address(args.a1 as *const u32));
-    sys_handler!(t, args, numbers::SYS_TIMER_CREATE, posix_timers::sys_timer_create(
-        args.a1 as i32,
-        args.a2 as *const posix_timers::sigevent,
-        args.a3 as *mut i32,
-    ));
-    sys_handler!(t, args, numbers::SYS_TIMER_SETTIME, posix_timers::sys_timer_settime(
-        args.a1 as i32,
-        args.a2 as i32,
-        args.a3 as *const posix_timers::itimerspec,
-        args.a4 as *mut posix_timers::itimerspec,
-    ));
-    sys_handler!(t, args, numbers::SYS_TIMER_GETTIME, posix_timers::sys_timer_gettime(args.a1 as i32, args.a2 as *mut posix_timers::itimerspec));
-    sys_handler!(t, args, numbers::SYS_TIMER_GETOVERRUN, posix_timers::sys_timer_getoverrun(args.a1 as i32));
-    sys_handler!(t, args, numbers::SYS_TIMER_DELETE, posix_timers::sys_timer_delete(args.a1 as i32));
-    sys_handler!(t, args, numbers::SYS_CLOCK_GETTIME, misc::sys_clock_gettime(args.a1, args.a2 as *mut Timespec));
-    sys_handler!(t, args, numbers::SYS_CLOCK_GETRES, misc::sys_clock_getres(args.a1, args.a2 as *mut Timespec));
-    sys_handler!(t, args, numbers::SYS_CLOCK_NANOSLEEP, misc::sys_clock_nanosleep(args.a1, args.a2, args.a3 as *const Timespec, args.a4 as *mut Timespec));
-    sys_handler!(t, args, numbers::SYS_EXIT_GROUP, process::sys_exit_group(args.a1));
-    sys_handler!(t, args, numbers::SYS_OPENAT, fs::sys_openat(args.a1 as i64, args.a2 as *const u8, args.a3 as i32, args.a4 as u32));
-    sys_handler!(t, args, numbers::SYS_MKDIRAT, fs::sys_mkdirat(args.a1 as i64, args.a2 as *const u8, args.a3 as u32));
-    sys_handler!(t, args, numbers::SYS_FSTATAT, fs::sys_fstatat(
-        args.a1 as i64,
-        args.a2 as *const u8,
-        args.a3 as *mut crate::vfs::Stat,
-        args.a4 as i32,
-    ));
-    sys_handler!(t, args, numbers::SYS_UNLINKAT, fs::sys_unlinkat(args.a1 as i64, args.a2 as *const u8, args.a3 as i32));
-    sys_handler!(t, args, numbers::SYS_RENAMEAT, fs::sys_renameat(
-        args.a1 as i64,
-        args.a2 as *const u8,
-        args.a3 as i64,
-        args.a4 as *const u8,
-    ));
-    sys_handler!(t, args, numbers::SYS_LINKAT, fs::sys_linkat(
-        args.a1 as i64,
-        args.a2 as *const u8,
-        args.a3 as i64,
-        args.a4 as *const u8,
-        args.a5 as i32,
-    ));
-    sys_handler!(t, args, numbers::SYS_SYMLINKAT, fs::sys_symlinkat(args.a2 as *const u8, args.a1 as i64, args.a3 as *const u8));
-    sys_handler!(t, args, numbers::SYS_READLINKAT, fs::sys_readlinkat(args.a1 as i64, args.a2 as *const u8, args.a3 as *mut u8, args.a4));
-    sys_handler!(t, args, numbers::SYS_FACCESSAT, fs::sys_faccessat(args.a1 as i64, args.a2 as *const u8, args.a3 as i32, args.a4 as i32));
-    sys_handler!(t, args, numbers::SYS_UNSHARE, namespaces::sys_unshare(args.a1));
-    sys_handler!(t, args, numbers::SYS_UTIMENSAT, fs::sys_utimensat(
-        args.a1 as i64,
-        args.a2 as *const u8,
-        args.a3 as *const u8,
-        args.a4 as i32,
-    ));
-    sys_handler!(t, args, numbers::SYS_SIGNALFD, process::sys_signalfd(args.a1, args.a2 as *const u64, args.a3));
-    sys_handler!(t, args, numbers::SYS_EVENTFD, eventfd::sys_eventfd2(args.a1 as u32, 0));
-    sys_handler!(t, args, numbers::SYS_FALLOCATE, fs::sys_fallocate(args.a1, args.a2 as i32, args.a3 as i64, args.a4 as i64));
-    sys_handler!(t, args, numbers::SYS_SIGNALFD4, process::sys_signalfd4(args.a1, args.a2 as *const u64, args.a3, args.a4 as i32));
-    sys_handler!(t, args, numbers::SYS_EVENTFD2, eventfd::sys_eventfd2(args.a1 as u32, args.a2 as i32));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETDENTS64,
+        fs::sys_getdents64(args.a1, args.a2 as *mut u8, args.a3 as usize)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SET_TID_ADDRESS,
+        process::sys_set_tid_address(args.a1 as *const u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMER_CREATE,
+        posix_timers::sys_timer_create(
+            args.a1 as i32,
+            args.a2 as *const posix_timers::sigevent,
+            args.a3 as *mut i32,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMER_SETTIME,
+        posix_timers::sys_timer_settime(
+            args.a1 as i32,
+            args.a2 as i32,
+            args.a3 as *const posix_timers::itimerspec,
+            args.a4 as *mut posix_timers::itimerspec,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMER_GETTIME,
+        posix_timers::sys_timer_gettime(args.a1 as i32, args.a2 as *mut posix_timers::itimerspec)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMER_GETOVERRUN,
+        posix_timers::sys_timer_getoverrun(args.a1 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMER_DELETE,
+        posix_timers::sys_timer_delete(args.a1 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CLOCK_GETTIME,
+        misc::sys_clock_gettime(args.a1, args.a2 as *mut Timespec)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CLOCK_GETRES,
+        misc::sys_clock_getres(args.a1, args.a2 as *mut Timespec)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CLOCK_NANOSLEEP,
+        misc::sys_clock_nanosleep(
+            args.a1,
+            args.a2,
+            args.a3 as *const Timespec,
+            args.a4 as *mut Timespec
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EXIT_GROUP,
+        process::sys_exit_group(args.a1)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_OPENAT,
+        fs::sys_openat(
+            args.a1 as i64,
+            args.a2 as *const u8,
+            args.a3 as i32,
+            args.a4 as u32
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MKDIRAT,
+        fs::sys_mkdirat(args.a1 as i64, args.a2 as *const u8, args.a3 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_FSTATAT,
+        fs::sys_fstatat(
+            args.a1 as i64,
+            args.a2 as *const u8,
+            args.a3 as *mut crate::vfs::Stat,
+            args.a4 as i32,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_UNLINKAT,
+        fs::sys_unlinkat(args.a1 as i64, args.a2 as *const u8, args.a3 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_RENAMEAT,
+        fs::sys_renameat(
+            args.a1 as i64,
+            args.a2 as *const u8,
+            args.a3 as i64,
+            args.a4 as *const u8,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_LINKAT,
+        fs::sys_linkat(
+            args.a1 as i64,
+            args.a2 as *const u8,
+            args.a3 as i64,
+            args.a4 as *const u8,
+            args.a5 as i32,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SYMLINKAT,
+        fs::sys_symlinkat(args.a2 as *const u8, args.a1 as i64, args.a3 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_READLINKAT,
+        fs::sys_readlinkat(
+            args.a1 as i64,
+            args.a2 as *const u8,
+            args.a3 as *mut u8,
+            args.a4
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_FACCESSAT,
+        fs::sys_faccessat(
+            args.a1 as i64,
+            args.a2 as *const u8,
+            args.a3 as i32,
+            args.a4 as i32
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_UNSHARE,
+        namespaces::sys_unshare(args.a1)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_UTIMENSAT,
+        fs::sys_utimensat(
+            args.a1 as i64,
+            args.a2 as *const u8,
+            args.a3 as *const u8,
+            args.a4 as i32,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SIGNALFD,
+        process::sys_signalfd(args.a1, args.a2 as *const u64, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EVENTFD,
+        eventfd::sys_eventfd2(args.a1 as u32, 0)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_FALLOCATE,
+        fs::sys_fallocate(args.a1, args.a2 as i32, args.a3 as i64, args.a4 as i64)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SIGNALFD4,
+        process::sys_signalfd4(args.a1, args.a2 as *const u64, args.a3, args.a4 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EVENTFD2,
+        eventfd::sys_eventfd2(args.a1 as u32, args.a2 as i32)
+    );
     sys_handler!(t, args, numbers::SYS_GETUID, process::sys_getuid());
     sys_handler!(t, args, numbers::SYS_GETGID, process::sys_getgid());
     sys_handler!(t, args, numbers::SYS_SETUID, process::sys_setuid(args.a1));
     sys_handler!(t, args, numbers::SYS_SETGID, process::sys_setgid(args.a1));
     sys_handler!(t, args, numbers::SYS_GETEUID, process::sys_geteuid());
     sys_handler!(t, args, numbers::SYS_GETEGID, process::sys_getegid());
-    sys_handler!(t, args, numbers::SYS_CAPGET, process::sys_capget(args.a1 as *mut u8, args.a2 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_CAPSET, process::sys_capset(args.a1 as *const u8, args.a2 as *const u8));
-    sys_handler!(t, args, numbers::SYS_SIGPROCMASK, process::sys_sigprocmask(args.a1 as i32, args.a2 as *const u64, args.a3 as *mut u64));
-    sys_handler!(t, args, numbers::SYS_GETRESGID, process::sys_getresgid(args.a1 as *mut u32, args.a2 as *mut u32, args.a3 as *mut u32));
-    sys_handler!(t, args, numbers::SYS_SETRESGID, process::sys_setresgid(args.a1 as u32, args.a2 as u32, args.a3 as u32));
-    sys_handler!(t, args, numbers::SYS_SECCOMP, seccomp::sys_seccomp(args.a1 as u32, args.a2 as u32, args.a3 as *const u8));
-    sys_handler!(t, args, numbers::SYS_MEMFD_CREATE, shm::sys_memfd_create(args.a1 as *const u8, args.a2 as u32));
-    sys_handler!(t, args, numbers::SYS_BPF, crate::ebpf::sys_bpf(args.a1 as u32, args.a2, args.a3, args.a4));
-    sys_handler!(t, args, numbers::SYS_SWAPON, fs::sys_swapon(args.a1 as *const u8, args.a2 as i32));
-    sys_handler!(t, args, numbers::SYS_SWAPOFF, fs::sys_swapoff(args.a1 as *const u8));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CAPGET,
+        process::sys_capget(args.a1 as *mut u8, args.a2 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CAPSET,
+        process::sys_capset(args.a1 as *const u8, args.a2 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SIGPROCMASK,
+        process::sys_sigprocmask(args.a1 as i32, args.a2 as *const u64, args.a3 as *mut u64)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETRESGID,
+        process::sys_getresgid(
+            args.a1 as *mut u32,
+            args.a2 as *mut u32,
+            args.a3 as *mut u32
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SETRESGID,
+        process::sys_setresgid(args.a1 as u32, args.a2 as u32, args.a3 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SECCOMP,
+        seccomp::sys_seccomp(args.a1 as u32, args.a2 as u32, args.a3 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MEMFD_CREATE,
+        shm::sys_memfd_create(args.a1 as *const u8, args.a2 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_BPF,
+        crate::ebpf::sys_bpf(args.a1 as u32, args.a2, args.a3, args.a4)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SWAPON,
+        fs::sys_swapon(args.a1 as *const u8, args.a2 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SWAPOFF,
+        fs::sys_swapoff(args.a1 as *const u8)
+    );
     sys_handler!(t, args, numbers::SYS_GETPGID, process::sys_getpgid(args.a1));
     sys_handler!(t, args, numbers::SYS_GETSID, process::sys_getsid(args.a1));
-    sys_handler!(t, args, numbers::SYS_PRLIMIT64, process::sys_prlimit64(args.a1, args.a2, args.a3 as *const u8, args.a4 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_GETITIMER, process::sys_getitimer(args.a1, args.a2 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_SETITIMER, process::sys_setitimer(args.a1, args.a2 as *const u8, args.a3 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_TIMES, process::sys_times(args.a1 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_GETRUSAGE, process::sys_getrusage(args.a1, args.a2 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_TIMERFD_CREATE, timerfd::sys_timerfd_create(args.a1, args.a2));
-    sys_handler!(t, args, numbers::SYS_TIMERFD_SETTIME, timerfd::sys_timerfd_settime(args.a1, args.a2, args.a3 as *const u8, args.a4 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_TIMERFD_GETTIME, timerfd::sys_timerfd_gettime(args.a1, args.a2 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_INOTIFY_INIT, inotify::sys_inotify_init(args.a1));
-    sys_handler!(t, args, numbers::SYS_INOTIFY_ADD_WATCH, inotify::sys_inotify_add_watch(args.a1, args.a2 as *const u8, args.a3 as u32));
-    sys_handler!(t, args, numbers::SYS_INOTIFY_RM_WATCH, inotify::sys_inotify_rm_watch(args.a1, args.a3 as u32));
-    sys_handler!(t, args, numbers::SYS_RECVMMSG, mmsg::sys_recvmmsg(
-        args.a1,
-        args.a2 as *mut mmsg::mmsghdr,
-        args.a3,
-        args.a4,
-        args.a5 as *const u8,
-    ));
-    sys_handler!(t, args, numbers::SYS_SENDMMSG, mmsg::sys_sendmmsg(args.a1, args.a2 as *mut mmsg::mmsghdr, args.a3, args.a4));
-    sys_handler!(t, args, numbers::SYS_OBJMGR_ENUM, misc::sys_objmgr_enum(args.a1 as *mut u8, args.a2 as usize));
-    sys_handler!(t, args, numbers::SYS_OBJMGR_AUDIT, misc::sys_objmgr_audit(args.a1, args.a2 as *mut u8, args.a3 as usize));
-    sys_handler!(t, args, numbers::SYS_DRMCTL, gui::sys_drmctl(args.a1, args.a2, args.a3 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_HASH, misc::sys_hash(args.a1, args.a2 as *const u8, args.a3, args.a4 as *mut u8, args.a5));
-    sys_handler!(t, args, numbers::SYS_GETRANDOM, misc::sys_getrandom(args.a1 as *mut u8, args.a2 as usize, args.a3));
-    sys_handler!(t, args, numbers::SYS_IO_URING_SETUP, io_uring::sys_io_uring_setup(args.a1, args.a2));
-    sys_handler!(t, args, numbers::SYS_IO_URING_ENTER, io_uring::sys_io_uring_enter(args.a1, args.a2 as u32, args.a3 as u32, args.a4 as u32, args.a5));
-    sys_handler!(t, args, numbers::SYS_IO_URING_REGISTER, io_uring::sys_io_uring_register(args.a1, args.a2 as u32, args.a3, args.a4 as u32));
-    sys_handler!(t, args, numbers::SYS_EPOLL_CREATE1, epoll::sys_epoll_create1(args.a1 as i32));
-    sys_handler!(t, args, numbers::SYS_EPOLL_CTL, epoll::sys_epoll_ctl(args.a1, args.a2 as i32, args.a3 as i32, args.a4 as *const u8));
-    sys_handler!(t, args, numbers::SYS_EPOLL_WAIT, epoll::sys_epoll_wait(args.a1, args.a2 as *mut u8, args.a3 as i32, args.a4 as i32));
-    sys_handler!(t, args, numbers::SYS_EPOLL_PWAIT, epoll::sys_epoll_pwait(
-        args.a1,
-        args.a2 as *mut u8,
-        args.a3 as i32,
-        args.a4 as i32,
-        args.a5 as *const u8,
-        0,
-    ));
-    sys_handler!(t, args, numbers::SYS_EPOLL_CREATE, epoll::sys_epoll_create(args.a1 as i32));
-    sys_handler!(t, args, numbers::SYS_READV, compat::sys_readv(args.a1, args.a2 as *const u8, args.a3 as i64));
-    sys_handler!(t, args, numbers::SYS_WRITEV, compat::sys_writev(args.a1, args.a2 as *const u8, args.a3 as i64));
-    sys_handler!(t, args, numbers::SYS_MADVISE, compat::sys_madvise(args.a1, args.a2, args.a3));
-    sys_handler!(t, args, numbers::SYS_PIPE2, compat::sys_pipe2(args.a1 as *mut u32, args.a2 as i32));
-    sys_handler!(t, args, numbers::SYS_DUP3, compat::sys_dup3(args.a1, args.a2, args.a3 as i32));
-    sys_handler!(t, args, numbers::SYS_PREAD64, compat::sys_pread64(args.a1, args.a2 as *mut u8, args.a3 as usize, args.a4));
-    sys_handler!(t, args, numbers::SYS_PWRITE64, compat::sys_pwrite64(args.a1, args.a2 as *const u8, args.a3 as usize, args.a4));
-    sys_handler!(t, args, numbers::SYS_LANDLOCK_CREATE_RULESET, landlock::sys_landlock_create_ruleset(args.a1 as *const u8, args.a2 as usize, args.a3 as u32));
-    sys_handler!(t, args, numbers::SYS_LANDLOCK_ADD_RULE, landlock::sys_landlock_add_rule(args.a1, args.a2 as u32, args.a3 as *const u8, args.a4 as u32));
-    sys_handler!(t, args, numbers::SYS_LANDLOCK_RESTRICT_SELF, landlock::sys_landlock_restrict_self(args.a1, args.a2 as u32));
-    sys_handler!(t, args, numbers::SYS_PRCTL, prctl::sys_prctl(args.a1, args.a2, args.a3, args.a4, args.a5));
-    sys_handler!(t, args, numbers::SYS_CGROUP_MKDIR, cgroup::sys_cgroup_mkdir(args.a1 as *const u8));
-    sys_handler!(t, args, numbers::SYS_CGROUP_WRITE, cgroup::sys_cgroup_write(args.a1 as *const u8, args.a2 as *const u8, args.a3 as *const u8));
-    sys_handler!(t, args, numbers::SYS_CGROUP_READ, cgroup::sys_cgroup_read(args.a1 as *const u8, args.a2 as *const u8, args.a3 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_SETNS, namespaces::sys_setns(args.a1, args.a2));
-    sys_handler!(t, args, numbers::SYS_MQ_OPEN, mqueue::mq_open(args.a1 as *const u8, args.a2 as i32, args.a3 as i32, args.a4 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_MQ_CLOSE, mqueue::mq_close(args.a1 as i32));
-    sys_handler!(t, args, numbers::SYS_MQ_TIMEDSEND, mqueue::mq_send(args.a1 as i32, args.a2 as *const u8, args.a3 as usize, args.a4 as u32));
-    sys_handler!(t, args, numbers::SYS_MQ_TIMEDRECEIVE, mqueue::mq_receive(
-        args.a1 as i32,
-        args.a2 as *mut u8,
-        args.a3 as usize,
-        args.a4 as *mut u32,
-    ));
-    sys_handler!(t, args, numbers::SYS_MQ_UNLINK, mqueue::mq_unlink(args.a1 as *const u8));
-    sys_handler!(t, args, numbers::SYS_SHMGET, shm::sys_shmget(args.a1 as i32, args.a2 as usize, args.a3 as i32));
-    sys_handler!(t, args, numbers::SYS_SHMAT, shm::sys_shmat(args.a1 as i32, args.a2 as *const u8, args.a3 as i32));
-    sys_handler!(t, args, numbers::SYS_SHMCTL, shm::sys_shmctl(args.a1 as i32, args.a2 as i32, args.a3 as *mut u8));
-    sys_handler!(t, args, numbers::SYS_SHMDT, shm::sys_shmdt(args.a1 as *const u8));
-    sys_handler!(t, args, numbers::SYS_GUI_CREATE_WINDOW, gui::sys_gui_create_window(args.a1 as *const u8, args.a2 as usize, args.a3 as usize));
-    sys_handler!(t, args, numbers::SYS_GUI_GET_BUFFER, gui::sys_gui_get_buffer(args.a1));
-    sys_handler!(t, args, numbers::SYS_GUI_FLUSH, gui::sys_gui_flush(args.a1, args.a2 as *const u32));
-    sys_handler!(t, args, numbers::SYS_GUI_MAP_BUFFER, gui::sys_gui_map_buffer(args.a1));
-    sys_handler!(t, args, numbers::SYS_GUI_GET_KEY, gui::sys_gui_get_key(args.a1));
-    sys_handler!(t, args, numbers::SYS_GUI_GET_MOUSE, gui::sys_gui_get_mouse(args.a1));
-    sys_handler!(t, args, numbers::SYS_GUI_SET_TITLE, gui::sys_gui_set_title(args.a1, args.a2 as *const u8));
-    sys_handler!(t, args, numbers::SYS_GUI_DESTROY_WINDOW, gui::sys_gui_destroy_window(args.a1));
-    sys_handler!(t, args, numbers::SYS_GUI_RESIZE_WINDOW, gui::sys_gui_resize_window(args.a1, args.a2, args.a3));
-    sys_handler!(t, args, numbers::SYS_GUI_MOVE_WINDOW, gui::sys_gui_move_window(args.a1, args.a2, args.a3));
-    sys_handler!(t, args, numbers::SYS_CLIPBOARD, gui::sys_clipboard(args.a1, args.a2 as *mut u8, args.a3));
-    sys_handler!(t, args, numbers::SYS_NOTIFY, gui::sys_notify(args.a1 as *const u8, args.a2, args.a3));
-    sys_handler!(t, args, numbers::SYS_BEEP, gui::sys_beep(args.a1 as u32, args.a2 as u32));
-    sys_handler!(t, args, numbers::SYS_MKFS, fs::sys_mkfs(args.a1 as *const u8, args.a2));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_PRLIMIT64,
+        process::sys_prlimit64(args.a1, args.a2, args.a3 as *const u8, args.a4 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETITIMER,
+        process::sys_getitimer(args.a1, args.a2 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SETITIMER,
+        process::sys_setitimer(args.a1, args.a2 as *const u8, args.a3 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMES,
+        process::sys_times(args.a1 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETRUSAGE,
+        process::sys_getrusage(args.a1, args.a2 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMERFD_CREATE,
+        timerfd::sys_timerfd_create(args.a1, args.a2)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMERFD_SETTIME,
+        timerfd::sys_timerfd_settime(args.a1, args.a2, args.a3 as *const u8, args.a4 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_TIMERFD_GETTIME,
+        timerfd::sys_timerfd_gettime(args.a1, args.a2 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_INOTIFY_INIT,
+        inotify::sys_inotify_init(args.a1)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_INOTIFY_ADD_WATCH,
+        inotify::sys_inotify_add_watch(args.a1, args.a2 as *const u8, args.a3 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_INOTIFY_RM_WATCH,
+        inotify::sys_inotify_rm_watch(args.a1, args.a3 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_RECVMMSG,
+        mmsg::sys_recvmmsg(
+            args.a1,
+            args.a2 as *mut mmsg::mmsghdr,
+            args.a3,
+            args.a4,
+            args.a5 as *const u8,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SENDMMSG,
+        mmsg::sys_sendmmsg(args.a1, args.a2 as *mut mmsg::mmsghdr, args.a3, args.a4)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_OBJMGR_ENUM,
+        misc::sys_objmgr_enum(args.a1 as *mut u8, args.a2 as usize)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_OBJMGR_AUDIT,
+        misc::sys_objmgr_audit(args.a1, args.a2 as *mut u8, args.a3 as usize)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_DRMCTL,
+        gui::sys_drmctl(args.a1, args.a2, args.a3 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_HASH,
+        misc::sys_hash(
+            args.a1,
+            args.a2 as *const u8,
+            args.a3,
+            args.a4 as *mut u8,
+            args.a5
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETRANDOM,
+        misc::sys_getrandom(args.a1 as *mut u8, args.a2 as usize, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_IO_URING_SETUP,
+        io_uring::sys_io_uring_setup(args.a1, args.a2)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_IO_URING_ENTER,
+        io_uring::sys_io_uring_enter(
+            args.a1,
+            args.a2 as u32,
+            args.a3 as u32,
+            args.a4 as u32,
+            args.a5
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_IO_URING_REGISTER,
+        io_uring::sys_io_uring_register(args.a1, args.a2 as u32, args.a3, args.a4 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EPOLL_CREATE1,
+        epoll::sys_epoll_create1(args.a1 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EPOLL_CTL,
+        epoll::sys_epoll_ctl(
+            args.a1,
+            args.a2 as i32,
+            args.a3 as i32,
+            args.a4 as *const u8
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EPOLL_WAIT,
+        epoll::sys_epoll_wait(args.a1, args.a2 as *mut u8, args.a3 as i32, args.a4 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EPOLL_PWAIT,
+        epoll::sys_epoll_pwait(
+            args.a1,
+            args.a2 as *mut u8,
+            args.a3 as i32,
+            args.a4 as i32,
+            args.a5 as *const u8,
+            0,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EPOLL_CREATE,
+        epoll::sys_epoll_create(args.a1 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_READV,
+        compat::sys_readv(args.a1, args.a2 as *const u8, args.a3 as i64)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_WRITEV,
+        compat::sys_writev(args.a1, args.a2 as *const u8, args.a3 as i64)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MADVISE,
+        compat::sys_madvise(args.a1, args.a2, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_PIPE2,
+        compat::sys_pipe2(args.a1 as *mut u32, args.a2 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_DUP3,
+        compat::sys_dup3(args.a1, args.a2, args.a3 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_PREAD64,
+        compat::sys_pread64(args.a1, args.a2 as *mut u8, args.a3 as usize, args.a4)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_PWRITE64,
+        compat::sys_pwrite64(args.a1, args.a2 as *const u8, args.a3 as usize, args.a4)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_LANDLOCK_CREATE_RULESET,
+        landlock::sys_landlock_create_ruleset(
+            args.a1 as *const u8,
+            args.a2 as usize,
+            args.a3 as u32
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_LANDLOCK_ADD_RULE,
+        landlock::sys_landlock_add_rule(
+            args.a1,
+            args.a2 as u32,
+            args.a3 as *const u8,
+            args.a4 as u32
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_LANDLOCK_RESTRICT_SELF,
+        landlock::sys_landlock_restrict_self(args.a1, args.a2 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_PRCTL,
+        prctl::sys_prctl(args.a1, args.a2, args.a3, args.a4, args.a5)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CGROUP_MKDIR,
+        cgroup::sys_cgroup_mkdir(args.a1 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CGROUP_WRITE,
+        cgroup::sys_cgroup_write(
+            args.a1 as *const u8,
+            args.a2 as *const u8,
+            args.a3 as *const u8
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CGROUP_READ,
+        cgroup::sys_cgroup_read(
+            args.a1 as *const u8,
+            args.a2 as *const u8,
+            args.a3 as *mut u8
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SETNS,
+        namespaces::sys_setns(args.a1, args.a2)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MQ_OPEN,
+        mqueue::mq_open(
+            args.a1 as *const u8,
+            args.a2 as i32,
+            args.a3 as i32,
+            args.a4 as *mut u8
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MQ_CLOSE,
+        mqueue::mq_close(args.a1 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MQ_TIMEDSEND,
+        mqueue::mq_send(
+            args.a1 as i32,
+            args.a2 as *const u8,
+            args.a3 as usize,
+            args.a4 as u32
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MQ_TIMEDRECEIVE,
+        mqueue::mq_receive(
+            args.a1 as i32,
+            args.a2 as *mut u8,
+            args.a3 as usize,
+            args.a4 as *mut u32,
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MQ_UNLINK,
+        mqueue::mq_unlink(args.a1 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SHMGET,
+        shm::sys_shmget(args.a1 as i32, args.a2 as usize, args.a3 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SHMAT,
+        shm::sys_shmat(args.a1 as i32, args.a2 as *const u8, args.a3 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SHMCTL,
+        shm::sys_shmctl(args.a1 as i32, args.a2 as i32, args.a3 as *mut u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SHMDT,
+        shm::sys_shmdt(args.a1 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_CREATE_WINDOW,
+        gui::sys_gui_create_window(args.a1 as *const u8, args.a2 as usize, args.a3 as usize)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_GET_BUFFER,
+        gui::sys_gui_get_buffer(args.a1)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_FLUSH,
+        gui::sys_gui_flush(args.a1, args.a2 as *const u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_MAP_BUFFER,
+        gui::sys_gui_map_buffer(args.a1)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_GET_KEY,
+        gui::sys_gui_get_key(args.a1)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_GET_MOUSE,
+        gui::sys_gui_get_mouse(args.a1)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_SET_TITLE,
+        gui::sys_gui_set_title(args.a1, args.a2 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_DESTROY_WINDOW,
+        gui::sys_gui_destroy_window(args.a1)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_RESIZE_WINDOW,
+        gui::sys_gui_resize_window(args.a1, args.a2, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GUI_MOVE_WINDOW,
+        gui::sys_gui_move_window(args.a1, args.a2, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_CLIPBOARD,
+        gui::sys_clipboard(args.a1, args.a2 as *mut u8, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_NOTIFY,
+        gui::sys_notify(args.a1 as *const u8, args.a2, args.a3)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_BEEP,
+        gui::sys_beep(args.a1 as u32, args.a2 as u32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MKFS,
+        fs::sys_mkfs(args.a1 as *const u8, args.a2)
+    );
     t
 }
 
 static SYSCALL_TABLE: [Option<SyscallHandler>; TABLE_SIZE] = build_table();
-
 
 // ─── Main dispatch entry ────────────────────────────────────────
 

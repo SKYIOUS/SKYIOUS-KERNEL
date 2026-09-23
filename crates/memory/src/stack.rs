@@ -1,6 +1,8 @@
 use crate::buddy::BuddyFrameAllocator;
 use vahi_sync::IrqSafeMutex as Mutex;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
+};
 use x86_64::VirtAddr;
 
 pub struct Stack {
@@ -34,21 +36,51 @@ pub fn alloc_stack(size_in_pages: usize) -> Option<Stack> {
 
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
 
+    // Map with rollback: if any page fails to map, free every frame claimed so
+    // far. The previous early-return leaked up to size_in_pages-1 frames per
+    // failed allocation, and each failed alloc_stack call bumped the bump
+    // pointer permanently (fragmenting the kernel-stack VA range).
+    let mut mapped: alloc::vec::Vec<(Page<Size4KiB>, PhysFrame)> = alloc::vec::Vec::new();
     for page in Page::range_inclusive(start_page, end_page) {
-        let frame = frame_allocator.allocate_frame()?;
-        unsafe {
-            if let Ok(t) = mapper.map_to(page, frame, flags, &mut frame_allocator) {
-                t.flush();
-            } else {
+        let frame = match frame_allocator.allocate_frame() {
+            Some(f) => f,
+            None => {
+                rollback(&mut mapper, &mut mapped);
+                return None;
+            }
+        };
+        // SAFETY: map_to with a freshly allocated frame and valid page range;
+        // on failure we roll back everything mapped so far.
+        match unsafe { mapper.map_to(page, frame, flags, &mut frame_allocator) } {
+            Ok(t) => t.flush(),
+            Err(_) => {
+                crate::buddy::BUDDY_ALLOCATOR.lock().deallocate_frame(frame);
+                rollback(&mut mapper, &mut mapped);
                 return None;
             }
         }
+        mapped.push((page, frame));
     }
 
     Some(Stack {
         top: stack_top,
         bottom: stack_bottom,
     })
+}
+
+/// K-03 rollback helper: unmap every page mapped so far and return the
+/// frames to the buddy. Used only from alloc_stack's failure paths.
+fn rollback(
+    mapper: &mut x86_64::structures::paging::OffsetPageTable<'static>,
+    mapped: &mut alloc::vec::Vec<(Page<Size4KiB>, PhysFrame)>,
+) {
+    for (p, f) in mapped.drain(..) {
+        // p was mapped by alloc_stack above and never activated for user
+        // execution; unmapping here returns ownership of f to the buddy.
+        let _ = mapper.unmap(p);
+        x86_64::instructions::tlb::flush(p.start_address());
+        crate::buddy::BUDDY_ALLOCATOR.lock().deallocate_frame(f);
+    }
 }
 
 /// Free a stack: unmap pages and return physical frames to the buddy.

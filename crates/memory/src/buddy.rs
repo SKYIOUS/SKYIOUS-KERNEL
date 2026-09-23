@@ -65,11 +65,13 @@ impl BuddyAllocator {
             crate::frame_info::track_alloc();
             return Some(PhysFrame::containing_address(addr));
         }
-        // If swap devices exist, try evicting a page and retry
+        // If swap devices exist, try evicting a page and retry. The eviction
+        // retry also counts the frame it hands out, or ALLOCATED_FRAMES
+        // undercounts live pages and the leak detectors fire spuriously.
         if !crate::swap::SWAP_DEVICES.lock().is_empty() && crate::swap::try_evict_one_page() {
-            return self
-                .allocate_contiguous(0)
-                .map(PhysFrame::containing_address);
+            let addr = self.allocate_contiguous(0)?;
+            crate::frame_info::track_alloc();
+            return Some(PhysFrame::containing_address(addr));
         }
         None
     }

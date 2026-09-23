@@ -113,3 +113,9 @@ bin/
 # QEMU process ID + screen capture
 qemu.pid
 limine-screen.ppm
+
+# Raw objdump/symbol dumps from KASLR/SMP debugging (regenerate with objdump;
+# tens of MB each, never referenced by scripts or CI)
+disasm*.txt
+tests/k0*_syms*.txt
+tests/k0*_disasm*.txt

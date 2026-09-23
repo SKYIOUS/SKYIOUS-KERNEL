@@ -119,7 +119,9 @@ pub fn estimate_process_rss(proc: &crate::task::process::Process) -> u64 {
 /// Get total system memory in bytes.
 pub fn total_system_memory() -> u64 {
     let free = crate::memory::phys::total_free_frames() as u64;
-    let heap_size = crate::allocator::HEAP_SIZE as u64;
+    // K-03: the heap is sized adaptively from the memory map, so use the
+    // actual mapped size rather than the historical 128 MiB constant.
+    let heap_size = crate::allocator::runtime_heap_size() as u64;
     free * 4096 + heap_size
 }
 

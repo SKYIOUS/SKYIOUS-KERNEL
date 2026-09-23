@@ -367,11 +367,31 @@ pub extern "C" fn ap_kernel_entry() -> ! {
         crate::arch::CurrentArch::init_cpu();
     }
 
-    // Each AP needs its own GS base for per-CPU storage (syscalls)
+    // K-02 ordering invariant: architectural state (LAPIC, GS/per-CPU,
+    // GDT/TSS, IDT) must be fully established BEFORE this CPU takes any
+    // IrqSafeMutex, allocates, or enters the scheduler. The previous order
+    // allocated (Box::new in init_gs_base) while GS base was still 0 and
+    // no IDT was loaded: the first IrqSafeMutex::lock asked the GS-based
+    // CPU-ID provider for this CPU's id, dereferenced GS base 0, and the
+    // resulting page fault became DF→TF (machine dead before login).
+    // This LAPIC's init also masks its timer, which must happen before
+    // interrupts can be enabled on this CPU.
+    crate::apic::lapic::init();
+
+    // Per-CPU identity. On a just-INIT'd AP the LAPIC ID register is
+    // readable after lapic::init() above; CPUID leaf 1 (used by the
+    // CPU-ID provider fallback) would give the same value.
     let cpu_id = crate::apic::current_lapic_id() as usize;
-    {
-        crate::syscalls::init_gs_base(cpu_id);
-    }
+
+    // GS/per-CPU state. From here on IrqSafeMutex and per-CPU access are
+    // valid on this CPU.
+    crate::syscalls::init_gs_base(cpu_id);
+
+    // Own GDT + TSS (per-CPU IST/privilege stacks), then the shared IDT.
+    // Before this point any fault would be fatal (IDT=0); after it the
+    // normal exception handlers protect the rest of bring-up.
+    crate::gdt::init_ap(cpu_id);
+    crate::interrupts::init_ap();
 
     // Enable EFER.SCE on this AP so `syscall` doesn't raise #UD.
     // We do NOT call syscalls::init() because it also sets GS base to CPU 0.
@@ -386,14 +406,8 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     // so user `syscall` doesn't jump to LSTAR=0 with CS=0/SS=8.
     crate::syscalls::init_syscall_msrs();
 
-    // Each AP needs its own GDT and IDT
-    crate::gdt::init_ap();
-    crate::interrupts::init_ap();
-
-    // Initialize Local APIC for this core
-    crate::apic::lapic::init();
-
-    // Enable interrupts
+    // Enable interrupts — only now are LAPIC (masked timer), TSS/IST and
+    // IDT all valid on this CPU.
     x86_64::instructions::interrupts::enable();
 
     // This core is now ready to be scheduled.

@@ -6,6 +6,7 @@ jobs = 1
 rustflags = [
     "-C", "target-feature=-sse",
     "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=--emit-relocs",
     "-C", "relocation-model=static",
 ]
 

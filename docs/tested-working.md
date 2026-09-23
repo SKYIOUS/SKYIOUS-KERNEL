@@ -1,7 +1,42 @@
 # Tested & Working — Vahi Kernel / SkyOS
 
-Living status document. Last updated: 2026-09-05 (session: workspace build repair, selftest gate 134/134).
+Living status document. Last updated: 2026-09-23 (session: KASLR + T-00/K-02/K-03 repair arc, pre-commit verification).
 Every claim here was reproduced on this machine; re-verify after any change.
+
+## Verified this session (2026-09-23)
+
+- KASLR is real now: `kaslr_reloc.rs` applies RELA relocations and switches
+  CR3 via the `.text.kaslr_trampoline` stub; boot log shows
+  `[KASLR] slide = 0x23e00000`, relocations applied, and execution resumes in
+  `post_kaslr_continue` at the randomized RIP (the quarantined WIP from
+  `git stash@{0}` / `T00_QUARANTINE/` was superseded — that copy is stale).
+- Selftest suite grew 134 → 146 (T-00 `harness_tests` + K-03 memory tests:
+  phys exhaustion recovery, frame-counter symmetry, address-space cycles,
+  kernel stack alloc/free).
+- Gate, exact commands (all run this session, this tree):
+  `cargo build --release --target x86_64-unknown-none` → 0 errors;
+  `cargo build --release --target x86_64-unknown-none --features self_test
+  -Zbuild-std=core,alloc` → 0 errors;
+  `cargo clippy --release --target x86_64-unknown-none --features self_test
+  -Zbuild-std=core,alloc -- -D warnings` → clean;
+  Limine image via `builder/build_limine_image.py`, then
+  `tests/run_qemu_tests.py --image tests/t00_selftest.bin --ovmf OVMF.fd
+  --timeout 900 --qemu-extra "-vga none"` → **PASS 146/146, 0 failed** at
+  `-smp 1`, and → **PASS 146/146, 0 failed** at `-smp 2`
+  (`--smp 2 --boot-only --expect-ap 1` also PASS: 1/1 AP up, VFS init reached).
+- Adaptive heap: `[BOOT] heap: 114 MiB (adaptive from memory map)` on the
+  512M QEMU machine (K-03 FB-005 fix).
+
+## Verified this session (2026-09-21)
+
+- Full codebase inspection: 344 Rust files, ~82,266 LOC across kernel + 18 crates
+- 216 kernel src files, 207 syscalls, 134 selftests (146 after the T-00/K-03 tests landed — see 2026-09-23)
+- New subsystems confirmed: hypervisor (16 files), ebpf (7), gui (15), compositor (8), crypto (3), objects (12), ash (8)
+- 18 extracted crates: sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci
+- Feature flags: default = smp,net,ext4,iommu; all-features = smp,net,ext4,uhci,ash,hypervisor,verification,gpu
+- CI: 5 jobs (validate, build-kernel, build-bootimage, t00-harness, clippy) — all green
+- Build: `cargo build` in kernel/ → 0 errors; `cargo clippy -- -D warnings` → clean
+-- QEMU boot: TAP version 13, 134/134 passed, 0 failed at smp 1 and 2 (2026-09-23: 146/146 at smp 1 and 2)
 
 ## Verified this session (2026-09-05)
 

@@ -11,17 +11,33 @@ pub fn alloc_frame() -> Option<u64> {
     crate::buddy::BUDDY_ALLOCATOR
         .lock()
         .allocate_contiguous(0)
-        .map(|a| a.as_u64())
+        .map(|a| {
+            // K-03: this path bypasses BuddyAllocator::allocate_frame (which
+            // calls track_alloc), while free_frame always reaches
+            // deallocate_frame → track_dealloc. Without this, the
+            // ALLOCATED_FRAMES counter undercounts every phys::alloc_frame
+            // and the leak detectors (phys::audit_snapshot) report phantom
+            // leaks. Alloc and free must be counted symmetrically.
+            crate::frame_info::track_alloc();
+            a.as_u64()
+        })
 }
 
 pub fn free_frame(phys_addr: u64) {
+    use x86_64::{structures::paging::PhysFrame, PhysAddr};
+    // Single lock acquisition for check-and-free. The previous version took
+    // the buddy lock once for is_free() and again for deallocate_frame(), so
+    // two concurrent free_frame calls on SMP could both pass the check and
+    // insert the same frame twice, corrupting the free lists.
+    let mut buddy = crate::buddy::BUDDY_ALLOCATOR.lock();
     // ponytail: guard double-free — buddy would otherwise re-insert and inflate count
-    if is_free(phys_addr) {
+    if buddy.is_free(PhysAddr::new(phys_addr)) {
         return;
     }
-    use x86_64::{structures::paging::PhysFrame, PhysAddr};
+    // SAFETY: PhysFrame::containing_address is valid for any address; the
+    // frame is only freed after the (locked) double-free check.
     let frame = PhysFrame::containing_address(PhysAddr::new(phys_addr));
-    crate::buddy::BUDDY_ALLOCATOR.lock().deallocate_frame(frame);
+    buddy.deallocate_frame(frame);
 }
 
 pub fn is_free(phys_addr: u64) -> bool {

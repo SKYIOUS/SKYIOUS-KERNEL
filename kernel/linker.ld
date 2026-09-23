@@ -10,6 +10,7 @@ SECTIONS
     .text : AT(PHYS_BASE + (. - VIRT_BASE))
     {
         *(.text .text.*)
+        KEEP(*(.text.kaslr_trampoline))
     }
 
     . = ALIGN(4K);

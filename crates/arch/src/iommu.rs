@@ -57,10 +57,16 @@ pub fn iommu_unmap(device_bdf: u16, iova: u64, size: u64) -> bool {
 
 /// Translate an IOVA to a physical address using the registered IOMMU.
 pub fn iommu_translate(device_bdf: u16, iova: u64) -> Option<u64> {
-    CURRENT_IOMMU.lock().as_ref().and_then(|i| i.translate(device_bdf, iova))
+    CURRENT_IOMMU
+        .lock()
+        .as_ref()
+        .and_then(|i| i.translate(device_bdf, iova))
 }
 
 /// Check if IOMMU hardware is enabled.
 pub fn iommu_enabled() -> bool {
-    CURRENT_IOMMU.lock().as_ref().is_some_and(|i| i.is_enabled())
+    CURRENT_IOMMU
+        .lock()
+        .as_ref()
+        .is_some_and(|i| i.is_enabled())
 }

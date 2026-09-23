@@ -71,6 +71,17 @@ pub unsafe fn init_memory(
     for &base in &[0xFEC0_0000u64, 0xFED0_0000, 0xfee00000] {
         map_phys_range(&mut mapper, &mut frame_allocator, base, base + 0x1000);
     }
+    // T-00 (FB-002): the classic VGA text buffer at physical 0xB8000 sits in
+    // the hole between Limine's conventional-RAM and extended-RAM entries
+    // (0x9FC00..0x100000 is reserved/ACPI-reclaimed, not "usable"). It is
+    // therefore never mapped into the HHDM by the loop above, and any write
+    // through VGA_BUFFER_VIRT (vga_buffer::init -> clear_screen) faults before
+    // the IDT exists: triple fault, silent reset. Whether the page happens to
+    // be mapped is a function of the exact QEMU/OVMF memmap, which is why some
+    // environments booted fine and others died silently after the splash.
+    // Map the two frames covering 0xB0000..0xBFFFF explicitly — the region is
+    // MMIO (present in every x86 PC), so the map is unconditional and safe.
+    map_phys_range(&mut mapper, &mut frame_allocator, 0xB_0000, 0xC_0000);
     crate::serial_write("[BOOT] HHDM mapping done\n");
 
     (mapper, frame_allocator)
@@ -101,7 +112,7 @@ pub unsafe fn init_graphics(
     if crate::drivers::graphics::is_active() {
         crate::serial_write("[BOOT] graphics=active\n");
         // Show boot splash as soon as framebuffer is ready.
-        crate::gui::splash::init();
+        // crate::gui::splash::init();  // Temporarily disabled - hangs without VirtIO GPU
     } else {
         crate::serial_write("[BOOT] graphics=INACTIVE\n");
     }

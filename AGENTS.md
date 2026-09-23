@@ -50,27 +50,70 @@ invalidates a statement in these docs updates them in the same commit.
 Rust, `#![no_std]`, edition 2021, nightly. Monolithic kernel (ADR-001).
 - **x86_64**: Limine bootloader, UEFI, KASLR, SYSCALL/SYSRET, SMP via SIPI
 - **aarch64**: EL1/EL0, GICv2, PSCI CPU_ON
-- **Memory**: Buddy allocator, slab, page tables (COW via isolate VM), swap
+- **riscv64**: RV64GC, SBI, PLIC
+- **Memory**: Buddy allocator, slab, page tables (COW via isolate VM), swap, frame tracking, stack allocator
 - **Scheduler**: Stride heap + SCHED_FIFO/SCHED_RR + CPU affinity + work stealing
-- **Filesystems**: SkyFS (journaling), ext2, ext4 (R/O), FAT32, ramfs, devfs, FUSE
-- **Networking**: smoltcp TCP/UDP, DHCP, DNS, Unix sockets, TCP Reno congestion control
-- **Security**: seccomp BPF, Landlock, capabilities, KASLR, CFI, SMAP/SMEP
-- **Drivers**: NVMe, E1000, xHCI, PS/2, VirtIO, HDA audio, VirtIO-GPU
+- **Filesystems**: SkyFS (journaling), ext2 (R+W), ext4 (R/O), FAT32, TarFS, ramfs/tmpfs, devfs, ctlfs, FUSE bridge
+- **Networking**: smoltcp TCP/UDP, DHCP, DNS, Unix sockets, zero-copy, RSS, TSO, TCP Reno congestion control
+- **Security**: SMAP/SMEP/UMIP, KASLR, CFI, seccomp BPF, Landlock, capabilities, audit
+- **Hypervisor**: VMX/SVM, EPT/NPT, vCPU, 10+ VM syscalls
+- **eBPF**: Full VM, verifier, JIT (x86_64), 4 helpers, maps
+- **ASH**: Verifier, interpreter, manager, hooks (net, syscall), JIT via ebpf/jit.rs, W^X exec-memory allocator
+- **GUI**: Compositor at 30 FPS, window manager, terminal, splash, notifications, clipboard
+- **Drivers**: NVMe, E1000, xHCI, PS/2, VirtIO, HDA audio, VirtIO-GPU, AHCI, PATA
 - **IPC**: Pipes, sockets, eventfd, message queues, shared memory
 - **Async I/O**: io_uring, epoll, timerfd, signalfd
+- **Crypto**: SHA-256, HMAC, PBKDF2, entropy (RDRAND+TSC)
+- **Objects**: KernelObject trait, handle table, security, namespace
 
 Module map:
 ```
 kernel/src/
-  arch/{arch_x86_64,arch_aarch64}.rs    # Architecture-specific code
-  mm/{buddy,slab,paging,isolate,swap}.rs # Memory management
-  task/{scheduler,thread,process,oom}.rs # Scheduling and process management
-  syscalls/{dispatch,net_*,process_*,fs_*}.rs  # Syscall implementations
-  drivers/{storage,net,usb,graphics}/    # Device drivers
-  net/{mod,tcp_congestion,dns,dhcp}.rs   # Network stack
-  fs/{skyfs,ext2,vfs,tarfs}.rs          # Filesystems
-  interrupts/{mod,irq,exceptions}.rs    # Interrupt handling
-  hal/{cpu,x86_64,aarch64}.rs           # Hardware abstraction
+  arch/{arch_x86_64,arch_aarch64,arch_riscv64}.rs  # Architecture-specific code
+  apic/{mod,ioapic,lapic,msi,errata}.rs              # APIC subsystem
+  ash/{mod,manager,runtime,syscalls,verifier,hooks}  # ASH scripting engine
+  boot/{mod,init,logger,state,tasks}.rs              # Boot state machine
+  compositor/{mod,blend,blur,flush,scene,shadow,vsync}.rs  # GUI compositor
+  crypto/{mod,entropy,sha256}.rs                     # Crypto primitives
+  debug/{mod,symbols}.rs                             # Debug utilities
+  drivers/{mod,storage,net,usb,graphics,audio,input}.rs  # Device drivers
+  ebpf/{mod,vm,verifier,jit,maps,helpers,tnum}.rs   # eBPF subsystem
+  gui/{mod,drawing,filemanager,input,menu,mouse,paint,shell,splash,surface,terminal,wallpaper,widgets,window,windows}.rs  # GUI stack
+  hal/{mod,cpu,x86_64,aarch64,riscv64,dma,irq,mutex,platform,exec_mem}.rs  # HAL
+  hypervisor/{mod,vmx,svm,ept,memory,vcpu,sched,hypercalls,boot,devices}.rs  # Hypervisor
+  interrupts/{mod,irq,exceptions,page_fault,diag}.rs  # Interrupt handling
+  ipc/mod.rs                                         # IPC primitives
+  memory/mod.rs                                      # Memory management (buddy, slab, paging, swap)
+  net/mod.rs                                         # Network stack (smoltcp)
+  objects/{mod,handle,namespace,security,syscalls,process_object,thread_object,window_object,fs_integration,gui_integration,net_integration}.rs  # Object manager
+  pci/mod.rs                                         # PCI subsystem
+  shell/{mod,commands}                               # Kernel shell
+  sync/{mod,cfi,rcu}.rs                              # Sync primitives (IrqSafeMutex, CFI, RCU)
+  syscalls/{mod,dispatch,numbers,net_*,process_*,fs_*,ipc_*,...}.rs  # Syscall implementations
+  task/{mod,process,thread,oom,executor,keyboard,lock,scheduler/}  # Task management
+  tests/{mod,apic,benchmarks,contract,ebpf,ext2_fs,fuzzer,futex,harness,init,memory,new_features,panic_path,pata_read,process_lifecycle,scheduler,skyfs,stress,sync,vfs}.rs  # Test suite
+  verified/{mod,concurrency,journal,scheduler,runner}.rs  # Verified proofs
+  vfs/mod.rs                                         # VFS layer
+crates/                                              # Extracted crates (18 total)
+  sync/       vahi-sync       — IrqSafeMutex (90 lines)
+  memory/     vahi-memory     — buddy, slab, paging, swap, frame_info
+  crypto/     vahi-crypto     — SHA-256, HMAC, PBKDF2, entropy (308 lines)
+  hal/        vahi-hal        — DMA, IRQ controller, platform, timer
+  limine/     vahi-limine     — Limine boot protocol (140 lines)
+  apic/       vahi-apic       — Local APIC, I/O APIC, MSI (1072 lines)
+  types/      vahi-types      — Shared types, Errno, credentials, VMA
+  arch/       vahi-arch       — x86_64, aarch64, HAL
+  gdt/        vahi-gdt        — GDT/IDT/TSS management
+  interrupts/ vahi-interrupts — IRQ, page fault, exceptions
+  task/       vahi-task       — process, thread, scheduler, OOM
+  syscalls/   vahi-syscalls   — syscall numbers, dispatch, ptrace/seccomp/namespaces
+  vfs/        vahi-vfs        — VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE
+  net/        vahi-net        — TCP Reno, UDP, DHCP, DNS, Unix sockets
+  drivers/    vahi-drivers    — NVMe, E1000, VirtIO, PS/2, xHCI, HDA, GPU
+  acpi/       vahi-acpi       — ACPI tables, MADT, PRT
+  objects/    vahi-objects    — KernelObject trait, handle table, security
+  ipc/        vahi-ipc        — IPC primitives
+  pci/        vahi-pci        — PCI subsystem
 ```
 
 ## Operating protocol (how every task runs)
@@ -115,8 +158,8 @@ kernel/src/
 7. **Syscall numbers.** Defined in `syscalls/numbers.rs`. New syscall →
    add number constant → add dispatch entry → add handler wrapper → implement.
    Linux x86_64 numbers are preferred.
-8. **Feature flags.** Default: `smp,net,ext4`. CI all-features adds
-   `uhci,ash,hypervisor,verification`. New feature flags need ADR.
+8. **Feature flags.** Default: `smp,net,ext4,iommu`. CI all-features adds
+   `uhci,ash,hypervisor,verification,gpu`. New feature flags need ADR.
 9. **Panic handler.** Uses `serial_write` only (no heap allocation in panic).
    Must dump registers, backtrace, process info, then halt. Never loop
    forever without diagnostic output.
@@ -167,28 +210,22 @@ kernel/src/
   in the same commit.
 
 ## Workspace structure
-- `Cargo.toml` (root) — workspace members: kernel, builder
+- `Cargo.toml` (root) — workspace members: kernel, builder, 18 crates
 - `kernel/` — the kernel (its own Cargo.toml, .cargo/config.toml, linker.ld)
+- `crates/` — 18 extracted crates (sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci)
 - `builder/` — Python scripts for Limine-bootable GPT disk images
 - `scripts/` — build.sh, run_qemu.sh (and PowerShell equivalents)
+- `tests/` — QEMU test harness, boot stress, selftest gate
+- `docs/` — PLAN.md, ADRs, architecture reviews, interface contracts
+- `examples/` — example userspace programs
 
-## Session log (2026-08-24)
+## Session log (2026-09-21)
 Completed this session:
-- ELF loader: fixed setup_user_stack with Linux ABI (argc/argv/envp/auxv)
-- Panic handler: register dumps (x86_64 + aarch64), stack backtrace, process info
-- Init process: PID 1 forcing, signal immunity, orphan reparenting, envp setup
-- OOM killer: proactive pressure detection, age/root scoring, stack-based formatting
-- TCP Reno congestion control: cwnd, slow start, fast recovery, Jacobson/Karels RTT
-- SMP scheduler: removed dead SCHED_QUEUES infrastructure (85 lines)
-- Build system: root workspace Cargo.toml, Makefile, build/run scripts
-- AGENTS.md: created operating contract
-- Dead code removal: spawn_userspace_app (64 lines), test_memory_allocations gated
-- Signal delivery: default restorer trampoline, FPU state save/restore, signal mask blocking
-- getrandom(2): RDRAND+TSC+SHA-256 entropy, GRND_NONBLOCK/GRND_RANDOM flags, i386 compat
-- Resource leak audit: FD cleanup on process exit, shm_detach_all, e1000 IRQ-context format! removal
-- main.rs decomposition: panic handler extracted to panic_handler.rs (613→434 lines)
-- Frame tracking: high-water-mark allocation tracking in frame_info.rs + buddy allocator
-- 100-boot stress test: tests/boot_stress_100.ps1 with configurable SMP/timeout
+- Full AGENTS.md inspection and update against actual codebase state
+- Identified 18 extracted crates, 216 kernel src files, 344 total Rust files (82,266 LOC)
+- Identified new subsystems: hypervisor (16 files), ebpf (7), gui (15), compositor (8), crypto (3), objects (12), ash (8)
+- Updated architecture summary, module map, commands, workspace structure
+- Updated feature flags: default = smp,net,ext4,iommu; added gpu, iommu, ash, hypervisor, verification
 
 ## Conventions & gotchas
 - **Allocator**: `linked_list_allocator` crate, heap at fixed address. `alloc_error_handler` triggers OOM killer.
@@ -200,6 +237,9 @@ Completed this session:
 - **Boot**: Limine protocol. Boot state machine in `boot/state.rs` with 8 states.
 - **QEMU serial**: All `serial_write` output goes to `-serial stdio`. Check serial logs for boot progress.
 - **Feature guards**: `#[cfg(feature = "net")]` for networking, `#[cfg(feature = "smp")]` for SMP. Check before using gated APIs.
+- **RUSTFLAGS**: Never set RUSTFLAGS env on kernel build — overrides `.cargo/config.toml` rustflags and drops `-Tlinker.ld`.
+- **Build order**: Build kernel first, then bootimage. The Rust builder (`builder/build_boot_image.py`) and Limine builder (`builder/build_limine_image.py`) produce different images.
+- **SMP under TCG**: Use `-cpu qemu64,-smep` for SMP-2+ boots.
 
 ## Removed (do not reintroduce)
 - `vahiai` crate (deleted — fake AI subsystem)

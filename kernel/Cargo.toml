@@ -65,7 +65,7 @@ iommu = []
 
 [profile.dev]
 panic = "abort"
-rustflags = ["-Z", "stack-protector=strong"]
+rustflags = ["-Z", "stack-protector=strong", "-C", "force-frame-pointers=yes", "--emit-relocs"]
 
 [profile.test]
 opt-level = 0
@@ -76,7 +76,7 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
-rustflags = ["-Z", "stack-protector=strong"]
+rustflags = ["-Z", "stack-protector=strong", "-C", "force-frame-pointers=yes", "--emit-relocs"]
 
 # Local build-std workaround (not upstream): hashbrown's optional
 # `rustc-std-workspace-alloc` shim dependency conflicts with -Zbuild-std's

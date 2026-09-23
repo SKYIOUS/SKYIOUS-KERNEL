@@ -3,6 +3,16 @@
 //! Extracted from main.rs to keep the crate root under 400 lines.
 
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// K-03 (D-23): re-entrancy guard for the diagnostic path below. K-00's debug
+/// capture (tests/k00_smp1.log) shows the original panic handler itself
+/// faulting (DF at core::num::carrying_mul_add while the IrqSafeMutex-held
+/// state was being walked), after which every retry re-entered the mutex held
+/// on the same CPU and panicked again — an infinite print loop that scrolls
+/// the first, real panic message off the serial log. Flag-based re-entry
+/// detection is IRQ-safe: the second entry bails to the deterministic halt.
+static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Full panic handler body: message → CPU info → registers → backtrace → halt.
 ///
@@ -10,76 +20,111 @@ use core::panic::PanicInfo;
 /// allocation): a panic caused by allocation failure must still print its
 /// message instead of recursing on `alloc::format!` (AGENTS.md rule 9).
 pub fn handle_panic(info: &PanicInfo) -> ! {
-    crate::serial_write("\n========================================\n");
-    crate::serial_write("           KERNEL PANIC\n");
-    crate::serial_write("========================================\n");
-
-    // ── 1. Panic message ──
+    // Machine-readable failure marker FIRST, before any diagnostic that could
+    // itself fault or recurse: host runners and CI gate on this line.
+    // Emits `Bail out! KERNEL PANIC` (TAP) and exits QEMU with 0x11 via
+    // isa-debug-exit when the self_test feature is compiled in; falls back to
+    // the full diagnostic banner + halt below when it is not.
+    #[cfg(not(feature = "self_test"))]
     {
-        // `PanicMessage` is Display — format into the stack buffer, no alloc.
-        crate::serial_write("[PANIC] ");
-        crate::interrupts::serial_fmt(format_args!("{}", info.message()));
-        crate::serial_write("\n");
+        let _ = info; // diagnostics below use `info` in non-test builds
     }
-    if let Some(loc) = info.location() {
-        crate::interrupts::serial_fmt(format_args!("[PANIC] at {}:{}\n", loc.file(), loc.line()));
-    }
-
-    // ── 2. CPU & process info ──
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "self_test")]
     {
-        let cpu = crate::apic::current_lapic_id();
-        crate::interrupts::serial_fmt(format_args!("[PANIC] CPU: {}\n", cpu));
+        let _ = info;
+        crate::serial_write("[PANIC] KERNEL PANIC\n");
+        crate::selftest::qemu_exit_panic();
     }
-    #[cfg(target_arch = "aarch64")]
+
+    #[allow(unreachable_code)]
     {
-        let mpidr: u64;
-        unsafe {
-            core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr);
-        }
-        crate::interrupts::serial_fmt(format_args!("[PANIC] CPU: {}\n", mpidr & 0xFF));
-    }
-    if let Some(tid) = crate::task::scheduler::with_current_thread(|t| {
-        let pid = t.process.as_ref().map(|p| p.id).unwrap_or(0);
-        (t._id, pid)
-    }) {
-        crate::interrupts::serial_fmt(format_args!(
-            "[PANIC] Thread: {:?}, PID: {}\n",
-            tid.0, tid.1
-        ));
-    }
-
-    // ── 3. Register dump ──
-    #[cfg(target_arch = "x86_64")]
-    dump_registers_x86_64();
-    #[cfg(target_arch = "aarch64")]
-    dump_registers_aarch64();
-
-    // ── 4. Stack backtrace ──
-    crate::debug::print_stack_trace();
-
-    // ── 5. Boot trace (if available) ──
-    crate::boot::with_trace(|trace, paths| {
-        if let Some(events) = trace {
-            crate::serial_write("[PANIC] Boot trace:\n");
-            for event in events {
-                crate::interrupts::serial_fmt(format_args!("  {:?}\n", event));
+        // K-03 (D-23): re-entrancy guard — if a diagnostic step below panics
+        // again (observed in K-00: fault inside the panic diagnostics while
+        // holding IrqSafeMutex), the re-entry must NOT repeat the diagnostics
+        // (which would re-take the same lock and loop forever). Bail to the
+        // deterministic halt instead. swap→false is safe: the first panicker
+        // is the only thread that can observe true here.
+        if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+            crate::serial_write("[PANIC] recursive panic during diagnostics — halting\n");
+            loop {
+                x86_64::instructions::hlt();
             }
         }
-        if let Some(p) = paths {
-            crate::serial_write("[PANIC] Init paths searched:\n");
-            for path in p {
-                crate::interrupts::serial_fmt(format_args!("  {}\n", path));
-            }
+        crate::serial_write("\n========================================\n");
+        crate::serial_write("           KERNEL PANIC\n");
+        crate::serial_write("========================================\n");
+
+        // ── 1. Panic message ──
+        {
+            // `PanicMessage` is Display — format into the stack buffer, no alloc.
+            crate::serial_write("[PANIC] ");
+            crate::interrupts::serial_fmt(format_args!("{}", info.message()));
+            crate::serial_write("\n");
         }
-    });
+        if let Some(loc) = info.location() {
+            crate::interrupts::serial_fmt(format_args!(
+                "[PANIC] at {}:{}\n",
+                loc.file(),
+                loc.line()
+            ));
+        }
 
-    crate::serial_write("========================================\n");
-    crate::serial_write("         SYSTEM HALTED\n");
-    crate::serial_write("========================================\n");
+        // ── 2. CPU & process info ──
+        #[cfg(target_arch = "x86_64")]
+        {
+            let cpu = crate::apic::current_lapic_id();
+            crate::interrupts::serial_fmt(format_args!("[PANIC] CPU: {}\n", cpu));
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let mpidr: u64;
+            unsafe {
+                core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr);
+            }
+            crate::interrupts::serial_fmt(format_args!("[PANIC] CPU: {}\n", mpidr & 0xFF));
+        }
+        if let Some(tid) = crate::task::scheduler::with_current_thread(|t| {
+            let pid = t.process.as_ref().map(|p| p.id).unwrap_or(0);
+            (t._id, pid)
+        }) {
+            crate::interrupts::serial_fmt(format_args!(
+                "[PANIC] Thread: {:?}, PID: {}\n",
+                tid.0, tid.1
+            ));
+        }
 
-    loop {
-        x86_64::instructions::hlt();
+        // ── 3. Register dump ──
+        #[cfg(target_arch = "x86_64")]
+        dump_registers_x86_64();
+        #[cfg(target_arch = "aarch64")]
+        dump_registers_aarch64();
+
+        // ── 4. Stack backtrace ──
+        crate::debug::print_stack_trace();
+
+        // ── 5. Boot trace (if available) ──
+        crate::boot::with_trace(|trace, paths| {
+            if let Some(events) = trace {
+                crate::serial_write("[PANIC] Boot trace:\n");
+                for event in events {
+                    crate::interrupts::serial_fmt(format_args!("  {:?}\n", event));
+                }
+            }
+            if let Some(p) = paths {
+                crate::serial_write("[PANIC] Init paths searched:\n");
+                for path in p {
+                    crate::interrupts::serial_fmt(format_args!("  {}\n", path));
+                }
+            }
+        });
+
+        crate::serial_write("========================================\n");
+        crate::serial_write("         SYSTEM HALTED\n");
+        crate::serial_write("========================================\n");
+
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
 }
 

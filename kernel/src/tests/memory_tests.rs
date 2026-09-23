@@ -172,6 +172,131 @@ fn test_address_space_multiple_cow_clones() -> Result<(), &'static str> {
     Ok(())
 }
 
+// ── K-03 regression tests ────────────────────────────────────────────
+
+/// K-03 §5: allocate until exhaustion, free everything, prove full recovery.
+/// A real exhaustion test (not just "allocator returns None eventually").
+fn test_phys_exhaustion_recovery() -> Result<(), &'static str> {
+    if !phys::is_initialized() {
+        return Err("not initialized");
+    }
+    let mut held: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    // Take every frame. The heap and page tables are already live, so the
+    // allocator MUST start returning None — that is the point of the test.
+    // Bound the loop so a broken allocator cannot spin forever.
+    for _ in 0..2_000_000 {
+        match phys::alloc_frame() {
+            Some(f) => {
+                if f & 0xFFF != 0 {
+                    return Err("non-aligned frame under exhaustion");
+                }
+                held.push(f);
+            }
+            None => break,
+        }
+    }
+    if held.is_empty() {
+        return Err("allocator exhausted with zero allocations taken");
+    }
+    let drained = phys::total_free_frames();
+    if drained != 0 {
+        return Err("free frames remain after exhaustion");
+    }
+    // Free everything, then prove full recovery: at least one frame must be
+    // allocatable again and the free count must match what we returned.
+    for f in held.iter() {
+        phys::free_frame(*f);
+    }
+    let recovered = phys::total_free_frames();
+    if recovered != held.len() {
+        return Err("recovered free count does not match freed frames");
+    }
+    let f = phys::alloc_frame().ok_or("no recovery after full free")?;
+    phys::free_frame(f);
+    Ok(())
+}
+
+/// K-03: ALLOCATED_FRAMES must return to its pre-cycle value after a
+/// symmetric alloc/free cycle. Catches unbalanced track_alloc/track_dealloc
+/// (the phys::alloc_frame bypass bug) that makes leak detectors lie.
+fn test_frame_counter_symmetry() -> Result<(), &'static str> {
+    if !phys::is_initialized() {
+        return Err("not initialized");
+    }
+    let (allocated_before, _) = crate::memory::frame_info::frame_stats();
+    let mut frames = [0u64; 16];
+    for f in frames.iter_mut() {
+        *f = phys::alloc_frame().ok_or("alloc failed")?;
+    }
+    let (allocated_mid, _) = crate::memory::frame_info::frame_stats();
+    if allocated_mid != allocated_before + 16 {
+        return Err("alloc did not count every frame (track_alloc unbalanced)");
+    }
+    for f in frames.iter() {
+        phys::free_frame(*f);
+    }
+    let (allocated_after, _) = crate::memory::frame_info::frame_stats();
+    if allocated_after != allocated_before {
+        return Err("frame counter did not return to baseline (track_dealloc unbalanced)");
+    }
+    Ok(())
+}
+
+/// K-03 §7: failed AddressSpace::new must not strand page-table frames.
+/// AddressSpace::new allocates one PML4 frame up front; clone_cow allocates
+/// one frame per hierarchy level. Both roll back on their own error paths,
+/// so the only observable failure the harness can drive is a None return
+/// with the allocator's free count restored. Drives repeated create/destroy
+/// to catch both leaks and double-frees.
+fn test_address_space_create_destroy_cycles() -> Result<(), &'static str> {
+    if !phys::is_initialized() {
+        return Err("not initialized");
+    }
+    let mut fa = BuddyFrameAllocator;
+    for _cycle in 0..8 {
+        let free_before = phys::total_free_frames();
+        let aspace = AddressSpace::new(&mut fa).ok_or("AddressSpace::new failed")?;
+        // Every user PML4 slot is empty on a fresh address space; dropping it
+        // (explicit destroy, as process teardown does) must return the PML4.
+        aspace.destroy();
+        let free_after = phys::total_free_frames();
+        if free_after != free_before {
+            return Err("create/destroy cycle changed free frame count");
+        }
+    }
+    Ok(())
+}
+
+/// K-03 §9: kernel stacks must come back intact after alloc/free, with the
+/// bump pointer advancing (never reusing a live VA range) and every frame
+/// returned to the buddy.
+fn test_kernel_stack_alloc_free() -> Result<(), &'static str> {
+    use crate::memory::stack;
+    if !phys::is_initialized() {
+        return Err("not initialized");
+    }
+    let free_before = phys::total_free_frames();
+    let s1 = stack::alloc_stack(4).ok_or("stack alloc failed")?;
+    let s2 = stack::alloc_stack(4).ok_or("second stack alloc failed")?;
+    if s2.bottom >= s1.top {
+        return Err("stack VA ranges overlap or are misordered");
+    }
+    if (s1.top - s1.bottom) != 4 * 4096 {
+        return Err("stack size mismatch");
+    }
+    let free_with_two = phys::total_free_frames();
+    if free_with_two + 8 != free_before {
+        return Err("two 4-page stacks did not consume exactly 8 frames");
+    }
+    stack::free_stack(&s1);
+    stack::free_stack(&s2);
+    let free_after = phys::total_free_frames();
+    if free_after != free_before {
+        return Err("stack free did not return all frames");
+    }
+    Ok(())
+}
+
 pub fn register() {
     crate::selftest::register("phys::alloc_many", test_phys_alloc_many);
     crate::selftest::register("phys::alloc_free_reuse", test_phys_alloc_free_reuse);
@@ -186,6 +311,13 @@ pub fn register() {
         test_address_space_multiple_cow_clones,
     );
     crate::selftest::register("mmap::regions_distinct", test_mmap_regions_distinct);
+    crate::selftest::register("phys::exhaustion_recovery", test_phys_exhaustion_recovery);
+    crate::selftest::register("frame_info::counter_symmetry", test_frame_counter_symmetry);
+    crate::selftest::register(
+        "address_space:create_destroy_cycles",
+        test_address_space_create_destroy_cycles,
+    );
+    crate::selftest::register("stack::alloc_free", test_kernel_stack_alloc_free);
 }
 
 /// Regression: anonymous mmap must return a distinct region per call.

@@ -74,7 +74,7 @@ Before merging any change:
 1. `cargo build --target x86_64-unknown-none` — compiles
 2. `cargo build --target x86_64-unknown-none --features self_test` — tests compile
 3. QEMU boot test — boots to login prompt
-4. Selftests — all pass (123/123)
+4. Selftests — all pass (134/134)
 5. Interface docs — updated if public API changed
 6. Invariant docs — updated if invariants changed
 

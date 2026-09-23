@@ -174,6 +174,7 @@ pub mod hypervisor;
 mod interrupts;
 pub mod iommu;
 pub mod ipc;
+mod kaslr_reloc;
 #[cfg(not(target_arch = "aarch64"))]
 mod keyboard;
 pub mod limine;
@@ -224,6 +225,13 @@ pub unsafe extern "C" fn _start() -> ! {
 /// KASLR: kernel base slide offset (0 if not randomized)
 pub static KERNEL_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// KASLR: has relocation been applied (guard against double-apply)
+pub static KASLR_APPLIED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Debug: KASLR slide value for verification
+pub static KASLR_DEBUG_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Stack canary value for `-Z stack-protector=strong`
 #[used]
 #[no_mangle]
@@ -245,18 +253,15 @@ pub fn oom_kill() -> ! {
 }
 
 fn init_kaslr() {
-    let val = crate::crypto::GLOBAL_ENTROPY.get_u64();
-    let val = if val == 0 { 0x1000 } else { val };
+    // Use TSC as entropy source since crypto/limine may not be ready yet
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
     // 30-bit address space (1GB range), 2MB alignment => 9 bits entropy (512 slots).
-    // Mask: 0xFFE0_0000 = bits 0-20 zeroed (2MB alignment), bits 21-30 random.
-    // Previous mask 0x3FFF_F000 gave 4KB alignment (not 2MB as claimed).
-    // NOTE: KERNEL_SLIDE is stored but NOT applied to relocate the kernel.
-    // Full KASLR requires runtime relocation of kernel image and fixups,
-    // which is not yet implemented. This provides entropy generation only.
-    KERNEL_SLIDE.store(
-        val & 0x0000_0000_FFE0_0000,
-        core::sync::atomic::Ordering::Relaxed,
-    );
+    // Mask: 0x3FFFFFE00000 = bits 0-20 zeroed (2MB alignment), bits 21-39 random (30-bit range).
+    // But we only want 1 GiB (bits 21-30), so mask with 0x3FE00000 (bits 21-30, 10 bits = 1024 slots * 2MiB = 1 GiB).
+    // 0x3FE00000 = 0b001111111110000000000000000000 = bits 21-30
+    let slide = (tsc & 0x0000_0000_3FE0_0000) | 0x200000;
+    KERNEL_SLIDE.store(slide, core::sync::atomic::Ordering::Relaxed);
+    crate::KASLR_DEBUG_SLIDE.store(slide, core::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn init_serial() {
@@ -283,6 +288,28 @@ pub fn serial_write(msg: &str) {
     }
 }
 
+pub fn serial_write_hex(mut val: u64) {
+    if val == 0 {
+        serial_putc(b'0');
+        return;
+    }
+    let mut buf = [0u8; 16];
+    let mut i = 16;
+    while val > 0 {
+        i -= 1;
+        let digit = (val & 0xF) as u8;
+        buf[i] = if digit < 10 {
+            b'0' + digit
+        } else {
+            b'a' + digit - 10
+        };
+        val >>= 4;
+    }
+    for &b in &buf[i..] {
+        serial_putc(b);
+    }
+}
+
 /// Kernel-provided sink for `vahi-vfs` serial output: routes `/dev/tty0`
 /// (userspace stdin/stdout/stderr) writes to the real serial port.
 ///
@@ -295,57 +322,38 @@ pub fn vahi_kernel_serial_putc(c: u8) {
 }
 
 /// Kernel-provided sink for `vahi-vfs` line output (ext4/tarfs/fuse
-/// debug). See `vahi_kernel_serial_putc` for the symbol-ownership note.
+/// Post-KASLR continuation: runs after the trampoline switches to the randomized address space.
+/// This function is called from the assembly trampoline and never returns.
 #[no_mangle]
-pub fn vahi_kernel_serial_write(msg: &str) {
-    serial_write(msg);
-}
-
-fn kernel_main() -> ! {
-    // Seed stack canary BEFORE any function with stack protection runs.
-    let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
-    let base = if entropy == 0 {
-        0x9E3779B97F4A7C15
+pub extern "C" fn post_kaslr_continue() -> ! {
+    // INSTRUMENTATION: Capture actual RIP at function entry to prove randomized execution
+    let actual_rip: u64;
+    unsafe {
+        core::arch::asm!("lea {0}, [rip]", out(reg) actual_rip, options(nostack, preserves_flags));
+    }
+    let slide = crate::KASLR_DEBUG_SLIDE.load(core::sync::atomic::Ordering::Relaxed);
+    serial_write("[KASLR-VERIFY] post_kaslr_continue actual RIP: 0x");
+    serial_write_hex(actual_rip);
+    serial_write("\n[KASLR-VERIFY] KERNEL_SLIDE: 0x");
+    serial_write_hex(slide);
+    serial_write("\n");
+    // Compute expected link-time address of this function
+    let link_va = post_kaslr_continue as *const () as u64;
+    let unslid = actual_rip.wrapping_sub(slide);
+    serial_write("[KASLR-VERIFY] link-time VA (post_kaslr_continue): 0x");
+    serial_write_hex(link_va);
+    serial_write("\n[KASLR-VERIFY] unslid RIP (actual - slide): 0x");
+    serial_write_hex(unslid);
+    serial_write("\n[KASLR-VERIFY] match: ");
+    if unslid == link_va {
+        serial_write("YES (actual_rip == link_va + slide)\n");
     } else {
-        entropy
-    };
-    unsafe {
-        __stack_chk_guard =
-            ((base << 1) | base.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize;
+        serial_write("NO\n");
     }
 
-    init_kaslr();
-    init_serial();
-
-    unsafe {
-        crate::arch::CurrentArch::init_cpu();
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
-    let hhdm = crate::limine::hhdm_offset();
-    #[cfg(not(target_arch = "aarch64"))]
-    let (mut mapper, mut frame_allocator) = unsafe {
-        let phys_mem_offset = x86_64::VirtAddr::new(hhdm);
-        boot::init::init_memory(phys_mem_offset)
-    };
-    #[cfg(target_arch = "aarch64")]
-    {
-        serial_write("[BOOT] memory::init...\n");
-        let hhdm = crate::limine::hhdm_offset();
-        let mut mapper = unsafe { memory::init_aarch64(hhdm) };
-        serial_write("[BOOT] memory::init done\n");
-        serial_write("[BOOT] frame allocator...\n");
-        unsafe { memory::init_frame_allocator_limine() };
-        let mut frame_allocator = memory::buddy::BuddyFrameAllocator;
-        serial_write("[BOOT] heap init...\n");
-        allocator::init_heap(&mut mapper, &mut frame_allocator)
-            .expect("heap initialization failed");
-        serial_write("[BOOT] HHDM mapping done\n");
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    unsafe {
-        boot::init::init_graphics(&mut mapper, &mut frame_allocator)
-    };
+    // The KASLR relocations have been applied and CR3 has been switched.
+    // Now continue with the rest of kernel initialization at the new virtual addresses.
+    // Memory and graphics were already initialized before KASLR activation.
 
     crate::vga_buffer::init();
     #[cfg(feature = "ash")]
@@ -400,6 +408,7 @@ fn kernel_main() -> ! {
             coverage::coverage_ratio()
         ));
     }
+
     serial_write("[BOOT] GUI init...\n");
     gui::init();
 
@@ -429,6 +438,99 @@ fn kernel_main() -> ! {
     loop {
         x86_64::instructions::interrupts::enable_and_hlt();
     }
+}
+
+fn kernel_main() -> ! {
+    // Seed stack canary BEFORE any function with stack protection runs.
+    let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
+    let base = if entropy == 0 {
+        0x9E3779B97F4A7C15
+    } else {
+        entropy
+    };
+    unsafe {
+        __stack_chk_guard =
+            ((base << 1) | base.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(17)) as usize;
+    }
+
+    init_kaslr();
+    init_serial();
+
+    // Early debug output to verify serial works - use direct writes to avoid alloc
+    let slide = crate::KASLR_DEBUG_SLIDE.load(core::sync::atomic::Ordering::Relaxed);
+    serial_write("[KASLR] init: slide = 0x");
+    serial_write_hex(slide);
+    serial_write("\n[KASLR] init done\n");
+
+    // T-00 test-mode announce: emitted before any other output so the host
+    // runner can distinguish an automated self_test run from a normal boot
+    // even if a later boot stage fails. Never printed without the feature.
+    #[cfg(feature = "self_test")]
+    serial_write("[SELFTEST] T-00 test mode active\n");
+
+    unsafe {
+        crate::arch::CurrentArch::init_cpu();
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    let hhdm = crate::limine::hhdm_offset();
+    #[cfg(not(target_arch = "aarch64"))]
+    let (mut _mapper, mut _frame_allocator) = unsafe {
+        let phys_mem_offset = x86_64::VirtAddr::new(hhdm);
+        boot::init::init_memory(phys_mem_offset)
+    };
+    #[cfg(target_arch = "aarch64")]
+    {
+        serial_write("[BOOT] memory::init...\n");
+        let hhdm = crate::limine::hhdm_offset();
+        let mut mapper = unsafe { memory::init_aarch64(hhdm) };
+        serial_write("[BOOT] memory::init done\n");
+        serial_write("[BOOT] frame allocator...\n");
+        unsafe { memory::init_frame_allocator_limine() };
+        let mut frame_allocator = memory::buddy::BuddyFrameAllocator;
+        serial_write("[BOOT] heap init...\n");
+        allocator::init_heap(&mut mapper, &mut frame_allocator)
+            .expect("heap initialization failed");
+        serial_write("[BOOT] HHDM mapping done\n");
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    unsafe {
+        boot::init::init_graphics(&mut _mapper, &mut _frame_allocator)
+    };
+
+    // Debug: print KASLR slide value
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let slide = crate::KASLR_DEBUG_SLIDE.load(core::sync::atomic::Ordering::Relaxed);
+        serial_write("[KASLR] slide = 0x");
+        serial_write_hex(slide);
+        serial_write("\n");
+
+        // Apply KASLR relocations to fix up absolute addresses
+        serial_write("[KASLR] Applying relocations...\n");
+        unsafe {
+            crate::kaslr_reloc::apply_kaslr_relocations(slide);
+        }
+        serial_write("[KASLR] Relocations applied\n");
+
+        // Activate KASLR mapping - switch to randomized virtual address space
+        // This function never returns - it jumps to post_kaslr_continue via trampoline
+        serial_write("[KASLR] Activating randomized kernel mapping...\n");
+        unsafe {
+            crate::kaslr_reloc::activate_kaslr_mapping();
+        }
+        // Never reached
+        loop {
+            crate::arch::CurrentArch::halt();
+        }
+    }
+}
+
+/// debug). See `vahi_kernel_serial_putc` for the symbol-ownership note.
+#[no_mangle]
+pub fn vahi_kernel_serial_write(msg: &str) {
+    serial_write(msg);
 }
 
 #[panic_handler]

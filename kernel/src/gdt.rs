@@ -14,8 +14,15 @@ lazy_static! {
 
 pub fn init_tss() {
     let mut tss = TSS.lock();
-    // Setup Double Fault stack with guard page
-    let df_stack = crate::memory::stack::alloc_stack(5).expect("Failed to allocate DF stack");
+    // K-03 (D-23): the DF handler runs on this IST stack while the interrupted
+    // stack frame is still live. In debug builds the interrupted frame alone
+    // can exceed 20 KiB (K-00: CreateAddressSpace overflowed 8 KiB with the
+    // handler pushing onto it), so the IST must hold BOTH frames.
+    // Evidence: tests/k00_smp1.log df_rsp inside the guard below the old
+    // 5-page stack; release 135/135 on 4 pages. 12 pages covers a 36 MB-ELF
+    // debug frame (measured ~29 KiB, boot/init.rs) with ~3× headroom — a
+    // bounded fix tied to measured evidence, not a blind size increase.
+    let df_stack = crate::memory::stack::alloc_stack(12).expect("Failed to allocate DF stack");
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(df_stack.top);
 
     // Setup Privilege stack (Ring 3 -> 0) with guard page
@@ -126,7 +133,10 @@ pub fn init() {
     }
 }
 
-pub fn init_ap() {
+/// K-02: CPU identity is established (via `lapic::init` + CPUID fallback)
+/// before this runs on an AP, so the CPU id is passed in rather than read
+/// through per-CPU machinery (`current_cpu_idx`) that is not valid yet.
+pub fn init_ap(cpu_id: usize) {
     use alloc::boxed::Box;
     use x86_64::instructions::segmentation::{Segment, CS, DS, SS};
     use x86_64::instructions::tables::load_tss;
@@ -134,7 +144,9 @@ pub fn init_ap() {
     // Create a per-CPU TSS
     let mut tss = Box::new(TaskStateSegment::new());
 
-    let df_stack = crate::memory::stack::alloc_stack(5).expect("Failed to allocate AP DF stack");
+    // K-03 (D-23): see init_tss — DF IST must hold the interrupted debug
+    // frame plus the handler frame; same measured bound as on the BSP.
+    let df_stack = crate::memory::stack::alloc_stack(12).expect("Failed to allocate AP DF stack");
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(df_stack.top);
 
     let p_stack =
@@ -143,7 +155,9 @@ pub fn init_ap() {
 
     let tss_ref = Box::leak(tss);
     {
-        let idx = current_cpu_idx();
+        // Same index the caller derived from its LAPIC id; kept local so
+        // this function has no per-CPU/GS dependency.
+        let idx = cpu_id;
         unsafe { LOADED_TSS[idx] = tss_ref as *mut TaskStateSegment };
     }
 
