@@ -302,7 +302,13 @@ fn read_proc_fd(pid: u64, fd: usize) -> String {
 fn read_proc_io(pid: u64) -> String {
     let table = PROCESS_TABLE.lock();
     let (rchar, wchar, syscr, syscw) = if let Some(proc) = table.get(&pid) {
-        let fd_count = proc.files.lock().fd_table.iter().filter(|f| f.is_some()).count() as u64;
+        let fd_count = proc
+            .files
+            .lock()
+            .fd_table
+            .iter()
+            .filter(|f| f.is_some())
+            .count() as u64;
         (fd_count * 1024, fd_count * 512, fd_count * 4, fd_count * 2)
     } else {
         (0, 0, 0, 0)

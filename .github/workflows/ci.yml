@@ -36,7 +36,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
 
       - name: Format check
-        run: cargo fmt --check --workspace
+        run: cargo fmt --all -- --check
 
       - name: Workspace build (default members, exclude kernel)
         run: cargo build --workspace --exclude vahi_kernel
