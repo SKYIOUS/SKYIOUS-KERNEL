@@ -14,7 +14,7 @@ lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 
 # x86_64 page table types — needed for paging, buddy, frame_info, virt, stack, isolate
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-x86_64 = "0.14.2"
+x86_64 = { version = "0.14.2", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
 
 [features]
 default = []

@@ -443,10 +443,14 @@ pub fn sys_timerfd_settime(
     }
 
     let abstime = (flags & TFD_TIMER_ABSTIME as u64) != 0;
-    let _ = abstime; // TODO: absolute time support
 
-    let it_value_ns =
-        (new_val.it_value_sec as u64) * 1_000_000_000 + (new_val.it_value_nsec as u64);
+    let it_value_ns = if abstime {
+        let raw_ns = (new_val.it_value_sec as u64) * 1_000_000_000 + (new_val.it_value_nsec as u64);
+        let now_ns = get_current_time_ns();
+        raw_ns.saturating_sub(now_ns)
+    } else {
+        (new_val.it_value_sec as u64) * 1_000_000_000 + (new_val.it_value_nsec as u64)
+    };
     let it_interval_ns =
         (new_val.it_interval_sec as u64) * 1_000_000_000 + (new_val.it_interval_nsec as u64);
 

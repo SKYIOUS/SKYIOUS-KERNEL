@@ -57,7 +57,7 @@ impl IoApic {
     /// from the ACPI-provided base and is guaranteed valid for the lifetime of
     /// this `IoApic` handle. The caller of `new` upholds the aliasing and
     /// validity contract documented above.
-    fn read(&self, reg: u32) -> u32 {
+    pub fn read(&self, reg: u32) -> u32 {
         let (ioregsel, iowin) = self.reg_ptrs();
         // SAFETY: pointer arithmetic stays within the 4 KiB I/O APIC MMIO
         // window (IOREGSEL and IOWIN are 0x00 and 0x10 from the base).
@@ -68,7 +68,7 @@ impl IoApic {
     }
 
     /// Write a 32-bit value to I/O APIC register `reg`.
-    fn write(&mut self, reg: u32, value: u32) {
+    pub fn write(&mut self, reg: u32, value: u32) {
         let (ioregsel, iowin) = self.reg_ptrs();
         // SAFETY: same derivation as `read`; `reg` indexes a valid register.
         unsafe {

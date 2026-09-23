@@ -20,11 +20,13 @@ use crate::apic::ioapic;
 ///
 /// Linux: `io_apic.c` disables focus processor on affected chipsets.
 /// Windows: HAL quirk table.
-pub fn ioapic_disable_focus_processor(_io: &mut ioapic::IoApic) {
+pub fn ioapic_disable_focus_processor(io: &mut ioapic::IoApic) {
     #[cfg(debug_assertions)]
     crate::serial_write("[APIC-ERRATA] disable focus processor (debug)\n");
-    // TODO: read IOAPICVER, clear bit 0, write back when errata is confirmed
-    // on a specific IOAPIC version.
+    let ver = io.read(0x01);
+    if ver & 0x1 != 0 {
+        io.write(0x01, ver & !0x1);
+    }
 }
 
 /// Stuck IRR workaround.
@@ -34,10 +36,15 @@ pub fn ioapic_disable_focus_processor(_io: &mut ioapic::IoApic) {
 /// the stale state.
 ///
 /// Linux: `mask_ioapic_entries()` + `unmask_ioapic_entry()` during suspend/resume.
-pub fn ioapic_clear_stuck_irr(_io: &mut ioapic::IoApic, _gsi: u8) {
+pub fn ioapic_clear_stuck_irr(io: &mut ioapic::IoApic, gsi: u8) {
     #[cfg(debug_assertions)]
     crate::serial_write("[APIC-ERRATA] clear stuck IRR (debug)\n");
-    // TODO: read entry, clear mask bit, write back, set mask bit again.
+    let (low, _) = io.read_redirection_entry(gsi);
+    let low_reg = 0x10 + (gsi as u32 * 2);
+    if low & (1 << 16) != 0 {
+        io.write(low_reg, low & !(1 << 16));
+        io.write(low_reg, low);
+    }
 }
 
 /// 8254 LVT0 timer mode quirk.
@@ -48,11 +55,15 @@ pub fn ioapic_clear_stuck_irr(_io: &mut ioapic::IoApic, _gsi: u8) {
 ///
 /// Linux: `lapic_init_clockevent()` checks for TSC deadline timer first.
 /// Windows: HAL selects timer source based on ACPI_FADT flags.
-pub fn lint0_8254_quirk(_lapic: &crate::apic::lapic::LocalApic) {
+pub fn lint0_8254_quirk(lapic: &crate::apic::lapic::LocalApic) {
     #[cfg(debug_assertions)]
     crate::serial_write("[APIC-ERRATA] LVT0/8254 quirk check (debug)\n");
-    // TODO: read LVT_LINT0, if delivery mode == ExtINT (0b111) and
-    // 8254 is present, log warning or mask entry.
+    let lint0 = lapic.read(0x350);
+    let delivery_mode = (lint0 >> 8) & 0x7;
+    if delivery_mode == 0b111 && (lint0 & (1 << 16)) == 0 {
+        #[cfg(debug_assertions)]
+        crate::serial_write("[APIC-ERRATA] LVT0 configured as active ExtINT\n");
+    }
 }
 
 /// Run all applicable errata workarounds during IOAPIC initialization.

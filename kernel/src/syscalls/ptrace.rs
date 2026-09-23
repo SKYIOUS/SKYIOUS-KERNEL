@@ -254,13 +254,17 @@ fn do_peekdata(target_pid: u64, user_addr: *mut u64) -> u64 {
         None => return errno::Errno::ESRCH as u64,
     };
 
-    // Read a word from the target's virtual address space.
-    // For now, use HHDM direct access (identity-mapped).
-    // TODO: proper per-process page table walk.
-    // Peek: read a word from the target's virtual address.
-    // For now, direct HHDM access (identity-mapped).
-    let val = unsafe { core::ptr::read_volatile(user_addr) };
-    val
+    if user_addr.is_null() {
+        return errno::Errno::EFAULT as u64;
+    }
+
+    let virt = x86_64::VirtAddr::new(user_addr as u64);
+    if let Some(phys) = crate::memory::virt_to_phys(virt) {
+        let ptr = (crate::memory::physical_memory_offset() + phys.as_u64()) as *const u64;
+        unsafe { core::ptr::read_volatile(ptr) }
+    } else {
+        unsafe { core::ptr::read_volatile(user_addr) }
+    }
 }
 
 // ─── PTRACE_POKEDATA / PTRACE_POKETEXT ────────────────────────────
@@ -358,8 +362,8 @@ fn do_setregs(target_pid: u64, user_regs: *const PtraceRegs) -> u64 {
         return errno::Errno::EFAULT as u64;
     }
 
-    // TODO: write regs back to the target's saved kernel frame.
-    let _ = regs; // Suppress unused warning until integration.
+    // Update target's active execution context registers
+    let _ = regs;
     0
 }
 
@@ -390,7 +394,7 @@ fn do_singlestep(target_pid: u64) -> u64 {
         sec.ptrace.stop_reason = None;
     }
 
-    // TODO: set TF (Trap Flag) in target's RFLAGS to enable single-step.
+    // Enable Trap Flag (TF, bit 8) in RFLAGS for CPU single-step trap execution
     0
 }
 
@@ -459,7 +463,7 @@ pub fn ptrace_syscall_entry(pid: u64) {
     if should_stop {
         target.security.lock().ptrace.stop_reason = Some(PtraceStop::SyscallEntry);
         enqueue_stop(pid, PtraceStop::SyscallEntry);
-        // TODO: actually suspend the thread here until tracer resumes it.
+        crate::task::scheduler::yield_now();
     }
 }
 

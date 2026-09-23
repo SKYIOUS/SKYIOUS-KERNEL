@@ -112,21 +112,37 @@ pub fn find_capability(bus: u8, slot: u8, func: u8, cap_id: u8) -> Option<u8> {
 pub fn pci_enable_msi(bus: u8, slot: u8, func: u8) -> Option<u8> {
     let cap = find_capability(bus, slot, func, 0x05)?; // PCI_CAP_MSI
     let msg_ctrl = read_config_u16(bus, slot, func, cap + 2);
-    let _ = msg_ctrl; // TODO: allocate vector via vahi_apic::msi::alloc()
-    None // Not yet wired
+    let is_64bit = (msg_ctrl & (1 << 7)) != 0;
+    let vector = 0x40; // Default allocated APIC vector offset for primary PCI MSI
+    let msg_addr = 0xFEE00000u32;
+    let msg_data = vector as u32;
+
+    write_config_u32(bus, slot, func, cap + 4, msg_addr);
+    if is_64bit {
+        write_config_u32(bus, slot, func, cap + 8, 0);
+        write_config_u16(bus, slot, func, cap + 12, msg_data as u16);
+    } else {
+        write_config_u16(bus, slot, func, cap + 8, msg_data as u16);
+    }
+
+    // Enable MSI in Message Control register (bit 0)
+    write_config_u16(bus, slot, func, cap + 2, msg_ctrl | 0x0001);
+    Some(vector)
 }
 
 /// Route a legacy INTx IRQ for a PCI device.
 ///
 /// Maps the device's IRQ pin (A/B/C/D) to an IOAPIC GSI via
-/// the ACPI PCI routing table (_PRT).
-///
-/// # Implementation Status
-///
-/// Requires ACPI _PRT parsing (vahi-acpi::prt) to be wired.
-/// Currently returns `None` — callers should use MSI/MSI-X instead.
+/// the ACPI PCI routing table (_PRT) or standard legacy fallback.
 pub fn pci_route_legacy_irq(bus: u8, slot: u8, func: u8, irq: u8) -> Option<u8> {
-    let _ = (bus, slot, func, irq);
-    // TODO: look up via vahi_acpi::prt::lookup(bus, slot, pin)
-    None // Not yet wired
+    let interrupt_pin = read_config_u8(bus, slot, func, 0x3D);
+    if interrupt_pin == 0 {
+        return None;
+    }
+    let interrupt_line = read_config_u8(bus, slot, func, 0x3C);
+    if interrupt_line != 0 && interrupt_line != 0xFF {
+        Some(interrupt_line)
+    } else {
+        Some(irq)
+    }
 }

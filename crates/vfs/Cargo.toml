@@ -10,8 +10,6 @@ vahi-memory = { path = "../memory" }
 vahi-drivers = { path = "../drivers" }
 vahi-syscalls = { path = "../syscalls" }
 vahi-objects = { path = "../objects" }
-vahi-acpi = { path = "../acpi" }
-vahi-net = { path = "../net" }
 vahi-crypto = { path = "../crypto" }
 vahi-types = { path = "../types" }
 vahi-hal = { path = "../hal" }
