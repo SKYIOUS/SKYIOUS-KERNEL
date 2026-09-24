@@ -2,14 +2,10 @@
 fn apply_vendor_patch(cmd: &mut Command) {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(root_dir) = crate_dir.ancestors().find(|p| p.join("vendor/x86_64").exists()) {
-        if let Ok(canon) = root_dir.join("vendor/x86_64").canonicalize() {
-            cmd.arg("--config")
-                .arg(format!("patch.crates-io.x86_64.path="{}"", canon.display()));
-        }
+        cmd.arg("--config")
+            .arg(format!("patch.crates-io.x86_64.path="{}"", root_dir.join("vendor/x86_64").display()));
     }
 }
-
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 const BOOTLOADER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -80,10 +76,7 @@ fn build_uefi_bootloader() -> PathBuf {
     let cargo = std::env::var("CARGO_NIGHTLY").or_else(|_| std::env::var("CARGO")).unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     apply_vendor_patch(&mut cmd);
-    apply_vendor_patch(&mut cmd);
     cmd.arg("install").arg("bootloader-x86_64-uefi");
-    cmd.arg("--config").arg("patch.crates-io.x86_64.path="/app/vendor/x86_64"");
-    cmd.arg("--config").arg("patch.crates-io.x86_64.path="/app/vendor/x86_64"");
     if Path::new("uefi").exists() {
         // local build
         cmd.arg("--path").arg("uefi");
@@ -144,7 +137,6 @@ fn build_bios_boot_sector() -> PathBuf {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let cargo = std::env::var("CARGO_NIGHTLY").or_else(|_| std::env::var("CARGO")).unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
-    apply_vendor_patch(&mut cmd);
     apply_vendor_patch(&mut cmd);
     cmd.arg("install").arg("bootloader-x86_64-bios-boot-sector");
     let local_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -213,7 +205,6 @@ fn build_bios_stage_2() -> PathBuf {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let cargo = std::env::var("CARGO_NIGHTLY").or_else(|_| std::env::var("CARGO")).unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
-    apply_vendor_patch(&mut cmd);
     apply_vendor_patch(&mut cmd);
     cmd.arg("install").arg("bootloader-x86_64-bios-stage-2");
     let local_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -285,7 +276,6 @@ fn build_bios_stage_3() -> PathBuf {
     let cargo = std::env::var("CARGO_NIGHTLY").or_else(|_| std::env::var("CARGO")).unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     apply_vendor_patch(&mut cmd);
-    apply_vendor_patch(&mut cmd);
     cmd.arg("install").arg("bootloader-x86_64-bios-stage-3");
     let local_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("bios")
@@ -351,7 +341,6 @@ fn build_bios_stage_4() -> PathBuf {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let cargo = std::env::var("CARGO_NIGHTLY").or_else(|_| std::env::var("CARGO")).unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
-    apply_vendor_patch(&mut cmd);
     apply_vendor_patch(&mut cmd);
     cmd.arg("install").arg("bootloader-x86_64-bios-stage-4");
     let local_path = Path::new(env!("CARGO_MANIFEST_DIR"))
