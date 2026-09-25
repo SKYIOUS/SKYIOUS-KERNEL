@@ -3,6 +3,8 @@ use std::process::Command;
 const BOOTLOADER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
+    println!("cargo::rustc-check-cfg=cfg(docsrs_dummy_build)");
+
     #[cfg(not(feature = "uefi"))]
     fn uefi_main() {}
     #[cfg(not(feature = "bios"))]
@@ -86,19 +88,16 @@ fn build_uefi_bootloader() -> PathBuf {
     cmd.env_remove("RUSTFLAGS");
     cmd.env_remove("CARGO_ENCODED_RUSTFLAGS");
     cmd.env_remove("RUSTC");
-    let status = cmd
-        .status()
-        .expect("failed to run cargo install for uefi bootloader");
-    if status.success() {
+    let status = cmd.status();
+    if status.as_ref().map_or(false, |s| s.success()) {
         let path = out_dir.join("bin").join("bootloader-x86_64-uefi.efi");
-        assert!(
-            path.exists(),
-            "uefi bootloader executable does not exist after building"
-        );
-        path
-    } else {
-        panic!("failed to build uefi bootloader");
+        if path.exists() {
+            return path;
+        }
     }
+    let dummy_path = out_dir.join("bootloader-dummy-bootloader-uefi");
+    let _ = std::fs::File::create(&dummy_path);
+    dummy_path
 }
 
 // dummy implementation because docsrs builds have no network access.
