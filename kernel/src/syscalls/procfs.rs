@@ -144,7 +144,7 @@ fn read_proc_status(pid: u64) -> String {
         let cutime = proc.cutime.load(core::sync::atomic::Ordering::Relaxed);
         let cstime = proc.cstime.load(core::sync::atomic::Ordering::Relaxed);
         let children_count = proc.children.lock().len();
-        let threads = 1;
+        let threads = 1; // TODO: thread count
 
         let mut s = String::new();
         s.push_str(&alloc::format!("Name:\t{}\n", name));
@@ -300,35 +300,7 @@ fn read_proc_fd(pid: u64, fd: usize) -> String {
 
 /// Read /proc/PID/io — I/O statistics.
 fn read_proc_io(pid: u64) -> String {
-    let table = PROCESS_TABLE.lock();
-    let (rchar, wchar, syscr, syscw) = if let Some(proc) = table.get(&pid) {
-        let fd_count = proc
-            .files
-            .lock()
-            .fd_table
-            .iter()
-            .filter(|f| f.is_some())
-            .count() as u64;
-        (fd_count * 1024, fd_count * 512, fd_count * 4, fd_count * 2)
-    } else {
-        (0, 0, 0, 0)
-    };
-    drop(table);
-
-    let mut s = String::new();
-    s.push_str(&alloc::format!("rchar: {}\n", rchar));
-    s.push_str(&alloc::format!("wchar: {}\n", wchar));
-    s.push_str(&alloc::format!("syscr: {}\n", syscr));
-    s.push_str(&alloc::format!("syscw: {}\n", syscw));
-    s.push_str("read_bytes: 0\n");
-    s.push_str("write_bytes: 0\n");
-    s.push_str("cancelled_write_bytes: 0\n");
-    s
-}
-
-#[allow(dead_code)]
-fn _unused_read_proc_io_stub(pid: u64) -> String {
-    let _ = pid;
+    let _ = pid; // TODO: track per-process I/O counters
     let mut s = String::new();
     s.push_str("rchar: 0\n");
     s.push_str("wchar: 0\n");
