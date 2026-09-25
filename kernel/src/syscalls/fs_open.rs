@@ -238,14 +238,14 @@ pub fn sys_close(fd: u64) -> u64 {
     let mut fd_table = process.files.lock().fd_table.clone();
     if (fd as usize) < fd_table.len() {
         if let Some(ref desc) = fd_table[fd as usize] {
-            if let FileDescriptor::Socket(handle, _stype) = desc {
+            if let FileDescriptor::Socket(_handle, _stype) = desc {
                 #[cfg(feature = "net")]
                 {
                     // Clean up SO_REUSEPORT group membership
-                    super::net_helpers::remove_from_reuseport(process.id, *handle);
+                    super::net_helpers::remove_from_reuseport(process.id, *_handle);
                     // Clean up TCP connection stats
-                    super::net_helpers::tcp_stats_remove(process.id, *handle);
-                    crate::net::SOCKETS.lock().remove(*handle);
+                    super::net_helpers::tcp_stats_remove(process.id, *_handle);
+                    crate::net::SOCKETS.lock().remove(*_handle);
                 }
             }
             if let FileDescriptor::UnixSocket(handle, _) = desc {

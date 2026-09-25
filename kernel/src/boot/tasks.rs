@@ -11,6 +11,7 @@ pub extern "C" fn run_async_tasks() -> ! {
 
     // ponytail: kernel shell disabled — it writes directly to the framebuffer,
     // clobbering the GUI compositor's rendered output. The GUI handles keyboard.
+    #[cfg(feature = "net")]
     let _ = executor.spawn(Task::new(network_poll_task()));
     let _ = executor.spawn(Task::new(crate::gui::input::gui_refresh_task()));
     executor.run();
