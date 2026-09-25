@@ -81,8 +81,8 @@ pub struct VerificationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use journal::{JournalEvent, JournalState, JournalStateMachine};
     use concurrency::{LockId, LockOrderVerifier, ThreadId};
+    use journal::{JournalEvent, JournalState, JournalStateMachine};
     use scheduler::{check_schedule_correctness, schedule_contract, SchedSnapshot, Thread};
 
     struct TestState(bool);
@@ -141,8 +141,14 @@ mod tests {
 
     #[test]
     fn test_scheduler_correctness_checks() {
-        let t1 = Thread { pass: 100, tickets: 10 };
-        let t2 = Thread { pass: 200, tickets: 10 };
+        let t1 = Thread {
+            pass: 100,
+            tickets: 10,
+        };
+        let t2 = Thread {
+            pass: 200,
+            tickets: 10,
+        };
         let threads = [&t1, &t2];
 
         let snap = SchedSnapshot {

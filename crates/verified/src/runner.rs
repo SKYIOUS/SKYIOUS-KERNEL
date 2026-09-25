@@ -16,8 +16,8 @@
 //! }
 //! ```
 
-use vahi_sync::IrqSafeMutex as Mutex;
 use crate::{Invariant, VerificationFailure, VerificationReport};
+use vahi_sync::IrqSafeMutex as Mutex;
 
 /// Global verification runner instance.
 ///
