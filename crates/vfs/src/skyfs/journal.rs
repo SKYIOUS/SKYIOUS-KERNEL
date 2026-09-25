@@ -5,11 +5,11 @@ use vahi_drivers::block::BlockDevice;
 use vahi_sync::IrqSafeMutex as Mutex;
 
 #[cfg(feature = "verification")]
+use crate::verified::journal::{JournalEvent, JournalStateMachine};
+#[cfg(feature = "verification")]
+use crate::verified::runner::VERIFICATION_RUNNER;
+#[cfg(feature = "verification")]
 use lazy_static::lazy_static;
-#[cfg(feature = "verification")]
-use vahi_verified::journal::{JournalEvent, JournalStateMachine};
-#[cfg(feature = "verification")]
-use vahi_verified::runner::VERIFICATION_RUNNER;
 
 #[cfg(feature = "verification")]
 lazy_static! {
@@ -130,7 +130,7 @@ impl Journal {
         {
             let mut verifier = JOURNAL_VERIFIER.lock();
             if let Err(v) = verifier.apply(JournalEvent::BeginTxn) {
-                let mut runner = VERIFICATION_RUNNER.lock();
+                let runner = VERIFICATION_RUNNER.lock();
                 runner.record_failure("journal::begin_transaction", &alloc::format!("{:?}", v));
             }
         }
@@ -220,7 +220,7 @@ impl Journal {
         {
             let mut verifier = JOURNAL_VERIFIER.lock();
             if let Err(v) = verifier.apply(JournalEvent::TxnPersisted) {
-                let mut runner = VERIFICATION_RUNNER.lock();
+                let runner = VERIFICATION_RUNNER.lock();
                 runner.record_failure("journal::commit_transaction", &alloc::format!("{:?}", v));
             }
         }
@@ -234,7 +234,7 @@ impl Journal {
         {
             let mut verifier = JOURNAL_VERIFIER.lock();
             if let Err(v) = verifier.apply(JournalEvent::Crash) {
-                let mut runner = VERIFICATION_RUNNER.lock();
+                let runner = VERIFICATION_RUNNER.lock();
                 runner.record_failure(
                     "journal::recover_from_dev::crash",
                     &alloc::format!("{:?}", v),
@@ -312,7 +312,7 @@ impl Journal {
         {
             let mut verifier = JOURNAL_VERIFIER.lock();
             if let Err(v) = verifier.apply(JournalEvent::RecoveryComplete) {
-                let mut runner = VERIFICATION_RUNNER.lock();
+                let runner = VERIFICATION_RUNNER.lock();
                 runner.record_failure(
                     "journal::recover_from_dev::recovery_complete",
                     &alloc::format!("{:?}", v),

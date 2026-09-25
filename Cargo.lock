@@ -926,6 +926,7 @@ dependencies = [
  "vahi-drivers",
  "vahi-hal",
  "vahi-memory",
+ "vahi-net",
  "vahi-objects",
  "vahi-sync",
  "vahi-syscalls",

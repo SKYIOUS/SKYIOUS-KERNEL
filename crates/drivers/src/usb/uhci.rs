@@ -69,7 +69,7 @@ fn tok(pid: u32, addr: u32, ep: u32, toggle: u32, len: usize) -> u32 {
     let ml = if len == 0 {
         0x1FF
     } else {
-        ((len + 3) / 4).saturating_sub(1) as u32 & 0x1FF
+        len.div_ceil(4).saturating_sub(1) as u32 & 0x1FF
     };
     (ml << SH_MAXLEN) | (toggle << SH_TOGGLE) | (ep << SH_EP) | (addr << SH_ADDR) | (pid << SH_PID)
 }
@@ -301,6 +301,7 @@ impl UhciController {
     }
 
     /// Control IN transfer: sends setup + IN data + status OUT
+    #[allow(clippy::too_many_arguments)]
     fn ctrl_in(
         &mut self,
         addr: u32,
@@ -378,6 +379,7 @@ impl UhciController {
     }
 
     /// Control OUT transfer: sends setup + status IN
+    #[allow(clippy::too_many_arguments)]
     fn ctrl_out(
         &mut self,
         addr: u32,

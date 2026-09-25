@@ -53,6 +53,7 @@ This plan is written against what the code **actually contains**, not what any p
 | Memory leak detection | No page-frame or slab leak tracking exists | High |
 | main.rs god module | 614 lines, 14 functions, GUI logic, ELF loading, trace spam — belongs in dedicated modules | High |
 | 95 `allow(dead_code)` annotations | 19 modules blanket-suppress dead code — masks real dead code across apic, ash, drivers, verified, skyfs | High |
+| `vahi-verified` crate extraction incomplete | `crates/vfs` verification feature gates code that imports `vahi_verified::{journal,runner}` — a crate that does not exist in the workspace. The in-tree `kernel/src/verified/` module is the intended extraction source; `crates/vfs/src/lib.rs` ships a compile-only stub (no-op bodies, overridden by vahi_kernel) so the `--features verification` clippy/build gate is green in the interim | High |
 | 4+ CPU SMP stress | Only tested with2 CPUs | Medium |
 | Dynamic linking | ELF loader supports it but no musl-linked binary tested | Medium |
 | Real hardware | Everything runs in QEMU only | Medium |
