@@ -20,9 +20,7 @@ vahi-drivers = { path = "../crates/drivers" }
 vahi-task = { path = "../crates/task" }
 vahi-objects = { path = "../crates/objects" }
 vahi-types = { path = "../crates/types" }
-vahi-acpi = { path = "../crates/acpi" }
 vahi-net = { path = "../crates/net" }
-vahi-gdt = { path = "../crates/gdt" }
 vahi-arch = { path = "../crates/arch" }
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"

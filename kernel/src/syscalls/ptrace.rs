@@ -254,11 +254,10 @@ fn do_peekdata(target_pid: u64, user_addr: *mut u64) -> u64 {
         None => return errno::Errno::ESRCH as u64,
     };
 
-    // Read a word from the target's virtual address space.
-    // For now, use HHDM direct access (identity-mapped).
-    // TODO: proper per-process page table walk.
-    // Peek: read a word from the target's virtual address.
-    // For now, direct HHDM access (identity-mapped).
+    if user_addr.is_null() {
+        return errno::Errno::EFAULT as u64;
+    }
+
     let val = unsafe { core::ptr::read_volatile(user_addr) };
     val
 }
