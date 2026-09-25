@@ -39,11 +39,11 @@ impl LocalApic {
         }
     }
 
-    fn read(&self, offset: u32) -> u32 {
+    pub fn read(&self, offset: u32) -> u32 {
         super::lapic_read32(offset)
     }
 
-    fn write(&mut self, offset: u32, value: u32) {
+    pub fn write(&mut self, offset: u32, value: u32) {
         super::lapic_write32(offset, value)
     }
 

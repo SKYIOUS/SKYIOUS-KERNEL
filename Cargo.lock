@@ -334,6 +334,7 @@ name = "hashbrown"
 version = "0.14.5"
 dependencies = [
  "ahash",
+ "rustc-std-workspace-alloc",
 ]
 
 [[package]]
@@ -541,6 +542,12 @@ checksum = "1ed5f33bb98eace335c13cdd159fbfc73ce203b597981a76832dfbb9cbd8101b"
 dependencies = [
  "log",
 ]
+
+[[package]]
+name = "rustc-std-workspace-alloc"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d441c3b2ebf55cebf796bfdc265d67fa09db17b7bb6bd4be75c509e1e8fec3"
 
 [[package]]
 name = "rustc_version"
@@ -753,7 +760,6 @@ name = "vahi-acpi"
 version = "0.3.0"
 dependencies = [
  "spin",
- "x86_64",
 ]
 
 [[package]]
@@ -772,12 +778,8 @@ dependencies = [
 name = "vahi-arch"
 version = "0.3.0"
 dependencies = [
- "acpi",
- "pc-keyboard",
- "pic8259",
  "spin",
  "vahi-sync",
- "x86_64",
 ]
 
 [[package]]
@@ -789,15 +791,11 @@ name = "vahi-drivers"
 version = "0.3.0"
 dependencies = [
  "crossbeam-queue",
- "embedded-io",
- "fatfs 0.4.0",
  "font8x8",
  "hashbrown",
- "heapless 0.8.0",
  "lazy_static",
  "limine",
  "linked_list_allocator",
- "mbr-nostd",
  "pc-keyboard",
  "smoltcp",
  "spin",
@@ -812,7 +810,6 @@ dependencies = [
  "vahi-types",
  "volatile 0.2.7",
  "x86_64",
- "xmas-elf",
 ]
 
 [[package]]
@@ -820,7 +817,6 @@ name = "vahi-gdt"
 version = "0.3.0"
 dependencies = [
  "spin",
- "x86_64",
 ]
 
 [[package]]
@@ -877,21 +873,14 @@ dependencies = [
 name = "vahi-objects"
 version = "0.3.0"
 dependencies = [
- "hashbrown",
  "spin",
  "vahi-sync",
- "vahi-types",
 ]
 
 [[package]]
 name = "vahi-pci"
 version = "0.3.0"
 dependencies = [
- "spin",
- "vahi-apic",
- "vahi-limine",
- "vahi-memory",
- "vahi-sync",
  "x86_64",
 ]
 
@@ -907,7 +896,6 @@ name = "vahi-syscalls"
 version = "0.3.0"
 dependencies = [
  "spin",
- "vahi-sync",
  "vahi-types",
 ]
 
@@ -917,7 +905,6 @@ version = "0.3.0"
 dependencies = [
  "bitflags 2.11.0",
  "crossbeam-queue",
- "futures-util",
  "lazy_static",
  "spin",
  "vahi-sync",
@@ -940,12 +927,10 @@ dependencies = [
  "hashbrown",
  "lazy_static",
  "spin",
- "vahi-acpi",
  "vahi-crypto",
  "vahi-drivers",
  "vahi-hal",
  "vahi-memory",
- "vahi-net",
  "vahi-objects",
  "vahi-sync",
  "vahi-syscalls",

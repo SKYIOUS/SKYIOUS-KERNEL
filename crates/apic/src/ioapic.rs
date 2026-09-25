@@ -51,7 +51,7 @@ impl IoApic {
         (ioregsel, iowin)
     }
 
-    fn read(&self, reg: u32) -> u32 {
+    pub fn read(&self, reg: u32) -> u32 {
         let (ioregsel, iowin) = self.reg_ptrs();
         // SAFETY: IOREGSEL/IOWIN are MMIO-mapped I/O APIC registers.
         // Write selects the register, read returns its value.
@@ -61,7 +61,7 @@ impl IoApic {
         }
     }
 
-    fn write(&mut self, reg: u32, value: u32) {
+    pub fn write(&mut self, reg: u32, value: u32) {
         let (ioregsel, iowin) = self.reg_ptrs();
         // SAFETY: IOREGSEL/IOWIN are MMIO-mapped I/O APIC registers.
         // Write selects the register, next write stores the value.

@@ -5,7 +5,6 @@ edition = "2021"
 description = "System call dispatch and implementations"
 
 [dependencies]
-vahi-sync = { path = "../sync" }
 vahi-types = { path = "../types" }
 spin = "0.9.8"
 
