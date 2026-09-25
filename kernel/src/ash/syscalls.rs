@@ -24,6 +24,9 @@ fn ash_check_priv() -> u64 {
 /// rdi = pointer to bytecode (raw EbpfInsn array)
 /// rsi = bytecode length in bytes
 /// rdx = hook_info packed: [u8 hook_type, u8 protocol, u16 port, u32 syscall/timer/signal]
+// SAFETY: syscall entrypoint; the user pointer is consumed only by
+// `copy_from_user`, which validates it, so the function is safe to call.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn sys_ash_register(bytecode_ptr: *const u8, len: usize, hook_info: u64) -> u64 {
     if bytecode_ptr.is_null() || len == 0 {
         return Errno::EINVAL as u64;

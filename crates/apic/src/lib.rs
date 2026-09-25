@@ -254,7 +254,7 @@ fn pmo() -> u64 {
 }
 
 /// Internal helper: log a message.
-fn log(msg: &str) {
+pub fn log(msg: &str) {
     if let Some(w) = SERIAL.get() {
         w.write(msg);
     }

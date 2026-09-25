@@ -53,13 +53,13 @@ impl GuestMemory {
     pub fn allocate_guest(mem_size: usize) -> Option<Self> {
         let mut regions = Vec::new();
         let mut allocated = 0usize;
-        let _page_size = 0x2000_00usize; // 2MB large pages
+        let _page_size = 0x0020_0000_usize; // 2MB large pages
 
         while allocated < mem_size {
             let frame = crate::memory::buddy::BUDDY_ALLOCATOR
                 .lock()
                 .allocate_contiguous(0)?;
-            let size = core::cmp::min(0x2000_00, mem_size - allocated);
+            let size = core::cmp::min(0x0020_0000, mem_size - allocated);
             let host_phys = frame.as_u64();
 
             regions.push(MemoryRegion {
@@ -154,7 +154,7 @@ impl GuestMemory {
         // Linux boot protocol: kernel at 16MB, initrd above, cmdline at 0x10000
         const LINUX_KERNEL_LOAD_ADDR: u64 = 0x100_0000; // 16MB
         const CMDLINE_ADDR: u64 = 0x1_0000; // 64KB
-        const INITRD_LOAD_ADDR: u64 = 0x20_0000_0; // 32MB
+        const INITRD_LOAD_ADDR: u64 = 0x0200_0000; // 32MB
 
         if !self.load_binary(kernel, LINUX_KERNEL_LOAD_ADDR) {
             return None;

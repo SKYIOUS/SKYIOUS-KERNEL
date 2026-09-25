@@ -44,26 +44,10 @@ pub fn map_bar_mmio(bar_phys: u64) {
 }
 
 pub fn pci_enable_msi(bus: u8, slot: u8, func: u8) -> Option<u8> {
-    let cap = find_capability(bus, slot, func, 0x05)?;
-    let vector = msi::alloc()?;
-    let lapic_id = vahi_apic::current_lapic_id();
-
-    let msg_ctrl = read_config_u16(bus, slot, func, cap + 2);
-    let is_64bit = (msg_ctrl & (1 << 7)) != 0;
-
-    let addr = msi::msi_addr(lapic_id);
-    let data = msi::msi_data(vector);
-
-    write_config_u32(bus, slot, func, cap + 4, addr);
-    if is_64bit {
-        write_config_u32(bus, slot, func, cap + 8, 0);
-        write_config_u16(bus, slot, func, cap + 0x0C, data);
-    } else {
-        write_config_u16(bus, slot, func, cap + 0x08, data);
-    }
-    write_config_u16(bus, slot, func, cap + 2, (msg_ctrl & !0x70) | 1);
-
-    Some(vector)
+    let dev = PciDevice::new(bus, slot, func)?;
+    // Delegate the MSI programming sequence to the vahi-pci crate; the only
+    // kernel-side decision is which LAPIC ID to target.
+    vahi_pci::pci_enable_msi(&dev, vahi_apic::current_lapic_id())
 }
 
 pub fn pci_route_legacy_irq(_bus: u8, _slot: u8, _func: u8, pin: u8) -> Option<u8> {

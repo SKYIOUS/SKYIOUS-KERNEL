@@ -1,6 +1,7 @@
 pub mod blend;
 pub mod blur;
-pub mod compositor;
+#[allow(clippy::module_inception)]
+pub mod compositor; // hardware-backed compositor impl, mirrors crate/module namespace
 pub mod flush;
 pub mod scene;
 pub mod shadow;

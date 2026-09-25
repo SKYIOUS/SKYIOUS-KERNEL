@@ -694,8 +694,13 @@ impl NvmeController {
     /// Set up MSI-X or legacy INTx interrupts for this controller.
     /// Returns the allocated vector, or 0 if operating in polled mode.
     fn setup_interrupts(&mut self, bus: u8, slot: u8, func: u8) -> u8 {
+        let dev = match vahi_pci::PciDevice::new(bus, slot, func) {
+            Some(d) => d,
+            None => return 0,
+        };
+
         // Try MSI-X first (cap ID 0x11)
-        if let Some(msix_cap) = vahi_pci::find_capability(bus, slot, func, PCI_CAP_MSIX) {
+        if let Some(msix_cap) = vahi_pci::find_capability(&dev, PCI_CAP_MSIX) {
             let msg_ctrl = vahi_pci::read_config_u16(bus, slot, func, msix_cap + 2);
             if let Some(base_vec) = vahi_apic::msi::alloc() {
                 // Enable MSI-X
@@ -705,14 +710,14 @@ impl NvmeController {
             }
         }
         // Fall back to MSI (cap ID 0x05)
-        if let Some(vector) = vahi_pci::pci_enable_msi(bus, slot, func) {
+        if let Some(vector) = vahi_pci::pci_enable_msi(&dev, 0) {
             crate::serial_write("");
             return vector;
         }
         // Fall back to legacy INTx
         let irq = (vahi_pci::read_config_u32(bus, slot, func, 0x3C) & 0xFF) as u8;
         if irq != 0 {
-            if let Some(vector) = vahi_pci::pci_route_legacy_irq(bus, slot, func, irq) {
+            if let Some(vector) = vahi_pci::pci_route_legacy_irq(&dev) {
                 crate::serial_write("");
                 return vector;
             }

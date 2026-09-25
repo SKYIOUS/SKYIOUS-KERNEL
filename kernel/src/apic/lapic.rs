@@ -71,7 +71,7 @@ impl LocalApic {
         // Error: Masked
         self.write(LAPIC_LVT_ERROR, 0x10000);
 
-        crate::apic::errata::apply_lapic_workarounds(self);
+        crate::apic::errata::apply_lapic_errata(self);
     }
 
     pub fn init_timer(&mut self) -> u32 {

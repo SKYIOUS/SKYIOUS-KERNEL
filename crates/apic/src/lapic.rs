@@ -77,7 +77,7 @@ impl LocalApic {
         self.write(LAPIC_LVT_LINT0, 0x0707);
         self.write(LAPIC_LVT_LINT1, 0x10004);
         self.write(LAPIC_LVT_ERROR, 0x10000);
-        super::errata::apply_lapic_workarounds(self);
+        super::errata::apply_lapic_errata(self);
     }
 
     pub fn init_timer(&mut self) -> u32 {

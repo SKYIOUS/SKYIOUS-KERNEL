@@ -23,7 +23,7 @@ pub fn boot_linux(
     const KERNEL_LOAD_ADDR: u64 = 0x100_0000; // 16MB
     const SETUP_HDR_OFFSET: u64 = 0x1F1;
     const CMDLINE_ADDR: u64 = 0x1_0000;
-    const INITRD_LOAD_ADDR: u64 = 0x20_000_00; // 32MB
+    const INITRD_LOAD_ADDR: u64 = 0x0200_0000; // 32MB
     const E820_ADDR: u64 = 0x1_4000; // e820 map
     const E820_ENTRIES: u64 = 0x1_4E8; // e820 entry count address
 
@@ -34,7 +34,7 @@ pub fn boot_linux(
 
     // 2. Set up setup_header fields
     let setup_sects_addr = KERNEL_LOAD_ADDR + SETUP_HDR_OFFSET + 1; // setup_sects at offset 0x1F1
-    let setup_sects = if kernel_data.len() > 0 {
+    let setup_sects = if !kernel_data.is_empty() {
         ((kernel_data.len() as u64 - 0x200 + 0x1FF) / 0x200).min(127) as u8
     } else {
         0

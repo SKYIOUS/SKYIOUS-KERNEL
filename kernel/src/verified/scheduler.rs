@@ -175,10 +175,7 @@ pub fn check_schedule_correctness(snap: &SchedSnapshot<'_>) -> Result<(), SchedV
     }
 
     // --- INVARIANT 1: pass sum bounded ---
-    let total_pass: u64 = threads
-        .iter()
-        .map(|t| t.pass)
-        .fold(0u64, core::ops::Add::add);
+    let total_pass: u64 = threads.iter().map(|t| t.pass).sum::<u64>();
     let max_possible = snap.elapsed_ticks.saturating_mul(STRIDE_MAX);
     if total_pass > max_possible.saturating_mul(2) {
         // Multiply by 2 for slack (initial passes may be skewed)

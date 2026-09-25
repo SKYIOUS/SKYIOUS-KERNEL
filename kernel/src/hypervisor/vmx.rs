@@ -340,7 +340,7 @@ fn emulate_cpuid(vcpu: &mut crate::hypervisor::vcpu::Vcpu) {
         0x4000_0000..=0x4FFF_FFFF => {
             // Hypervisor CPUID leaves — report Vahi
             vcpu.regs.rax = 0x4D_564100; // " VAHI"
-            vcpu.regs.rbx = 0x0069_6861_56; // "Vahi\0"
+            vcpu.regs.rbx = 0x0000_6968_6156; // "Vahi\0"
             vcpu.regs.rcx = 0x0001; // Interface version
             vcpu.regs.rdx = 0;
         }

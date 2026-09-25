@@ -157,6 +157,6 @@ impl IoApic {
             crate::serial_write("[IOAPIC] done\n");
         }
 
-        crate::apic::errata::apply_ioapic_workarounds(self, index);
+        crate::apic::errata::apply_ioapic_errata(self);
     }
 }

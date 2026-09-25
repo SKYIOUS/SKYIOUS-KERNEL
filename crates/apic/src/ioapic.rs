@@ -115,6 +115,6 @@ impl IoApic {
         self.write(low_reg, low);
         self.write(high_reg, (dest_lapic_id as u32) << 24);
 
-        super::errata::apply_ioapic_workarounds(self, index);
+        super::errata::apply_ioapic_errata(self);
     }
 }
