@@ -1,0 +1,12 @@
+[package]
+name = "vahi-verified"
+version.workspace = true
+edition.workspace = true
+description = "Formal verification infrastructure for the Vahi kernel"
+
+[dependencies]
+vahi-sync = { path = "../sync" }
+
+[features]
+default = ["verification"]
+verification = []

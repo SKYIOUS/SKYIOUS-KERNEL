@@ -39,9 +39,14 @@
 //!    Pass values track virtual time, so min-pass selection implements
 //!    weighted fair queuing.
 
-use crate::task::thread::Thread;
+/// Thread representation for scheduler verification model.
+#[derive(Debug, Clone)]
+pub struct Thread {
+    pub pass: u64,
+    pub tickets: u32,
+}
 
-/// Maximum stride constant (must match `thread.rs`).
+/// Maximum stride constant (must match thread configuration).
 pub const STRIDE_MAX: u64 = 1 << 20;
 
 /// Violation kinds detected by invariant checks.
@@ -229,7 +234,7 @@ pub fn schedule_contract(
         return Err(SchedViolation::PassSumMismatch {
             expected: 1,
             actual: 0,
-            detail: "current_time must be > 0".into(),
+            detail: alloc::string::String::from("current_time must be > 0"),
         });
     }
 

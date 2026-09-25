@@ -130,7 +130,7 @@ impl Journal {
         {
             let mut verifier = JOURNAL_VERIFIER.lock();
             if let Err(v) = verifier.apply(JournalEvent::BeginTxn) {
-                let runner = VERIFICATION_RUNNER.lock();
+                let mut runner = VERIFICATION_RUNNER.lock();
                 runner.record_failure("journal::begin_transaction", &alloc::format!("{:?}", v));
             }
         }
@@ -220,7 +220,7 @@ impl Journal {
         {
             let mut verifier = JOURNAL_VERIFIER.lock();
             if let Err(v) = verifier.apply(JournalEvent::TxnPersisted) {
-                let runner = VERIFICATION_RUNNER.lock();
+                let mut runner = VERIFICATION_RUNNER.lock();
                 runner.record_failure("journal::commit_transaction", &alloc::format!("{:?}", v));
             }
         }
@@ -234,7 +234,7 @@ impl Journal {
         {
             let mut verifier = JOURNAL_VERIFIER.lock();
             if let Err(v) = verifier.apply(JournalEvent::Crash) {
-                let runner = VERIFICATION_RUNNER.lock();
+                let mut runner = VERIFICATION_RUNNER.lock();
                 runner.record_failure(
                     "journal::recover_from_dev::crash",
                     &alloc::format!("{:?}", v),
@@ -312,7 +312,7 @@ impl Journal {
         {
             let mut verifier = JOURNAL_VERIFIER.lock();
             if let Err(v) = verifier.apply(JournalEvent::RecoveryComplete) {
-                let runner = VERIFICATION_RUNNER.lock();
+                let mut runner = VERIFICATION_RUNNER.lock();
                 runner.record_failure(
                     "journal::recover_from_dev::recovery_complete",
                     &alloc::format!("{:?}", v),

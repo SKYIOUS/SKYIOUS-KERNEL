@@ -14,6 +14,7 @@ vahi-crypto = { path = "../crypto" }
 vahi-types = { path = "../types" }
 vahi-hal = { path = "../hal" }
 vahi-net = { path = "../net", optional = true }
+vahi-verified = { path = "../verified", optional = true }
 spin = "0.9.8"
 hashbrown = { version = "0.14", default-features = false, features = ["alloc", "ahash"] }
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
@@ -24,4 +25,4 @@ fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "c4b88477b22ca7e51
 default = ["ext4"]
 ext4 = []
 net = ["dep:vahi-net"]
-verification = []
+verification = ["dep:vahi-verified"]

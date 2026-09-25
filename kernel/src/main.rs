@@ -196,7 +196,7 @@ mod task;
 mod tests;
 mod tty;
 #[cfg(feature = "verification")]
-mod verified;
+pub use vahi_verified as verified;
 mod vfs;
 #[cfg(not(target_arch = "aarch64"))]
 mod vga_buffer;

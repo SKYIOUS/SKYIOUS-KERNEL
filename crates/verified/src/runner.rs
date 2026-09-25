@@ -10,18 +10,18 @@
 //! ```rust,ignore
 //! #[cfg(feature = "verification")]
 //! {
-//!     let mut v = crate::verified::runner::VERIFICATION_RUNNER.lock();
+//!     let mut v = vahi_verified::VERIFICATION_RUNNER.lock();
 //!     v.checkpoint("scheduler::pick_next", &snapshot);
 //!     v.report();
 //! }
 //! ```
 
-use crate::sync::IrqSafeMutex as Mutex;
-use crate::verified::{Invariant, VerificationFailure, VerificationReport};
+use vahi_sync::IrqSafeMutex as Mutex;
+use crate::{Invariant, VerificationFailure, VerificationReport};
 
 /// Global verification runner instance.
 ///
-/// Guarded by `crate::sync::IrqSafeMutex` for interrupt-safe access from scheduler
+/// Guarded by `vahi_sync::IrqSafeMutex` for interrupt-safe access from scheduler
 /// checkpoints (which may fire from timer IRQ context).
 pub static VERIFICATION_RUNNER: Mutex<VerificationRunner> = Mutex::new(VerificationRunner::new());
 
@@ -127,6 +127,12 @@ impl VerificationRunner {
     }
 }
 
+impl Default for VerificationRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Convenience macro: run a checkpoint with the global runner.
 ///
 /// Example:
@@ -138,7 +144,7 @@ macro_rules! verify_checkpoint {
     ($name:expr, $state:expr) => {
         #[cfg(feature = "verification")]
         {
-            let mut __v = $crate::verified::runner::VERIFICATION_RUNNER.lock();
+            let mut __v = $crate::runner::VERIFICATION_RUNNER.lock();
             __v.checkpoint($name, $state);
         }
     };

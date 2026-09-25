@@ -22,6 +22,7 @@ vahi-objects = { path = "../crates/objects" }
 vahi-types = { path = "../crates/types" }
 vahi-net = { path = "../crates/net" }
 vahi-arch = { path = "../crates/arch" }
+vahi-verified = { path = "../crates/verified", optional = true }
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"
 volatile = "0.2.6"
@@ -42,7 +43,7 @@ limine = "0.6.5"
 
 # x86_64-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-x86_64 = "0.14.2"
+x86_64 = { version = "0.14.2", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
 pic8259 = "0.10.1"
 pc-keyboard = "0.5.1"
 acpi = "4.1.1"
@@ -50,7 +51,7 @@ aml = { version = "0.16.4", optional = true }
 
 [features]
 default = ["smp", "net", "ext4", "iommu"]
-verification = []
+verification = ["dep:vahi-verified", "vahi-vfs/verification"]
 smp = []
 net = []
 uhci = ["vahi-drivers/uhci"]
@@ -76,13 +77,6 @@ codegen-units = 1
 panic = "abort"
 rustflags = ["-Z", "stack-protector=strong", "-C", "force-frame-pointers=yes", "--emit-relocs"]
 
-# Local build-std workaround (not upstream): hashbrown's optional
-# `rustc-std-workspace-alloc` shim dependency conflicts with -Zbuild-std's
-# injected alloc extern (E0464: multiple candidates for alloc). The vendored
-# copy drops that shim; cargo then resolves `extern crate alloc` via the
-# build-std extern like every other crate in this kernel.
-[patch.crates-io]
-hashbrown = { path = "vendor/hashbrown" }
 
 [build-dependencies]
 bootloader-boot-config = "0.11"
