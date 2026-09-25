@@ -33,12 +33,9 @@ smoltcp = { version = "0.10", default-features = false, features = ["alloc", "lo
 xmas-elf = "0.9.1"
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "c4b88477b22ca7e5131fbd8891f62a5deaa88e6e", default-features = false, features = ["alloc"] }
-embedded-io = "0.6.1"
-mbr-nostd = "0.1.0"
 
 # Enhanced data structures
 hashbrown = { version = "0.14", default-features = false, features = ["alloc", "ahash"] }
-heapless = { version = "0.8", default-features = false }
 limine = "0.6.5"
 
 # x86_64-specific dependencies
@@ -78,5 +75,3 @@ panic = "abort"
 rustflags = ["-Z", "stack-protector=strong", "-C", "force-frame-pointers=yes", "--emit-relocs"]
 
 
-[build-dependencies]
-bootloader-boot-config = "0.11"
