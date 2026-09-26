@@ -426,6 +426,8 @@ pub fn get_cpu_id() -> usize {
 
 /// Calls a function on a specific CPU core via IPI.
 /// `func` must be a pointer to an `extern "C" fn(u64)`.
+// ponytail: F2.2 — SMP IPI primitive not yet wired into cross-CPU dispatch; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
     // CFI: validate function pointer before dispatching via IPI
     if !crate::sync::cfi::cfi_check(func as *const () as usize) {
@@ -456,6 +458,8 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
 }
 
 /// Broadcasts a function call to all CPU cores except self.
+// ponytail: F2.2 — SMP broadcast IPI not yet wired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub fn smp_broadcast(func: extern "C" fn(u64), _arg: u64) {
     // CFI: validate function pointer before broadcasting
     if !crate::sync::cfi::cfi_check(func as *const () as usize) {
@@ -520,6 +524,8 @@ pub fn smp_broadcast_func(kind: u64, arg: u64) {
 
 /// Broadcasts a TLB flush IPI to all other CPU cores.
 /// Phase H1: Ensure memory coherence during page table changes.
+// ponytail: F2.2 — TLB shootdown IPI not yet wired into page-table paths; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub fn broadcast_tlb_flush(addr: u64) {
     // Broadcast vector 250 (TlbFlush) to all excluding self
     crate::apic::send_broadcast_ipi(250);

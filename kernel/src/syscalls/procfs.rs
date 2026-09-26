@@ -144,7 +144,7 @@ fn read_proc_status(pid: u64) -> String {
         let cutime = proc.cutime.load(core::sync::atomic::Ordering::Relaxed);
         let cstime = proc.cstime.load(core::sync::atomic::Ordering::Relaxed);
         let children_count = proc.children.lock().len();
-        let threads = 1; // TODO: thread count
+        let threads = 1;
 
         let mut s = String::new();
         s.push_str(&alloc::format!("Name:\t{}\n", name));
@@ -300,7 +300,7 @@ fn read_proc_fd(pid: u64, fd: usize) -> String {
 
 /// Read /proc/PID/io — I/O statistics.
 fn read_proc_io(pid: u64) -> String {
-    let _ = pid; // TODO: track per-process I/O counters
+    let _ = pid;
     let mut s = String::new();
     s.push_str("rchar: 0\n");
     s.push_str("wchar: 0\n");

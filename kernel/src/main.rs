@@ -14,7 +14,6 @@
 #![deny(warnings)]
 // Targeted clippy suppressions — each lint is named and documented.
 #![allow(
-    dead_code,
     // Design-level: require refactoring to fix properly
     clippy::result_unit_err,
     clippy::too_many_arguments,
@@ -147,9 +146,13 @@ mod panic_handler;
 extern crate alloc;
 #[cfg(not(target_arch = "aarch64"))]
 mod acpi;
+// ponytail: F2.2 — acpi_prt tables partially unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod acpi_prt;
 mod allocator;
+// ponytail: F2.2 — apic/msi feature surface unwired; see ADR-029-syscall-module-lint-hygiene.md
 #[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)]
 mod apic;
 pub mod arch;
 #[cfg(feature = "ash")]
@@ -157,6 +160,8 @@ pub mod ash;
 pub mod boot;
 #[cfg(feature = "gpu")]
 pub mod compositor;
+// ponytail: F2.2 — coverage instrumentation field unused on this config; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub mod coverage;
 pub mod crypto;
 pub mod debug;
@@ -169,34 +174,61 @@ mod gdt;
 pub mod gui;
 pub mod hal;
 #[cfg(feature = "hypervisor")]
+// ponytail: F2.2 — hypervisor VMCB/SVM syscall surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub mod hypervisor;
 #[cfg(not(target_arch = "aarch64"))]
 mod interrupts;
+// ponytail: F2.2 — iommu feature surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub mod iommu;
 pub mod ipc;
+// ponytail: F2.2 — kaslr_reloc helpers partially unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod kaslr_reloc;
 #[cfg(not(target_arch = "aarch64"))]
+// ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod keyboard;
 pub mod limine;
 mod memory;
 mod net;
+// ponytail: F2.2 — object/types surface; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub mod objects;
 #[cfg(not(target_arch = "aarch64"))]
 mod pci;
 pub mod pty;
+// ponytail: F2.2 — security/namespace/capability surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod security;
+// ponytail: F2.2 — selftest harness infra; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod selftest;
+// ponytail: F2.2 — shell (kernel_shell) not spawned in current boot path; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod shell;
 mod smp;
+// ponytail: F2.2 — sync RCU/CFI surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod sync;
+// ponytail: F2.2 — syscall impls pending dispatch wiring (ptrace/vm/ash-numbers/tmrfd); see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod syscalls;
+// ponytail: F2.2 — task cgroup/OOM/scheduler surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod task;
+#[cfg(feature = "self_test")]
 mod tests;
 mod tty;
 #[cfg(feature = "verification")]
 pub use vahi_verified as verified;
-mod vfs;
+// ponytail: F2.2 — vfs pseudo-fs (procfs/epoll/inotify) surface; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
+pub mod vfs;
 #[cfg(not(target_arch = "aarch64"))]
+// ponytail: F2.2 — legacy VGA text-mode Color variants unused under Limine framebuffer; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod vga_buffer;
 
 use crate::arch::Arch;

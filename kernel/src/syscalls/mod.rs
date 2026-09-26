@@ -55,14 +55,12 @@ use crate::task::process::CURRENT_PROCESS;
 // ponytail: keepping existing CAP_SETUID/CAP_SETGID as-is (swapped vs Linux)
 
 /// Maximum supported CPU count.
-#[allow(dead_code)]
 pub const MAX_CPUS: usize = 8;
 /// Upper bound for a single read/write syscall buffer allocation.
 /// Larger requests are clamped (callers must loop Ã¢â‚¬â€ POSIX allows short I/O).
 
 /// Array of per-CPU area pointers for indexed access from non-GS contexts.
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub struct PerCpuPtr(pub *mut PerCpuData);
 unsafe impl Send for PerCpuPtr {}
 unsafe impl Sync for PerCpuPtr {}

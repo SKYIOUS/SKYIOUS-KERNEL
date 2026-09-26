@@ -161,6 +161,7 @@ pub fn init_devices() {
     crate::acpi::init(crate::limine::rsdp_addr());
     crate::serial_write("[BOOT] APIC init...\n");
     crate::apic::init();
+    #[cfg(feature = "self_test")]
     crate::tests::run_all();
     #[cfg(feature = "smp")]
     {

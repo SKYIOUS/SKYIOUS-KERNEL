@@ -43,7 +43,6 @@ pub const PT_SINGLESTEP: u64 = 0x08;
 // Re-export the crate's PtraceStop type.
 pub use vahi_syscalls::ptrace::PtraceStop;
 
-#[allow(dead_code)]
 /// Old local PtraceStop variants (kept for kernel-internal use)
 enum _LocalPtraceStop {
     /// Stopped on syscall entry (PTRACE_SYSCALL).

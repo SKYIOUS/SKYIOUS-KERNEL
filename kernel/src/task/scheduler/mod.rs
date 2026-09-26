@@ -27,9 +27,13 @@ pub mod tick;
 
 // Re-export public functions at the scheduler:: level for backward compatibility.
 pub use spawn::{
-    add_futex_thread, block_on_pipe, boost_thread_priority, spawn, spawn_thread, wake_futex,
+    block_on_pipe, boost_thread_priority, spawn, spawn_thread, wake_futex,
     wake_pipe, wake_process_blocked, wake_process_futex, with_current_thread,
 };
+// ponytail: F2.2 — add_futex_thread is consumed only by the self_test scheduler
+// tests; see ADR-029-syscall-module-lint-hygiene.md
+#[cfg(feature = "self_test")]
+pub use spawn::add_futex_thread;
 pub use switch::{schedule, try_schedule};
 pub use tick::tick;
 
