@@ -54,6 +54,9 @@ default-members = [
 version = "0.3.0"
 edition = "2021"
 
+[workspace.dependencies]
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
+
 [profile.dev]
 panic = "abort"
 
