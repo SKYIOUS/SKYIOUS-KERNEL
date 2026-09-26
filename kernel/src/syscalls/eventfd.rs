@@ -12,9 +12,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::task::process::FileDescriptor;
-use crate::task::process::{
-    EventFdData, CURRENT_PROCESS, EFD_CLOEXEC, EFD_MAX, EFD_NONBLOCK, EFD_SEMAPHORE,
-};
+use crate::task::process::{EventFdData, CURRENT_PROCESS, EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
 
 /// Unique key generator for eventfd blocking/wake.
 static NEXT_EFD_KEY: AtomicU64 = AtomicU64::new(0x4000_0000_0000);

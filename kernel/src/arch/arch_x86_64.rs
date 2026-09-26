@@ -14,7 +14,9 @@ impl Arch for X86_64Arch {
         crate::gdt::init();
         crate::interrupts::init_idt();
         unsafe { crate::interrupts::PICS.lock().initialize() };
-        crate::syscalls::init();
+        // Route through the arch seam, not the x86 MSR path, so a non-x86
+        // port is one impl (Arch::init_syscalls) instead of a grep-and-replace.
+        unsafe { Self::init_syscalls() };
         crate::apic::init();
     }
 

@@ -1,21 +1,11 @@
-#![allow(unused_imports)]
 //! Process lifecycle syscalls: fork, clone, execve, exit, wait, sched, time.
 //! Extracted from process.rs to keep each module under 1k lines.
 
 use super::errno;
-use super::numbers;
 use super::*;
-use crate::gdt;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::FileDescriptor;
-use crate::vfs::{Stat, VfsNode, VFS};
-use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec;
 use alloc::vec::Vec;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
-use x86_64::VirtAddr;
 
 pub fn sys_getppid() -> u64 {
     get_current_process().map_or(0, |p| p.parent_id.unwrap_or(0))
@@ -659,7 +649,7 @@ pub fn sys_sched_getaffinity(pid: i64, cpusetsize: u64, mask_ptr: u64) -> u64 {
 
 pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
     use crate::memory::buddy::BuddyFrameAllocator;
-    use crate::task::process::{Process, CURRENT_PROCESS};
+    use crate::task::process::Process;
 
     // The parent is THIS CPU's current thread's process — never the global
     // CURRENT_PROCESS mirror, which another CPU's context switch can
@@ -758,7 +748,7 @@ pub fn sys_clone(
     regs_ptr: *mut u64,
 ) -> u64 {
     use crate::memory::buddy::BuddyFrameAllocator;
-    use crate::task::process::{Process, CURRENT_PROCESS};
+    use crate::task::process::Process;
 
     const CLONE_SETTLS: u64 = 0x80000;
     const CLONE_PARENT_SETTID: u64 = 0x00100000;

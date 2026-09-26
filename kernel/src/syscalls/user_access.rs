@@ -203,6 +203,21 @@ pub unsafe fn copy_to_user(dst_ptr: *mut u8, src: &[u8]) -> Result<(), ()> {
     Ok(())
 }
 
+/// Copy a `T: Copy` struct into a userspace buffer, collapsing the repeated
+/// `from_raw_parts(&T, size_of::<T>()) -> copy_to_user` idiom used by every
+/// stat-family syscall.
+///
+/// # Safety
+///
+/// `dst_ptr` must point to a writable userspace region of at least
+/// `size_of::<T>()` bytes (validated by `copy_to_user` -> `validate_ptr`).
+/// `src` must be a valid, fully-initialized `T: Copy`.
+#[inline]
+pub unsafe fn copy_struct_to_user<T: Copy>(dst_ptr: *mut u8, src: &T) -> Result<(), ()> {
+    let slice = core::slice::from_raw_parts(src as *const T as *const u8, core::mem::size_of::<T>());
+    copy_to_user(dst_ptr, slice)
+}
+
 /// A wrapper for reading a string from userspace.
 pub unsafe fn read_user_string(
     ptr: *const u8,

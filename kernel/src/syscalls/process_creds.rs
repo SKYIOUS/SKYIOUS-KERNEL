@@ -1,19 +1,10 @@
-#![allow(unused_imports)]
 //! Process credentials and resource limit syscalls: uid, gid, capabilities,
 //! process groups, resource limits.
 //! Extracted from process.rs to keep each module under 1k lines.
 
 use super::errno;
-use super::numbers;
 use super::*;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::vfs::{Stat, VfsNode, VFS};
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::task::process::CURRENT_PROCESS;
 
 #[repr(C)]
 struct RLimit {

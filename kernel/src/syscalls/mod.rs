@@ -1,13 +1,4 @@
-#![allow(unused_imports)]
-use crate::gdt;
-use crate::interrupts::IrqFmtBuf;
-use crate::sync::IrqSafeMutex as Mutex;
-use crate::task::process::Process;
-use crate::vfs::{Stat, VfsNode, VFS};
-use alloc::sync::Arc;
-use x86_64::registers::model_specific::{LStar, SFMask, Star};
-use x86_64::registers::rflags::RFlags;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
+use x86_64::structures::paging::{Mapper, Page, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
 
 pub mod cgroup;
@@ -38,7 +29,6 @@ pub mod fs_mount;
 pub mod fs_open;
 pub mod fs_stat;
 pub mod gui;
-pub mod ipc;
 pub mod misc;
 pub mod net;
 pub mod net_helpers;
@@ -56,18 +46,10 @@ pub use helpers::*;
 pub mod ptrace;
 
 pub use fs::*;
-pub use gui::*;
-pub use ipc::*;
-pub use misc::*;
 pub use net::*;
-pub use process::*;
 pub use signal::*;
 
-use crate::objects::KernelObject;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::task::process::CURRENT_PROCESS;
 
 // Capability constants (matching Linux CAP_* values)
 // ponytail: keepping existing CAP_SETUID/CAP_SETGID as-is (swapped vs Linux)
@@ -273,7 +255,6 @@ use crate::task::process::{MINSIGSTKSZ, SS_DISABLE, SS_ONSTACK};
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ signalfd4 Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-use crate::task::process::{EventFdData, EFD_MAX, EFD_NONBLOCK, EFD_SEMAPHORE};
 use crate::task::process::{SignalFdData, SignalFdInfo, SIGNAL_FDS};
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ eventfd2 Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬

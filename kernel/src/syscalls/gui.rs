@@ -1,19 +1,7 @@
-#![allow(unused_imports)]
 //! gui syscalls — split from mod.rs (7246 lines).
 use super::errno;
-use super::numbers;
 use super::*;
-use crate::gui::{window::Window, COMPOSITOR};
-use crate::memory::buddy::{BUDDY_ALLOCATOR, MAX_ORDER};
-use crate::memory::physical_memory_offset;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::vfs::{Stat, VfsNode, VFS};
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
 
 pub fn sys_beep(freq_hz: u32, duration_ms: u32) -> u64 {
     crate::drivers::audio::pcspeaker::beep(freq_hz, duration_ms);

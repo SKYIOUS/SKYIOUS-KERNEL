@@ -1,19 +1,10 @@
-#![allow(unused_imports)]
 //! Process signal syscalls: rt_sigaction, rt_sigreturn, kill, sigprocmask,
 //! pause, sigaltstack, signalfd4.
 //! Extracted from process.rs to keep each module under 1k lines.
 
 use super::errno;
-use super::numbers;
 use super::*;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::vfs::{Stat, VfsNode, VFS};
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
 
 pub fn sys_rt_sigaction(sig: u64, act: *const u64, oldact: *mut u64, _sigsetsize: u64) -> u64 {
     const SIG_DFL: u64 = 0;

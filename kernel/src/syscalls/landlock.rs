@@ -59,7 +59,7 @@ pub const LANDLOCK_CREATE_RULESET_VERSION: u64 = 1 << 0;
 pub const LANDLOCK_CREATE_RULESET_HANDLES_MASK: u64 = 0x00FF_FFFF_FFFF_FFFF;
 
 // Landlock state types — single source of truth: vahi_syscalls::landlock.
-pub use vahi_syscalls::landlock::{LandlockPathRule, LandlockRuleset, LandlockState};
+pub use vahi_syscalls::landlock::{LandlockRuleset, LandlockState};
 
 /// landlock_create_ruleset() — Create a new Landlock ruleset, returns a real fd.
 pub fn sys_landlock_create_ruleset(user_attr: *const u8, size: usize, flags: u32) -> u64 {

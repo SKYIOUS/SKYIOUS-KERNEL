@@ -3,29 +3,14 @@ use super::helpers::*;
 use super::numbers;
 use super::*;
 use super::{cgroup, landlock, namespaces, prctl, seccomp};
-use super::{fs, gui, ipc, misc, net, process};
+use super::{fs, gui, misc, net, process};
 use crate::gdt;
-use crate::interrupts::IrqFmtBuf;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::syscalls::user_access;
-use crate::task::process::Process;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::vfs::{Stat, VfsNode, VFS};
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
 use x86_64::registers::model_specific::{LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
-extern "C" {
-    fn syscall_entry();
-}
 
 // ─── Per-CPU data and MSR setup ─────────────────────────────────
-
 pub fn init_syscall_msrs() {
     let selectors = gdt::get_selectors();
 

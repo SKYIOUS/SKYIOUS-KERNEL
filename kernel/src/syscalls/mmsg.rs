@@ -6,7 +6,7 @@
 
 use super::errno;
 use super::net_helpers::{
-    iovec, msghdr, parse_sockaddr, recvfrom_internal, sendto_internal, write_sockaddr, IOV_MAX,
+    iovec, msghdr, parse_sockaddr, recvfrom_internal, sendto_internal, IOV_MAX,
 };
 use crate::syscalls::user_access;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};

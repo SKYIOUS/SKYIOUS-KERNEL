@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 // Seccomp state types — single source of truth: vahi_syscalls::seccomp.
 pub use vahi_syscalls::seccomp::{
     SeccompBpfInstruction, SeccompMode, SeccompState, SECCOMP_RET_ACTION, SECCOMP_RET_ALLOW,
-    SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS, SECCOMP_RET_KILL_THREAD, SECCOMP_RET_LOG,
-    SECCOMP_RET_TRACE, SECCOMP_RET_TRAP, SECCOMP_RET_USER_NOTIF,
+    SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS, SECCOMP_RET_LOG,
+    SECCOMP_RET_TRACE, SECCOMP_RET_TRAP,
 };
 
 pub const SECCOMP_MODE_DISABLED: SeccompMode = SeccompMode::Disabled;

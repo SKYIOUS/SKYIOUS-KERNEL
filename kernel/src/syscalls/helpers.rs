@@ -1,19 +1,9 @@
-#![allow(unused_imports)]
 use super::errno;
-use super::numbers;
-use crate::gdt;
-use crate::interrupts::IrqFmtBuf;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::Process;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::vfs::{Stat, VfsNode, VFS};
+use crate::vfs::VfsNode;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
-use x86_64::VirtAddr;
 
 pub const CAP_CHOWN: u64 = 1 << 0;
 pub const CAP_DAC_OVERRIDE: u64 = 1 << 1;

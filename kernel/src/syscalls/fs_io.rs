@@ -4,10 +4,8 @@
 
 use super::errno;
 use super::*;
-use crate::sync::IrqSafeMutex as Mutex;
-use crate::task::process::{FileDescriptor, SocketType, CURRENT_PROCESS};
-use crate::vfs::{VfsNode, VFS};
-use alloc::sync::Arc;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use crate::vfs::VFS;
 use x86_64::structures::paging::PageTableFlags;
 
 // ─── ioctl helper structs (must be at module level, not inside match) ─

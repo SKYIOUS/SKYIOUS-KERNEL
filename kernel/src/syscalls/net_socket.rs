@@ -3,9 +3,7 @@
 //! Extracted from net.rs to keep each module under 1k lines.
 
 use super::errno;
-use super::net_helpers::*;
 use super::*;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use alloc::vec;
 
