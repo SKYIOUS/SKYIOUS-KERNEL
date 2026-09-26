@@ -5,7 +5,7 @@
 
 pub use vahi_pci::*;
 
-use vahi_apic::msi;
+use crate::apic::msi;
 use vahi_limine::hhdm_offset;
 
 fn bar_to_virt(bar_val: u64) -> usize {
@@ -44,10 +44,28 @@ pub fn map_bar_mmio(bar_phys: u64) {
 }
 
 pub fn pci_enable_msi(bus: u8, slot: u8, func: u8) -> Option<u8> {
+    // The root kernel apic stack is `crate::apic` (inited in init_devices()
+    // before PCI enumerate); `vahi_apc` is not yet wired into the boot path,
+    // so its MemoryProvider/MEM is uninitialized and `vahi_apc::msi`/`current_lapic_id`
+    // panic. Allocate + target via the local stack to stay consistent with every
+    // other interrupt caller. `vahi_pci` is still used for pure config-space reads.
     let dev = PciDevice::new(bus, slot, func)?;
-    // Delegate the MSI programming sequence to the vahi-pci crate; the only
-    // kernel-side decision is which LAPIC ID to target.
-    vahi_pci::pci_enable_msi(&dev, vahi_apic::current_lapic_id())
+    let cap = find_capability(&dev, 0x05)?;
+    let vector = msi::alloc()?;
+    let lapic_id = crate::apic::current_lapic_id();
+    let msg_ctrl = read_config_u16(bus, slot, func, cap + 2);
+    let is_64bit = (msg_ctrl & (1 << 7)) != 0;
+    let addr = msi::msi_addr(lapic_id);
+    let data = msi::msi_data(vector);
+    write_config_u32(bus, slot, func, cap + 4, addr);
+    if is_64bit {
+        write_config_u32(bus, slot, func, cap + 8, 0);
+        write_config_u16(bus, slot, func, cap + 0x0C, data);
+    } else {
+        write_config_u16(bus, slot, func, cap + 0x08, data);
+    }
+    write_config_u16(bus, slot, func, cap + 2, (msg_ctrl & !0x70) | 1);
+    Some(vector)
 }
 
 pub fn pci_route_legacy_irq(_bus: u8, _slot: u8, _func: u8, pin: u8) -> Option<u8> {

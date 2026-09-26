@@ -10,7 +10,6 @@ pub struct InodeCache {
 
 struct InodeEntry {
     #[allow(dead_code)]
-    #[allow(dead_code)]
     inode_type: u8, // InodeType enum (File=0, Dir=1, Link=2)
     #[allow(dead_code)]
     refcount: u32,

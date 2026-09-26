@@ -23,6 +23,7 @@ members = [
     "crates/ipc",
     "crates/pci",
     "crates/syscalls",
+    "crates/verified",
 ]
 
 # builder is std-only (Python build scripts). Build explicitly with: cargo build -p builder
@@ -46,11 +47,15 @@ default-members = [
     "crates/ipc",
     "crates/pci",
     "crates/syscalls",
+    "crates/verified",
 ]
 
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
+
+[workspace.dependencies]
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
 
 [profile.dev]
 panic = "abort"
@@ -63,4 +68,4 @@ panic = "abort"
 rustflags = ["-Z", "stack-protector=strong"]
 
 [patch.crates-io]
-hashbrown = { path = "kernel/vendor/hashbrown" }
+bootloader = { path = "builder/vendor/bootloader" }

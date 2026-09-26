@@ -9,9 +9,9 @@ use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 
 pub fn sys_setsockopt(
-    sockfd: u64,
-    level: i32,
-    optname: i32,
+    _sockfd: u64,
+    _level: i32,
+    _optname: i32,
     _optval: *const u8,
     _optlen: u64,
 ) -> u64 {
@@ -26,16 +26,16 @@ pub fn sys_setsockopt(
             None => return errno::Errno::ESRCH as u64,
         };
         let fd_table = process.files.lock().fd_table.clone();
-        if (sockfd as usize) >= fd_table.len() {
+        if (_sockfd as usize) >= fd_table.len() {
             return errno::Errno::EBADF as u64;
         }
-        if fd_table[sockfd as usize].is_none() {
+        if fd_table[_sockfd as usize].is_none() {
             return errno::Errno::EBADF as u64;
         }
 
         // Socket options — smoltcp sockets are non-blocking; most are accepted but unused
-        match level {
-            SOL_SOCKET => match optname {
+        match _level {
+            SOL_SOCKET => match _optname {
                 SO_RCVTIMEO | SO_SNDTIMEO => 0u64,
                 SO_REUSEADDR => {
                     // Accept SO_REUSEADDR — allows reusing local addresses
@@ -45,7 +45,7 @@ pub fn sys_setsockopt(
                     // Record SO_REUSEPORT flag for this socket
                     let (pid, handle) = {
                         let fd_table = process.files.lock().fd_table.clone();
-                        match fd_table[sockfd as usize] {
+                        match fd_table[_sockfd as usize] {
                             Some(FileDescriptor::Socket(h, _)) => (process.id, h),
                             _ => return errno::Errno::ENOTSOCK as u64,
                         }
@@ -94,7 +94,7 @@ pub fn sys_setsockopt(
                 }
                 _ => errno::Errno::ENOPROTOOPT as u64,
             },
-            IPPROTO_TCP => match optname {
+            IPPROTO_TCP => match _optname {
                 TCP_NODELAY => {
                     // Disable Nagle's algorithm — accept but don't implement yet
                     0u64
@@ -117,7 +117,7 @@ pub fn sys_setsockopt(
                 }
                 _ => errno::Errno::ENOPROTOOPT as u64,
             },
-            IPPROTO_IP => match optname {
+            IPPROTO_IP => match _optname {
                 IP_TOS => {
                     // Type of service
                     0u64

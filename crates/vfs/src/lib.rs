@@ -133,49 +133,6 @@ pub mod tty {
     }
 }
 
-/// Verification stubs — feature-gated, overridden by vahi_kernel.
-/// ponytail: the real journal verifier lives in the not-yet-extracted
-/// `vahi-verified` crate (kernel/src/verified). These stubs only satisfy
-/// vahi-vfs's own `verification` cfg so the crate compiles standalone; the
-/// kernel supplies the genuine implementation and does not call these.
+/// Verification layer re-exported from `vahi-verified`.
 #[cfg(feature = "verification")]
-pub mod verified {
-    pub mod journal {
-        #[derive(Debug)]
-        pub enum JournalEvent {
-            BeginTxn,
-            TxnPersisted,
-            Crash,
-            RecoveryComplete,
-        }
-        pub struct JournalStateMachine;
-        impl JournalStateMachine {
-            pub fn new() -> Self {
-                Self
-            }
-            pub fn apply(&mut self, _event: JournalEvent) -> Result<(), JournalEvent> {
-                Ok(())
-            }
-            pub fn record_failure(&self, _name: &str, _msg: &str) {
-                // ponytail: stub — real recorder supplied by vahi_kernel.
-            }
-        }
-    }
-    pub mod runner {
-        use super::journal::JournalStateMachine;
-        pub struct VerificationRunner;
-        struct JournalStateMachineGuard(JournalStateMachine);
-        impl core::ops::Deref for JournalStateMachineGuard {
-            type Target = JournalStateMachine;
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-        impl VerificationRunner {
-            pub fn lock(&self) -> impl core::ops::Deref<Target = JournalStateMachine> {
-                JournalStateMachineGuard(JournalStateMachine::new())
-            }
-        }
-        pub static VERIFICATION_RUNNER: VerificationRunner = VerificationRunner;
-    }
-}
+pub use vahi_verified as verified;

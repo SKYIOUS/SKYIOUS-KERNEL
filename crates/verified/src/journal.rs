@@ -266,34 +266,6 @@ impl JournalStateMachine {
     /// This structural property means **atomicity is guaranteed by the
     /// on-disk format**, independent of any runtime check.
     pub fn recovery_atomicity_proof(txns: &[TransactionId]) -> bool {
-        // ponytail: Structural guarantee from the journal format.
-        //   The commit marker is a single-block write; the block device
-        //   guarantees sector writes are atomic.  Since the header fits
-        //   in one sector (512 B header in a 4096 B block), the
-        //   state=1→state=2 transition is itself atomic.
-        //
-        // Formal argument (seL4-style):
-        //
-        //   Let W be the set of writes in a transaction T.
-        //   Let C be the commit marker block.
-        //
-        //   Case 1 — C is on disk after crash:
-        //     C.state == 2 (committed).  Recovery replays nothing because
-        //     the data was already written before C was updated.  Since
-        //     the block device writes sectors atomically, W was either
-        //     fully written or fully unwritten before the crash, but if
-        //     C is visible then so is W (happens-before: write W, write C).
-        //     Either way the filesystem is consistent.
-        //
-        //   Case 2 — C is NOT on disk after crash:
-        //     C.state == 1 (collecting) or C is absent.  Recovery skips
-        //     this transaction because the commit marker proves it wasn't
-        //     committed.  Writes W are discarded.  The filesystem state
-        //     reverts to the last committed checkpoint.
-        //
-        //   Therefore after recovery the filesystem is in a state that
-        //   reflects exactly the set of transactions whose commit markers
-        //   were durable — i.e. atomicity holds.
         let _ = txns;
         true
     }
@@ -335,5 +307,11 @@ impl JournalStateMachine {
             });
         }
         Ok(())
+    }
+}
+
+impl Default for JournalStateMachine {
+    fn default() -> Self {
+        Self::new()
     }
 }

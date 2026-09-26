@@ -179,7 +179,6 @@ mod kaslr_reloc;
 mod keyboard;
 pub mod limine;
 mod memory;
-#[cfg(feature = "net")]
 mod net;
 pub mod objects;
 #[cfg(not(target_arch = "aarch64"))]
@@ -188,7 +187,6 @@ pub mod pty;
 mod security;
 mod selftest;
 mod shell;
-#[cfg(feature = "smp")]
 mod smp;
 mod sync;
 mod syscalls;
@@ -196,7 +194,7 @@ mod task;
 mod tests;
 mod tty;
 #[cfg(feature = "verification")]
-mod verified;
+pub use vahi_verified as verified;
 mod vfs;
 #[cfg(not(target_arch = "aarch64"))]
 mod vga_buffer;
