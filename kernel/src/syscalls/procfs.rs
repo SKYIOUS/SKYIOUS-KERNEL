@@ -152,7 +152,7 @@ fn read_proc_status(pid: u64) -> String {
         s.push_str(&alloc::format!("Tgid:\t{}\n", pid));
         s.push_str(&alloc::format!("Pid:\t{}\n", pid));
         s.push_str(&alloc::format!("PPid:\t{}\n", ppid));
-        s.push_str(&alloc::format!("TracerPid:\t0\n"));
+        s.push_str("TracerPid:\t0\n");
         s.push_str(&alloc::format!(
             "Uid:\t{}\t{}\t{}\t{}\n",
             uid,
@@ -169,11 +169,11 @@ fn read_proc_status(pid: u64) -> String {
         ));
         s.push_str(&alloc::format!("FDSize:\t{}\n", 256));
         s.push_str(&alloc::format!("Threads:\t{}\n", threads));
-        s.push_str(&alloc::format!("SigPnd:\t0\n"));
-        s.push_str(&alloc::format!("ShdPnd:\t0\n"));
-        s.push_str(&alloc::format!("SigBlk:\t0\n"));
-        s.push_str(&alloc::format!("SigIgn:\t0\n"));
-        s.push_str(&alloc::format!("SigCgt:\t0\n"));
+        s.push_str("SigPnd:\t0\n");
+        s.push_str("ShdPnd:\t0\n");
+        s.push_str("SigBlk:\t0\n");
+        s.push_str("SigIgn:\t0\n");
+        s.push_str("SigCgt:\t0\n");
         s.push_str("CapInh:\t0000000000000000\n");
         s.push_str("CapPrm:\t0000000000000000\n");
         s.push_str("CapEff:\t0000000000000000\n");
@@ -192,8 +192,8 @@ fn read_proc_status(pid: u64) -> String {
         s.push_str("VmSwap:\t       0 kB\n");
         s.push_str(&alloc::format!("VmSwap:\t{} kB\n", 0));
         s.push_str(&alloc::format!("Threads:\t{}\n", threads));
-        s.push_str(&alloc::format!(" voluntary_ctxt_switches:\t0\n"));
-        s.push_str(&alloc::format!(" nonvoluntary_ctxt_switches:\t0\n"));
+        s.push_str(" voluntary_ctxt_switches:\t0\n");
+        s.push_str(" nonvoluntary_ctxt_switches:\t0\n");
         // time fields (in clock ticks, 100 Hz)
         s.push_str(&alloc::format!("\n utime:\t{}\n", utime));
         s.push_str(&alloc::format!(" stime:\t{}\n", stime));
@@ -317,7 +317,7 @@ fn read_proc_cmdline(pid: u64) -> String {
     if pid == 1 {
         String::from("/bin/init\0")
     } else {
-        alloc::format!("/bin/unknown\0")
+        alloc::string::String::from("/bin/unknown\0")
     }
 }
 

@@ -1309,7 +1309,7 @@ impl vahi_types::ProcessProvider for KernelProcessProvider {
 pub fn init_process_provider() {
     static PROVIDER: KernelProcessProvider = KernelProcessProvider;
     vahi_types::register_process_provider(&PROVIDER);
-    vahi_types::register_tick_fn(|| crate::interrupts::get_ticks());
+    vahi_types::register_tick_fn(crate::interrupts::get_ticks);
     // Redirect crate-side pipe blocking (vahi-net unix sockets) to the one
     // live scheduler. Plain fn pointers: no state crosses the boundary.
     vahi_types::register_sched_facade(vahi_types::SchedFacade {

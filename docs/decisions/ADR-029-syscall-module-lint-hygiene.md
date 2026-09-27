@@ -194,3 +194,101 @@ Note: dependency `dead_code` is NOT reported through a `cargo clippy -p
 vahi_kernel` build (rustc silences lints in dependencies), so each leaf crate
 must be clippy-checked directly via `-p` — this is why the earlier kernel-only
 gate missed the crates entirely.
+
+---
+
+### Phase F2.7 — clippy-suppression audit & staged retirement (2026-09-27)
+
+The crate-root `#![allow(... clippy:: ...)]` block in `kernel/src/main.rs:16–143`
+is **not** the "27 lints" stated earlier in PLAN F2.7 — the audited block holds
+**127 named `clippy::` lints** (two tagged groups: ~14 "Design-level: require
+refactoring to fix properly"; ~113 "Mechanical style: safe to suppress, fix
+incrementally").
+
+#### Evidence — per-lint site-count audit (kernel + ALL dependency crates)
+Probe run with `--force-warn <every lint>` over `cargo clippy -p vahi_kernel`
+**without** `--no-deps`, so rustc also emits warnings from dependency crates
+(`vahi-crypto`, `vahi-net`, `vahi-vfs`, `vahi-task`, `vahi-ipc`, …). Counts via
+`rg '#<lint>'`; total raw = **7203** (clippy de-duplicated to 677 auto-apply
+suggestions).
+
+> **Scope note (important):** rustc **silences lints in dependencies** during a
+> normal `cargo clippy -p vahi_kernel -D warnings` build. So these deps-inclusive
+> counts are NOT what removing a lint from `main.rs`'s crate-root `#![allow(...)]`
+> will surface to the gate — only the **kernel-crate-only** sites are. The
+> deps-inclusive table is still useful: it shows which lints need cross-crate
+> attention and why a monolithic auto-fix is rejected (top two lints alone =
+> 4387 deps-inclusive sites; `arithmetic_side_effects` needs per-site overflow
+> review and is wrong to blind-auto-fix on pointer arith / scheduler counters).
+
+| lint | deps-incl. sites | kernel-crate-only | risk | stage |
+|---|---|---|---|---|
+| `absolute_paths` | 2594 | many | high (path-resolve churn) | 5+ |
+| `arithmetic_side_effects` | 1793 | many | **high (semantics — overflow)** | 5+, per-site review |
+| `use_self` | 281 | ? | safe-mechanical | 2 |
+| `module_name_repetitions` | 268 | ? | medium (naming churn) | 3 |
+| `missing_trait_methods` | 240 | ? | safe-mechanical | 2 |
+| `uninlined_format_args` | 190 | ? | safe-mechanical | 2 |
+| `cast_ptr_alignment` | 58 | ? | medium (`unsafe` ptr sites) | 3 |
+| `too_many_lines` | 46 | ? | high (refactor) | 5+, structural |
+| `unnecessary_cast` | 35 | ? | safe-mechanical | 2 |
+| `redundant_closure` | 23 | 2 | safe-mechanical | **1 done** |
+| `redundant_closure_for_method_calls` | 21 | 0 | safe-mechanical | **1 done** |
+| `useless_format` | 10 | 10 | safe-mechanical | **1 done** |
+| `missing_safety_doc` | 8 | ? | high (cross-crate `unsafe` docs) | 4 |
+| `too_many_arguments` | 7 | ? | high (signature refactor) | 5 |
+| `derivable_impls` | 5 | ? | safe-mechanical | 2 |
+| `let_and_return` | 4 | 4 | safe-mechanical | **1 done** |
+| `redundant_else` | 2 | 0 | safe-mechanical | **1 done** |
+| `redundant_field_names` | 2 | 0 | safe-mechanical | **1 done** |
+| `needless_lifetimes` | 2 | ? | safe-mechanical | 2 |
+| `needless_borrow` | 1 | 2 (verification-gated) | safe-mechanical | **1 done** |
+| `single_match` | 1 | 2 (1 default + 1 `ash`-gated) | safe-mechanical | **1 done** |
+| `manual_memcpy` | 1 | ? | medium (rewrites to `copy_nonoverlapping`) | 3 |
+| `unconditional_recursion` | 0 | 0 | correctness | already safe |
+
+(`?` = kernel-crate-only count not yet enumerated for deferred lints; only
+Stage-1 lints were fully enumerated + fixed.)
+
+#### Stage 1 — DONE (8 lints, 20 kernel-crate sites fixed)
+Retired `needless_borrow`, `useless_format`, `redundant_closure`,
+`let_and_return`, `redundant_else`, `redundant_field_names`, `single_match`,
+`redundant_closure_for_method_calls` from the crate-root allow block and fixed
+every kernel-crate site:
+
+- `useless_format` ×10: `cgroup.rs:351`, `procfs.rs:155,172,173,174,175,176,195,196,320`
+  (`push_str(&format!("lit"))` → `push_str("lit")`; `format!(expr)` →
+  `String::from(expr)` where the result is returned).
+- `let_and_return` ×4: `prctl.rs:74,125,151` (`let v = …; v` → inlined tail),
+  `ptrace.rs:267` (inlined `let val = if let …; val` → tail expr).
+- `redundant_closure` ×2: `fs_mount.rs:175` (`|| SwapSlot::new()` → fn ptr),
+  `process.rs:1312` (`|| get_ticks()` → fn ptr; sig verified:
+  `register_tick_fn(f: fn() -> u64)` / `get_ticks() -> u64`).
+- `single_match` ×2: `net_helpers.rs:578` (`match recv_slice {Ok(n)=>{…} Err(_)=>{} }` →
+  `if let Ok(n) = … { … }`), `ash/verifier.rs:64` (`match cls {0x01=>{…} _=>{} }` →
+  `if cls == 0x01 { … }`).
+- `needless_borrow` ×2: `scheduler/mod.rs:349,397` (verification-gated;
+  `(&*p.0).pass` → `(*p.0).pass`).
+- `redundant_else`, `redundant_field_names`,
+  `redundant_closure_for_method_calls`: 0 kernel-crate sites (removed from allow;
+  no fixes needed).
+
+Gates (all `rc=0`, `Finished`):
+- `cargo clippy -p vahi_kernel --target x86_64-unknown-none -- -D warnings` (default)
+- `cargo clippy -p vahi_kernel --target x86_64-unknown-none --features self_test -- -D warnings`
+- `cargo clippy -p vahi_kernel --target x86_64-unknown-none --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu,self_test" -- -D warnings`
+- `cargo build -p vahi_kernel --target x86_64-unknown-none` (default)
+
+Note: the all-features probe originally surfaced 3 errors (the 2 `needless_borrow`
++ 1 `single_match` sites) in `#[cfg(feature = "verification")]` /
+`#[cfg(feature = "ash")]` code — invisible to the default gate. Fixed; re-gate
+green.
+
+#### Remaining staged retirement (not yet executed)
+- **Stage 2:** `use_self`, `missing_trait_methods`, `uninlined_format_args`,
+  `derivable_impls`, `needless_lifetimes`, `unnecessary_cast`.
+- **Stage 3:** `cast_ptr_alignment`, `manual_memcpy` (unsafe-ptr sites, manual review).
+- **Stage 4:** `missing_safety_doc` (cross-crate `unsafe fn` docstring audit).
+- **Stage 5 (deferred):** `absolute_paths`, `arithmetic_side_effects`,
+  `too_many_lines`, `too_many_arguments` — high-churn/semantic; each gated
+  behind its own per-module `ponytail:` ceiling until a real refactor lands.

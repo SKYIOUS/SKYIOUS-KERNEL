@@ -258,13 +258,12 @@ fn do_peekdata(target_pid: u64, user_addr: *mut u64) -> u64 {
     }
 
     let virt = x86_64::VirtAddr::new(user_addr as u64);
-    let val = if let Some(phys) = crate::memory::virt_to_phys(virt) {
+    if let Some(phys) = crate::memory::virt_to_phys(virt) {
         let ptr = (crate::memory::physical_memory_offset() + phys.as_u64()) as *const u64;
         unsafe { core::ptr::read_volatile(ptr) }
     } else {
         unsafe { core::ptr::read_volatile(user_addr) }
-    };
-    val
+    }
 }
 
 // ─── PTRACE_POKEDATA / PTRACE_POKETEXT ────────────────────────────

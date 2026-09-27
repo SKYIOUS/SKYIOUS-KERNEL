@@ -575,27 +575,24 @@ pub(crate) fn recvfrom_internal(
             let mut result = Err(errno::Errno::EAGAIN as u64);
             if let Some(_) = with_tcp_mut(sockets, handle, |socket| {
                 if socket.may_recv() {
-                    match socket.recv_slice(buf) {
-                        Ok(n) => {
-                            #[cfg(feature = "ash")]
+                    if let Ok(n) = socket.recv_slice(buf) {
+                        #[cfg(feature = "ash")]
+                        {
+                            let src = socket.remote_endpoint().map(|e| e.port).unwrap_or(0);
+                            let dst = socket.local_endpoint().map(|e| e.port).unwrap_or(0);
+                            if crate::ash::hooks::net::hook_net_receive(
+                                &mut buf[..n],
+                                0,
+                                6,
+                                src,
+                                dst,
+                            ) == crate::ash::AshResult::Drop
                             {
-                                let src = socket.remote_endpoint().map(|e| e.port).unwrap_or(0);
-                                let dst = socket.local_endpoint().map(|e| e.port).unwrap_or(0);
-                                if crate::ash::hooks::net::hook_net_receive(
-                                    &mut buf[..n],
-                                    0,
-                                    6,
-                                    src,
-                                    dst,
-                                ) == crate::ash::AshResult::Drop
-                                {
-                                    result = Err(errno::Errno::EAGAIN as u64);
-                                    return;
-                                }
+                                result = Err(errno::Errno::EAGAIN as u64);
+                                return;
                             }
-                            result = Ok((n, None));
                         }
-                        Err(_) => {}
+                        result = Ok((n, None));
                     }
                 }
             }) {
