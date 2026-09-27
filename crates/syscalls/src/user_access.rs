@@ -26,8 +26,9 @@ pub unsafe fn copy_to_user(_dst_ptr: *mut u8, _src: &[u8]) -> Result<(), ()> {
 }
 
 /// Stub: check if we're in a user memory copy context.
-#[allow(dead_code)]
-pub fn user_copy_active() -> bool {
+    #[allow(dead_code)]
+    // ponytail: always false (no copy-active tracking); upgrade path: track nest depth vs do_user_addr_fault unwinding.
+    pub fn user_copy_active() -> bool {
     false
 }
 
@@ -45,4 +46,5 @@ pub unsafe fn read_user_string(
 
 /// Stub: abort an in-progress user memory copy.
 #[allow(dead_code)]
+// ponytail: no-op (no unwind/restore); upgrade path: restore saved user regs + drop copy-active flag.
 pub fn abort_user_copy() {}

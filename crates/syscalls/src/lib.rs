@@ -44,6 +44,7 @@ pub struct PerCpuData {
 
 /// Stub: get per-CPU data.
 #[allow(dead_code, static_mut_refs)]
+// ponytail: no real per-CPU backing storage (returns a static stub); upgrade path: arch-backed per-CPU area via lapic/id MSR.
 pub fn get_per_cpu() -> &'static mut PerCpuData {
     static mut PER_CPU: PerCpuData = PerCpuData {
         self_ptr: 0,
@@ -62,10 +63,12 @@ pub fn get_per_cpu() -> &'static mut PerCpuData {
 
 /// Stub: set kernel stack for current CPU.
 #[allow(dead_code)]
+// ponytail: stub no-op (no TSS.RSP0 write); upgrade path: emit WRMSR/MOV to TSS for current-CPU stack.
 pub fn set_kernel_stack(_stack_top: u64) {}
 
 /// Stub: check if current process has pending signals.
 #[allow(dead_code)]
+// ponytail: always false (no signal-pending scan); upgrade path: scan per-process SignalQueue before syscall return.
 pub fn check_signal_interrupt() -> bool {
     false
 }
