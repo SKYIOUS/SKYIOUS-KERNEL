@@ -12,6 +12,8 @@ static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
 pub struct Pipe {
     buffer: Mutex<VecDeque<u8>>,
     capacity: usize,
+    // ponytail: F2.2 — Pipe.id reserved for per-instance diagnostics (see ADR-029)
+    #[allow(dead_code)]
     id: u64,
     eof: AtomicBool,
     writers: AtomicU64,

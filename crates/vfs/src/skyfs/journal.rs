@@ -18,6 +18,8 @@ lazy_static! {
 }
 
 const JOURNAL_MAGIC: u64 = 0x4A4F55524E414C5F;
+// ponytail: F2.2 — skyfs journal sizing constant not yet referenced (see ADR-029)
+#[allow(dead_code)]
 const MAX_TRANSACTION_BLOCKS: u32 = 256;
 
 /// Journal header state values

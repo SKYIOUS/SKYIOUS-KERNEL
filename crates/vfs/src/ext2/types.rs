@@ -1,6 +1,8 @@
 //! EXT2 on-disk data structures and constants.
 
 pub const EXT2_SUPER_MAGIC: u16 = 0xEF53;
+// ponytail: F2.2 — ext2 error_fs feature bit not referenced by the wired ext2 path (see ADR-029)
+#[allow(dead_code)]
 pub const EXT2_ERROR_FS: u16 = 2;
 pub const S_IFMT: u16 = 0xF000;
 

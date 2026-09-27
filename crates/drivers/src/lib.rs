@@ -21,7 +21,7 @@
 //! - DMA buffers must be cache-line aligned (64 bytes)
 
 #![no_std]
-#![allow(dead_code, unused_variables)]
+#![allow(unused_variables)]
 #![allow(clippy::result_unit_err, clippy::missing_safety_doc)]
 #![allow(clippy::manual_range_contains, clippy::needless_range_loop)]
 #![allow(clippy::identity_op, clippy::int_plus_one)]
@@ -39,9 +39,17 @@ pub fn get_ticks() -> u64 {
     vahi_types::get_ticks()
 }
 
+// ponytail: F2.2 — driver subsystems (audio/block/graphics/storage/usb) are the
+// vahi-drivers crate surface not yet wired into the kernel probe path.
+// Module-level `#[allow(dead_code)]` covers them; removal precondition = each
+// driver wired into the probe table or deleted (see
+// docs/decisions/ADR-029-syscall-module-lint-hygiene.md)
+#[allow(dead_code)]
 pub mod audio;
+#[allow(dead_code)]
 pub mod block;
 pub mod gpu;
+#[allow(dead_code)]
 pub mod graphics;
 pub mod input;
 pub mod mouse;
@@ -49,7 +57,9 @@ pub mod net;
 pub mod ps2;
 pub mod rtc;
 pub mod serial;
+#[allow(dead_code)]
 pub mod storage;
+#[allow(dead_code)]
 pub mod usb;
 pub mod watchdog;
 

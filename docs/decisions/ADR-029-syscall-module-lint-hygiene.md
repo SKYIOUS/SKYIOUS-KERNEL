@@ -158,3 +158,39 @@ Two configs verified (both `-D warnings` via `#![deny(warnings)]`):
 - `tests/run_qemu_tests.py` self_test path (`TAP version 13`, selftests) is
   unchanged in behavior: test code is now `#[cfg(feature = "self_test")]`-gated
   at the module boundary, compiled exactly when called from `main.rs`.
+
+---
+
+### Phase 2b — dependency-crate root allow retirement (2026-09-27)
+
+The crate roots of `vahi-net`, `vahi-vfs`, and `vahi-drivers` still carried
+`#![allow(dead_code, ...)]` (bundled with `unused_variables`/`unused_imports`
+and clippy lints — those remain; only `dead_code` was retired, per the same
+build-driven rule). Retiring them surfaced:
+
+- `vahi-drivers`: 16 dead items in unwired driver subsystems (audio/hda,
+  block/scheduler, graphics/console, storage/nvme, usb/uhci). Handled with
+  **module-level** `#[allow(dead_code)]` + `ponytail:` on the owning `mod` decls
+  (`audio`, `block`, `graphics`, `storage`, `usb`) — these submodules are the
+  not-yet-probed driver surface, so module-level (not crate-root) is appropriate.
+- `vahi-vfs`: 3 items in *wired* modules (`ext2/types`, `pipe`, `skyfs/journal`)
+  — handled **per-item** (module-level would over-suppress live ext2/skyfs/pipe
+  code).
+- `vahi-net`: no own dead_code (clean once the `vahi-drivers` dep compiled).
+
+#### Evidence (Phase 2b)
+`--all-features` surfaces the superset (e.g. `uhci` constants only compile under
+the `uhci` feature):
+- `cargo clippy -p vahi-drivers --target x86_64-unknown-none --all-features -- -D warnings` → `Finished`, 0 errors.
+- `cargo clippy -p vahi-net --target x86_64-unknown-none --all-features -- -D warnings` → `Finished`, 0 errors.
+- `cargo clippy -p vahi-vfs --target x86_64-unknown-none --all-features -- -D warnings` → `Finished`, 0 errors.
+- Re-verify kernel gates (deps are kernel dependencies; attr-only dep changes do
+  not alter kernel behavior): `cargo clippy -p vahi_kernel ... --features
+  "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu" -- -D warnings`
+  → `Finished`; `+self_test` → `Finished`; `cargo build -p vahi_kernel --target
+  x86_64-unknown-none` (default) → `Finished`.
+
+Note: dependency `dead_code` is NOT reported through a `cargo clippy -p
+vahi_kernel` build (rustc silences lints in dependencies), so each leaf crate
+must be clippy-checked directly via `-p` — this is why the earlier kernel-only
+gate missed the crates entirely.

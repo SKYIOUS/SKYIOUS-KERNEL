@@ -50,7 +50,7 @@
 //! 7. Extract `mod.rs` last (socket table, interface management)
 
 #![no_std]
-#![allow(dead_code, unused_variables, unused_imports)]
+#![allow(unused_variables, unused_imports)]
 #![allow(
     clippy::result_unit_err,
     clippy::missing_safety_doc,
