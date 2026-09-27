@@ -292,3 +292,46 @@ green.
 - **Stage 5 (deferred):** `absolute_paths`, `arithmetic_side_effects`,
   `too_many_lines`, `too_many_arguments` — high-churn/semantic; each gated
   behind its own per-module `ponytail:` ceiling until a real refactor lands.
+
+---
+
+### Phase F2.3 — `kernel/src/main.rs` decomposition (2026-09-27), stage 1
+
+`main.rs` entered this phase at 561 lines; target `<300`. Stage 1 extracts the
+KASLR surface, which is a coherent, low-churn unit:
+
+- **Moved** to new `kernel/src/kaslr.rs`: the 3 KASLR statics
+  (`KERNEL_SLIDE`, `KASLR_APPLIED`, `KASLR_DEBUG_SLIDE`) and `fn init_kaslr`
+  (TSC-entropy slide computation + stores). Moved **verbatim** (same
+  `core::sync::atomic::` qualified paths; same `| 0x200000` mask math), so
+  behavior is byte-identical. Added one `SAFETY:` line on the `_rdtsc` `unsafe`
+  block (AGENTS §4 — the original main.rs body had none; authored fresh in the
+  new file). Kept `init_kaslr` as `pub(crate)` (originally crate-private).
+- **Re-exported** `pub(crate) use kaslr::{KASLR_APPLIED, KASLR_DEBUG_SLIDE,
+  KERNEL_SLIDE, init_kaslr};` at `main.rs` so all existing `crate::KERNEL_SLIDE`
+  / `crate::KASLR_APPLIED` / `crate::KASLR_DEBUG_SLIDE` / `init_kaslr()` refs
+  (`kaslr_reloc.rs:200,484`; `kernel_main` and 3 debug loads in main.rs) resolve
+  unchanged — zero churn inside callers.
+- **Intentionally NOT moved:** `__stack_chk_guard` / `__stack_chk_fail` (compiler
+  stack-protector symbols — moving breaks the `stack-protector=strong` linkage
+  symbol resolution) and `oom_kill`/`init_serial`/`serial_*` (serial subsystem
+  has its own `crate::drivers::serial`; next slice deferred to F2.3 stage 2,
+  not guessed now).
+
+Result: `main.rs` 561 -> **504** lines (-57); `kaslr.rs` new 57 lines (well under
+the 1000-line ceiling, AGENTS §4).
+
+#### Evidence (F2.3 stage 1)
+- `cargo clippy -p vahi_kernel --target x86_64-unknown-none -- -D warnings` -> rc=0
+- `cargo clippy -p vahi_kernel --target x86_64-unknown-none --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu,self_test" -- -D warnings` -> rc=0
+- `cargo clippy -p vahi_kernel --target x86_64-unknown-none --features self_test -- -D warnings` -> rc=0
+- `cargo build -p vahi_kernel --target x86_64-unknown-none` (default) -> rc=0
+
+#### F2.3 stage 2 (not yet executed) — candidate slices
+- `serial_*` family (`init_serial`, `serial_putc`, `serial_write`,
+  `serial_write_hex`, `vahi_kernel_serial_putc`, `vahi_kernel_serial_write`)
+  -> `kernel/src/drivers/serial.rs` (verify it does not collide with the
+  existing `crate::drivers::serial` module identity first).
+- `__stack_chk_fail` body (keep the statics at root; only relocate the fail
+  body after confirming the `#![no_mangle]` linkage boundary).
+- `panic` handler, then `kernel_main` decomposition.

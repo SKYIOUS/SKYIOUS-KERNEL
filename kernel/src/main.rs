@@ -178,6 +178,8 @@ pub mod ipc;
 // ponytail: F2.2 — kaslr_reloc helpers partially unwired; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
 mod kaslr_reloc;
+mod kaslr;
+pub(crate) use kaslr::{KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLIDE, init_kaslr};
 #[cfg(not(target_arch = "aarch64"))]
 // ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
@@ -244,16 +246,6 @@ pub unsafe extern "C" fn _start() -> ! {
     kernel_main()
 }
 
-/// KASLR: kernel base slide offset (0 if not randomized)
-pub static KERNEL_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// KASLR: has relocation been applied (guard against double-apply)
-pub static KASLR_APPLIED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// Debug: KASLR slide value for verification
-pub static KASLR_DEBUG_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
 /// Stack canary value for `-Z stack-protector=strong`
 #[used]
 #[no_mangle]
@@ -272,18 +264,6 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 
 pub fn oom_kill() -> ! {
     crate::task::oom::handle_oom()
-}
-
-fn init_kaslr() {
-    // Use TSC as entropy source since crypto/limine may not be ready yet
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    // 30-bit address space (1GB range), 2MB alignment => 9 bits entropy (512 slots).
-    // Mask: 0x3FFFFFE00000 = bits 0-20 zeroed (2MB alignment), bits 21-39 random (30-bit range).
-    // But we only want 1 GiB (bits 21-30), so mask with 0x3FE00000 (bits 21-30, 10 bits = 1024 slots * 2MiB = 1 GiB).
-    // 0x3FE00000 = 0b001111111110000000000000000000 = bits 21-30
-    let slide = (tsc & 0x0000_0000_3FE0_0000) | 0x200000;
-    KERNEL_SLIDE.store(slide, core::sync::atomic::Ordering::Relaxed);
-    crate::KASLR_DEBUG_SLIDE.store(slide, core::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn init_serial() {
