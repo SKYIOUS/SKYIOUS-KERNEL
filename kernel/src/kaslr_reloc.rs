@@ -291,6 +291,47 @@ pub const fn pd_destination_index(pd_index_shift: usize, page: usize) -> Option<
 /// Whether sliding the kernel's `pages` pages by `pd_index_shift` runs past
 /// the end of the 512-entry directory. Callers must check this rather than
 /// wrap.
+/// Apply the KASLR slide to `R_X86_64_RELATIVE` relocation targets.
+///
+/// PIC links relative to 0, so every entry in the alloc `.rela` section is a
+/// fixed adjustment: the word at `offset + base` gains `slide`. There are no
+/// symbols to resolve and no types to skip.
+///
+/// Only targets that land on an 8-aligned word inside `[base, base + len)` are
+/// touched. Anything else is counted as failed rather than applied: a corrupt
+/// `r_offset` here would fault the kernel part-way through the slide, after the
+/// CR3 switch, with no way back.
+///
+/// The addition is `wrapping_add` on purpose. The `audit` profile runs with
+/// `overflow-checks = true`, where a plain `+` on a near-`u64::MAX` word aborts
+/// the kernel instead of sliding it.
+pub fn apply_relative_to_range(
+    words: &mut [u64],
+    offset_bytes: usize,
+    len_bytes: usize,
+    slide: u64,
+) -> RelocationOutcome {
+    let mut applied = 0u64;
+    let mut failed = 0u64;
+
+    if offset_bytes % 8 != 0 || len_bytes % 8 != 0 {
+        // A table whose bounds are not word-aligned cannot describe words.
+        return RelocationOutcome::from_counts(0, words.len() as u64);
+    }
+
+    for (i, word) in words.iter_mut().enumerate() {
+        if offset_bytes.saturating_add(i * 8) >= len_bytes {
+            // Past the end of the described region.
+            failed += 1;
+            continue;
+        }
+        *word = word.wrapping_add(slide);
+        applied += 1;
+    }
+
+    RelocationOutcome::from_counts(applied, failed)
+}
+
 pub fn pd_shift_aliases(pd_index_shift: usize, pages: usize) -> bool {
     // Ask the same predicate `pd_destination_index` uses, so the two can never
     // disagree about the boundary. An overrun means the LAST page's
