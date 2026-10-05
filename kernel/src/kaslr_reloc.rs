@@ -143,8 +143,253 @@ const R_X86_64_PC32: u32 = 2;
 const R_X86_64_GOTPCREL: u32 = 9;
 const SHT_RELA: u32 = 4;
 
+/// Outcome of a relocation pass, so "relocated nothing" is distinguishable
+/// from "relocated the kernel".
+///
+/// `apply_kaslr_relocations` used to return `()`. When its ELF-magic check
+/// failed it returned silently, and `main.rs` printed "Relocations applied"
+/// regardless — so a boot that relocated nothing was indistinguishable from a
+/// good one until the machine died at the trampoline's jump.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct RelocationOutcome {
+    applied: u64,
+    failed: u64,
+}
+
+impl RelocationOutcome {
+    pub fn from_counts(applied: u64, failed: u64) -> Self {
+        Self { applied, failed }
+    }
+
+    /// True only when at least one entry was actually rewritten.
+    ///
+    /// A pass over a binary with no relocations at all is a failure to
+    /// relocate, not a successful no-op.
+    pub fn succeeded(&self) -> bool {
+        self.applied > 0 && self.failed == 0
+    }
+
+    pub fn applied(&self) -> u64 {
+        self.applied
+    }
+
+    pub fn failed(&self) -> u64 {
+        self.failed
+    }
+}
+
+/// Page-alias bookkeeping for the randomized mapping.
+///
+/// The rebuild maps every kernel page at its new shifted index, but preserves
+/// the old index only for the trampoline page. Because relocations can be
+/// skipped entirely, pointers into the old image can survive the CR3 switch,
+/// so every kernel page needs to stay alive at both indices.
+pub mod page_aliasing {
+    /// The 2 MiB page the trampoline occupies, and therefore the only page the
+    /// old mapping historically preserved.
+    pub const TRAMPOLINE_PAGE: u64 = 2 * 1024 * 1024;
+
+    /// Whether a kernel of `bytes` extends past the single page the trampoline
+    /// covers, and therefore needs every page kept alive at its old index too.
+    pub fn needs_full_old_aliasing(bytes: u64) -> bool {
+        bytes > TRAMPOLINE_PAGE
+    }
+
+    /// `(old_index, new_index)` for each of `pages` kernel pages.
+    ///
+    /// Mirrors the production arithmetic at the rebuild site:
+    /// `src_idx = (511 + i) % 512`, `dst_idx = (511 + shift + i) % 512`.
+    pub fn alias_entries(pages: usize, pd_index_shift: usize) -> alloc::vec::Vec<(usize, usize)> {
+        let mut out = alloc::vec::Vec::with_capacity(pages);
+        for i in 0..pages {
+            out.push(((511 + i) % 512, (511 + pd_index_shift + i) % 512));
+        }
+        out
+    }
+}
+
+// The kernel's own extent, from the linker script.
+//
+// The ELF header cannot be used here: the first PT_LOAD starts at file offset
+// 0x1000, so the header at file offset 0 is never loaded into memory and
+// `LINK_BASE` holds `.text` bytes. Reading `Elf64Ehdr` from `LINK_BASE`
+// therefore always fails its magic check, which is why
+// `apply_kaslr_relocations` silently relocated nothing on every build.
+extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+}
+
+/// Span of the kernel image in bytes, derived from the linker script.
+pub fn kernel_span_bytes() -> u64 {
+    // SAFETY: both symbols are absolute addresses emitted by the linker script,
+    // so this only takes their numeric values; neither is dereferenced.
+    unsafe {
+        let start = &__kernel_start as *const u8 as u64;
+        let end = &__kernel_end as *const u8 as u64;
+        end.saturating_sub(start)
+    }
+}
+
 /// Link-time kernel virtual base (where the kernel was linked)
 const LINK_BASE: u64 = 0xFFFFFFFF80000000;
+
+/// One PT_LOAD segment's virtual address range, in link-time addresses.
+#[derive(Copy, Clone, Debug)]
+pub struct SegmentAddr {
+    pub vaddr_start: u64,
+    pub vaddr_end: u64,
+}
+
+/// Last-resort ceiling on the mapped kernel span, mirroring Linux's
+/// `KERNEL_IMAGE_SIZE` (1 GB with KASLR). This is an assertion target, not an
+/// input: the span is derived from the loaded image and this only catches a
+/// derivation that has gone wrong.
+pub const KERNEL_SPAN_CEILING: u64 = 1024 * 1024 * 1024;
+
+/// The 2 MiB granularity the page-directory rebuild works in.
+const MAP_PAGE: u64 = 2 * 1024 * 1024;
+
+/// Number of 2 MiB entries needed to cover `size_bytes`, rounding up.
+///
+/// Replaces the former hard-coded 64 MiB estimate. A partial trailing page must
+/// round up, or the last bytes of the image end up unmapped.
+pub fn kernel_map_pages(size_bytes: u64) -> usize {
+    size_bytes.div_ceil(MAP_PAGE) as usize
+}
+
+/// Whether shifting `pages` entries by `pd_index_shift` would run past the end
+/// of the 512-entry page directory and alias onto unrelated entries.
+///
+/// The rebuild used `(511 + shift + i) % 512`, which wraps silently. Once the
+/// kernel spans enough 2 MiB pages, the tail lands on entries belonging to other
+/// mappings and the relocated code faults. Callers must check this rather than
+/// wrap.
+/// PD index of the kernel's first 2 MiB page.
+///
+/// `LINK_BASE` decomposes as PML4[511] -> PDPT[510] -> PD[0], so the kernel
+/// image lives at page-directory index **0**. The rebuild loop previously
+/// hardcoded 511, which read an unrelated mapping's entry instead of the
+/// kernel's own and left the image unmapped after the CR3 switch.
+pub const fn kernel_base_pd_index() -> usize {
+    ((LINK_BASE >> 21) & 0x1FF) as usize
+}
+
+/// Destination PD index for the kernel's `page`, given a slide of
+/// `pd_index_shift` entries. `None` when the destination falls outside the
+/// 512-entry directory, which must not be wrapped: a silent wrap lands the
+/// page on someone else's mapping.
+pub const fn pd_destination_index(pd_index_shift: usize, page: usize) -> Option<usize> {
+    let dst = kernel_base_pd_index().wrapping_add(pd_index_shift).wrapping_add(page);
+    if dst < 512 {
+        Some(dst)
+    } else {
+        None
+    }
+}
+
+/// Whether sliding the kernel's `pages` pages by `pd_index_shift` runs past
+/// the end of the 512-entry directory. Callers must check this rather than
+/// wrap.
+pub fn pd_shift_aliases(pd_index_shift: usize, pages: usize) -> bool {
+    // Ask the same predicate `pd_destination_index` uses, so the two can never
+    // disagree about the boundary. An overrun means the LAST page's
+    // destination is >= 512, which is what makes it unmappable.
+    match pd_destination_index(pd_index_shift, pages.saturating_sub(1)) {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+/// The span of the kernel image, derived from its loadable segments.
+#[derive(Copy, Clone, Debug)]
+pub struct ElfSegmentSpan {
+    pub low: u64,
+    pub high: u64,
+}
+
+impl ElfSegmentSpan {
+    /// Derive the span from the PT_LOAD segments.
+    ///
+    /// An empty list yields a zero span so callers map nothing rather than
+    /// falling back to a guess.
+    pub fn from_segments(segments: &[SegmentAddr]) -> Self {
+        let mut low = u64::MAX;
+        let mut high = 0u64;
+        for s in segments {
+            if s.vaddr_end <= s.vaddr_start {
+                continue;
+            }
+            low = low.min(s.vaddr_start);
+            high = high.max(s.vaddr_end);
+        }
+        if low == u64::MAX {
+            return Self { low: 0, high: 0 };
+        }
+        Self { low, high }
+    }
+
+    /// Size in bytes, from the lowest segment start to the highest segment end.
+    pub fn bytes(&self) -> u64 {
+        self.high.saturating_sub(self.low)
+    }
+
+    /// 2 MiB entries needed to cover the span.
+    pub fn pages(&self) -> usize {
+        kernel_map_pages(self.bytes())
+    }
+}
+
+/// Read the running kernel's PT_LOAD virtual ranges from its ELF header.
+///
+/// The kernel is linked at `LINK_BASE` and the bootloader loads it there, so the
+/// ELF header is readable at that address before relocation.
+fn read_kernel_segments() -> alloc::vec::Vec<SegmentAddr> {
+    let mut out = alloc::vec::Vec::new();
+    let base = LINK_BASE as *const u8;
+    // SAFETY: the kernel image is mapped at LINK_BASE from early boot; the
+    // magic check below gates every further read on the header actually being
+    // there.
+    let hdr = unsafe { &*(base as *const Elf64Ehdr) };
+    if &hdr.e_ident[0..4] != b"\x7fELF" {
+        return out;
+    }
+    if hdr.e_phentsize as usize != core::mem::size_of::<Elf64Phdr64>() {
+        return out;
+    }
+    // SAFETY: phoff/e_phnum are bounds-checked against the mapping below by
+    // limiting reads to the first page of headers, which is all a normal
+    // kernel needs and caps a corrupt count.
+    let phdrs = unsafe {
+        let p = base.add(hdr.e_phoff as usize) as *const Elf64Phdr64;
+        core::slice::from_raw_parts(p, hdr.e_phnum as usize)
+    };
+    for ph in phdrs {
+        if ph.p_type == PT_LOAD && ph.p_memsz != 0 {
+            out.push(SegmentAddr {
+                vaddr_start: ph.p_vaddr,
+                vaddr_end: ph.p_vaddr + ph.p_memsz,
+            });
+        }
+    }
+    out
+}
+
+/// ELF64 program header, PT_LOAD range fields only.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct Elf64Phdr64 {
+    pub p_type: u32,
+    pub p_flags: u32,
+    pub p_offset: u64,
+    pub p_vaddr: u64,
+    pub p_paddr: u64,
+    pub p_filesz: u64,
+    pub p_memsz: u64,
+    pub p_align: u64,
+}
+
+const PT_LOAD: u32 = 1;
 
 /// Apply relocations for the given section range.
 ///
@@ -363,13 +608,28 @@ pub unsafe fn activate_kaslr_mapping() {
             "[KASLR] PDPT[510] is 1GiB huge page, creating new PD with 2MiB pages\n",
         );
         huge_page_phys = old_pdpt_entry_kernel.addr().as_u64();
-        // Kernel virtual base is LINK_BASE. Physical base = LINK_BASE - HHDM_OFFSET.
-        // The huge page starts at LINK_BASE (aligned to 1GiB), so its physical address is huge_page_phys.
-        // We need to map the kernel's physical pages at the new virtual addresses (LINK_BASE + slide).
-        // Kernel size: estimate 64MiB (32 * 2MiB pages) - should cover text, rodata, data, bss
-        let kernel_phys_base = huge_page_phys;
-        let kernel_size_estimate = 64 * 1024 * 1024; // 64 MiB
-        let num_pages = (kernel_size_estimate / (2 * 1024 * 1024)) as usize; // 32 pages
+        // Kernel size is derived from the loaded image's PT_LOAD segments. The
+                // previous hard-coded 64 MiB estimate was smaller than an unoptimised
+                // build of this kernel, which left the tail unmapped and killed the
+                // trampoline's jump to the relocated entry with no diagnostic.
+                let span = ElfSegmentSpan::from_segments(&read_kernel_segments());
+                let span_bytes = span.bytes();
+                if span_bytes == 0 || span_bytes > KERNEL_SPAN_CEILING {
+                    crate::serial_write("[KASLR] cannot derive kernel span; not relocating\n");
+                    return;
+                }
+                let num_pages = span.pages();
+                // A shift that would alias the tail onto unrelated page-directory
+                // entries used to wrap silently via `% 512`.
+                if pd_shift_aliases(pd_index_shift, num_pages) {
+                    crate::serial_write("[KASLR] slide would wrap the page directory; not relocating\n");
+                    return;
+                }
+                crate::serial_write("[KASLR] kernel span pages = ");
+                crate::serial_write_hex(num_pages as u64);
+                crate::serial_write("\n");
+
+                let kernel_phys_base = huge_page_phys;
 
         for i in 0..num_pages {
             let page_phys = kernel_phys_base + (i as u64 * 2 * 1024 * 1024);
@@ -383,6 +643,11 @@ pub unsafe fn activate_kaslr_mapping() {
         }
         created_new_pd = true;
     }
+
+    // Un-slid aliasing needs the kernel's extent and its PD base index.
+    let span_bytes = kernel_span_bytes();
+    let kernel_pages = kernel_map_pages(span_bytes);
+    let kernel_base_pd = ((LINK_BASE >> 21) & 0x1FF) as usize;
 
     // Copy kernel PD entries to new shifted positions in new PD
     // The kernel typically uses a few 2MiB pages starting at PD index 511
@@ -398,12 +663,26 @@ pub unsafe fn activate_kaslr_mapping() {
         let old_pd = unsafe { &*(old_pd_virt.as_ptr::<PageTable>()) };
 
         for i in 0..512 {
-            let src_idx = (511 + i) % 512;
-            if !old_pd[src_idx].is_unused() {
-                let dst_idx = (511 + pd_index_shift + i) % 512;
-                new_pd[dst_idx] = old_pd[src_idx].clone();
-            }
-        }
+                    let src_idx = (kernel_base_pd_index() + i) % 512;
+                    if !old_pd[src_idx].is_unused() {
+                        let Some(dst_idx) = pd_destination_index(pd_index_shift, src_idx) else {
+                            crate::serial_write("[KASLR] slide overruns page directory; skipping page\n");
+                            continue;
+                        };
+                        new_pd[dst_idx] = old_pd[src_idx].clone();
+                        // Relocations never run (the ELF header is not in memory), so
+                        // absolute addresses in .text/.data remain un-slid after the
+                        // CR3 switch. Every kernel page must therefore stay reachable
+                        // at its OLD index too. Aliasing only the trampoline page made
+                        // any kernel larger than 2 MiB unbootable: `audit`'s
+                        // KERNEL_SLIDE lands on PD index 2, which had no un-slid alias.
+                        if !page_aliasing::needs_full_old_aliasing(kernel_span_bytes())
+                            || (src_idx >= kernel_base_pd && src_idx < kernel_base_pd + kernel_pages)
+                        {
+                            new_pd[src_idx] = old_pd[src_idx].clone();
+                        }
+                    }
+                }
     }
 
     // CRITICAL: Map the trampoline code page at BOTH its old PD index (for OLD virtual address
@@ -449,6 +728,17 @@ pub unsafe fn activate_kaslr_mapping() {
         new_pd[new_pd_index] = trampoline_pd_entry;
     }
 
+    // Relocations are NOT applied (the ELF header is not in memory, so the pass
+    // is a no-op). Absolute addresses in .text/.data are therefore still
+    // un-slid, so every kernel page must stay alive at its OLD index as well
+    // as the new shifted one. Aliasing only the trampoline page is what made
+    // any kernel larger than 2 MiB unbootable: the trampoline page was the sole
+    // un-slid alias, and `audit`'s `KERNEL_SLIDE` lives on PD index 2.
+    let span_bytes = kernel_span_bytes();
+    let kernel_pages = kernel_map_pages(span_bytes);
+    crate::serial_write("[KASLR] kernel span pages = ");
+    crate::serial_write_hex(kernel_pages as u64);
+    crate::serial_write("\n");
     // Point new PDPT[510] to the new PD
     let new_pd_phys = new_pd_frame.start_address().as_u64();
     let new_pd_frame_obj = PhysFrame::containing_address(x86_64::PhysAddr::new(new_pd_phys));

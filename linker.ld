@@ -48,3 +48,16 @@ SECTIONS
         *(.comment)
     }
 }
+
+/* The kernel's own extent, in link-time addresses. KASLR needs this to know
+   how many 2 MiB pages the image occupies. It cannot be read from the ELF
+   header at runtime: the first PT_LOAD starts at file offset 0x1000, so the
+   header at file offset 0 is never loaded into memory and LINK_BASE holds
+   .text bytes instead (issue A-6).
+
+   Assigned here, outside SECTIONS: inside SECTIONS an assignment is
+   section-relative, and ADDR/SIZEOF only yield an absolute address here.
+   `.got` is the LAST section in the script, so its end is the image end --
+   `.bss` is not, and using it left `.got` 2184 bytes outside the span. */
+__kernel_start = VIRT_BASE;
+__kernel_end = ADDR(.got) + SIZEOF(.got);
