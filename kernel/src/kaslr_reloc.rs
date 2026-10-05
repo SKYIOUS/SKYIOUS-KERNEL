@@ -757,12 +757,13 @@ pub unsafe fn activate_kaslr_mapping() {
                             continue;
                         };
                         new_pd[dst_idx] = old_pd[src_idx].clone();
-                        // Relocations never run (the ELF header is not in memory), so
-                        // absolute addresses in .text/.data remain un-slid after the
-                        // CR3 switch. Every kernel page must therefore stay reachable
-                        // at its OLD index too. Aliasing only the trampoline page made
-                        // any kernel larger than 2 MiB unbootable: `audit`'s
-                        // KERNEL_SLIDE lands on PD index 2, which had no un-slid alias.
+                        // The slide is applied just before the trampoline, and the
+                        // trampoline executes at its OLD virtual address until the CR3
+                        // switch completes. Any page it might be executing from must
+                        // therefore remain reachable at its OLD index in the NEW tables.
+                        // Aliasing only the trampoline page made any kernel larger
+                        // than 2 MiB unbootable: `audit`'s KERNEL_SLIDE lands on PD
+                        // index 2, which had no un-slid alias.
                         if !page_aliasing::needs_full_old_aliasing(kernel_span_bytes())
                             || (src_idx >= kernel_base_pd && src_idx < kernel_base_pd + kernel_pages)
                         {
@@ -815,12 +816,12 @@ pub unsafe fn activate_kaslr_mapping() {
         new_pd[new_pd_index] = trampoline_pd_entry;
     }
 
-    // Relocations are NOT applied (the ELF header is not in memory, so the pass
-    // is a no-op). Absolute addresses in .text/.data are therefore still
-    // un-slid, so every kernel page must stay alive at its OLD index as well
-    // as the new shifted one. Aliasing only the trampoline page is what made
-    // any kernel larger than 2 MiB unbootable: the trampoline page was the sole
-    // un-slid alias, and `audit`'s `KERNEL_SLIDE` lives on PD index 2.
+    // Keep every kernel page reachable at its OLD index as well as the new
+    // shifted one. The trampoline runs from its old virtual address across the
+    // CR3 switch, so the new tables must still resolve it there. Aliasing only
+    // the trampoline page is what made any kernel larger than 2 MiB unbootable:
+    // the trampoline page was the sole un-slid alias, and `audit`'s
+    // `KERNEL_SLIDE` lives on PD index 2.
     let span_bytes = kernel_span_bytes();
     let kernel_pages = kernel_map_pages(span_bytes);
     crate::serial_write("[KASLR] kernel span pages = ");
@@ -851,6 +852,18 @@ pub unsafe fn activate_kaslr_mapping() {
     core::arch::asm!("mov {}, rsp", out(reg) old_rsp, options(nostack, preserves_flags));
 
     let new_pml4_phys = new_pml4_frame.start_address().as_u64();
+
+    // Everything above reads kernel statics, so the slide cannot be applied
+    // until here. From this point to the trampoline nothing may touch kernel
+    // data: a relocated static resolves into the new address space, which does
+    // not exist until the CR3 switch a few instructions below. `apply_kaslr_
+    // relocations` reports its counts in a dry run before its first write and
+    // is silent afterwards for exactly this reason.
+    //
+    // # Safety
+    // The link-time mapping is still live here, so every r_offset is writable.
+    // Callers must not have applied the slide already.
+    apply_kaslr_relocations(slide);
 
     // Call the assembly trampoline - never returns
     kaslr_activate_mapping(new_pml4_phys, slide, old_rsp);
