@@ -509,16 +509,24 @@ fn kernel_main() -> ! {
         serial_write_hex(slide);
         serial_write("\n");
 
-        // Apply KASLR relocations to fix up absolute addresses
+        // Apply KASLR relocations to fix up absolute addresses. Must run while
+        // the link-time mapping is still live -- activate_kaslr_mapping switches
+        // CR3 below, and after that every r_offset is unmapped.
         serial_write("[KASLR] Applying relocations...\n");
+        // No reporting here: the slide has just been applied, so every
+        // relocated global now points into an unmapped address space and
+        // touching kernel data would fault before the CR3 switch below.
+        // `apply_kaslr_relocations` reports its own counts in a dry run that
+        // completes before the first write.
         unsafe {
             crate::kaslr_reloc::apply_kaslr_relocations(slide);
         }
-        serial_write("[KASLR] Relocations applied\n");
 
-        // Activate KASLR mapping - switch to randomized virtual address space
-        // This function never returns - it jumps to post_kaslr_continue via trampoline
-        serial_write("[KASLR] Activating randomized kernel mapping...\n");
+        // Nothing may touch kernel data between here and the CR3 switch: the
+        // slide has been applied, so every relocated global now resolves into
+        // an address space that does not exist yet. That includes serial
+        // output -- `serial_write` reads relocated statics. `activate_kaslr_
+        // mapping` must therefore be the very next statement.
         unsafe {
             crate::kaslr_reloc::activate_kaslr_mapping();
         }

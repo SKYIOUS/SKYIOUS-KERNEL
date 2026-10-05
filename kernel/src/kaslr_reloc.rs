@@ -137,6 +137,9 @@ pub struct Elf64Ehdr {
 
 /// Relocation types we handle
 const R_X86_64_64: u32 = 1;
+
+/// The only relocation type the PIC link emits (type 8).
+const R_X86_64_RELATIVE: u32 = 8;
 const R_X86_64_32S: u32 = 11;
 const R_X86_64_PLT32: u32 = 4;
 const R_X86_64_PC32: u32 = 2;
@@ -218,6 +221,11 @@ pub mod page_aliasing {
 extern "C" {
     static __kernel_start: u8;
     static __kernel_end: u8;
+    /// Bounds of the alloc `.rela` section emitted by the root linker script.
+    /// Under `relocation-model=pic` this holds every `R_X86_64_RELATIVE` entry,
+    /// so it is the whole input the slide needs -- no ELF header required.
+    static __rela_start: u8;
+    static __rela_end: u8;
 }
 
 /// Span of the kernel image in bytes, derived from the linker script.
@@ -473,70 +481,108 @@ unsafe fn apply_relocations_section(
     }
 }
 
-/// Apply all KASLR relocations using the given slide.
+/// Apply all KASLR relocations using the given slide, and report what happened.
 ///
-/// This parses the kernel's ELF relocation sections and applies the slide
-/// to all absolute addresses that need to be adjusted for the randomized base.
+/// The kernel is linked PIC, so the alloc `.rela` section holds
+/// `R_X86_64_RELATIVE` entries: each is a fixed adjustment, the word at
+/// `r_offset` gains the slide. There are no symbols to resolve.
+///
+/// This no longer reads the ELF header. The header is not in memory -- the
+/// first `PT_LOAD` starts at file offset 0x1000, so file bytes `[0, 0x1000)`
+/// are never mapped and `LINK_BASE` holds `.text` bytes (issue A-6). The table
+/// is reached through linker-emitted bounds instead, which is what
+/// `__rela_start`/`__rela_end` are for.
 ///
 /// # Safety
-/// Must be called before any code that depends on the relocated addresses.
-/// The kernel must be mapped at its link-time virtual address.
-pub unsafe fn apply_kaslr_relocations(slide: u64) {
-    // Use atomic guard to prevent double-application
+/// Must be called before `activate_kaslr_mapping` switches CR3, while the
+/// link-time mapping is still live. Every `r_offset` names an address in that
+/// old mapping, so applying this after the switch would fault.
+pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
+    // Guard against double-application: the slide is an absolute add, so a
+    // second pass would slide the same words twice.
     if crate::KASLR_APPLIED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-        return;
+        return RelocationOutcome::from_counts(0, 1);
     }
 
-    const LINK_BASE: u64 = 0xFFFFFFFF80000000;
+    // `&sym as *const u8 as usize` takes the ADDRESS of the linker symbol, which
+    // is its value. A bare `sym as usize` would instead LOAD the byte stored at
+    // that address -- one byte of relocation data, not the bound.
+    let (rela_start, rela_end) = unsafe {
+        (&__rela_start as *const u8 as usize, &__rela_end as *const u8 as usize)
+    };
+    let rela_bytes = rela_end.saturating_sub(rela_start);
+    let rela_start = rela_start as *const Elf64Rela;
+    if rela_bytes == 0 || rela_bytes % core::mem::size_of::<Elf64Rela>() != 0 {
+        return RelocationOutcome::from_counts(0, 1);
+    }
+    let count = rela_bytes / core::mem::size_of::<Elf64Rela>();
 
-    // Read ELF header from the kernel base
-    let ehdr = &*(LINK_BASE as *const Elf64Ehdr);
-
-    // Verify ELF magic
-    if &ehdr.e_ident[0..4] != b"\x7fELF" {
-        return;
+    // Dry run FIRST. Once the slide is written, every relocated global points
+    // into the not-yet-mapped slid address space, so any further code that
+    // touches kernel data -- serial output included -- would fault. Reporting
+    // therefore has to happen before the first write, not after the loop.
+    let mut in_image = 0u64;
+    let mut out_of_image = 0u64;
+    for i in 0..count {
+        // SAFETY: bounded by `count`, which the modulo check made exact, and
+        // `.rela` is an alloc section inside a PT_LOAD.
+        let rel = &*rela_start.add(i);
+        if rel.get_type() == R_X86_64_RELATIVE {
+            if in_kernel_image(rel.r_offset as usize) {
+                in_image += 1;
+            } else {
+                out_of_image += 1;
+            }
+        }
     }
 
-    // Get section headers
-    let shdr_base = (LINK_BASE + ehdr.e_shoff) as *const Elf64Shdr;
-    let shstrndx = ehdr.e_shstrndx as usize;
-    let _shstrtab = &*shdr_base.add(shstrndx);
-    let shstrtab_data = core::slice::from_raw_parts(
-        (LINK_BASE + ehdr.e_shoff) as *const u8,
-        ehdr.e_shentsize as usize * ehdr.e_shnum as usize,
-    );
+    crate::serial_write("[KASLR] rela entries=");
+    crate::serial_write_hex(count as u64);
+    crate::serial_write(" in_image=");
+    crate::serial_write_hex(in_image);
+    crate::serial_write(" out_of_image=");
+    crate::serial_write_hex(out_of_image);
+    crate::serial_write("\n");
 
-    // Iterate through section headers to find RELA sections
-    for i in 0..ehdr.e_shnum as usize {
-        let shdr = &*shdr_base.add(i);
-        if shdr.sh_type != 4 {
-            // SHT_RELA = 4
+    if out_of_image != 0 {
+        // Refuse to slide a partially-valid table. Half-corrected pointers are
+        // strictly worse than none: the image still runs from its link-time
+        // mapping, so any relocated reference would fault on use.
+        crate::serial_write("[KASLR] WARNING: out-of-image relocation targets; refusing to slide\n");
+        return RelocationOutcome::from_counts(0, out_of_image);
+    }
+
+    // Write pass. Deliberately silent -- see the dry run above.
+    let mut applied = 0u64;
+    for i in 0..count {
+        let rel = &*rela_start.add(i);
+        if rel.get_type() != R_X86_64_RELATIVE {
             continue;
         }
-
-        // Get section name
-        let name_offset = shdr.sh_name as usize;
-        if name_offset >= shstrtab_data.len() {
-            continue;
-        }
-        let name_end = shstrtab_data[name_offset..]
-            .iter()
-            .position(|&b| b == 0)
-            .map(|pos| name_offset + pos)
-            .unwrap_or(shstrtab_data.len());
-        let name = core::str::from_utf8(&shstrtab_data[name_offset..name_end]).unwrap_or("");
-
-        // Process .rela.text, .rela.rodata, .rela.data
-        if name.starts_with(".rela.") {
-            let rela_start = (LINK_BASE + shdr.sh_addr) as *const Elf64Rela;
-            let rela_count = shdr.sh_size / shdr.sh_entsize;
-            let rela_end = (rela_start as usize
-                + (rela_count as usize) * core::mem::size_of::<Elf64Rela>())
-                as *const Elf64Rela;
-
-            apply_relocations_section(rela_start, rela_end, slide);
-        }
+        let p = rel.r_offset as *mut u64;
+        // wrapping_add: `overflow-checks` is on under the audit profile, where a
+        // plain `+` here would abort the kernel part-way through the slide.
+        p.write_volatile(p.read_volatile().wrapping_add(slide));
+        applied += 1;
     }
+
+    RelocationOutcome::from_counts(applied, 0)
+}
+
+/// True when `addr` names a word inside the kernel image.
+///
+/// A `r_offset` outside the image would fault during the slide, after which the
+/// kernel is unrecoverable. Refusing is strictly better than writing.
+fn in_kernel_image(addr: usize) -> bool {
+    // SAFETY: both symbols are absolute addresses emitted by the linker script.
+    // Only their numeric values are taken; neither is dereferenced.
+    let (start, end) = unsafe {
+        (
+            &__kernel_start as *const u8 as usize,
+            &__kernel_end as *const u8 as usize,
+        )
+    };
+    addr >= start && addr.checked_add(core::mem::size_of::<u64>()).is_some_and(|e| e <= end)
 }
 
 /// Activate KASLR by switching to the randomized virtual address space.
