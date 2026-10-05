@@ -564,17 +564,24 @@ pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
     let mut in_image = 0u64;
     let mut out_of_image = 0u64;
     for i in 0..count {
-        // SAFETY: bounded by `count`, which the modulo check made exact, and
-        // `.rela` is an alloc section inside a PT_LOAD.
-        let rel = &*rela_start.add(i);
-        if rel.get_type() == R_X86_64_RELATIVE {
-            if in_kernel_image(rel.r_offset as usize) {
-                in_image += 1;
-            } else {
-                out_of_image += 1;
+            // SAFETY: bounded by `count`, which the modulo check made exact, and
+            // `.rela` is an alloc section inside a PT_LOAD.
+            let rel = &*rela_start.add(i);
+            if rel.get_type() == R_X86_64_RELATIVE {
+                // Range gate: targets inside the .text section cannot be slid.
+                // x86 instructions are not slide-invariant; adding a u64 to them
+                // corrupts the binary and the kernel then faults on the next fetch.
+                // Refuse those targets and continue to the next entry.
+                if rel.r_offset >= 0xFFFFFFFF80000000 && rel.r_offset < 0xFFFFFFFF804B8B8A+1 {
+                    continue;
+                }
+                if in_kernel_image(rel.r_offset as usize) {
+                    in_image += 1;
+                } else {
+                    out_of_image += 1;
+                }
             }
         }
-    }
 
     crate::serial_write("[KASLR] rela entries=");
     crate::serial_write_hex(count as u64);
