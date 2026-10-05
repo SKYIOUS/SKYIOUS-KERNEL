@@ -5,7 +5,12 @@ jobs = 1
 rustflags = [
     "-C", "target-feature=-sse",
     "-C", "link-arg=-Tlinker.ld",
-    "-C", "relocation-model=static",
+    # KASLR (issue A-6): with `static`, lld resolves every absolute address at
+    # link time and leaves no runtime relocation to apply, so the mapping can be
+    # randomised but no embedded pointer is ever corrected. `pic` instead emits
+    # R_X86_64_RELATIVE entries into an alloc .rela.dyn that the kernel can walk
+    # after the slide. This is the model Linux uses for KASLR.
+    "-C", "relocation-model=pic",
 ]
 
 [target.aarch64-unknown-none]
