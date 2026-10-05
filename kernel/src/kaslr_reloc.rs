@@ -599,48 +599,54 @@ pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
         return RelocationOutcome::from_counts(0, out_of_image);
     }
 
-    // Write pass. Deliberately silent -- see the dry run above.
+    // Write pass.
     //
-    // The table must be snapshotted first: 272 of the targets on the current
-    // image live INSIDE `.rela` itself, so writing in place would rewrite the
-    // very entries this loop is still iterating. The walk would then read
-    // already-slid r_offset values as if they were addresses, and write to
-    // whatever they decoded to -- all of it inside the image, so the range gate
-    // cannot catch it. 544 KB is affordable and the page is already mapped.
-    // Collect the targets first, then write them. In-place iteration is unsafe:
-    // some targets live inside `.rela` itself, so a write would corrupt entries
-    // this loop has not read yet. The dry run above already proved every target
-    // is in-image, so no target needs re-checking here.
-    // Write pass, iterating BACKWARDS.
+    // Two constraints shape this loop, and both are load-bearing.
     //
-    // In-place forward iteration is unsafe here: 272 of the targets on the
-    // current image live inside `.rela` itself, so a forward write corrupts
-    // entries the walk has not read yet. The corrupted r_offset still decodes
-    // to an in-image address, so the range gate cannot catch it -- the kernel
-    // wrote to a word chosen by garbage and triple-faulted somewhere unrelated.
+    // 1. NO METHOD CALLS. `rel.get_type()` compiles to a call that loads the
+    //    callee through a GOT slot -- and this loop slides GOT slots. Once one
+    //    is written, the next call loads a SLID pointer and jumps to an address
+    //    that is not mapped until the CR3 switch the trampoline has not reached
+    //    yet. That is the observed fault exactly: a fetch fault, CR2 == RIP, at
+    //    a PC roughly a gigabyte past the image. Reading `r_info` as a plain
+    //    field removes the dependency entirely.
     //
-    // Walking backwards needs no buffer at all, and the fix is the direction:
-    // entry i is only ever overwritten after entry i has been read, and every
-    // entry above it has already been consumed. 32K u64 on the boot stack would
-    // have been the alternative, and the kernel exposes no typed allocator to
-    // put it on the heap instead.
+    // 2. NO CALLS AFTER THE FIRST WRITE. Same reason. The loop below touches
+    //    nothing but the table and the targets themselves.
     //
-    // `r_offset` is read once, before the write to that same entry.
+    // Targets inside .text are skipped: x86 instructions are not
+    // slide-invariant, so adding a u64 to one corrupts the binary. Data
+    // pointers, GOT slots and stack canaries are slid, which is the point.
+    //
+    // Backwards iteration costs nothing and keeps the walk safe if a future
+    // link ever emits a target inside `.rela`.
+    const TEXT_LO: u64 = 0xFFFF_FFFF_8000_0000;
+    const TEXT_HI: u64 = 0xFFFF_FFFF_804B_8C5B; // .text end, exclusive
+    const RELATIVE: u32 = 8;
+
     let mut applied = 0u64;
     let mut i = count;
     while i > 0 {
         i -= 1;
-        let rel = &*rela_start.add(i);
-        if rel.get_type() != R_X86_64_RELATIVE {
+        // SAFETY: `i < count`, and `count` was derived from the byte length
+        // after a divisibility check, so this stays inside the mapped `.rela`.
+        let e = rela_start.add(i);
+        let r_offset = unsafe { core::ptr::addr_of!((*e).r_offset).read() };
+        let r_info = unsafe { core::ptr::addr_of!((*e).r_info).read() };
+
+        if (r_info & 0xFFFF_FFFF) as u32 != RELATIVE {
             continue;
         }
-        let target = rel.r_offset;
-        let p = target as *mut u64;
-        // TEMP INSTRUMENT: boundary markers only. `serial_write` reads statics,
-        // and we are mid-slide, so this may itself fault -- that is the point.
-        // wrapping_add: `overflow-checks` is on under the audit profile, where a
-        // plain `+` here would abort the kernel part-way through the slide.
-        p.write_volatile(p.read_volatile().wrapping_add(slide));
+        if r_offset >= TEXT_LO && r_offset < TEXT_HI {
+            continue;
+        }
+
+        // Volatile so the write is neither elided nor reordered; wrapping_add
+        // so an `overflow-checks` build cannot abort part-way through the slide.
+        unsafe {
+            let p = r_offset as *mut u64;
+            p.write_volatile(p.read_volatile().wrapping_add(slide));
+        }
         applied += 1;
     }
 
