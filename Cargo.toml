@@ -60,6 +60,39 @@ hashbrown = { version = "0.17", default-features = false, features = ["default-h
 [profile.dev]
 panic = "abort"
 
+# Arithmetic-safety profile. `release` leaves overflow-checks and
+# debug-assertions off, so any wrapping computation on untrusted input (ACPI
+# table lengths, disk-supplied counts, ELF DT_STRSZ) executes silently. This
+# profile turns both on so the QEMU self-test suite surfaces that class of bug
+# mechanically instead of by inspection.
+#
+#   cargo build --profile audit --target x86_64-unknown-none \
+#       --features self_test -Zbuild-std=core,alloc
+#
+# CI builds release; this is an on-demand gate, not a default.
+[profile.audit]
+inherits = "dev"
+overflow-checks = true
+debug-assertions = true
+
+# Isolation variants: same as `audit` with one knob off, so a boot failure can
+# be attributed to a specific check rather than to "checked arithmetic" in
+# general.
+[profile.audit_ovf]
+inherits = "audit"
+debug-assertions = false
+
+[profile.audit_dbg]
+inherits = "audit"
+overflow-checks = false
+
+# Same checks as `audit` but optimised for size, so the binary is the same order
+# of magnitude as release. Isolates "checked arithmetic" from "unoptimised
+# binary too large for the KASLR mapping to relocate".
+[profile.audit_small]
+inherits = "audit"
+opt-level = "z"
+
 [profile.release]
 opt-level = "z"
 lto = false
