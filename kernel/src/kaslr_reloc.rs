@@ -83,6 +83,45 @@ extern "C" {
     fn post_kaslr_continue() -> !;
 }
 
+/// Enter the KASLR trampoline without reading its address from memory.
+///
+/// The ordinary `extern "C"` call compiles to `movq GOTSLOT(%rip),%rax;
+/// callq *%rax` -- confirmed in the current build at 0xffffffff800ca41d. That GOT
+/// slot is a relocation target, so applying the slide rewrites it to the slid
+/// address, which is not mapped until the CR3 switch the trampoline itself
+/// performs. The call therefore targets an unmapped page and the CPU faults on
+/// the instruction fetch. That is the fetch fault at ~1 GiB past the image.
+///
+/// `lea r11, [rip + kaslr_activate_mapping]` embeds the link-time address in the
+/// instruction instead. RIP-relative data is what PIC code already uses
+/// everywhere, so this needs no relocation and no GOT: the target is the
+/// address in the CURRENT mapping, which is still live because every kernel page
+/// is aliased at its old PD index for the duration of the transition.
+///
+/// `r11` is the SysV callee-saved register for a custom asm entry point, and the
+/// trampoline restores `rsp` from `rdx` rather than popping a frame, so nothing
+/// it does clobbers the value it may still need.
+///
+/// # Safety
+/// Never returns. `new_pml4_phys` must be a physical address of a PML4 built
+/// for the slid image, `slide` the same value that was applied to the
+/// relocation targets, and `old_rsp` a stack pointer valid in the new tables.
+#[inline(never)]
+unsafe fn kaslr_trampoline_entry(new_pml4_phys: u64, slide: u64, old_rsp: u64) -> ! {
+    core::arch::asm!(
+        "lea r11, [rip + kaslr_activate_mapping]",
+        "test r11, r11",
+        "jz 2f",
+        "jmp r11",
+        "2:",
+        "ud2",
+        in("rdi") new_pml4_phys,
+        in("rsi") slide,
+        in("rdx") old_rsp,
+        options(noreturn),
+    );
+}
+
 /// ELF64 relocation entry (matching ELF specification)
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -140,6 +179,7 @@ const R_X86_64_64: u32 = 1;
 
 /// The only relocation type the PIC link emits (type 8).
 const R_X86_64_RELATIVE: u32 = 8;
+
 const R_X86_64_32S: u32 = 11;
 const R_X86_64_PLT32: u32 = 4;
 const R_X86_64_PC32: u32 = 2;
@@ -553,13 +593,44 @@ pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
     }
 
     // Write pass. Deliberately silent -- see the dry run above.
+    //
+    // The table must be snapshotted first: 272 of the targets on the current
+    // image live INSIDE `.rela` itself, so writing in place would rewrite the
+    // very entries this loop is still iterating. The walk would then read
+    // already-slid r_offset values as if they were addresses, and write to
+    // whatever they decoded to -- all of it inside the image, so the range gate
+    // cannot catch it. 544 KB is affordable and the page is already mapped.
+    // Collect the targets first, then write them. In-place iteration is unsafe:
+    // some targets live inside `.rela` itself, so a write would corrupt entries
+    // this loop has not read yet. The dry run above already proved every target
+    // is in-image, so no target needs re-checking here.
+    // Write pass, iterating BACKWARDS.
+    //
+    // In-place forward iteration is unsafe here: 272 of the targets on the
+    // current image live inside `.rela` itself, so a forward write corrupts
+    // entries the walk has not read yet. The corrupted r_offset still decodes
+    // to an in-image address, so the range gate cannot catch it -- the kernel
+    // wrote to a word chosen by garbage and triple-faulted somewhere unrelated.
+    //
+    // Walking backwards needs no buffer at all, and the fix is the direction:
+    // entry i is only ever overwritten after entry i has been read, and every
+    // entry above it has already been consumed. 32K u64 on the boot stack would
+    // have been the alternative, and the kernel exposes no typed allocator to
+    // put it on the heap instead.
+    //
+    // `r_offset` is read once, before the write to that same entry.
     let mut applied = 0u64;
-    for i in 0..count {
+    let mut i = count;
+    while i > 0 {
+        i -= 1;
         let rel = &*rela_start.add(i);
         if rel.get_type() != R_X86_64_RELATIVE {
             continue;
         }
-        let p = rel.r_offset as *mut u64;
+        let target = rel.r_offset;
+        let p = target as *mut u64;
+        // TEMP INSTRUMENT: boundary markers only. `serial_write` reads statics,
+        // and we are mid-slide, so this may itself fault -- that is the point.
         // wrapping_add: `overflow-checks` is on under the audit profile, where a
         // plain `+` here would abort the kernel part-way through the slide.
         p.write_volatile(p.read_volatile().wrapping_add(slide));
@@ -865,8 +936,24 @@ pub unsafe fn activate_kaslr_mapping() {
     // Callers must not have applied the slide already.
     apply_kaslr_relocations(slide);
 
-    // Call the assembly trampoline - never returns
-    kaslr_activate_mapping(new_pml4_phys, slide, old_rsp);
+    // Call the trampoline WITHOUT going through a relocated reference.
+    //
+    // After the slide, every data reference in the image resolves into the new
+    // address space, which does not exist until the CR3 switch that the
+    // trampoline itself performs. A normal `extern "C"` call reaches its target
+    // through a GOT slot, and that slot was just relocated -- so the call
+    // would target an address that is not mapped, which is the fetch fault at
+    // ~1 GiB past the image that this kernel triple-faulted on.
+    //
+    // Taking the address of the trampoline and calling through the pointer is
+    // no better: the same GOT load feeds it. What is safe is a `call` to a
+    // link-time constant, which RIP-relative code already is, so the target is
+    // the address in the CURRENT (un-slid) mapping -- still mapped, because
+    // every kernel page is aliased at its old PD index for exactly this reason.
+    //
+    // SAFETY: `kaslr_trampoline_entry` is `-> !` and never returns. The three
+    // arguments are values already held in registers or stack slots.
+    unsafe { kaslr_trampoline_entry(new_pml4_phys, slide, old_rsp) }
 }
 
 /// Get the current KASLR slide value
