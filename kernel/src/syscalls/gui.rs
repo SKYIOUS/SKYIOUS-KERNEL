@@ -267,6 +267,10 @@ pub fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
             if buf.is_null() {
                 return comp.clipboard.len() as u64;
             }
+            // Without this the copy is a kernel write to an arbitrary address.
+            if !crate::syscalls::user_access::validate_ptr(buf, copy_len) {
+                return crate::syscalls::errno::Errno::EFAULT as u64;
+            }
             unsafe {
                 core::ptr::copy_nonoverlapping(comp.clipboard.as_ptr(), buf, copy_len);
             }
@@ -277,6 +281,11 @@ pub fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
             if buf.is_null() || len == 0 {
                 comp.clipboard.clear();
                 return 0;
+            }
+            // Without this the copy reads an arbitrary address into clipboard
+            // state that mode 0 can then hand back to userspace.
+            if !crate::syscalls::user_access::validate_ptr(buf, len as usize) {
+                return crate::syscalls::errno::Errno::EFAULT as u64;
             }
             let mut new_data = alloc::vec![0u8; len as usize];
             unsafe {

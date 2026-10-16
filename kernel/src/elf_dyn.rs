@@ -153,15 +153,34 @@ fn map_lib_segments(
     Ok(max_end)
 }
 
-fn parse_dt_entries(dyn_vaddr: u64, mapper: &impl Translate) -> [(u64, u64); 32] {
-    let phys = mapper
-        .translate_addr(VirtAddr::new(dyn_vaddr))
-        .expect("parse_dt_entries: address not mapped in target address space");
+/// Bytes of the strtab that are actually backed by the mapped region.
+///
+/// `DT_STRSZ` is read from the file and is therefore attacker-controlled, while
+/// `translate_addr` validates a single page. Every strtab scan must be bounded
+/// by this, not by the declared size.
+pub(crate) fn strtab_mapped_bytes(strtab_vaddr: u64) -> usize {
+    4096usize - (strtab_vaddr as usize & 0xFFF)
+}
+
+/// Number of 16-byte dynamic entries readable from a single validated page.
+/// `translate_addr` proves one page; the walk must not read past it.
+const DT_ENTRIES_PER_PAGE: usize = 4096 / 16;
+
+pub(crate) fn parse_dt_entries(dyn_vaddr: u64, mapper: &impl Translate) -> [(u64, u64); 32] {
+    let phys = match mapper.translate_addr(VirtAddr::new(dyn_vaddr)) {
+        Some(p) => p,
+        None => return [(0u64, 0u64); 32],
+    };
     let ptr = phys_to_virt(phys.as_u64()) as *const u64;
     let mut out = [(0u64, 0u64); 32];
     let mut idx = 0;
-    for i in 0..1024 {
+    // Bounded by the page translate_addr validated, not by a fixed count: a
+    // table with no DT_NULL must not drive a read past mapped memory.
+    for i in 0..DT_ENTRIES_PER_PAGE {
+        // SAFETY: i < DT_ENTRIES_PER_PAGE, so ptr.add(i*2) and ptr.add(i*2+1)
+        // stay within the single page translate_addr validated above.
         let tag = unsafe { core::ptr::read_unaligned(ptr.add(i * 2)) };
+        // SAFETY: same bound, offset i*2+1 is the last u64 of the pair.
         let val = unsafe { core::ptr::read_unaligned(ptr.add(i * 2 + 1)) };
         if tag == DT_NULL {
             break;
@@ -178,26 +197,37 @@ fn get_dt(entries: &[(u64, u64); 32], tag: u64) -> Option<u64> {
     entries.iter().find(|&&(t, _)| t == tag).map(|&(_, v)| v)
 }
 
-fn read_dt_str(
+pub(crate) fn read_dt_str(
     offset: u64,
     strtab: u64,
     strsz: usize,
     mapper: &impl Translate,
 ) -> Result<String, &'static str> {
-    let phys = mapper
-        .translate_addr(VirtAddr::new(strtab))
-        .expect("read_dt_str: strtab not mapped in target address space");
+    let phys = match mapper.translate_addr(VirtAddr::new(strtab)) {
+        Some(p) => p,
+        None => return Err("strtab not mapped in target address space"),
+    };
     let ptr = phys_to_virt(phys.as_u64()) as *const u8;
+    // DT_STRSZ comes from the file, so it is attacker-controlled and may exceed
+    // what is actually mapped. translate_addr validated one page from `strtab`;
+    // clamp the declared size to that page so the scan below cannot walk past
+    // validated memory in ring 0.
+    let mapped = strtab_mapped_bytes(strtab);
+    let strsz = strsz.min(mapped);
     let o = offset as usize;
     if o >= strsz {
         return Err("String offset out of bounds");
     }
     let mut end = o;
     unsafe {
+        // SAFETY: end starts at o < strsz <= mapped bytes from ptr, and the
+        // loop stops at strsz, so ptr.add(end) stays inside the validated page.
         while end < strsz && *ptr.add(end) != 0 {
             end += 1;
         }
     }
+    // SAFETY: ptr.add(o) .. ptr.add(end) with end <= strsz <= mapped, so the
+    // slice lies entirely within the page translate_addr validated.
     let slice = unsafe { core::slice::from_raw_parts(ptr.add(o), end - o) };
     core::str::from_utf8(slice)
         .map(|s| s.to_string())

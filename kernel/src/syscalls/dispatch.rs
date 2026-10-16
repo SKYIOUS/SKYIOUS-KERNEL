@@ -849,7 +849,7 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
         t,
         args,
         numbers::SYS_SYMLINKAT,
-        fs::sys_symlinkat(args.a2 as *const u8, args.a1 as i64, args.a3 as *const u8)
+        fs::sys_symlinkat(args.a1 as *const u8, args.a2 as i64, args.a3 as *const u8)
     );
     sys_handler!(
         t,
@@ -1056,7 +1056,7 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
         t,
         args,
         numbers::SYS_INOTIFY_RM_WATCH,
-        inotify::sys_inotify_rm_watch(args.a1, args.a3 as u32)
+        inotify::sys_inotify_rm_watch(args.a1, args.a2 as u32)
     );
     sys_handler!(
         t,

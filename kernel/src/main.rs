@@ -243,6 +243,24 @@ pub unsafe extern "C" fn _start() -> ! {
         core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'K',
             options(nostack, nomem, preserves_flags));
     }
+    km_entry_marker();
+    // Debug marker: O for first pass, Q for second pass
+    extern "C" {
+        static __kernel_start: u8;
+    }
+    const LINK_BASE: usize = 0xFFFFFFFF80000000;
+    let kernel_start_addr = unsafe { &__kernel_start as *const u8 as usize };
+    let marker = if kernel_start_addr != LINK_BASE { b'Q' } else { b'O' };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3f8",
+            "mov al, {}",
+            "out dx, al",
+            in(reg_byte) marker,
+            options(nostack, preserves_flags)
+        );
+    }
     kernel_main()
 }
 
@@ -264,6 +282,18 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 
 pub fn oom_kill() -> ! {
     crate::task::oom::handle_oom()
+}
+
+pub unsafe fn km_entry_marker() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3f8",
+            "mov al, 'M'",
+            "out dx, al",
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 pub fn init_serial() {
@@ -442,7 +472,138 @@ pub extern "C" fn post_kaslr_continue() -> ! {
     }
 }
 
+/// Late initialization entry point: runs after KASLR trampoline has switched CR3.
+/// This is called from kernel_main() when KASLR_APPLIED is already set.
+fn goto_late_init() -> ! {
+    crate::serial_write("[DEBUG] goto_late_init entry\n");
+
+    // Skip KASLR re-initialization; trampoline already ran.
+    crate::serial_write("[DEBUG] calling init_serial\n");
+    init_serial();
+
+    // Early debug output to verify serial works
+    let slide = crate::KASLR_DEBUG_SLIDE.load(core::sync::atomic::Ordering::Relaxed);
+    serial_write("[KASLR] init: slide = 0x");
+    serial_write_hex(slide);
+    serial_write("\n[KASLR] init done\n");
+
+    // T-00 test-mode announce
+    #[cfg(feature = "self_test")]
+    serial_write("[SELFTEST] T-00 test mode active\n");
+
+    unsafe {
+        crate::arch::CurrentArch::init_cpu();
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    let hhdm = crate::limine::hhdm_offset();
+    #[cfg(not(target_arch = "aarch64"))]
+    let (mut _mapper, mut _frame_allocator) = unsafe {
+        let phys_mem_offset = x86_64::VirtAddr::new(hhdm);
+        boot::init::init_memory(phys_mem_offset)
+    };
+    #[cfg(target_arch = "aarch64")]
+    {
+        serial_write("[BOOT] memory::init...\n");
+        let hhdm = crate::limine::hhdm_offset();
+        let mut mapper = unsafe { memory::init_aarch64(hhdm) };
+        serial_write("[BOOT] memory::init done\n");
+        serial_write("[BOOT] frame allocator...\n");
+        unsafe { memory::init_frame_allocator_limine() };
+        let mut frame_allocator = memory::buddy::BuddyFrameAllocator;
+        serial_write("[BOOT] heap init...\n");
+        allocator::init_heap(&mut mapper, &mut frame_allocator)
+            .expect("heap initialization failed");
+        serial_write("[BOOT] HHDM mapping done\n");
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    unsafe {
+        boot::init::init_graphics(&mut _mapper, &mut _frame_allocator)
+    };
+
+    // KASLR was already applied by the trampoline on first kernel_main entry.
+    // This is the late init path - no need to activate KASLR again.
+    // Debug: print KASLR slide value
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let slide = crate::KASLR_DEBUG_SLIDE.load(core::sync::atomic::Ordering::Relaxed);
+        serial_write("[KASLR] slide = 0x");
+        serial_write_hex(slide);
+        serial_write("\n");
+    }
+
+    crate::serial_write("[DEBUG] before scheduler init\n");
+    // Continue with normal late init
+    serial_write("[BOOT] scheduler init...\n");
+    crate::serial_write("[DEBUG] calling task::scheduler::init\n");
+    task::scheduler::init();
+
+    #[cfg(feature = "self_test")]
+    {
+        serial_write("[SELF-TEST] registering tests...\n");
+        tests::register_all();
+        serial_write("[SELF-TEST] running...\n");
+        coverage::init();
+        selftest::run_all();
+        serial_write(&alloc::format!(
+            "[COVERAGE] unique={}, total={}, ratio={:.4}\n",
+            coverage::unique_blocks(),
+            coverage::total_hits(),
+            coverage::coverage_ratio()
+        ));
+    }
+
+    serial_write("[BOOT] GUI init...\n");
+    gui::init();
+
+    task::scheduler::spawn(boot::tasks::run_async_tasks);
+    task::scheduler::spawn(drivers::usb::usb_hid_poller);
+    task::scheduler::spawn(boot::tasks::init_os_task);
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        x86_64::instructions::interrupts::enable();
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("msr daifclr, #2");
+    }
+
+    #[cfg(feature = "verification")]
+    {
+        let _vreport = crate::verified::runner::VERIFICATION_RUNNER.lock().report();
+        serial_write("[VERIFY] boot-phase invariant checks complete\n");
+    }
+
+    task::scheduler::schedule();
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
+}
+
 fn kernel_main() -> ! {
+    // Debug marker N at start of kernel_main (second pass)
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3f8",
+            "mov al, 'N'",
+            "out dx, al",
+            options(nostack, preserves_flags)
+        );
+    }
+    // Check if KASLR is already applied by comparing __kernel_start to LINK_BASE.
+    // If KASLR was applied, __kernel_start will be at LINK_BASE + slide.
+    extern "C" {
+        static __kernel_start: u8;
+    }
+    const LINK_BASE: usize = 0xFFFFFFFF80000000;
+    let kernel_start_addr = unsafe { &__kernel_start as *const u8 as usize };
+    if kernel_start_addr != LINK_BASE {
+        // KASLR already applied - jump to late init
+        goto_late_init();
+    }
+
     // Seed stack canary BEFORE any function with stack protection runs.
     let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
     let base = if entropy == 0 {
@@ -509,17 +670,11 @@ fn kernel_main() -> ! {
         serial_write_hex(slide);
         serial_write("\n");
 
-        // Relocations are applied inside activate_kaslr_mapping, after the new
-        // page tables are built and immediately before the CR3 switch. Building
-        // the tables reads kernel statics (hhdm_offset, the buddy allocator), so
-        // the slide cannot be applied until that work is done -- a relocated
-        // static resolves into an address space that does not exist yet.
+        // Activate KASLR: build new page tables, apply relocations, and jump via trampoline.
+        // This must happen after memory is initialized (so we can allocate page tables)
+        // but before we touch any relocated statics.
         unsafe {
             crate::kaslr_reloc::activate_kaslr_mapping();
-        }
-        // Never reached
-        loop {
-            crate::arch::CurrentArch::halt();
         }
     }
 }

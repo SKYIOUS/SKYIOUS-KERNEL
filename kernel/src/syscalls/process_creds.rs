@@ -472,6 +472,11 @@ pub fn sys_getgroups(size: i32, list: *mut u32) -> u64 {
     if size < groups.len() {
         return errno::Errno::EINVAL as u64;
     }
+    // Validate before slicing: from_raw_parts_mut lets ring 0 write the group
+    // list into a kernel address.
+    if !user_access::validate_ptr(list as *const u8, core::mem::size_of::<u32>() * groups.len()) {
+        return errno::Errno::EFAULT as u64;
+    }
     let slice = unsafe { core::slice::from_raw_parts_mut(list, groups.len()) };
     for (i, g) in groups.iter().enumerate() {
         slice[i] = *g;
@@ -487,6 +492,11 @@ pub fn sys_setgroups(size: i64, list: *const u32) -> u64 {
         return errno::Errno::EINVAL as u64;
     }
     let count = size as usize;
+    // Validate before slicing: from_raw_parts over a userspace pointer lets
+    // ring 0 adopt kernel memory as the group list.
+    if count > 0 && !user_access::validate_ptr(list as *const u8, core::mem::size_of::<u32>() * count) {
+        return errno::Errno::EFAULT as u64;
+    }
     let slice = if count > 0 {
         unsafe { core::slice::from_raw_parts(list, count) }
     } else {

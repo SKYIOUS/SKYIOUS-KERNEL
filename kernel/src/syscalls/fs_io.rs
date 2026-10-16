@@ -240,6 +240,12 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
         Some(FileDescriptor::InotifyFd { instance_key, .. }) => {
             let key = instance_key;
 
+            // inotify_read writes the event header and watch name through this
+            // slice, so an unvalidated `buf` is an arbitrary-address kernel
+            // write. Validate before the slice exists.
+            if !user_access::validate_ptr(buf, count) {
+                return errno::Errno::EFAULT as u64;
+            }
             match super::inotify::inotify_read(key, unsafe {
                 core::slice::from_raw_parts_mut(buf, count)
             }) {
@@ -368,6 +374,11 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             let inst = guard
                 .downcast_mut::<crate::syscalls::io_uring::IoUringInstance>()
                 .expect("IoUringFd did not contain IoUringInstance");
+            // submit_sqes reads every entry out of this slice, so an
+            // unvalidated `buf` reads a kernel address in ring 0.
+            if !user_access::validate_ptr(buf, n_sqes * sqe_size) {
+                return errno::Errno::EFAULT as u64;
+            }
             let sqes = unsafe {
                 core::slice::from_raw_parts(
                     buf as *const crate::syscalls::io_uring::IoSqEntry,

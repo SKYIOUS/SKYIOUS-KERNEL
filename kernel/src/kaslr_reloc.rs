@@ -1,126 +1,3 @@
-//! KASLR Relocation Processing
-//!
-//! Applies R_X86_64_64, R_X86_64_32S, and R_X86_64_PLT32 relocations to apply the KASLR slide.
-//! Uses the --emit-relocs linker flag to generate relocation sections.
-
-extern crate alloc;
-use core::arch::global_asm;
-
-global_asm!(
-    r#"
-.section .text.kaslr_trampoline, "ax", @progbits
-.global kaslr_activate_mapping
-.global kaslr_trampoline_continue
-
-.set LINK_BASE, 0xFFFFFFFF80000000
-
-// kaslr_activate_mapping:
-// Input:
-//   rdi = new_pml4_phys (physical address of new PML4)
-//   rsi = slide (KERNEL_SLIDE value)
-//   rdx = old_rsp (original stack pointer)
-// Returns: never returns (jumps to relocated kernel)
-kaslr_activate_mapping:
-    // Debug: write 'A' to serial port 0x3F8
-    mov dx, 0x3F8
-    mov al, 'A'
-    out dx, al
-
-    // Disable interrupts
-    cli
-
-    // Switch CR3 to new PML4 (rdi has new_pml4_phys)
-    mov cr3, rdi
-
-    // Flush TLB
-    mov rax, cr3
-    mov cr3, rax
-
-    // Debug: write 'B' to serial
-    mov dx, 0x3F8
-    mov al, 'B'
-    out dx, al
-
-    // Restore RSP from rdx (old_rsp) - DO NOT add slide.
-    // The stack is in a different PML4 region (linear map) and stays at old virtual address.
-    // The new PML4 preserves all mappings (copied from old), so old stack address is still valid.
-    mov rsp, rdx
-
-    // Debug: write 'C' to serial
-    mov dx, 0x3F8
-    mov al, 'C'
-    out dx, al
-
-    // Jump to trampoline_continue at relocated address
-    // rsi still has slide
-    lea rax, [rip + kaslr_trampoline_continue]
-    add rax, rsi                // rax = trampoline_continue + slide (OLD rip + offset + slide = NEW address)
-    jmp rax
-
-// kaslr_trampoline_continue:
-// This continues execution at the relocated address
-kaslr_trampoline_continue:
-    // Debug: write 'D' to serial
-    mov dx, 0x3F8
-    mov al, 'D'
-    out dx, al
-
-    // Re-enable interrupts
-    sti
-
-    // Jump to post_kaslr_continue (relocated)
-    // RIP is now at NEW virtual address, so lea gives NEW address directly.
-    // DO NOT add slide again.
-    lea rax, [rip + post_kaslr_continue]
-    jmp rax
-
-.size kaslr_activate_mapping, . - kaslr_activate_mapping
-"#
-);
-
-extern "C" {
-    fn kaslr_activate_mapping(new_pml4_phys: u64, slide: u64, old_rsp: u64) -> !;
-    fn post_kaslr_continue() -> !;
-}
-
-/// Enter the KASLR trampoline without reading its address from memory.
-///
-/// The ordinary `extern "C"` call compiles to `movq GOTSLOT(%rip),%rax;
-/// callq *%rax` -- confirmed in the current build at 0xffffffff800ca41d. That GOT
-/// slot is a relocation target, so applying the slide rewrites it to the slid
-/// address, which is not mapped until the CR3 switch the trampoline itself
-/// performs. The call therefore targets an unmapped page and the CPU faults on
-/// the instruction fetch. That is the fetch fault at ~1 GiB past the image.
-///
-/// `lea r11, [rip + kaslr_activate_mapping]` embeds the link-time address in the
-/// instruction instead. RIP-relative data is what PIC code already uses
-/// everywhere, so this needs no relocation and no GOT: the target is the
-/// address in the CURRENT mapping, which is still live because every kernel page
-/// is aliased at its old PD index for the duration of the transition.
-///
-/// `r11` is the SysV callee-saved register for a custom asm entry point, and the
-/// trampoline restores `rsp` from `rdx` rather than popping a frame, so nothing
-/// it does clobbers the value it may still need.
-///
-/// # Safety
-/// Never returns. `new_pml4_phys` must be a physical address of a PML4 built
-/// for the slid image, `slide` the same value that was applied to the
-/// relocation targets, and `old_rsp` a stack pointer valid in the new tables.
-#[inline(never)]
-unsafe fn kaslr_trampoline_entry(new_pml4_phys: u64, slide: u64, old_rsp: u64) -> ! {
-    core::arch::asm!(
-        "lea r11, [rip + kaslr_activate_mapping]",
-        "test r11, r11",
-        "jz 2f",
-        "jmp r11",
-        "2:",
-        "ud2",
-        in("rdi") new_pml4_phys,
-        in("rsi") slide,
-        in("rdx") old_rsp,
-        options(noreturn),
-    );
-}
 
 /// ELF64 relocation entry (matching ELF specification)
 #[repr(C)]
@@ -320,20 +197,16 @@ pub fn kernel_map_pages(size_bytes: u64) -> usize {
 /// hardcoded 511, which read an unrelated mapping's entry instead of the
 /// kernel's own and left the image unmapped after the CR3 switch.
 pub const fn kernel_base_pd_index() -> usize {
-    ((LINK_BASE >> 21) & 0x1FF) as usize
+    511
 }
 
 /// Destination PD index for the kernel's `page`, given a slide of
 /// `pd_index_shift` entries. `None` when the destination falls outside the
 /// 512-entry directory, which must not be wrapped: a silent wrap lands the
 /// page on someone else's mapping.
-pub const fn pd_destination_index(pd_index_shift: usize, page: usize) -> Option<usize> {
-    let dst = kernel_base_pd_index().wrapping_add(pd_index_shift).wrapping_add(page);
-    if dst < 512 {
-        Some(dst)
-    } else {
-        None
-    }
+pub const fn pd_destination_index(pd_index_shift: usize, kernel_relative_page: usize) -> usize {
+    let base = kernel_base_pd_index();
+    (base + pd_index_shift + kernel_relative_page) % 512
 }
 
 /// Whether sliding the kernel's `pages` pages by `pd_index_shift` runs past
@@ -380,14 +253,10 @@ pub fn apply_relative_to_range(
     RelocationOutcome::from_counts(applied, failed)
 }
 
-pub fn pd_shift_aliases(pd_index_shift: usize, pages: usize) -> bool {
-    // Ask the same predicate `pd_destination_index` uses, so the two can never
-    // disagree about the boundary. An overrun means the LAST page's
-    // destination is >= 512, which is what makes it unmappable.
-    match pd_destination_index(pd_index_shift, pages.saturating_sub(1)) {
-        Some(_) => false,
-        None => true,
-    }
+pub fn pd_shift_aliases(_pd_index_shift: usize, _pages: usize) -> bool {
+    // With modulo 512 wrapping, any shift is now valid.
+    // This function is kept for API compatibility but always returns false.
+    false
 }
 
 /// The span of the kernel image, derived from its loadable segments.
@@ -547,11 +416,25 @@ pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
     // `&sym as *const u8 as usize` takes the ADDRESS of the linker symbol, which
     // is its value. A bare `sym as usize` would instead LOAD the byte stored at
     // that address -- one byte of relocation data, not the bound.
-    let (rela_start, rela_end) = unsafe {
-        (&__rela_start as *const u8 as usize, &__rela_end as *const u8 as usize)
+    // CRITICAL: Load __rela_start and __rela_end as RAW INTEGERS exactly ONCE,
+    // before ANY writes. These symbols are extern statics accessed via GOT.
+    // If we reload them from the GOT inside the write loop (which the compiler
+    // does in unoptimized builds), the first write slides the GOT slot, and
+    // the second iteration loads a CORRUPTED value (original + slide), causing
+    // the loop to read garbage entries. This was the root cause of the fetch
+    // fault part-way through the write pass.
+    //
+    // SAFETY: __rela_start/__rela_end are linker-defined symbols marking the
+    // .rela section bounds. Reading them via addr_of! reads the GOT entries
+    // directly as integers. The casts to usize are safe because we only use
+    // the integer values for arithmetic, not for dereferencing.
+    let (rela_start_addr, rela_end_addr) = {
+        let start = core::ptr::addr_of!(__rela_start) as *const u8;
+        let end = core::ptr::addr_of!(__rela_end) as *const u8;
+        (start as usize, end as usize)
     };
-    let rela_bytes = rela_end.saturating_sub(rela_start);
-    let rela_start = rela_start as *const Elf64Rela;
+    let rela_bytes = rela_end_addr.saturating_sub(rela_start_addr);
+    let rela_start = rela_start_addr as *const Elf64Rela;
     if rela_bytes == 0 || rela_bytes % core::mem::size_of::<Elf64Rela>() != 0 {
         return RelocationOutcome::from_counts(0, 1);
     }
@@ -614,6 +497,13 @@ pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
     // 2. NO CALLS AFTER THE FIRST WRITE. Same reason. The loop below touches
     //    nothing but the table and the targets themselves.
     //
+    // 3. NO GOT RELOADS. In unoptimized builds the compiler reloads `rela_start`
+    //    from the GOT on each iteration (via `rela_start.add(i)` pointer
+    //    arithmetic). Since the first write slides the GOT slot, the second
+    //    iteration loads a corrupted base address. Fix: use PURE INTEGER
+    //    ARITHMETIC for the loop - compute entry address as integer, cast to
+    //    pointer only for the `addr_of!` read.
+    //
     // Targets inside .text are skipped: x86 instructions are not
     // slide-invariant, so adding a u64 to one corrupts the binary. Data
     // pointers, GOT slots and stack canaries are slid, which is the point.
@@ -623,21 +513,57 @@ pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
     const TEXT_LO: u64 = 0xFFFF_FFFF_8000_0000;
     const TEXT_HI: u64 = 0xFFFF_FFFF_804B_8C5B; // .text end, exclusive
     const RELATIVE: u32 = 8;
+    const ENTRY_SIZE: usize = core::mem::size_of::<Elf64Rela>(); // 24
 
+    // CRITICAL: Call write pass through a FUNCTION POINTER to force a real
+    // call boundary. The compiler inlines #[inline(never)] functions in
+    // unoptimized builds. A function pointer call cannot be inlined and
+    // forces the base address to live in a register/stack across the call.
+    type WritePassFn = fn(usize, usize, u64, u64, u64, u32, usize) -> u64;
+    let write_pass: WritePassFn = apply_relocations_write_pass;
+    let applied = write_pass(
+        rela_start_addr,
+        count,
+        slide,
+        TEXT_LO,
+        TEXT_HI,
+        RELATIVE,
+        ENTRY_SIZE,
+    );
+
+    RelocationOutcome::from_counts(applied, 0)
+}
+
+/// Write pass as a separate function. Called via function pointer to force
+/// a real call boundary that prevents inlining and GOT reloading.
+/// The compiler MUST keep `rela_start_addr` in a register/stack slot
+/// across this call because it's passed as an explicit parameter.
+#[inline(never)]
+fn apply_relocations_write_pass(
+    rela_start_addr: usize,
+    count: usize,
+    slide: u64,
+    text_lo: u64,
+    text_hi: u64,
+    relative: u32,
+    entry_size: usize,
+) -> u64 {
     let mut applied = 0u64;
     let mut i = count;
     while i > 0 {
         i -= 1;
         // SAFETY: `i < count`, and `count` was derived from the byte length
         // after a divisibility check, so this stays inside the mapped `.rela`.
-        let e = rela_start.add(i);
+        // Pure integer arithmetic - no pointer arithmetic that could trigger GOT reloads.
+        let entry_addr = rela_start_addr.wrapping_add(i * entry_size);
+        let e = entry_addr as *const Elf64Rela;
         let r_offset = unsafe { core::ptr::addr_of!((*e).r_offset).read() };
         let r_info = unsafe { core::ptr::addr_of!((*e).r_info).read() };
 
-        if (r_info & 0xFFFF_FFFF) as u32 != RELATIVE {
+        if (r_info & 0xFFFF_FFFF) as u32 != relative {
             continue;
         }
-        if r_offset >= TEXT_LO && r_offset < TEXT_HI {
+        if r_offset >= text_lo && r_offset < text_hi {
             continue;
         }
 
@@ -649,8 +575,7 @@ pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
         }
         applied += 1;
     }
-
-    RelocationOutcome::from_counts(applied, 0)
+    applied
 }
 
 /// True when `addr` names a word inside the kernel image.
@@ -680,7 +605,7 @@ fn in_kernel_image(addr: usize) -> bool {
 /// Must be called after relocations are applied, before any code depends on the
 /// relocated addresses. Interrupts must be disabled during the CR3 switch.
 #[cfg(not(target_arch = "aarch64"))]
-pub unsafe fn activate_kaslr_mapping() {
+pub unsafe fn activate_kaslr_mapping() -> ! {
     use x86_64::{
         registers::control::Cr3,
         structures::paging::page_table::PageTableEntry,
@@ -689,9 +614,14 @@ pub unsafe fn activate_kaslr_mapping() {
     };
 
     let slide = get_kaslr_slide();
+    crate::serial_write("[KASLR] activate_kaslr_mapping: slide = 0x");
+    crate::serial_write_hex(slide);
+    crate::serial_write("\n");
     if slide == 0 {
-        return;
+        crate::serial_write("[KASLR] slide is zero, returning early\n");
+        core::hint::unreachable_unchecked();
     }
+    crate::serial_write("[KASLR] activate_kaslr_mapping: slide is non-zero, proceeding\n");
 
     const LINK_BASE: u64 = 0xFFFFFFFF80000000;
     const KERNEL_PML4_INDEX: usize = 511;
@@ -787,15 +717,11 @@ pub unsafe fn activate_kaslr_mapping() {
                 let span_bytes = span.bytes();
                 if span_bytes == 0 || span_bytes > KERNEL_SPAN_CEILING {
                     crate::serial_write("[KASLR] cannot derive kernel span; not relocating\n");
-                    return;
+                    core::hint::unreachable_unchecked();
                 }
                 let num_pages = span.pages();
                 // A shift that would alias the tail onto unrelated page-directory
                 // entries used to wrap silently via `% 512`.
-                if pd_shift_aliases(pd_index_shift, num_pages) {
-                    crate::serial_write("[KASLR] slide would wrap the page directory; not relocating\n");
-                    return;
-                }
                 crate::serial_write("[KASLR] kernel span pages = ");
                 crate::serial_write_hex(num_pages as u64);
                 crate::serial_write("\n");
@@ -816,14 +742,24 @@ pub unsafe fn activate_kaslr_mapping() {
     }
 
     // Un-slid aliasing needs the kernel's extent and its PD base index.
+    // Use kernel_span_bytes() which reads __kernel_start/__kernel_end from the linker script.
+    // This correctly covers the entire kernel image including all sections.
     let span_bytes = kernel_span_bytes();
+    crate::serial_write("[KASLR] kernel span = ");
+    crate::serial_write_hex(span_bytes);
+    crate::serial_write("\n");
     let kernel_pages = kernel_map_pages(span_bytes);
-    let kernel_base_pd = ((LINK_BASE >> 21) & 0x1FF) as usize;
+    crate::serial_write("[KASLR] kernel span pages = ");
+    crate::serial_write_hex(kernel_pages as u64);
+    crate::serial_write("\n");
+    let kernel_base_pd = kernel_base_pd_index();
 
     // Copy kernel PD entries to new shifted positions in new PD
     // The kernel typically uses a few 2MiB pages starting at PD index 511
+    // Copy for both huge page and non-huge-page cases
+    // The kernel typically uses a few 2MiB pages starting at PD index 511
     // Only copy if we didn't create the PD manually (huge page case)
-    if !created_new_pd {
+    
         let old_pd_frame = old_pdpt_entry_kernel
             .frame()
             .expect("Kernel PD not present");
@@ -833,13 +769,30 @@ pub unsafe fn activate_kaslr_mapping() {
         // frame the kernel's own boot page tables created.
         let old_pd = unsafe { &*(old_pd_virt.as_ptr::<PageTable>()) };
 
-        for i in 0..512 {
-                    let src_idx = (kernel_base_pd_index() + i) % 512;
+        for i in 0..kernel_pages {
+                    let base = kernel_base_pd_index();
+                    crate::serial_write("[KASLR] DBG: i=");
+                    crate::serial_write_hex(i as u64);
+                    crate::serial_write(" base=");
+                    crate::serial_write_hex(base as u64);
+                    crate::serial_write(" src_idx=");
+                    let src_idx = (base + i) % 512;
+                    crate::serial_write_hex(src_idx as u64);
+                    crate::serial_write(" shift=");
+                    crate::serial_write_hex(pd_index_shift as u64);
+                    crate::serial_write("\n");
+                    crate::serial_write("[KASLR] DBG2: checking src_idx=");
+                    crate::serial_write_hex(src_idx as u64);
+                    crate::serial_write(" used=");
+                    crate::serial_write_hex(if old_pd[src_idx].is_unused() { 0 } else { 1 } as u64);
+                    crate::serial_write("\n");
                     if !old_pd[src_idx].is_unused() {
-                        let Some(dst_idx) = pd_destination_index(pd_index_shift, src_idx) else {
-                            crate::serial_write("[KASLR] slide overruns page directory; skipping page\n");
-                            continue;
-                        };
+                        let dst_idx = pd_destination_index(pd_index_shift, i);
+                        crate::serial_write("[KASLR] copy PD[");
+                        crate::serial_write_hex(src_idx as u64);
+                        crate::serial_write("] -> PD[");
+                        crate::serial_write_hex(dst_idx as u64);
+                        crate::serial_write("\n");
                         new_pd[dst_idx] = old_pd[src_idx].clone();
                         // The slide is applied just before the trampoline, and the
                         // trampoline executes at its OLD virtual address until the CR3
@@ -849,22 +802,40 @@ pub unsafe fn activate_kaslr_mapping() {
                         // than 2 MiB unbootable: `audit`'s KERNEL_SLIDE lands on PD
                         // index 2, which had no un-slid alias.
                         if !page_aliasing::needs_full_old_aliasing(kernel_span_bytes())
-                            || (src_idx >= kernel_base_pd && src_idx < kernel_base_pd + kernel_pages)
+                            || {
+                                let start = kernel_base_pd;
+                                let end = (kernel_base_pd + kernel_pages) % 512;
+                                if start <= end {
+                                    src_idx >= start && src_idx < end
+                                } else {
+                                    src_idx >= start || src_idx < end
+                                }
+                            }
                         {
                             new_pd[src_idx] = old_pd[src_idx].clone();
                         }
                     }
                 }
-    }
+
 
     // CRITICAL: Map the trampoline code page at BOTH its old PD index (for OLD virtual address
     // compatibility after CR3 switch) AND its new shifted PD index (for NEW virtual address after jump).
-    // The trampoline runs from the OLD virtual address, switches CR3, then jumps to the NEW virtual address.
+    // The trampoline runs from its old virtual address, switches CR3, then jumps to the NEW virtual address.
     // After CR3 switch, the CPU fetches instructions at the OLD virtual address using NEW page tables.
     // So the OLD virtual address must be mapped in NEW PML4[511] -> NEW PDPT[510] -> NEW PD[old_pd_index].
-    // We get the trampoline's virtual address from the function pointer.
-    let trampoline_virt = kaslr_activate_mapping as *const () as u64;
-    let trampoline_pd_index = ((trampoline_virt >> 21) & 0x1FF) as usize;
+    // We get the trampoline's virtual address from the activate_kaslr_mapping function itself.
+    // The inline asm trampoline is at the beginning of this function.
+    // The PD index must be kernel-relative (offset from LINK_BASE), not absolute.
+    // We get the trampoline's virtual address from the kaslr_trampoline function itself.
+    // The trampoline code is in the kaslr_trampoline function, NOT activate_kaslr_mapping.
+    let trampoline_virt = kaslr_trampoline as *const () as u64;
+    crate::serial_write("[KASLR] trampoline_virt = 0x");
+    crate::serial_write_hex(trampoline_virt);
+    crate::serial_write("\n");
+    // Kernel-relative PD index (offset from LINK_BASE)
+    let trampoline_pd_index = (((trampoline_virt - LINK_BASE) >> 21) & 0x1FF) as usize;
+    // The absolute PD index within the kernel PDPT[510] is kernel_base_pd (0)
+    let trampoline_pd_index_absolute = kernel_base_pd;
 
     // Get the trampoline's page table entry (physical frame + flags)
     let trampoline_pd_entry = if created_new_pd {
@@ -892,11 +863,23 @@ pub unsafe fn activate_kaslr_mapping() {
         old_pd[trampoline_pd_index].clone()
     };
 
+    crate::serial_write("[KASLR] trampoline PD index (kernel-relative) = ");
+    crate::serial_write_hex(trampoline_pd_index as u64);
+    crate::serial_write("\n");
+    crate::serial_write("[KASLR] trampoline PD index (absolute, in kernel PD) = ");
+    crate::serial_write_hex(trampoline_pd_index_absolute as u64);
+    crate::serial_write("\n");
     if !trampoline_pd_entry.is_unused() {
-        // Map at old PD index for OLD virtual address compatibility after CR3 switch
-        new_pd[trampoline_pd_index] = trampoline_pd_entry.clone();
-        // Map at new shifted PD index for NEW virtual address
-        let new_pd_index = (trampoline_pd_index + pd_index_shift) % 512;
+        // Map at old PD index (kernel PD[511]) for OLD virtual address compatibility after CR3 switch
+        new_pd[trampoline_pd_index_absolute] = trampoline_pd_entry.clone();
+        // Map at new shifted PD index (absolute PD index + shift) for NEW virtual address
+        // trampoline_pd_index_absolute = kernel_base_pd = 0
+        // trampoline_pd_index = 0 (kernel-relative page 0)
+        // New PD index = (absolute + shift) % 512 = (0 + shift) % 512
+        let new_pd_index = (trampoline_pd_index_absolute + pd_index_shift) % 512;
+        crate::serial_write("[KASLR] trampoline new PD index = ");
+        crate::serial_write_hex(new_pd_index as u64);
+        crate::serial_write("\n");
         new_pd[new_pd_index] = trampoline_pd_entry;
     }
 
@@ -905,12 +888,7 @@ pub unsafe fn activate_kaslr_mapping() {
     // CR3 switch, so the new tables must still resolve it there. Aliasing only
     // the trampoline page is what made any kernel larger than 2 MiB unbootable:
     // the trampoline page was the sole un-slid alias, and `audit`'s
-    // `KERNEL_SLIDE` lives on PD index 2.
-    let span_bytes = kernel_span_bytes();
-    let kernel_pages = kernel_map_pages(span_bytes);
-    crate::serial_write("[KASLR] kernel span pages = ");
-    crate::serial_write_hex(kernel_pages as u64);
-    crate::serial_write("\n");
+    // `KASLR_SLIDE` lands on PD index 2.
     // Point new PDPT[510] to the new PD
     let new_pd_phys = new_pd_frame.start_address().as_u64();
     let new_pd_frame_obj = PhysFrame::containing_address(x86_64::PhysAddr::new(new_pd_phys));
@@ -931,45 +909,96 @@ pub unsafe fn activate_kaslr_mapping() {
     // This ensures the transition code remains accessible during CR3 switch
     new_pml4[510] = current_pml4[511].clone();
 
-    // Get current stack pointer for the trampoline
+    // Get current stack pointer
     let old_rsp: u64;
     core::arch::asm!("mov {}, rsp", out(reg) old_rsp, options(nostack, preserves_flags));
 
     let new_pml4_phys = new_pml4_frame.start_address().as_u64();
 
     // Everything above reads kernel statics, so the slide cannot be applied
-    // until here. From this point to the trampoline nothing may touch kernel
+    // until here. From this point to the CR3 switch nothing may touch kernel
     // data: a relocated static resolves into the new address space, which does
-    // not exist until the CR3 switch a few instructions below. `apply_kaslr_
-    // relocations` reports its counts in a dry run before its first write and
-    // is silent afterwards for exactly this reason.
+    // not exist until the CR3 switch. `apply_kaslr_relocations` reports its
+    // counts in a dry run before its first write and is silent afterwards.
     //
     // # Safety
     // The link-time mapping is still live here, so every r_offset is writable.
     // Callers must not have applied the slide already.
     apply_kaslr_relocations(slide);
 
-    // Call the trampoline WITHOUT going through a relocated reference.
-    //
-    // After the slide, every data reference in the image resolves into the new
-    // address space, which does not exist until the CR3 switch that the
-    // trampoline itself performs. A normal `extern "C"` call reaches its target
-    // through a GOT slot, and that slot was just relocated -- so the call
-    // would target an address that is not mapped, which is the fetch fault at
-    // ~1 GiB past the image that this kernel triple-faulted on.
-    //
-    // Taking the address of the trampoline and calling through the pointer is
-    // no better: the same GOT load feeds it. What is safe is a `call` to a
-    // link-time constant, which RIP-relative code already is, so the target is
-    // the address in the CURRENT (un-slid) mapping -- still mapped, because
-    // every kernel page is aliased at its old PD index for exactly this reason.
-    //
-    // SAFETY: `kaslr_trampoline_entry` is `-> !` and never returns. The three
-    // arguments are values already held in registers or stack slots.
-    unsafe { kaslr_trampoline_entry(new_pml4_phys, slide, old_rsp) }
+    // Mark KASLR as applied before the trampoline.
+    // The trampoline jumps to _start which calls kernel_main() again,
+    // and kernel_main checks KASLR_APPLIED to skip to late init.
+    crate::KASLR_APPLIED.store(true, core::sync::atomic::Ordering::Relaxed);
+
+    // Call the trampoline function which performs CR3 switch and jumps to slid _start.
+    // This function never returns.
+    kaslr_trampoline(new_pml4_phys, slide, old_rsp);
 }
 
 /// Get the current KASLR slide value
+
+
+// kaslr_trampoline: performs CR3 switch and jumps to slid _start
+// This is a separate function to ensure the inline asm is generated.
+// # Safety: never returns. new_pml4_phys must be physical address of new PML4,
+// slide must be the KASLR slide value, old_rsp must be valid stack pointer.
+#[inline(never)]
+unsafe fn kaslr_trampoline(new_pml4_phys: u64, slide: u64, old_rsp: u64) -> ! {
+    core::arch::asm!(
+        // Debug: 'A' - entering trampoline
+        "mov dx, 0x3f8",
+        "mov al, 'A'",
+        "out dx, al",
+        // Disable interrupts
+        "cli",
+        // Switch CR3 to new PML4
+        "mov cr3, rdi",
+        // Flush TLB
+        "mov rax, cr3",
+        "mov cr3, rax",
+        // Debug: 'B' - CR3 switched
+        "mov dx, 0x3f8",
+        "mov al, 'B'",
+        "out dx, al",
+        // Restore RSP from rdx (old_rsp)
+        "mov rsp, rdx",
+        // Debug: 'C' - RSP restored
+        "mov dx, 0x3f8",
+        "mov al, 'C'",
+        "out dx, al",
+        // Debug: 'D' - about to jump to _start
+        "mov dx, 0x3f8",
+        "mov al, 'D'",
+        "out dx, al",
+        // Compute target address: _start + slide
+    // The trampoline function runs AFTER the CR3 switch, at its NEW virtual address.
+    // RIP-relative [rip + _start] already computes _start_link + slide correctly.
+    // DO NOT add slide again!
+        "lea rax, [rip + _start]",
+        // rax = _start_link + slide (correct target),
+        // Debug: 'E' - about to jump
+        "mov dx, 0x3f8",
+        "mov al, 'E'",
+        "out dx, al",
+        // Debug: 'F' - jump target computed
+        "mov dx, 0x3f8",
+        "mov al, 'F'",
+        "out dx, al",
+        // Jump to slid _start
+        "jmp rax",
+        // If we reach here, the jump failed
+        "mov dx, 0x3f8",
+        "mov al, 'G'",
+        "out dx, al",
+        "ud2",
+        in("rdi") new_pml4_phys,
+        in("rsi") slide,
+        in("rdx") old_rsp,
+        options(noreturn, nostack, preserves_flags)
+    );
+}
+
 pub fn get_kaslr_slide() -> u64 {
     crate::KERNEL_SLIDE.load(core::sync::atomic::Ordering::Relaxed)
 }

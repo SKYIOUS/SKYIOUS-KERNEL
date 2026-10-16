@@ -8,6 +8,11 @@
 #   .\tests\smp_stress.ps1 -Cpus "2,4,8"   # Specific counts
 #   .\tests\smp_stress.ps1 -TimeoutSeconds 120
 
+#
+# IMPORTANT: this script must be pointed at a SELF_TEST image. The production
+# image (bootimage-vahi_kernel.bin) is built without the `self_test` feature,
+# so the fuzzer and stress suites are not compiled in and every boot would
+# report success while testing nothing.
 param(
     [string]$Cpus = "1,2,4,8",
     [int]$TimeoutSeconds = 120,
@@ -17,7 +22,7 @@ param(
 $ErrorActionPreference = "Stop"
 $rootDir = $PSScriptRoot | Split-Path -Parent
 $bios = Join-Path $rootDir "OVMF.fd"
-$img = Join-Path $rootDir "bootimage-vahi_kernel.bin"
+$img = Join-Path $rootDir "bootimage-selftest.bin"
 
 if (!(Test-Path $img)) {
     Write-Host "ERROR: Boot image not found at $img" -ForegroundColor Red

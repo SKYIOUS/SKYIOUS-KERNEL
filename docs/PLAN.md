@@ -322,3 +322,165 @@ Each phase has a verification gate. Don't start the next phase until the current
 | `docs/kernel-future-plan.md` | Superseded by this plan's Tier 3 |
 | `tasks/plan.md` | A4/A5 tasks are complete |
 | `tasks/todo.md` | This plan's task tables replace it |
+
+---
+
+## Phase A0: KASLR Relocation Correctness (issue A-6)
+
+KASLR currently randomises the page mapping without correcting a single
+embedded pointer. The kernel boots only because every old address stays
+aliased, so a green self-test suite is **not** evidence that KASLR works.
+This phase makes the relocation actually happen, or makes its absence honest.
+
+Evidence ledger: `docs/architecture/issues.md` (A-6), inventory in
+`docs/architecture/UNDONE-audit-profile.md`.
+
+### Architecture decision
+
+`--emit-relocs` is now on the root `.cargo/config.toml`, which produces
+124,765 `.rela.text` + 15,866 `.rela.rodata` + 1 `.rela.data` entries that
+were previously absent. The emitted type is `R_X86_64_64` (291,977 entries),
+**not** `R_X86_64_RELATIVE` — the walk logic differs from the original plan.
+
+The blocker is placement: lld emits these as non-alloc (`sh_addr = 0`) and
+refuses to place them, so `__rela_start`/`__rela_end` never materialise.
+
+### Tasks
+
+#### A0.1 — Diagnose why lld will not place the `.rela` output section
+**Description:** `__rela_start`/`__rela_end` stay missing and `__kernel_end`
+is byte-identical across three different definitions of the section's extent.
+Get lld to state the reason instead of inferring it.
+
+**Acceptance criteria:**
+- [ ] `llvm-nm` shows `__rela_start`/`__rela_end` resolving to real addresses
+- [ ] `.rela` appears as an output section with `SHF_ALLOC` set
+- [ ] The `.rela` section falls inside a `PT_LOAD`
+
+**Verification:**
+- [ ] `cargo build --profile audit --target x86_64-unknown-none --features self_test -Zbuild-std=core,alloc`
+- [ ] `llvm-readobj --sections` shows `.rela` with `Address != 0` and `alloc=True`
+- [ ] `llvm-nm` shows both symbols
+- [ ] Boot still reports 177/177
+
+**Approaches to try, in order** (do not repeat these, already ruled out):
+1. `-Wl,-t` or `--print-map` trace to see lld's section-placement decision
+2. `*(.rela.*)` catch-all, not an enumerated list
+3. Force `SHF_ALLOC` on the inputs via `llvm-objcopy --set-section-flags`
+4. **Fallback if lld refuses:** have `build.rs` generate a `.S`/`.o` carrying the
+   table as ordinary alloc data, sidestepping lld's own emission entirely
+
+**Dependencies:** None
+**Files:** `linker.ld`, `kernel/build.rs`, `builder/build_limine_image.py`
+**Scope:** S
+
+#### A0.2 — Replace the ELF-header magic gate with a symbol-driven walk
+**Description:** Once A0.1 lands, rewrite `apply_kaslr_relocations`
+(kaslr_reloc.rs:443-499) to iterate `__rela_start..__rela_end` instead of
+walking `e_shoff`/section headers. Delete the gate at :455.
+
+**Acceptance criteria:**
+- [ ] `apply_kaslr_relocations` reads no ELF header and never checks magic
+- [ ] It returns `RelocationOutcome` (:154-180), which is currently test-only
+- [ ] `main.rs:517` prints the outcome instead of an unconditional lie
+- [ ] `read_kernel_segments` (:347-376) and `Elf64Phdr64` (:379-390) deleted
+
+**Verification:**
+- [ ] RED first: a test that asserts `applied > 0` fails before, passes after
+- [ ] Boot serial shows a non-zero applied count
+- [ ] 177/177 still pass
+- [ ] `[KASLR] match:` reports YES (needs A0.4)
+
+**Dependencies:** A0.1
+**Files:** `kernel/src/kaslr_reloc.rs`, `kernel/src/main.rs`
+**Scope:** M
+
+#### A0.3 — Handle relocation types correctly
+**Description:** The table is `R_X86_64_64`, not `RELATIVE`. Each type needs
+the right treatment: `R_X86_64_64`/1 (291,977) is `*offset += slide`;
+`R_X86_64_32S`/11 (28,922) and `R_X86_64_PC32`/2 (579) are relative-to-symbol
+and must **not** be blindly slid; `GOTPCREL`/9 (1,032) is RIP-relative and
+self-adjusts.
+
+**Acceptance criteria:**
+- [ ] Each type is either applied correctly or explicitly skipped with a reason
+- [ ] No relocation is applied to an address outside `[__kernel_start, __kernel_end)`
+- [ ] Skipped types are counted and reported, not silently dropped
+
+**Verification:**
+- [ ] Per-type counters visible in boot serial
+- [ ] 177/177 pass
+- [ ] Disassemble 3 known `movabs` targets post-slide and confirm they carry
+      `link_va + slide`
+
+**Dependencies:** A0.2
+**Files:** `kernel/src/kaslr_reloc.rs`
+**Scope:** M
+
+#### A0.4 — Fix the false `match: NO` in the KASLR verification
+**Description:** `main.rs:350` compares a RIP sampled 24 bytes into the
+prologue against the function's *entry* address. The check is wrong, not the
+trampoline. Measured: `actual - slide - link_va = 24`.
+
+**Acceptance criteria:**
+- [ ] `match:` reports YES on a correct slide
+- [ ] The check still reports NO when the slide genuinely mismatches
+
+**Verification:**
+- [ ] Boot serial shows `match: YES`
+- [ ] A deliberately wrong slide is still detected
+
+**Dependencies:** A0.2
+**Files:** `kernel/src/main.rs`
+**Scope:** XS
+
+#### A0.5 — Decide honest KASLR behaviour if A0.2/A0.3 fail
+**Description:** If the relocation cannot be made to work, the kernel must not
+present a broken KASLR as a working one. Options: gate it off behind an
+explicit opt-in, or report `applied=0` loudly at boot.
+
+**Acceptance criteria:**
+- [ ] `apply_kaslr_relocations` cannot report success while applying nothing
+- [ ] The boot log states the true relocation count
+
+**Verification:**
+- [ ] With relocations unavailable, the log says so and does not claim success
+
+**Dependencies:** A0.2, A0.3
+**Files:** `kernel/src/kaslr_reloc.rs`, `kernel/src/main.rs`
+**Scope:** S
+
+### Checkpoint: after A0.1
+- [ ] `.rela` is alloc and mapped
+- [ ] 177/177 still pass (no regression from adding the section)
+- [ ] Image size impact recorded
+
+### Checkpoint: after A0.4
+- [ ] Relocations actually applied; boot serial shows non-zero count
+- [ ] `match: YES`
+- [ ] 177/177 pass
+- [ ] A-6 closable in `issues.md`
+
+### Risks
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| lld refuses to place `.rela` outright | HIGH | A0.1 step 4 fallback: generate the table from `build.rs` |
+| Sliding `R_X86_64_PC32` breaks code | HIGH | A0.3 skips relative types; verify by disassembly |
+| Adding `.rela` grows the loadable image ~3.4 MB | MED | Acceptable; it is 3 pages |
+| Full old-page aliasing masked this for years | MED | A0.5 makes it report honestly |
+| Release profile already red (`.size` asm) | LOW | Untouched; separate issue |
+
+### Not in this phase
+- `cargo build --release` red at HEAD (pre-existing, 4 errors at `HEAD~3` too)
+- The 105-boot reliability matrix (needs a re-run after A0.4)
+- `audit_ovf` / `audit_dbg` / `audit_small` boots against the current tree
+- Dead code cleanup: `coverage::record_block` has no callers; `kernel/linker.ld`
+  is a dead duplicate of the root script
+- Wiring `tests/mod.rs` (shared with another contributor's uncommitted work)
+
+### Open questions
+- Does the `.rela` table survive the `AT(PHYS_BASE + (. - VIRT_BASE))` load
+  addressing, or does it need explicit copy-to-RAM handling like `.bss`?
+- Should A3.1 (KASLR entropy) wait until A0.2 lands? Better entropy on a
+  mapping that is not relocated is not worth much.

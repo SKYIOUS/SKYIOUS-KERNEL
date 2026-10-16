@@ -261,13 +261,26 @@ def main() -> int:
         return INFRA_ERROR
     ovmf = find_ovmf(root, args.ovmf)
 
-    serial_path = args.serial or os.path.join(tempfile.gettempdir(), "vahi_t00_serial.log")
+    # A shared default serial path makes concurrent runs destroy each other's
+    # capture: one run truncates the file the other is still reading, which
+    # surfaces as a spurious BOOT_FAILURE. Default to a unique path per run so
+    # parallel boots are independent; --serial still overrides it.
+    if args.serial:
+        serial_path = args.serial
+    else:
+        serial_path = os.path.join(
+            tempfile.gettempdir(), f"vahi_t00_serial_{os.getpid()}.log"
+        )
     log_path = args.log or os.path.join("tests", "t00_last_run.log")
-    for p in (serial_path,):
+    # Remove any leftover capture so a stale file is never parsed as this run's
+    # verdict. Absence is the normal first-run case; only a genuine failure to
+    # remove (e.g. Windows file locking) is an error.
+    if os.path.exists(serial_path):
         try:
-            os.remove(p)
-        except OSError:
-            pass
+            os.remove(serial_path)
+        except OSError as exc:
+            print(f"INFRASTRUCTURE_ERROR: could not clear {serial_path}: {exc}")
+            return INFRA_ERROR
 
     print(f"=== T-00 QEMU self-test runner ===")
     print(f"image : {image}")

@@ -10,6 +10,7 @@ SECTIONS
     .text : AT(PHYS_BASE + (. - VIRT_BASE))
     {
         *(.text .text.*)
+        KEEP(*(.text.kaslr_trampoline))
     }
 
     . = ALIGN(4K);
@@ -39,6 +40,27 @@ SECTIONS
         *(.got .got.*)
     }
 
+    /* Relocation tables for KASLR. lld emits .rela.text/.rela.rodata/.rela.data
+       as NON-alloc sections by default (sh_addr = 0), so they live only in the
+       file and are never mapped -- the kernel cannot read them at runtime, and
+       apply_kaslr_relocations has nothing to walk (issue A-6). Making them alloc
+       and placing them inside a PT_LOAD makes them reachable once the bootloader
+       has loaded the image.
+
+       The .rela.debug_* tables are not collected: they are non-alloc debug
+       metadata, so leaving them out keeps ~36 MB out of the image. Note they
+       must NOT be added to /DISCARD/: lld resolves /DISCARD/ first, and doing
+       so took the runtime tables with them. */
+    . = ALIGN(4K);
+    .rela : AT(PHYS_BASE + (. - VIRT_BASE))
+    {
+        KEEP(*(.rela.text))
+        KEEP(*(.rela.rodata))
+        KEEP(*(.rela.data))
+        KEEP(*(.rela.got))
+        KEEP(*(.rela.dyn))
+    }
+
     /DISCARD/ :
     {
         *(.hash)
@@ -57,7 +79,10 @@ SECTIONS
 
    Assigned here, outside SECTIONS: inside SECTIONS an assignment is
    section-relative, and ADDR/SIZEOF only yield an absolute address here.
-   `.got` is the LAST section in the script, so its end is the image end --
-   `.bss` is not, and using it left `.got` 2184 bytes outside the span. */
+   `.rela` is the LAST section in the script, so its end is the image end.
+   `.got` was not (it left .got 2184 bytes outside the span) and `.bss` is not
+   either. */
 __kernel_start = VIRT_BASE;
-__kernel_end = ADDR(.got) + SIZEOF(.got);
+__rela_start = ADDR(.rela);
+__rela_end = __rela_start + SIZEOF(.rela);
+__kernel_end = __rela_end;

@@ -456,6 +456,12 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
                 addr: u64,
                 len: u64,
             }
+            // Validate the userspace array BEFORE any slice is built over it:
+            // from_raw_parts alone lets ring 0 read a kernel address.
+            let iovec_bytes = core::mem::size_of::<IoVec>() * nr_args as usize;
+            if !user_access::validate_ptr(arg as *const u8, iovec_bytes) {
+                return Errno::EFAULT as u64;
+            }
             let iovecs =
                 unsafe { core::slice::from_raw_parts(arg as *const IoVec, nr_args as usize) };
             inst.fixed_buffers = iovecs
@@ -472,6 +478,12 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
             if arg == 0 || nr_args == 0 || nr_args > 1024 {
                 return Errno::EINVAL as u64;
             }
+            if !user_access::validate_ptr(
+                arg as *const u8,
+                core::mem::size_of::<i32>() * nr_args as usize,
+            ) {
+                return Errno::EFAULT as u64;
+            }
             let fds = unsafe { core::slice::from_raw_parts(arg as *const i32, nr_args as usize) };
             inst.fixed_files = fds.to_vec();
             0
@@ -483,6 +495,9 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
         IORING_REGISTER_EVENTFD => {
             if arg == 0 {
                 return Errno::EINVAL as u64;
+            }
+            if !user_access::validate_ptr(arg as *const u8, core::mem::size_of::<i32>()) {
+                return Errno::EFAULT as u64;
             }
             let efd_fd = unsafe { core::ptr::read_volatile(arg as *const i32) };
             if efd_fd < 0 {

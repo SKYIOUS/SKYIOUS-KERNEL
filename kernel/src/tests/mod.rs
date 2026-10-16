@@ -6,15 +6,23 @@
 // Simple test framework for no_std kernel testing. Tests are run during
 // boot and results are printed via serial output.
 
+pub mod abi_args;
 pub mod apic_tests;
 pub mod benchmarks;
 pub mod contract_tests;
 pub mod ebpf_tests;
+pub mod elf_dyn_bounds;
 pub mod ext2_fs_tests;
 pub mod futex_test;
 pub mod fuzzer;
 pub mod harness_tests;
 pub mod init;
+pub mod kernel_stress;
+pub mod pd_base;
+pub mod reloc_apply;
+pub mod ebpf_termination;
+pub mod kaslr_mapping;
+pub mod kaslr_relocation;
 pub mod memory_tests;
 pub mod new_features;
 pub mod panic_path_tests;
@@ -26,6 +34,7 @@ pub mod skyfs_tests;
 pub mod stress;
 #[cfg(not(target_arch = "aarch64"))]
 pub mod sync_tests;
+pub mod userptr_contract;
 pub mod vfs_tests;
 
 /// Test function signature
@@ -63,4 +72,13 @@ pub fn register_all() {
     #[cfg(not(target_arch = "aarch64"))]
     sync_tests::register();
     process_lifecycle_tests::register();
+    userptr_contract::register();
+    abi_args::register();
+    elf_dyn_bounds::register();
+    kernel_stress::register();
+    kaslr_mapping::register();
+    pd_base::register();
+    reloc_apply::register();
+    ebpf_termination::register();
+    kaslr_relocation::register();
 }

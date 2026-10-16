@@ -15,6 +15,12 @@ pub static KASLR_APPLIED: core::sync::atomic::AtomicBool =
 pub static KASLR_DEBUG_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn init_kaslr() {
+    // Guard against re-entry from trampoline: if KASLR already applied, skip entirely.
+    // The trampoline jumps to _start -> kernel_main -> init_kaslr(), so we must bail out.
+    if crate::KASLR_APPLIED.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+
     // Use TSC as entropy source since crypto/limine may not be ready yet
     // SAFETY: _rdtsc is callable at CPL0 on x86_64; this fn is only linked into
     // the x86_64 boot path (no #[cfg] guard mirrors the original main.rs body).

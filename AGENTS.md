@@ -10,6 +10,7 @@ even if tests pass.
 | `CONTEXT.md` | Working agreement, git policy, verification commands |
 | `docs/PLAN.md` | Single source of truth for what's next |
 | `docs/decisions/` | ADRs. New decision → new ADR; conflicts reopen via ADR only |
+| `docs/architecture/issues.md` | Verified open-debt ledger (confirmed defects not yet fixed) |
 | `docs/architecture/` | Architecture reviews, strategic roadmap |
 | `docs/tested-working.md` | Verified status of subsystems — update when status changes |
 | `CONTRIBUTING.md` | Contributor onboarding and PR process |
@@ -199,15 +200,22 @@ crates/                                              # Extracted crates (18 tota
 ## Commands
 - **Build**: `cd kernel && cargo build --release --target x86_64-unknown-none`
 - **Build (debug)**: `cd kernel && cargo build --target x86_64-unknown-none`
-- **Build image**: `python builder/build_limine_image.py --kernel kernel/target/x86_64-unknown-none/release/vahi_kernel --output bootimage-vahi_kernel.bin`
+- **Build image**: `python builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --output bootimage-vahi_kernel.bin`
 - **Make targets**: `make boot` (build + image), `make run` (build + QEMU), `make clean`
 - **QEMU**: `qemu-system-x86_64 -drive file=bootimage-vahi_kernel.bin -m 512M -serial stdio`
 - **QEMU (UEFI)**: `qemu-system-x86_64 -drive if=pflash,format=raw,file=OVMF.fd -drive file=bootimage-vahi_kernel.bin -m 512M -serial stdio`
 - **Selftests**: build with `--features self_test`, boot in QEMU, check serial output
-- **Clippy**: `cd kernel && cargo clippy --target x86_64-unknown-none -- -D warnings`
+- **Gate**: `python tests/run_qemu_tests.py --image <image> --timeout 540 --qemu-extra "-vga none"`
+- **Clippy**: `cd kernel && cargo clippy --release --target x86_64-unknown-none -- -D warnings`
 - **Commits**: conventional prefixes (`feat:`/`fix:`/`docs:`/`refactor:`/`chore:`),
-  atomic per concern, subject ≤72 chars; docs invalidated by a change ship
-  in the same commit.
+  atomic per concern, subject ≤72 chars; docs invalidated by a change ship in
+  the same commit.
+
+**Artifact location:** the binary lands at workspace-root
+`target/x86_64-unknown-none/release/vahi_kernel`, NOT `kernel/target/`. The
+workspace root `Cargo.toml` owns `[profile.release]`; `kernel/Cargo.toml`'s own
+`[profile.*]` tables are ignored (cargo warns "profiles for the non root package
+will be ignored"), so kernel-specific profile settings do not apply.
 
 ## Workspace structure
 - `Cargo.toml` (root) — workspace members: kernel, builder, 18 crates
