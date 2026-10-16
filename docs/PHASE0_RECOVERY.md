@@ -127,8 +127,8 @@ All 6 frozen-revision boots die at the same point, and it is a new observation:
   too. No persisted log in `tests/` contains the `activate_kaslr_mapping`
   output, so no post-arc build is recorded as ever booting; the last persisted
   green boot predates the arc (2026-10-03).
-- Attribution is not bisected (out of scope for Phase 0): the suspect window is
-  the KASLR relocation arc `ad717eb` … `c7a9709` plus its frozen WIP.
+- Attribution: bisected 2026-10-16, same day — see section 8. The break is the
+  atomic `.rela`-table redesign spanning `fab6026` … `e86cbc4`.
 
 ## 7. Documentation drift observed (findings only, not corrected)
 
@@ -143,10 +143,51 @@ All 6 frozen-revision boots die at the same point, and it is a new observation:
 - `docs/architecture/issues.md` audit section — "the 2.6 MB release build boots
   to 161/161" no longer holds for the frozen revision; see section 6.
 
+## 8. Bisect — where boot broke (measured 2026-10-16, same day)
+
+Method: scratch worktree (`C:\Windows\Temp\opencode\vahi-bisect`, removed after)
+checked out at each revision; built from the worktree's `kernel/` directory with
+the frozen recipe (`cargo build --release --target x86_64-unknown-none
+--features self_test -Zbuild-std=core,alloc`); images built and booted with the
+frozen repo's `builder/build_limine_image.py` and `tests/run_qemu_tests.py`
+(UEFI/OVMF, smp1, `-vga none`). Runs sequential. Evidence: `bisect/` subdir.
+
+| Revision | Subject | Link | Boot |
+|---|---|---|---|
+| `5a6ffdb` | pre-arc (docs) | OK | **PASS 146/146** |
+| `ad717eb` | link kernel PIC (arc 1) | OK | **PASS 146/146** — trampoline A→D, slid RIP `0xffffffff8927b91c` |
+| `84863de` | apply RELATIVE relocations (arc 2) | OK | **PASS 146/146** — slide `0x9200000`, trampoline A→D, `[KASLR-VERIFY]` OK |
+| `fab6026` | walk alloc `.rela` table (arc 3) | **FAIL** — `undefined symbol: __rela_end` | — |
+| `a8318fd` | slide after page tables (arc 4) | FAIL (same) | — |
+| `12f8b39` | backwards iteration (arc 5) | FAIL (same) | — |
+| `8e65741` | exclude `.text` (arc 6) | FAIL (same) | — |
+| `c7a9709` | GOT-free write loop (arc 7) | FAIL (same) | — |
+| `e86cbc4` | freeze (arc + WIP) | OK | **FAIL** — dies after `A`, before `B` (§6) |
+
+- Last revision that builds and boots: **`84863de`**. First buildable revision
+  containing the `.rela`-table redesign: **`e86cbc4` itself**, and it does not
+  boot. `fab6026` … `c7a9709` are not independently buildable: their linker
+  script half never existed in a commit — `__rela_start`/`__rela_end` first
+  appear in root `linker.ld` in `e86cbc4` (`git log --all -S__rela_start`). The
+  freeze's `kernel/linker.ld` still lacks them (dead copy; the root script is
+  the live one — the freeze links).
+- Conclusion: the boot regression is the **atomic `.rela`-table redesign**
+  spanning `fab6026` … `e86cbc4` (relocations sourced from a custom alloc
+  `.rela` output section, plus reworked trampoline and link glue). It cannot be
+  pinned to a single arc commit because the intermediate commits were never
+  buildable standalone. Booting ends at `84863de`.
+- Related finding: `stash@{1}` (`architecture-refactor-v1`, "T-00 quarantine:
+  broken KASLR WIP …") holds a divergent WIP variant of the same area
+  (`kernel/linker.ld`, `kernel/.cargo/config.toml`, `crates/limine/src/lib.rs`,
+  `kernel/src/main.rs`); it is not part of the freeze and was left untouched.
+
 ## Evidence file map
 
 `tests/recovery-2026-10-16/`: `build_selftest.log`, `build_prod.log`,
 `build_prod_image.log`, `clippy.log`, `selftest.bin`, `prod.bin`,
 `serial_smp{1,2,4,8}.log`, `run_smp{1,2,4,8}.log`, `serial_prod{1,2}.log`,
 `run_prod{1,2}.log`, `control_serial_bench.log`, `control_run_bench.log`.
+`bisect/`: `build_*.log` (link pass/fail per revision), `buildimage_*.log`,
+`serial_{5a6ffdb,ad717eb,84863de}.log`, `run_*.log` for the three booted
+revisions. Boot images were deleted after capture (reproducible; ~300 MB each).
 Archived copy: `evidence\` inside the external freeze folder.
