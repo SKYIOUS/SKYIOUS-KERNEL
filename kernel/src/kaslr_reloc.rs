@@ -15,22 +15,6 @@ impl Elf64Rela {
     }
 }
 
-/// ELF64 section header
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct Elf64Shdr {
-    pub sh_name: u32,
-    pub sh_type: u32,
-    pub sh_flags: u64,
-    pub sh_addr: u64,
-    pub sh_offset: u64,
-    pub sh_size: u64,
-    pub sh_link: u32,
-    pub sh_info: u32,
-    pub sh_addralign: u64,
-    pub sh_entsize: u64,
-}
-
 /// ELF64 header
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -51,17 +35,10 @@ pub struct Elf64Ehdr {
     pub e_shstrndx: u16,
 }
 
-/// Relocation types we handle
-const R_X86_64_64: u32 = 1;
-
-/// The only relocation type the PIC link emits (type 8).
+/// The only relocation type the PIC link emits (type 8). The validator refuses
+/// the whole pass on anything else rather than guessing at a type the
+/// toolchain was not asked to produce.
 const R_X86_64_RELATIVE: u32 = 8;
-
-const R_X86_64_32S: u32 = 11;
-const R_X86_64_PLT32: u32 = 4;
-const R_X86_64_PC32: u32 = 2;
-const R_X86_64_GOTPCREL: u32 = 9;
-const SHT_RELA: u32 = 4;
 
 /// Outcome of a relocation pass, so "relocated nothing" is distinguishable
 /// from "relocated the kernel".
@@ -143,6 +120,12 @@ extern "C" {
     /// so it is the whole input the slide needs -- no ELF header required.
     static __rela_start: u8;
     static __rela_end: u8;
+    /// Writability range for relocation targets, from the root linker script:
+    /// `[__writable_start, __writable_end)` spans exactly the sections the
+    /// segment layout maps writable. Whole-section granularity is enough --
+    /// lld only ever targets allocatable data words.
+    static __writable_start: u8;
+    static __writable_end: u8;
 }
 
 /// Span of the kernel image in bytes, derived from the linker script.
@@ -197,7 +180,7 @@ pub fn kernel_map_pages(size_bytes: u64) -> usize {
 /// hardcoded 511, which read an unrelated mapping's entry instead of the
 /// kernel's own and left the image unmapped after the CR3 switch.
 pub const fn kernel_base_pd_index() -> usize {
-    511
+    ((LINK_BASE >> 21) & 0x1FF) as usize
 }
 
 /// Destination PD index for the kernel's `page`, given a slide of
@@ -212,51 +195,8 @@ pub const fn pd_destination_index(pd_index_shift: usize, kernel_relative_page: u
 /// Whether sliding the kernel's `pages` pages by `pd_index_shift` runs past
 /// the end of the 512-entry directory. Callers must check this rather than
 /// wrap.
-/// Apply the KASLR slide to `R_X86_64_RELATIVE` relocation targets.
-///
-/// PIC links relative to 0, so every entry in the alloc `.rela` section is a
-/// fixed adjustment: the word at `offset + base` gains `slide`. There are no
-/// symbols to resolve and no types to skip.
-///
-/// Only targets that land on an 8-aligned word inside `[base, base + len)` are
-/// touched. Anything else is counted as failed rather than applied: a corrupt
-/// `r_offset` here would fault the kernel part-way through the slide, after the
-/// CR3 switch, with no way back.
-///
-/// The addition is `wrapping_add` on purpose. The `audit` profile runs with
-/// `overflow-checks = true`, where a plain `+` on a near-`u64::MAX` word aborts
-/// the kernel instead of sliding it.
-pub fn apply_relative_to_range(
-    words: &mut [u64],
-    offset_bytes: usize,
-    len_bytes: usize,
-    slide: u64,
-) -> RelocationOutcome {
-    let mut applied = 0u64;
-    let mut failed = 0u64;
-
-    if offset_bytes % 8 != 0 || len_bytes % 8 != 0 {
-        // A table whose bounds are not word-aligned cannot describe words.
-        return RelocationOutcome::from_counts(0, words.len() as u64);
-    }
-
-    for (i, word) in words.iter_mut().enumerate() {
-        if offset_bytes.saturating_add(i * 8) >= len_bytes {
-            // Past the end of the described region.
-            failed += 1;
-            continue;
-        }
-        *word = word.wrapping_add(slide);
-        applied += 1;
-    }
-
-    RelocationOutcome::from_counts(applied, failed)
-}
-
-pub fn pd_shift_aliases(_pd_index_shift: usize, _pages: usize) -> bool {
-    // With modulo 512 wrapping, any shift is now valid.
-    // This function is kept for API compatibility but always returns false.
-    false
+pub fn pd_shift_aliases(pd_index_shift: usize, pages: usize) -> bool {
+    kernel_base_pd_index() + pd_index_shift + pages > 512
 }
 
 /// The span of the kernel image, derived from its loadable segments.
@@ -349,203 +289,322 @@ pub struct Elf64Phdr64 {
 
 const PT_LOAD: u32 = 1;
 
-/// Apply relocations for the given section range.
-///
-/// # Safety
-/// Caller must ensure `rela_start`..`rela_end` is a valid, readable range of Elf64Rela.
-/// The relocation targets must be writable memory.
-unsafe fn apply_relocations_section(
-    rela_start: *const Elf64Rela,
-    rela_end: *const Elf64Rela,
-    slide: u64,
-) {
-    let mut rela = rela_start;
-    while rela < rela_end {
-        let rel = &*rela;
-        match rel.get_type() {
-            R_X86_64_64 => {
-                // 64-bit absolute address: add slide
-                let target = rel.r_offset as *mut u64;
-                *target = target.read_volatile().wrapping_add(slide);
-            }
-            R_X86_64_32S => {
-                // 32-bit signed: add slide (may overflow if slide > 2GB)
-                // We only handle this if the slide fits in 32-bit signed
-                if slide <= i32::MAX as u64 {
-                    let target = rel.r_offset as *mut i32;
-                    let val = target.read_volatile() as i64;
-                    let new_val = val.saturating_add(slide as i64);
-                    target.write_volatile(new_val as i32);
-                }
-            }
-            R_X86_64_PLT32 | R_X86_64_PC32 | R_X86_64_GOTPCREL => {
-                // PC-relative relocations don't need adjustment for KASLR
-                // because they're relative to the instruction pointer
-            }
-            _ => {
-                // Ignore other relocation types
-            }
+/// Everything a relocation-target check needs, cached as raw integers before
+/// the first write. Each field mirrors a linker symbol that is reached through
+/// the GOT, so reloading any of them after a write would read a slid pointer
+/// whose mapping does not exist until the CR3 switch.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ImageBounds {
+    /// First byte of the image (`__kernel_start`).
+    pub start: usize,
+    /// One past the last image byte (`__kernel_end`).
+    pub end: usize,
+    /// First writable byte (`.data`, `__writable_start`).
+    pub writable_start: usize,
+    /// One past the last writable byte (`__writable_end`, the first read-only
+    /// alloc section).
+    pub writable_end: usize,
+}
+
+/// Why one `R_X86_64_RELATIVE` entry was rejected. One rejection refuses the
+/// whole pass -- a half-relocated kernel faults on use, which is the failure
+/// mode this validation exists to prevent.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RelocReject {
+    /// Not `R_X86_64_RELATIVE` (8). The PIC link emits nothing else, so any
+    /// other type is not this toolchain's output and cannot be applied blind.
+    UnsupportedType(u32),
+    /// Targets are 8-byte words; an unaligned target cannot name one.
+    MisalignedOffset(u64),
+    /// Not strictly greater than the previous target. lld emits targets in
+    /// strictly ascending order, so this is a duplicate, an overlap, or a
+    /// corrupt table.
+    NonIncreasingOffset(u64),
+    /// The target (or the 8-byte word it names) is outside the image.
+    OutOfImageOffset(u64),
+    /// The target is in the image but not in a writable section: `.text` and
+    /// `.rodata` are mapped read-only, so a write there faults or corrupts
+    /// code.
+    ReadOnlyOffset(u64),
+    /// `r_addend` -- the link-time value the word must become -- is outside
+    /// `[start, end]`. One-past-end is legitimate (pointers to the image end).
+    OutOfImageAddend(u64),
+    /// `r_addend + slide` cannot be represented in u64.
+    Overflow(u64),
+}
+
+impl RelocReject {
+    /// Short description for the boot log.
+    pub fn describe(self) -> &'static str {
+        match self {
+            RelocReject::UnsupportedType(_) => "unsupported relocation type",
+            RelocReject::MisalignedOffset(_) => "misaligned target",
+            RelocReject::NonIncreasingOffset(_) => "duplicate or overlapping target",
+            RelocReject::OutOfImageOffset(_) => "target outside the image",
+            RelocReject::ReadOnlyOffset(_) => "target in a read-only section",
+            RelocReject::OutOfImageAddend(_) => "addend outside the image",
+            RelocReject::Overflow(_) => "addend + slide overflows",
         }
-        rela = rela.add(1);
     }
+
+    /// The offending value, for the boot log.
+    pub fn value(self) -> u64 {
+        match self {
+            RelocReject::UnsupportedType(v) => v as u64,
+            RelocReject::MisalignedOffset(v)
+            | RelocReject::NonIncreasingOffset(v)
+            | RelocReject::OutOfImageOffset(v)
+            | RelocReject::ReadOnlyOffset(v)
+            | RelocReject::OutOfImageAddend(v)
+            | RelocReject::Overflow(v) => v,
+        }
+    }
+}
+
+/// How the alloc `.rela` region's byte length decomposes into entries.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TableShape {
+    /// Zero bytes: the link emitted no relocation records. Explicit, never a
+    /// silent success.
+    Empty,
+    /// Not a whole number of 24-byte entries.
+    Malformed(u64),
+    /// A whole number of entries.
+    Entries(usize),
+}
+
+impl TableShape {
+    /// Classify a `.rela` region by its byte length.
+    pub fn of(rela_bytes: u64) -> Self {
+        let entry_size = core::mem::size_of::<Elf64Rela>() as u64;
+        if rela_bytes == 0 {
+            TableShape::Empty
+        } else if !rela_bytes.is_multiple_of(entry_size) {
+            TableShape::Malformed(rela_bytes)
+        } else {
+            TableShape::Entries((rela_bytes / entry_size) as usize)
+        }
+    }
+}
+
+/// Validate one entry against the slide and the cached bounds.
+///
+/// `prev_offset` is the previously accepted target; lld emits targets in
+/// strictly ascending order, so requiring each to exceed the last is the
+/// duplicate/overlap guard. Returns `None` when the entry is safe to apply.
+pub fn reject_entry(
+    rel: &Elf64Rela,
+    slide: u64,
+    bounds: &ImageBounds,
+    prev_offset: Option<u64>,
+) -> Option<RelocReject> {
+    let ty = rel.get_type();
+    if ty != R_X86_64_RELATIVE {
+        return Some(RelocReject::UnsupportedType(ty));
+    }
+    let off = rel.r_offset;
+    if !off.is_multiple_of(8) {
+        return Some(RelocReject::MisalignedOffset(off));
+    }
+    if prev_offset.is_some_and(|prev| off <= prev) {
+        return Some(RelocReject::NonIncreasingOffset(off));
+    }
+    let off_us = off as usize;
+    if off_us < bounds.start
+        || off_us
+            .checked_add(core::mem::size_of::<u64>())
+            .is_none_or(|end_of_word| end_of_word > bounds.end)
+    {
+        return Some(RelocReject::OutOfImageOffset(off));
+    }
+    if off_us < bounds.writable_start || off_us >= bounds.writable_end {
+        return Some(RelocReject::ReadOnlyOffset(off));
+    }
+    let addend = rel.r_addend as u64;
+    if addend.checked_add(slide).is_none() {
+        return Some(RelocReject::Overflow(addend));
+    }
+    if addend < bounds.start as u64 || addend > bounds.end as u64 {
+        return Some(RelocReject::OutOfImageAddend(addend));
+    }
+    None
 }
 
 /// Apply all KASLR relocations using the given slide, and report what happened.
 ///
-/// The kernel is linked PIC, so the alloc `.rela` section holds
-/// `R_X86_64_RELATIVE` entries: each is a fixed adjustment, the word at
-/// `r_offset` gains the slide. There are no symbols to resolve.
+/// Under `relocation-model=pic` the alloc `.rela` section holds
+/// `R_X86_64_RELATIVE` entries whose target words are LINK-TIME ZERO: the
+/// link-time value lives in `r_addend`, so the write is `addend + slide`. It is
+/// NOT `word + slide` (the word holds nothing to add to yet -- the old
+/// arithmetic wrote the slide into zero-filled words and lost every link-time
+/// address).
 ///
-/// This no longer reads the ELF header. The header is not in memory -- the
-/// first `PT_LOAD` starts at file offset 0x1000, so file bytes `[0, 0x1000)`
-/// are never mapped and `LINK_BASE` holds `.text` bytes (issue A-6). The table
-/// is reached through linker-emitted bounds instead, which is what
-/// `__rela_start`/`__rela_end` are for.
+/// Validation is all-or-nothing. Every entry is checked before the first
+/// write; one rejection refuses the pass with zero writes, leaving the
+/// link-time world coherent. Reporting (serial output included) therefore
+/// happens only before the first write: afterwards the GOT slots it would
+/// touch are slid and point into address space that does not exist until the
+/// CR3 switch.
+///
+/// The ELF header is not used: the first `PT_LOAD` starts at file offset
+/// 0x1000, so the header is never mapped (issue A-6). The table is reached
+/// through linker-emitted bounds instead.
 ///
 /// # Safety
 /// Must be called before `activate_kaslr_mapping` switches CR3, while the
 /// link-time mapping is still live. Every `r_offset` names an address in that
 /// old mapping, so applying this after the switch would fault.
 pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
-    // Guard against double-application: the slide is an absolute add, so a
-    // second pass would slide the same words twice.
-    if crate::KASLR_APPLIED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+    use core::sync::atomic::Ordering;
+
+    // Guard against double-application: the write is absolute, so a second
+    // pass would slide the same words twice.
+    if crate::KASLR_APPLIED.swap(true, Ordering::AcqRel) {
         return RelocationOutcome::from_counts(0, 1);
     }
 
-    // `&sym as *const u8 as usize` takes the ADDRESS of the linker symbol, which
-    // is its value. A bare `sym as usize` would instead LOAD the byte stored at
-    // that address -- one byte of relocation data, not the bound.
-    // CRITICAL: Load __rela_start and __rela_end as RAW INTEGERS exactly ONCE,
-    // before ANY writes. These symbols are extern statics accessed via GOT.
-    // If we reload them from the GOT inside the write loop (which the compiler
-    // does in unoptimized builds), the first write slides the GOT slot, and
-    // the second iteration loads a CORRUPTED value (original + slide), causing
-    // the loop to read garbage entries. This was the root cause of the fetch
-    // fault part-way through the write pass.
+    // `&sym as *const u8 as usize` takes the ADDRESS of the linker symbol,
+    // which is its value. A bare `sym as usize` would instead LOAD the byte
+    // stored at that address -- one byte of relocation data, not the bound.
+    // Every bound is loaded exactly ONCE, before ANY write: these are extern
+    // statics accessed via the GOT, and the write pass slides their slots. A
+    // reload after the first write would read a slid pointer into the
+    // not-yet-mapped slid address space (the root cause of the original fetch
+    // fault part-way through the write pass).
     //
-    // SAFETY: __rela_start/__rela_end are linker-defined symbols marking the
-    // .rela section bounds. Reading them via addr_of! reads the GOT entries
-    // directly as integers. The casts to usize are safe because we only use
-    // the integer values for arithmetic, not for dereferencing.
-    let (rela_start_addr, rela_end_addr) = {
+    // SAFETY: all are linker-defined symbols; only their numeric values are
+    // taken, never dereferenced.
+    let (rela_start_addr, rela_end_addr, bounds) = {
         let start = core::ptr::addr_of!(__rela_start) as *const u8;
         let end = core::ptr::addr_of!(__rela_end) as *const u8;
-        (start as usize, end as usize)
+        let image_start = core::ptr::addr_of!(__kernel_start) as *const u8;
+        let image_end = core::ptr::addr_of!(__kernel_end) as *const u8;
+        let writable_start = core::ptr::addr_of!(__writable_start) as *const u8;
+        let writable_end = core::ptr::addr_of!(__writable_end) as *const u8;
+        (
+            start as usize,
+            end as usize,
+            ImageBounds {
+                start: image_start as usize,
+                end: image_end as usize,
+                writable_start: writable_start as usize,
+                writable_end: writable_end as usize,
+            },
+        )
     };
-    let rela_bytes = rela_end_addr.saturating_sub(rela_start_addr);
-    let rela_start = rela_start_addr as *const Elf64Rela;
-    if rela_bytes == 0 || rela_bytes % core::mem::size_of::<Elf64Rela>() != 0 {
-        return RelocationOutcome::from_counts(0, 1);
-    }
-    let count = rela_bytes / core::mem::size_of::<Elf64Rela>();
 
-    // Dry run FIRST. Once the slide is written, every relocated global points
-    // into the not-yet-mapped slid address space, so any further code that
-    // touches kernel data -- serial output included -- would fault. Reporting
-    // therefore has to happen before the first write, not after the loop.
-    let mut in_image = 0u64;
-    let mut out_of_image = 0u64;
+    let rela_bytes = rela_end_addr.saturating_sub(rela_start_addr);
+    let count = match TableShape::of(rela_bytes as u64) {
+        TableShape::Empty => {
+            crate::serial_write(
+                "[KASLR] rela entries=0: the link emitted no relocations; refusing to slide\n",
+            );
+            crate::KASLR_APPLIED.store(false, Ordering::Release);
+            return RelocationOutcome::from_counts(0, 0);
+        }
+        TableShape::Malformed(bytes) => {
+            crate::serial_write("[KASLR] rela malformed: ");
+            crate::serial_write_hex(bytes);
+            crate::serial_write(" bytes is not a whole number of 24-byte entries\n");
+            crate::KASLR_APPLIED.store(false, Ordering::Release);
+            return RelocationOutcome::from_counts(0, 1);
+        }
+        TableShape::Entries(count) => count,
+    };
+
+    // Validation pass. Runs entirely before the first write, so it may call,
+    // log, and read any static it likes. Any rejection refuses the pass.
+    let rela_start = rela_start_addr as *const Elf64Rela;
+    let mut accepted = 0u64;
+    let mut rejected = 0u64;
+    let mut first_reject: Option<RelocReject> = None;
+    let mut prev_offset: Option<u64> = None;
     for i in 0..count {
-            // SAFETY: bounded by `count`, which the modulo check made exact, and
-            // `.rela` is an alloc section inside a PT_LOAD.
-            let rel = &*rela_start.add(i);
-            if rel.get_type() == R_X86_64_RELATIVE {
-                // Range gate: targets inside the .text section cannot be slid.
-                // x86 instructions are not slide-invariant; adding a u64 to them
-                // corrupts the binary and the kernel then faults on the next fetch.
-                // Refuse those targets and continue to the next entry.
-                if rel.r_offset >= 0xFFFFFFFF80000000 && rel.r_offset < 0xFFFFFFFF804B8B8A+1 {
-                    continue;
-                }
-                if in_kernel_image(rel.r_offset as usize) {
-                    in_image += 1;
-                } else {
-                    out_of_image += 1;
+        // SAFETY: `i < count`, and `count` was derived from the section's byte
+        // length after the divisibility check above, so this stays inside the
+        // mapped `.rela`.
+        let rel = &*rela_start.add(i);
+        match reject_entry(rel, slide, &bounds, prev_offset) {
+            None => {
+                accepted += 1;
+                prev_offset = Some(rel.r_offset);
+            }
+            Some(reason) => {
+                rejected += 1;
+                if first_reject.is_none() {
+                    first_reject = Some(reason);
                 }
             }
         }
+    }
 
     crate::serial_write("[KASLR] rela entries=");
     crate::serial_write_hex(count as u64);
     crate::serial_write(" in_image=");
-    crate::serial_write_hex(in_image);
+    crate::serial_write_hex(accepted);
     crate::serial_write(" out_of_image=");
-    crate::serial_write_hex(out_of_image);
+    crate::serial_write_hex(rejected);
     crate::serial_write("\n");
 
-    if out_of_image != 0 {
+    if let Some(reason) = first_reject {
         // Refuse to slide a partially-valid table. Half-corrected pointers are
         // strictly worse than none: the image still runs from its link-time
         // mapping, so any relocated reference would fault on use.
-        crate::serial_write("[KASLR] WARNING: out-of-image relocation targets; refusing to slide\n");
-        return RelocationOutcome::from_counts(0, out_of_image);
+        crate::serial_write("[KASLR] WARNING: refusing to slide; ");
+        crate::serial_write(reason.describe());
+        crate::serial_write(" value=0x");
+        crate::serial_write_hex(reason.value());
+        crate::serial_write("\n");
+        crate::KASLR_APPLIED.store(false, Ordering::Release);
+        return RelocationOutcome::from_counts(0, rejected);
     }
 
-    // Write pass.
-    //
-    // Two constraints shape this loop, and both are load-bearing.
+    // Write pass. Constraints, all load-bearing:
     //
     // 1. NO METHOD CALLS. `rel.get_type()` compiles to a call that loads the
-    //    callee through a GOT slot -- and this loop slides GOT slots. Once one
-    //    is written, the next call loads a SLID pointer and jumps to an address
-    //    that is not mapped until the CR3 switch the trampoline has not reached
-    //    yet. That is the observed fault exactly: a fetch fault, CR2 == RIP, at
-    //    a PC roughly a gigabyte past the image. Reading `r_info` as a plain
-    //    field removes the dependency entirely.
+    //    callee through a GOT slot -- and this pass slides GOT slots. Once one
+    //    is written, the next call jumps to an address that is not mapped
+    //    until the CR3 switch. Reading `r_info` as a plain field removes the
+    //    dependency.
+    // 2. NO CALLS AFTER THE FIRST WRITE, for the same reason.
+    // 3. NO GOT RELOADS. Unoptimized builds reload `rela_start` from the GOT
+    //    each iteration; after the first write that slot is slid and the next
+    //    iteration reads a corrupt base. The pass uses pure integer arithmetic
+    //    and casts to a pointer only for the `addr_of!` reads.
     //
-    // 2. NO CALLS AFTER THE FIRST WRITE. Same reason. The loop below touches
-    //    nothing but the table and the targets themselves.
-    //
-    // 3. NO GOT RELOADS. In unoptimized builds the compiler reloads `rela_start`
-    //    from the GOT on each iteration (via `rela_start.add(i)` pointer
-    //    arithmetic). Since the first write slides the GOT slot, the second
-    //    iteration loads a corrupted base address. Fix: use PURE INTEGER
-    //    ARITHMETIC for the loop - compute entry address as integer, cast to
-    //    pointer only for the `addr_of!` read.
-    //
-    // Targets inside .text are skipped: x86 instructions are not
-    // slide-invariant, so adding a u64 to one corrupts the binary. Data
-    // pointers, GOT slots and stack canaries are slid, which is the point.
-    //
-    // Backwards iteration costs nothing and keeps the walk safe if a future
-    // link ever emits a target inside `.rela`.
-    const TEXT_LO: u64 = 0xFFFF_FFFF_8000_0000;
-    const TEXT_HI: u64 = 0xFFFF_FFFF_804B_8C5B; // .text end, exclusive
-    const RELATIVE: u32 = 8;
-    const ENTRY_SIZE: usize = core::mem::size_of::<Elf64Rela>(); // 24
-
-    // CRITICAL: Call write pass through a FUNCTION POINTER to force a real
-    // call boundary. The compiler inlines #[inline(never)] functions in
-    // unoptimized builds. A function pointer call cannot be inlined and
-    // forces the base address to live in a register/stack across the call.
-    type WritePassFn = fn(usize, usize, u64, u64, u64, u32, usize) -> u64;
+    // The pass is called through a FUNCTION POINTER to force a real call
+    // boundary: `#[inline(never)]` alone is not enough in unoptimized builds.
+    type WritePassFn = fn(usize, usize, u64, usize) -> u64;
     let write_pass: WritePassFn = apply_relocations_write_pass;
     let applied = write_pass(
         rela_start_addr,
         count,
         slide,
-        TEXT_LO,
-        TEXT_HI,
-        RELATIVE,
-        ENTRY_SIZE,
+        core::mem::size_of::<Elf64Rela>(),
     );
 
-    RelocationOutcome::from_counts(applied, 0)
+    RelocationOutcome::from_counts(applied, accepted.saturating_sub(applied))
 }
 
-/// Write pass as a separate function. Called via function pointer to force
-/// a real call boundary that prevents inlining and GOT reloading.
-/// The compiler MUST keep `rela_start_addr` in a register/stack slot
-/// across this call because it's passed as an explicit parameter.
+/// Write pass as a separate function, called through a function pointer to
+/// force a real call boundary that prevents inlining and GOT reloading. The
+/// base address must live in a register or stack slot across this call, which
+/// passing it as an explicit parameter guarantees.
+///
+/// The caller's validation pass guaranteed: type 8, 8-aligned target, strictly
+/// ascending targets, a writable in-image target, and an in-image addend whose
+/// `addend + slide` cannot overflow. Nothing here re-checks those; the only
+/// constraint it must honor is doing no calls and reading no statics after its
+/// first write.
+///
+/// Backwards iteration costs nothing and keeps the walk safe if a future link
+/// ever emits a target inside `.rela`: entries ahead of the cursor are read
+/// before the pass can ever write them.
 #[inline(never)]
-fn apply_relocations_write_pass(
+pub(crate) fn apply_relocations_write_pass(
     rela_start_addr: usize,
     count: usize,
     slide: u64,
-    text_lo: u64,
-    text_hi: u64,
-    relative: u32,
     entry_size: usize,
 ) -> u64 {
     let mut applied = 0u64;
@@ -554,44 +613,34 @@ fn apply_relocations_write_pass(
         i -= 1;
         // SAFETY: `i < count`, and `count` was derived from the byte length
         // after a divisibility check, so this stays inside the mapped `.rela`.
-        // Pure integer arithmetic - no pointer arithmetic that could trigger GOT reloads.
+        // Pure integer arithmetic - no pointer arithmetic that could trigger
+        // GOT reloads.
         let entry_addr = rela_start_addr.wrapping_add(i * entry_size);
         let e = entry_addr as *const Elf64Rela;
         let r_offset = unsafe { core::ptr::addr_of!((*e).r_offset).read() };
         let r_info = unsafe { core::ptr::addr_of!((*e).r_info).read() };
+        let r_addend = unsafe { core::ptr::addr_of!((*e).r_addend).read() };
 
-        if (r_info & 0xFFFF_FFFF) as u32 != relative {
-            continue;
-        }
-        if r_offset >= text_lo && r_offset < text_hi {
+        if (r_info & 0xFFFF_FFFF) as u32 != R_X86_64_RELATIVE {
             continue;
         }
 
-        // Volatile so the write is neither elided nor reordered; wrapping_add
-        // so an `overflow-checks` build cannot abort part-way through the slide.
+        // The target word is LINK-TIME ZERO in an alloc RELATIVE relocation;
+        // the link-time value lives in `r_addend`. The entry must therefore be
+        // OVERWRITTEN with `addend + slide`, never added to: the old
+        // `word + slide` wrote the slide into zero-filled words and lost every
+        // link-time address. Volatile so the write is neither elided nor
+        // reordered; `wrapping_add` because validation already proved no
+        // overflow, but an `overflow-checks` build must not be able to abort
+        // part-way through the pass.
+        let value = (r_addend as u64).wrapping_add(slide);
         unsafe {
             let p = r_offset as *mut u64;
-            p.write_volatile(p.read_volatile().wrapping_add(slide));
+            p.write_volatile(value);
         }
         applied += 1;
     }
     applied
-}
-
-/// True when `addr` names a word inside the kernel image.
-///
-/// A `r_offset` outside the image would fault during the slide, after which the
-/// kernel is unrecoverable. Refusing is strictly better than writing.
-fn in_kernel_image(addr: usize) -> bool {
-    // SAFETY: both symbols are absolute addresses emitted by the linker script.
-    // Only their numeric values are taken; neither is dereferenced.
-    let (start, end) = unsafe {
-        (
-            &__kernel_start as *const u8 as usize,
-            &__kernel_end as *const u8 as usize,
-        )
-    };
-    addr >= start && addr.checked_add(core::mem::size_of::<u64>()).is_some_and(|e| e <= end)
 }
 
 /// Activate KASLR by switching to the randomized virtual address space.
@@ -604,8 +653,13 @@ fn in_kernel_image(addr: usize) -> bool {
 /// # Safety
 /// Must be called after relocations are applied, before any code depends on the
 /// relocated addresses. Interrupts must be disabled during the CR3 switch.
+///
+/// Returns without switching only when the relocation pass refused; refusal
+/// makes zero writes, so the link-time world is still coherent and the caller
+/// must continue the boot at link-time addresses. On success it never
+/// returns: the trampoline switches CR3 and jumps to the slid continuation.
 #[cfg(not(target_arch = "aarch64"))]
-pub unsafe fn activate_kaslr_mapping() -> ! {
+pub unsafe fn activate_kaslr_mapping() {
     use x86_64::{
         registers::control::Cr3,
         structures::paging::page_table::PageTableEntry,
@@ -618,8 +672,11 @@ pub unsafe fn activate_kaslr_mapping() -> ! {
     crate::serial_write_hex(slide);
     crate::serial_write("\n");
     if slide == 0 {
-        crate::serial_write("[KASLR] slide is zero, returning early\n");
-        core::hint::unreachable_unchecked();
+        // Defensive: init_kaslr only ever seeds a non-zero 2 MiB-aligned
+        // slide, but refusing here is cheap and safe -- the caller continues
+        // at link-time addresses, where a zero slide is already correct.
+        crate::serial_write("[KASLR] slide is zero; continuing at link addresses\n");
+        return;
     }
     crate::serial_write("[KASLR] activate_kaslr_mapping: slide is non-zero, proceeding\n");
 
@@ -919,20 +976,30 @@ pub unsafe fn activate_kaslr_mapping() -> ! {
     // until here. From this point to the CR3 switch nothing may touch kernel
     // data: a relocated static resolves into the new address space, which does
     // not exist until the CR3 switch. `apply_kaslr_relocations` reports its
-    // counts in a dry run before its first write and is silent afterwards.
+    // counts in a validation pass before its first write and is silent
+    // afterwards.
     //
     // # Safety
     // The link-time mapping is still live here, so every r_offset is writable.
     // Callers must not have applied the slide already.
-    apply_kaslr_relocations(slide);
+    let outcome = apply_kaslr_relocations(slide);
+    if !outcome.succeeded() {
+        // Refusal made zero writes, so the link-time world is still coherent
+        // and late boot can run from the link mapping without a slide. This is
+        // strictly better than jumping into the slid address space on
+        // unrelocated pointers.
+        crate::serial_write("[KASLR] relocation refused (applied=");
+        crate::serial_write_hex(outcome.applied());
+        crate::serial_write(" failed=");
+        crate::serial_write_hex(outcome.failed());
+        crate::serial_write("); continuing at link addresses\n");
+        return;
+    }
 
-    // Mark KASLR as applied before the trampoline.
-    // The trampoline jumps to _start which calls kernel_main() again,
-    // and kernel_main checks KASLR_APPLIED to skip to late init.
-    crate::KASLR_APPLIED.store(true, core::sync::atomic::Ordering::Relaxed);
-
-    // Call the trampoline function which performs CR3 switch and jumps to slid _start.
-    // This function never returns.
+    // Success: the slide has been written. Nothing below may touch kernel
+    // data (the KASLR_APPLIED guard was already set at the top of the pass).
+    // The trampoline switches CR3 and jumps to the slid continuation; it never
+    // returns.
     kaslr_trampoline(new_pml4_phys, slide, old_rsp);
 }
 
@@ -946,6 +1013,12 @@ pub unsafe fn activate_kaslr_mapping() -> ! {
 #[inline(never)]
 unsafe fn kaslr_trampoline(new_pml4_phys: u64, slide: u64, old_rsp: u64) -> ! {
     core::arch::asm!(
+        // Restore RSP from rdx (old_rsp) FIRST: every debug-marker write clobbers
+        // the low 16 bits of rdx with `mov dx, 0x3f8`. `rdx - 8` stands in for
+        // the return-address slot a `call` would have pushed, so the continuation
+        // enters with the SysV call alignment (rsp % 16 == 8) its frame math
+        // (sub $0xfc8) assumes. No later instruction reads rdx.
+        "lea rsp, [rdx - 8]",
         // Debug: 'A' - entering trampoline
         "mov dx, 0x3f8",
         "mov al, 'A'",
@@ -957,40 +1030,29 @@ unsafe fn kaslr_trampoline(new_pml4_phys: u64, slide: u64, old_rsp: u64) -> ! {
         // Flush TLB
         "mov rax, cr3",
         "mov cr3, rax",
-        // Debug: 'B' - CR3 switched
+        // Debug: 'B' - CR3 switched, RSP restored
         "mov dx, 0x3f8",
         "mov al, 'B'",
         "out dx, al",
-        // Restore RSP from rdx (old_rsp)
-        "mov rsp, rdx",
         // Debug: 'C' - RSP restored
         "mov dx, 0x3f8",
         "mov al, 'C'",
         "out dx, al",
-        // Debug: 'D' - about to jump to _start
+        // Debug: 'D' - about to compute jump target
         "mov dx, 0x3f8",
         "mov al, 'D'",
         "out dx, al",
-        // Compute target address: _start + slide
-    // The trampoline function runs AFTER the CR3 switch, at its NEW virtual address.
-    // RIP-relative [rip + _start] already computes _start_link + slide correctly.
-    // DO NOT add slide again!
-        "lea rax, [rip + _start]",
-        // rax = _start_link + slide (correct target),
-        // Debug: 'E' - about to jump
-        "mov dx, 0x3f8",
-        "mov al, 'E'",
-        "out dx, al",
-        // Debug: 'F' - jump target computed
-        "mov dx, 0x3f8",
-        "mov al, 'F'",
-        "out dx, al",
-        // Jump to slid _start
+        // Compute the target LAST: the RIP-relative lea resolves to the
+        // continuation's LINK-TIME address (this code still executes from the
+        // old index, which the new tables keep mapped), and the second lea
+        // adds the slide exactly once. No instruction after the first lea
+        // writes a register the two leas need: `rsi` is untouched by every
+        // marker above and `lea` preserves flags.
+        "lea rax, [rip + post_kaslr_continue]",
+        "lea rax, [rax + rsi]",
+        // Jump to the slid continuation
         "jmp rax",
-        // If we reach here, the jump failed
-        "mov dx, 0x3f8",
-        "mov al, 'G'",
-        "out dx, al",
+        // Unreachable
         "ud2",
         in("rdi") new_pml4_phys,
         in("rsi") slide,

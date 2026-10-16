@@ -676,6 +676,12 @@ fn kernel_main() -> ! {
         unsafe {
             crate::kaslr_reloc::activate_kaslr_mapping();
         }
+        // Reached only when the relocation pass refused: refusal makes zero
+        // writes, so the link-time world is still coherent (no GOT slot was
+        // slid) and the late boot can run from the link mapping, without a
+        // slide, instead of jumping into the slid address space on
+        // unrelocated pointers.
+        post_kaslr_continue();
     }
 }
 

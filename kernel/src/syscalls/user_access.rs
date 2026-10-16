@@ -111,21 +111,14 @@ pub fn init_smap() {
 
 /// Detect SMAP support via CPUID leaf 7 (EBX bit 20).
 fn smap_supported() -> bool {
+    // The previous hand-rolled asm destroyed the CPUID result: rustc
+    // allocated the `out(reg)` operand to RBX itself, so "mov {0}, rbx"
+    // compiled to a no-op and the `pop rbx` restored the stale caller
+    // value. The compiler intrinsic handles RBX preservation correctly.
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        let rbx_val: u64;
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 7",
-            "xor ecx, ecx",
-            "cpuid",
-            "mov {0}, rbx",
-            "pop rbx",
-            out(reg) rbx_val,
-            out("eax") _, out("ecx") _, out("edx") _,
-            options(nomem)
-        );
-        (rbx_val & (1 << 20)) != 0
+    {
+        let features = core::arch::x86_64::__cpuid(7);
+        (features.ebx & (1 << 20)) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
     false
