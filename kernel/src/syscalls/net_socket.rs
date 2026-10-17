@@ -5,6 +5,7 @@
 use super::errno;
 use super::*;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+#[cfg(feature = "net")]
 use alloc::vec;
 
 pub fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {

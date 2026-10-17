@@ -1,15 +1,22 @@
 use crate::arch::Arch;
+#[cfg(feature = "smp")]
 use crate::println;
+#[cfg(feature = "smp")]
 use core::arch::global_asm;
 
 use core::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "smp")]
 use x86_64::registers::control::Cr3;
+#[cfg(feature = "smp")]
 use x86_64::structures::paging::{FrameAllocator, PageTable, PhysFrame};
+#[cfg(feature = "smp")]
 use x86_64::VirtAddr;
 
 // The trampoline must be placed at a 4KB aligned physical address in the first 1MB.
 // We use 0x8000.
+#[cfg(feature = "smp")]
 pub const TRAMPOLINE_PHYS: u64 = 0x8000;
+#[cfg(feature = "smp")]
 pub const DATA_PHYS: u64 = 0x7000;
 
 /// Shared data between BSP and APs during boot
@@ -33,6 +40,7 @@ pub static mut BOOT_DATA: SmpBootData = SmpBootData {
 
 /// Allocate a copy of the kernel page directory in the lower 4GB.
 /// Returns the physical frame address, or None if impossible.
+#[cfg(feature = "smp")]
 fn allocate_low_pml4() -> Option<PhysFrame> {
     let offset = crate::memory::physical_memory_offset();
 
@@ -73,6 +81,7 @@ fn allocate_low_pml4() -> Option<PhysFrame> {
     Some(new_frame)
 }
 
+#[cfg(feature = "smp")]
 global_asm!(
     r#"
 .code16
@@ -179,11 +188,13 @@ smp_trampoline_end:
 "#
 );
 
+#[cfg(feature = "smp")]
 extern "C" {
     fn smp_trampoline_start();
     fn smp_trampoline_end();
 }
 
+#[cfg(feature = "smp")]
 pub fn init() {
     crate::serial_write("[SMP] init enter\n");
     let ap_ids: &alloc::vec::Vec<u8> = match crate::acpi::AP_LAPIC_IDS.get() {
