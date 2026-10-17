@@ -130,6 +130,7 @@ jobs:
             echo "FAIL: kernel ELF not found after build"
             exit 1
           fi
+          KERNEL=$(realpath "$KERNEL")
           echo "kernel=$KERNEL" >> $GITHUB_OUTPUT
           echo "Found kernel ELF: $KERNEL"
 
@@ -193,7 +194,7 @@ jobs:
         run: |
           python3 tests/run_qemu_tests.py \
             --image tests/t00_selftest.bin \
-            --ovmf /usr/share/OVMF/OVMF_CODE.fd \
+            --ovmf /usr/share/ovmf/OVMF.fd \
             --timeout 2400 \
             --qemu-extra "-vga none" \
             --log tests/t00_ci_run.log
@@ -243,6 +244,7 @@ jobs:
 
       - name: Clippy (extracted crates)
         run: |
+          rustup override set nightly
           for crate in vahi-sync vahi-crypto vahi-hal vahi-limine vahi-memory vahi-arch vahi-task vahi-syscalls vahi-drivers vahi-vfs vahi-net vahi-objects vahi-types vahi-ipc vahi-acpi vahi-pci vahi-gdt; do
             echo "Clippy: $crate"
             cargo clippy -p "$crate" --target x86_64-unknown-none -- -D warnings || exit 1
