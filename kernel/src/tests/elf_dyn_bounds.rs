@@ -12,9 +12,9 @@
 //! than at a hard-coded count.
 
 use crate::memory::buddy::BuddyFrameAllocator;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page};
 use crate::memory::paging::AddressSpace;
 use crate::selftest;
+use x86_64::structures::paging::{FrameAllocator, Mapper, Page};
 
 /// The strtab scan must be bounded by the mapped region, not by `DT_STRSZ`.
 ///
@@ -72,7 +72,9 @@ fn test_dt_entry_walk_stops_at_mapped_region() -> Result<(), &'static str> {
         mapper
             .map_to(
                 Page::containing_address(x86_64::VirtAddr::new(page_vaddr)),
-                match FrameAllocator::<x86_64::structures::paging::Size4KiB>::allocate_frame(&mut allocator) {
+                match FrameAllocator::<x86_64::structures::paging::Size4KiB>::allocate_frame(
+                    &mut allocator,
+                ) {
                     Some(f) => f,
                     None => return Err("frame allocation failed"),
                 },

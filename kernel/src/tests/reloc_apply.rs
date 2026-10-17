@@ -78,13 +78,18 @@ fn test_write_pass_writes_addend_plus_slide() -> Result<(), &'static str> {
 /// lost entirely.
 fn test_write_pass_overwrites_the_word() -> Result<(), &'static str> {
     let mut words: [u64; 1] = [0xDEAD_BEEF_0000_0000];
-    let table = [entry(core::ptr::addr_of_mut!(words[0]) as usize, START + 0x40)];
+    let table = [entry(
+        core::ptr::addr_of_mut!(words[0]) as usize,
+        START + 0x40,
+    )];
     let applied = run_write_pass(&table, SLIDE);
     if applied != 1 {
         return Err("the entry must be applied");
     }
     if words[0] != (START + 0x40) as u64 + SLIDE {
-        return Err("the word must be replaced with addend + slide, not have the slide added to it");
+        return Err(
+            "the word must be replaced with addend + slide, not have the slide added to it",
+        );
     }
     Ok(())
 }
@@ -92,7 +97,10 @@ fn test_write_pass_overwrites_the_word() -> Result<(), &'static str> {
 /// A zero slide is identity: the target becomes exactly the link-time addend.
 fn test_zero_slide_writes_link_addend() -> Result<(), &'static str> {
     let mut words: [u64; 1] = [0];
-    let table = [entry(core::ptr::addr_of_mut!(words[0]) as usize, START + 0x80)];
+    let table = [entry(
+        core::ptr::addr_of_mut!(words[0]) as usize,
+        START + 0x80,
+    )];
     let applied = run_write_pass(&table, 0);
     if applied != 1 {
         return Err("the entry must be applied");
@@ -176,12 +184,16 @@ fn test_read_only_target_is_rejected() -> Result<(), &'static str> {
 fn test_duplicate_target_is_rejected() -> Result<(), &'static str> {
     let rel = entry(WRITABLE_START + 0x10, START);
     if reject_entry(&rel, SLIDE, &bounds(), Some((WRITABLE_START + 0x10) as u64))
-        != Some(RelocReject::NonIncreasingOffset((WRITABLE_START + 0x10) as u64))
+        != Some(RelocReject::NonIncreasingOffset(
+            (WRITABLE_START + 0x10) as u64,
+        ))
     {
         return Err("a duplicate target must be rejected");
     }
     if reject_entry(&rel, SLIDE, &bounds(), Some((WRITABLE_START + 0x18) as u64))
-        != Some(RelocReject::NonIncreasingOffset((WRITABLE_START + 0x10) as u64))
+        != Some(RelocReject::NonIncreasingOffset(
+            (WRITABLE_START + 0x10) as u64,
+        ))
     {
         return Err("a descending target must be rejected");
     }

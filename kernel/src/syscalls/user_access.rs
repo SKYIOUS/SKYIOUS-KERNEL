@@ -207,7 +207,8 @@ pub unsafe fn copy_to_user(dst_ptr: *mut u8, src: &[u8]) -> Result<(), ()> {
 /// `src` must be a valid, fully-initialized `T: Copy`.
 #[inline]
 pub unsafe fn copy_struct_to_user<T: Copy>(dst_ptr: *mut u8, src: &T) -> Result<(), ()> {
-    let slice = core::slice::from_raw_parts(src as *const T as *const u8, core::mem::size_of::<T>());
+    let slice =
+        core::slice::from_raw_parts(src as *const T as *const u8, core::mem::size_of::<T>());
     copy_to_user(dst_ptr, slice)
 }
 

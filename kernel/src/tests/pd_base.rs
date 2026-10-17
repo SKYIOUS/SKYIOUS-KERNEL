@@ -69,10 +69,19 @@ fn test_destination_beyond_end_is_none() -> Result<(), &'static str> {
 }
 
 pub fn register() {
-    selftest::register("pd:kernel_sits_at_index_zero", test_kernel_sits_at_index_zero);
+    selftest::register(
+        "pd:kernel_sits_at_index_zero",
+        test_kernel_sits_at_index_zero,
+    );
     selftest::register("pd:zero_slide_is_identity", test_zero_slide_is_identity);
-    selftest::register("pd:shift_moves_pages_from_zero", test_shift_moves_pages_from_zero);
-    selftest::register("pd:small_shift_does_not_alias", test_small_shift_does_not_alias);
+    selftest::register(
+        "pd:shift_moves_pages_from_zero",
+        test_shift_moves_pages_from_zero,
+    );
+    selftest::register(
+        "pd:small_shift_does_not_alias",
+        test_small_shift_does_not_alias,
+    );
     selftest::register("pd:oversized_shift_aliases", test_oversized_shift_aliases);
     selftest::register(
         "pd:destination_beyond_end_is_none",

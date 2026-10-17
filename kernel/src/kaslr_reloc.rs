@@ -1,4 +1,3 @@
-
 /// ELF64 relocation entry (matching ELF specification)
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -767,23 +766,23 @@ pub unsafe fn activate_kaslr_mapping() {
         );
         huge_page_phys = old_pdpt_entry_kernel.addr().as_u64();
         // Kernel size is derived from the loaded image's PT_LOAD segments. The
-                // previous hard-coded 64 MiB estimate was smaller than an unoptimised
-                // build of this kernel, which left the tail unmapped and killed the
-                // trampoline's jump to the relocated entry with no diagnostic.
-                let span = ElfSegmentSpan::from_segments(&read_kernel_segments());
-                let span_bytes = span.bytes();
-                if span_bytes == 0 || span_bytes > KERNEL_SPAN_CEILING {
-                    crate::serial_write("[KASLR] cannot derive kernel span; not relocating\n");
-                    core::hint::unreachable_unchecked();
-                }
-                let num_pages = span.pages();
-                // A shift that would alias the tail onto unrelated page-directory
-                // entries used to wrap silently via `% 512`.
-                crate::serial_write("[KASLR] kernel span pages = ");
-                crate::serial_write_hex(num_pages as u64);
-                crate::serial_write("\n");
+        // previous hard-coded 64 MiB estimate was smaller than an unoptimised
+        // build of this kernel, which left the tail unmapped and killed the
+        // trampoline's jump to the relocated entry with no diagnostic.
+        let span = ElfSegmentSpan::from_segments(&read_kernel_segments());
+        let span_bytes = span.bytes();
+        if span_bytes == 0 || span_bytes > KERNEL_SPAN_CEILING {
+            crate::serial_write("[KASLR] cannot derive kernel span; not relocating\n");
+            core::hint::unreachable_unchecked();
+        }
+        let num_pages = span.pages();
+        // A shift that would alias the tail onto unrelated page-directory
+        // entries used to wrap silently via `% 512`.
+        crate::serial_write("[KASLR] kernel span pages = ");
+        crate::serial_write_hex(num_pages as u64);
+        crate::serial_write("\n");
 
-                let kernel_phys_base = huge_page_phys;
+        let kernel_phys_base = huge_page_phys;
 
         for i in 0..num_pages {
             let page_phys = kernel_phys_base + (i as u64 * 2 * 1024 * 1024);
@@ -816,64 +815,61 @@ pub unsafe fn activate_kaslr_mapping() {
     // Copy for both huge page and non-huge-page cases
     // The kernel typically uses a few 2MiB pages starting at PD index 511
     // Only copy if we didn't create the PD manually (huge page case)
-    
-        let old_pd_frame = old_pdpt_entry_kernel
-            .frame()
-            .expect("Kernel PD not present");
-        let old_pd_virt = VirtAddr::new(hhdm_offset) + old_pd_frame.start_address().as_u64();
-        // SAFETY: every physical frame is readable through the HHDM, and the
-        // frame came from a present PDPTE, so it is a real page-directory
-        // frame the kernel's own boot page tables created.
-        let old_pd = unsafe { &*(old_pd_virt.as_ptr::<PageTable>()) };
 
-        for i in 0..kernel_pages {
-                    let base = kernel_base_pd_index();
-                    crate::serial_write("[KASLR] DBG: i=");
-                    crate::serial_write_hex(i as u64);
-                    crate::serial_write(" base=");
-                    crate::serial_write_hex(base as u64);
-                    crate::serial_write(" src_idx=");
-                    let src_idx = (base + i) % 512;
-                    crate::serial_write_hex(src_idx as u64);
-                    crate::serial_write(" shift=");
-                    crate::serial_write_hex(pd_index_shift as u64);
-                    crate::serial_write("\n");
-                    crate::serial_write("[KASLR] DBG2: checking src_idx=");
-                    crate::serial_write_hex(src_idx as u64);
-                    crate::serial_write(" used=");
-                    crate::serial_write_hex(if old_pd[src_idx].is_unused() { 0 } else { 1 } as u64);
-                    crate::serial_write("\n");
-                    if !old_pd[src_idx].is_unused() {
-                        let dst_idx = pd_destination_index(pd_index_shift, i);
-                        crate::serial_write("[KASLR] copy PD[");
-                        crate::serial_write_hex(src_idx as u64);
-                        crate::serial_write("] -> PD[");
-                        crate::serial_write_hex(dst_idx as u64);
-                        crate::serial_write("\n");
-                        new_pd[dst_idx] = old_pd[src_idx].clone();
-                        // The slide is applied just before the trampoline, and the
-                        // trampoline executes at its OLD virtual address until the CR3
-                        // switch completes. Any page it might be executing from must
-                        // therefore remain reachable at its OLD index in the NEW tables.
-                        // Aliasing only the trampoline page made any kernel larger
-                        // than 2 MiB unbootable: `audit`'s KERNEL_SLIDE lands on PD
-                        // index 2, which had no un-slid alias.
-                        if !page_aliasing::needs_full_old_aliasing(kernel_span_bytes())
-                            || {
-                                let start = kernel_base_pd;
-                                let end = (kernel_base_pd + kernel_pages) % 512;
-                                if start <= end {
-                                    src_idx >= start && src_idx < end
-                                } else {
-                                    src_idx >= start || src_idx < end
-                                }
-                            }
-                        {
-                            new_pd[src_idx] = old_pd[src_idx].clone();
-                        }
-                    }
+    let old_pd_frame = old_pdpt_entry_kernel
+        .frame()
+        .expect("Kernel PD not present");
+    let old_pd_virt = VirtAddr::new(hhdm_offset) + old_pd_frame.start_address().as_u64();
+    // SAFETY: every physical frame is readable through the HHDM, and the
+    // frame came from a present PDPTE, so it is a real page-directory
+    // frame the kernel's own boot page tables created.
+    let old_pd = unsafe { &*(old_pd_virt.as_ptr::<PageTable>()) };
+
+    for i in 0..kernel_pages {
+        let base = kernel_base_pd_index();
+        crate::serial_write("[KASLR] DBG: i=");
+        crate::serial_write_hex(i as u64);
+        crate::serial_write(" base=");
+        crate::serial_write_hex(base as u64);
+        crate::serial_write(" src_idx=");
+        let src_idx = (base + i) % 512;
+        crate::serial_write_hex(src_idx as u64);
+        crate::serial_write(" shift=");
+        crate::serial_write_hex(pd_index_shift as u64);
+        crate::serial_write("\n");
+        crate::serial_write("[KASLR] DBG2: checking src_idx=");
+        crate::serial_write_hex(src_idx as u64);
+        crate::serial_write(" used=");
+        crate::serial_write_hex(if old_pd[src_idx].is_unused() { 0 } else { 1 } as u64);
+        crate::serial_write("\n");
+        if !old_pd[src_idx].is_unused() {
+            let dst_idx = pd_destination_index(pd_index_shift, i);
+            crate::serial_write("[KASLR] copy PD[");
+            crate::serial_write_hex(src_idx as u64);
+            crate::serial_write("] -> PD[");
+            crate::serial_write_hex(dst_idx as u64);
+            crate::serial_write("\n");
+            new_pd[dst_idx] = old_pd[src_idx].clone();
+            // The slide is applied just before the trampoline, and the
+            // trampoline executes at its OLD virtual address until the CR3
+            // switch completes. Any page it might be executing from must
+            // therefore remain reachable at its OLD index in the NEW tables.
+            // Aliasing only the trampoline page made any kernel larger
+            // than 2 MiB unbootable: `audit`'s KERNEL_SLIDE lands on PD
+            // index 2, which had no un-slid alias.
+            if !page_aliasing::needs_full_old_aliasing(kernel_span_bytes()) || {
+                let start = kernel_base_pd;
+                let end = (kernel_base_pd + kernel_pages) % 512;
+                if start <= end {
+                    src_idx >= start && src_idx < end
+                } else {
+                    src_idx >= start || src_idx < end
                 }
-
+            } {
+                new_pd[src_idx] = old_pd[src_idx].clone();
+            }
+        }
+    }
 
     // CRITICAL: Map the trampoline code page at BOTH its old PD index (for OLD virtual address
     // compatibility after CR3 switch) AND its new shifted PD index (for NEW virtual address after jump).
@@ -1004,7 +1000,6 @@ pub unsafe fn activate_kaslr_mapping() {
 }
 
 /// Get the current KASLR slide value
-
 
 // kaslr_trampoline: performs CR3 switch and jumps to slid _start
 // This is a separate function to ensure the inline asm is generated.

@@ -53,8 +53,7 @@ fn with_process_context<T>(f: impl FnOnce() -> T) -> T {
     let previous = CURRENT_PROCESS.lock().clone();
     let mut allocator = BuddyFrameAllocator;
     if let Some(addr_space) = AddressSpace::new(&mut allocator) {
-        let new_proc =
-            alloc::sync::Arc::new(Process::new(Process::next_id(), None, addr_space));
+        let new_proc = alloc::sync::Arc::new(Process::new(Process::next_id(), None, addr_space));
         *CURRENT_PROCESS.lock() = Some(new_proc);
     }
     let out = f();
@@ -77,12 +76,7 @@ fn test_io_uring_register_rejects_kernel_pointer() -> Result<(), &'static str> {
             crate::syscalls::io_uring::IORING_REGISTER_FILES,
             crate::syscalls::io_uring::IORING_REGISTER_EVENTFD,
         ] {
-            let rc = crate::syscalls::io_uring::sys_io_uring_register(
-                ring_fd,
-                op,
-                KERNEL_PTR,
-                8,
-            );
+            let rc = crate::syscalls::io_uring::sys_io_uring_register(ring_fd, op, KERNEL_PTR, 8);
             if rc == 0 {
                 return Err("io_uring_register accepted a kernel pointer");
             }
@@ -106,8 +100,7 @@ fn test_io_uring_write_rejects_kernel_sqe_pointer() -> Result<(), &'static str> 
             return Err("io_uring_setup did not yield an fd");
         }
         let sqe_size = core::mem::size_of::<crate::syscalls::io_uring::IoSqEntry>();
-        let rc =
-            crate::syscalls::fs_io::sys_write(ring_fd, KERNEL_PTR as *const u8, sqe_size);
+        let rc = crate::syscalls::fs_io::sys_write(ring_fd, KERNEL_PTR as *const u8, sqe_size);
         if rc == 0 {
             return Err("io_uring write() accepted a kernel SQE pointer");
         }
@@ -127,11 +120,8 @@ fn test_inotify_read_rejects_kernel_buffer() -> Result<(), &'static str> {
             return Err("inotify_init did not yield an fd");
         }
         let path = b"/tmp\0";
-        let _wd = crate::syscalls::inotify::sys_inotify_add_watch(
-            watch_fd,
-            path.as_ptr(),
-            0x0000_00FF,
-        );
+        let _wd =
+            crate::syscalls::inotify::sys_inotify_add_watch(watch_fd, path.as_ptr(), 0x0000_00FF);
 
         let rc = crate::syscalls::fs_io::sys_read(watch_fd, KERNEL_PTR as *mut u8, 64);
         if rc == 0 {
@@ -164,8 +154,7 @@ fn test_getgroups_rejects_kernel_buffer() -> Result<(), &'static str> {
             return Err("group list was not populated; test would be vacuous");
         }
 
-        let rc =
-            crate::syscalls::process_creds::sys_getgroups(64, KERNEL_PTR as *mut u32);
+        let rc = crate::syscalls::process_creds::sys_getgroups(64, KERNEL_PTR as *mut u32);
         if rc == 0 {
             return Err("getgroups wrote through a kernel pointer");
         }
@@ -181,8 +170,7 @@ fn test_getgroups_rejects_kernel_buffer() -> Result<(), &'static str> {
 /// as the supplementary group list.
 fn test_setgroups_rejects_kernel_buffer() -> Result<(), &'static str> {
     with_process_context(|| {
-        let rc =
-            crate::syscalls::process_creds::sys_setgroups(4, KERNEL_PTR as *const u32);
+        let rc = crate::syscalls::process_creds::sys_setgroups(4, KERNEL_PTR as *const u32);
         if rc == 0 {
             return Err("setgroups adopted kernel memory as the group list");
         }

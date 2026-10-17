@@ -43,11 +43,7 @@ pub fn sys_statfs(path_ptr: *const u8, statfs_buf: *mut u8) -> u64 {
     let mut vfs = VFS.lock();
     if let Some(node) = vfs.resolve_path(&path_str) {
         if let Ok(statfs) = node.statfs() {
-            if unsafe {
-                user_access::copy_struct_to_user(statfs_buf, &statfs)
-            }
-            .is_err()
-            {
+            if unsafe { user_access::copy_struct_to_user(statfs_buf, &statfs) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
             return 0;
@@ -83,10 +79,7 @@ pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
     match fd_table[fd as usize] {
         Some(FileDescriptor::File { ref node, .. }) => {
             if let Ok(stat) = node.stat() {
-                if unsafe {
-                    user_access::copy_struct_to_user(stat_buf as *mut u8, &stat)
-                }
-                .is_err()
+                if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err()
                 {
                     return errno::Errno::EFAULT as u64;
                 }
@@ -99,11 +92,7 @@ pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
                 st_mode: crate::vfs::_S_IFSOCK | 0o666,
                 ..Stat::default()
             };
-            if unsafe {
-                user_access::copy_struct_to_user(stat_buf as *mut u8, &stat)
-            }
-            .is_err()
-            {
+            if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
             0
@@ -113,11 +102,7 @@ pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
                 st_mode: crate::vfs::_S_IFCHR | 0o620,
                 ..Stat::default()
             };
-            if unsafe {
-                user_access::copy_struct_to_user(stat_buf as *mut u8, &stat)
-            }
-            .is_err()
-            {
+            if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
             0
@@ -341,17 +326,14 @@ pub fn sys_fstatat(
     } else {
         if let Some(node) = VFS.lock().resolve_path(&abs_path) {
             if let Ok(stat) = node.stat() {
-            if unsafe {
-                user_access::copy_struct_to_user(stat_buf as *mut u8, &stat)
+                if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err()
+                {
+                    return errno::Errno::EFAULT as u64;
+                }
+                return 0;
             }
-            .is_err()
-            {
-                return errno::Errno::EFAULT as u64;
-            }
-            return 0;
         }
-    }
-    errno::Errno::ENOENT as u64
+        errno::Errno::ENOENT as u64
     }
 }
 

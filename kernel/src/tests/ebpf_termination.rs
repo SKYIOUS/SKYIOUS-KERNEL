@@ -20,9 +20,27 @@ use alloc::vec::Vec;
 fn test_backward_jump_terminates() -> Result<(), &'static str> {
     // insn 0: r0 = 42; insn 1: ja -2 (back to insn 0); insn 2: exit
     let insns = [
-        EbpfInsn { code: 0xb7, dst_reg: 0, src_reg: 0, off: 0, imm: 42 },
-        EbpfInsn { code: 0x05, dst_reg: 0, src_reg: 0, off: -2, imm: 0 },
-        EbpfInsn { code: 0x95, dst_reg: 0, src_reg: 0, off: 0, imm: 0 },
+        EbpfInsn {
+            code: 0xb7,
+            dst_reg: 0,
+            src_reg: 0,
+            off: 0,
+            imm: 42,
+        },
+        EbpfInsn {
+            code: 0x05,
+            dst_reg: 0,
+            src_reg: 0,
+            off: -2,
+            imm: 0,
+        },
+        EbpfInsn {
+            code: 0x95,
+            dst_reg: 0,
+            src_reg: 0,
+            off: 0,
+            imm: 0,
+        },
     ];
     // Must return, whatever the verdict. A hang here is the defect.
     let _ = tnum_verify(&insns);
@@ -33,10 +51,34 @@ fn test_backward_jump_terminates() -> Result<(), &'static str> {
 /// terminate; merging the same state repeatedly is what makes this loop.
 fn test_conditional_backward_jump_terminates() -> Result<(), &'static str> {
     let insns = [
-        EbpfInsn { code: 0xb7, dst_reg: 0, src_reg: 0, off: 0, imm: 1 },
-        EbpfInsn { code: 0x05, dst_reg: 0, src_reg: 0, off: 0, imm: 0 }, // ja -> 3
-        EbpfInsn { code: 0x95, dst_reg: 0, src_reg: 0, off: 0, imm: 0 }, // exit
-        EbpfInsn { code: 0x55, dst_reg: 0, src_reg: 0, off: -3, imm: 0 }, // jne -> 1
+        EbpfInsn {
+            code: 0xb7,
+            dst_reg: 0,
+            src_reg: 0,
+            off: 0,
+            imm: 1,
+        },
+        EbpfInsn {
+            code: 0x05,
+            dst_reg: 0,
+            src_reg: 0,
+            off: 0,
+            imm: 0,
+        }, // ja -> 3
+        EbpfInsn {
+            code: 0x95,
+            dst_reg: 0,
+            src_reg: 0,
+            off: 0,
+            imm: 0,
+        }, // exit
+        EbpfInsn {
+            code: 0x55,
+            dst_reg: 0,
+            src_reg: 0,
+            off: -3,
+            imm: 0,
+        }, // jne -> 1
     ];
     let _ = tnum_verify(&insns);
     Ok(())
@@ -48,20 +90,43 @@ fn test_long_forward_chain_terminates() -> Result<(), &'static str> {
     let mut insns = Vec::new();
     for _ in 0..64usize {
         // r0 += 1; jne +0 (never taken, falls through)
-        insns.push(EbpfInsn { code: 0x07, dst_reg: 0, src_reg: 0, off: 0, imm: 1 });
-        insns.push(EbpfInsn { code: 0x55, dst_reg: 0, src_reg: 0, off: 0, imm: 0 });
+        insns.push(EbpfInsn {
+            code: 0x07,
+            dst_reg: 0,
+            src_reg: 0,
+            off: 0,
+            imm: 1,
+        });
+        insns.push(EbpfInsn {
+            code: 0x55,
+            dst_reg: 0,
+            src_reg: 0,
+            off: 0,
+            imm: 0,
+        });
     }
-    insns.push(EbpfInsn { code: 0x95, dst_reg: 0, src_reg: 0, off: 0, imm: 0 });
+    insns.push(EbpfInsn {
+        code: 0x95,
+        dst_reg: 0,
+        src_reg: 0,
+        off: 0,
+        imm: 0,
+    });
     let _ = tnum_verify(&insns);
     Ok(())
 }
 
-
 pub fn register() {
-    selftest::register("tnum:backward_jump_terminates", test_backward_jump_terminates);
+    selftest::register(
+        "tnum:backward_jump_terminates",
+        test_backward_jump_terminates,
+    );
     selftest::register(
         "tnum:conditional_backward_jump_terminates",
         test_conditional_backward_jump_terminates,
     );
-    selftest::register("tnum:long_forward_chain_terminates", test_long_forward_chain_terminates);
+    selftest::register(
+        "tnum:long_forward_chain_terminates",
+        test_long_forward_chain_terminates,
+    );
 }

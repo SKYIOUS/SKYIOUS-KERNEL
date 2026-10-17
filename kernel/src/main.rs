@@ -176,10 +176,10 @@ mod interrupts;
 pub mod iommu;
 pub mod ipc;
 // ponytail: F2.2 — kaslr_reloc helpers partially unwired; see ADR-029-syscall-module-lint-hygiene.md
+mod kaslr;
 #[allow(dead_code)]
 mod kaslr_reloc;
-mod kaslr;
-pub(crate) use kaslr::{KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLIDE, init_kaslr};
+pub(crate) use kaslr::{init_kaslr, KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLIDE};
 #[cfg(not(target_arch = "aarch64"))]
 // ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
@@ -250,7 +250,11 @@ pub unsafe extern "C" fn _start() -> ! {
     }
     const LINK_BASE: usize = 0xFFFFFFFF80000000;
     let kernel_start_addr = unsafe { &__kernel_start as *const u8 as usize };
-    let marker = if kernel_start_addr != LINK_BASE { b'Q' } else { b'O' };
+    let marker = if kernel_start_addr != LINK_BASE {
+        b'Q'
+    } else {
+        b'O'
+    };
     #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(

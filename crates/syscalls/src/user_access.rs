@@ -45,9 +45,9 @@ pub unsafe fn copy_to_user(_dst_ptr: *mut u8, _src: &[u8]) -> Result<(), ()> {
 }
 
 /// Stub: check if we're in a user memory copy context.
-    #[allow(dead_code)]
-    // ponytail: always false (no copy-active tracking); upgrade path: track nest depth vs do_user_addr_fault unwinding.
-    pub fn user_copy_active() -> bool {
+#[allow(dead_code)]
+// ponytail: always false (no copy-active tracking); upgrade path: track nest depth vs do_user_addr_fault unwinding.
+pub fn user_copy_active() -> bool {
     false
 }
 
@@ -56,7 +56,10 @@ pub unsafe fn copy_to_user(_dst_ptr: *mut u8, _src: &[u8]) -> Result<(), ()> {
 /// # Safety
 /// `ptr` must be a valid user-space pointer.
 #[allow(clippy::result_unit_err)]
-pub unsafe fn read_user_string(_ptr: *const u8, _max_len: usize) -> Result<alloc::string::String, ()> {
+pub unsafe fn read_user_string(
+    _ptr: *const u8,
+    _max_len: usize,
+) -> Result<alloc::string::String, ()> {
     // Returning an empty string reads as a successful empty argument, so
     // callers would operate on "" instead of failing. Refuse instead.
     Err(())
