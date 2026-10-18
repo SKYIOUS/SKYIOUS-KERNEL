@@ -14,26 +14,6 @@ impl Elf64Rela {
     }
 }
 
-/// ELF64 header
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct Elf64Ehdr {
-    pub e_ident: [u8; 16],
-    pub e_type: u16,
-    pub e_machine: u16,
-    pub e_version: u32,
-    pub e_entry: u64,
-    pub e_phoff: u64,
-    pub e_shoff: u64,
-    pub e_flags: u32,
-    pub e_ehsize: u16,
-    pub e_phentsize: u16,
-    pub e_phnum: u16,
-    pub e_shentsize: u16,
-    pub e_shnum: u16,
-    pub e_shstrndx: u16,
-}
-
 /// The only relocation type the PIC link emits (type 8). The validator refuses
 /// the whole pass on anything else rather than guessing at a type the
 /// toolchain was not asked to produce.
@@ -76,10 +56,11 @@ impl RelocationOutcome {
 
 /// Page-alias bookkeeping for the randomized mapping.
 ///
-/// The rebuild maps every kernel page at its new shifted index, but preserves
-/// the old index only for the trampoline page. Because relocations can be
-/// skipped entirely, pointers into the old image can survive the CR3 switch,
-/// so every kernel page needs to stay alive at both indices.
+/// The rebuild maps every kernel page at its new shifted index and keeps it
+/// alive at its old index too: the transition runs on the pre-slide stack
+/// pointer, and relocations can be skipped entirely, so pointers into the old
+/// image can survive the CR3 switch. The helpers here model that mapping for
+/// the regression tests.
 pub mod page_aliasing {
     /// The 2 MiB page the trampoline occupies, and therefore the only page the
     /// old mapping historically preserved.
@@ -108,7 +89,7 @@ pub mod page_aliasing {
 //
 // The ELF header cannot be used here: the first PT_LOAD starts at file offset
 // 0x1000, so the header at file offset 0 is never loaded into memory and
-// `LINK_BASE` holds `.text` bytes. Reading `Elf64Ehdr` from `LINK_BASE`
+// `LINK_BASE` holds `.text` bytes. Reading an ELF header from `LINK_BASE`
 // therefore always fails its magic check, which is why
 // `apply_kaslr_relocations` silently relocated nothing on every build.
 extern "C" {
@@ -165,13 +146,6 @@ pub fn kernel_map_pages(size_bytes: u64) -> usize {
     size_bytes.div_ceil(MAP_PAGE) as usize
 }
 
-/// Whether shifting `pages` entries by `pd_index_shift` would run past the end
-/// of the 512-entry page directory and alias onto unrelated entries.
-///
-/// The rebuild used `(511 + shift + i) % 512`, which wraps silently. Once the
-/// kernel spans enough 2 MiB pages, the tail lands on entries belonging to other
-/// mappings and the relocated code faults. Callers must check this rather than
-/// wrap.
 /// PD index of the kernel's first 2 MiB page.
 ///
 /// `LINK_BASE` decomposes as PML4[511] -> PDPT[510] -> PD[0], so the kernel
@@ -183,9 +157,11 @@ pub const fn kernel_base_pd_index() -> usize {
 }
 
 /// Destination PD index for the kernel's `page`, given a slide of
-/// `pd_index_shift` entries. `None` when the destination falls outside the
-/// 512-entry directory, which must not be wrapped: a silent wrap lands the
-/// page on someone else's mapping.
+/// `pd_index_shift` entries.
+///
+/// The index wraps with `% 512`; a wrapped slide lands the page on someone
+/// else's mapping, so callers must refuse conflicting slides (see
+/// `pd_shift_conflicts`) before relying on this.
 pub const fn pd_destination_index(pd_index_shift: usize, kernel_relative_page: usize) -> usize {
     let base = kernel_base_pd_index();
     (base + pd_index_shift + kernel_relative_page) % 512
@@ -196,6 +172,16 @@ pub const fn pd_destination_index(pd_index_shift: usize, kernel_relative_page: u
 /// wrap.
 pub fn pd_shift_aliases(pd_index_shift: usize, pages: usize) -> bool {
     kernel_base_pd_index() + pd_index_shift + pages > 512
+}
+
+/// Whether a slide of `pd_index_shift` entries would land the kernel's slid
+/// range on its own old-index aliases, or wrap the directory.
+///
+/// When the two ranges overlap, the alias written for a later page overwrites
+/// an already-slid entry, so `LINK_BASE + slide` resolves the wrong physical
+/// page. Callers must refuse such slides instead of building those tables.
+pub fn pd_shift_conflicts(pd_index_shift: usize, pages: usize) -> bool {
+    pd_index_shift < pages || pd_shift_aliases(pd_index_shift, pages)
 }
 
 /// The span of the kernel image, derived from its loadable segments.
@@ -236,57 +222,6 @@ impl ElfSegmentSpan {
         kernel_map_pages(self.bytes())
     }
 }
-
-/// Read the running kernel's PT_LOAD virtual ranges from its ELF header.
-///
-/// The kernel is linked at `LINK_BASE` and the bootloader loads it there, so the
-/// ELF header is readable at that address before relocation.
-fn read_kernel_segments() -> alloc::vec::Vec<SegmentAddr> {
-    let mut out = alloc::vec::Vec::new();
-    let base = LINK_BASE as *const u8;
-    // SAFETY: the kernel image is mapped at LINK_BASE from early boot; the
-    // magic check below gates every further read on the header actually being
-    // there.
-    let hdr = unsafe { &*(base as *const Elf64Ehdr) };
-    if &hdr.e_ident[0..4] != b"\x7fELF" {
-        return out;
-    }
-    if hdr.e_phentsize as usize != core::mem::size_of::<Elf64Phdr64>() {
-        return out;
-    }
-    // SAFETY: phoff/e_phnum are bounds-checked against the mapping below by
-    // limiting reads to the first page of headers, which is all a normal
-    // kernel needs and caps a corrupt count.
-    let phdrs = unsafe {
-        let p = base.add(hdr.e_phoff as usize) as *const Elf64Phdr64;
-        core::slice::from_raw_parts(p, hdr.e_phnum as usize)
-    };
-    for ph in phdrs {
-        if ph.p_type == PT_LOAD && ph.p_memsz != 0 {
-            out.push(SegmentAddr {
-                vaddr_start: ph.p_vaddr,
-                vaddr_end: ph.p_vaddr + ph.p_memsz,
-            });
-        }
-    }
-    out
-}
-
-/// ELF64 program header, PT_LOAD range fields only.
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct Elf64Phdr64 {
-    pub p_type: u32,
-    pub p_flags: u32,
-    pub p_offset: u64,
-    pub p_vaddr: u64,
-    pub p_paddr: u64,
-    pub p_filesz: u64,
-    pub p_memsz: u64,
-    pub p_align: u64,
-}
-
-const PT_LOAD: u32 = 1;
 
 /// Everything a relocation-target check needs, cached as raw integers before
 /// the first write. Each field mirrors a linker symbol that is reached through
@@ -710,7 +645,7 @@ pub unsafe fn activate_kaslr_mapping() {
     }
 
     // The kernel is currently mapped at LINK_BASE (0xFFFFFFFF80000000)
-    // which is PML4[511], PDPT[510], PD[511] (2MiB pages)
+    // which is PML4[511], PDPT[510], PD[0] (2MiB pages)
     // We want it at LINK_BASE + slide.
     // Since slide < 1GiB, PML4 index remains 511, PDPT index remains 510.
     // We need to create a new PD with entries shifted by (slide >> 21).
@@ -741,7 +676,7 @@ pub unsafe fn activate_kaslr_mapping() {
     let new_pd = &mut *(new_pd_virt.as_mut_ptr::<PageTable>());
     new_pd.zero();
 
-    // The kernel starts at PD index 511 (since LINK_BASE >> 21 & 0x1FF = 511)
+    // The kernel starts at PD index 0 within PDPT[510] (LINK_BASE >> 21 & 0x1FF)
     // We need to map the same physical pages at new virtual addresses:
     // new_virt = LINK_BASE + slide + (old_virt - LINK_BASE) = old_virt + slide
     // This means PD index shift = (slide >> 21)
@@ -765,17 +700,17 @@ pub unsafe fn activate_kaslr_mapping() {
             "[KASLR] PDPT[510] is 1GiB huge page, creating new PD with 2MiB pages\n",
         );
         huge_page_phys = old_pdpt_entry_kernel.addr().as_u64();
-        // Kernel size is derived from the loaded image's PT_LOAD segments. The
-        // previous hard-coded 64 MiB estimate was smaller than an unoptimised
-        // build of this kernel, which left the tail unmapped and killed the
-        // trampoline's jump to the relocated entry with no diagnostic.
-        let span = ElfSegmentSpan::from_segments(&read_kernel_segments());
-        let span_bytes = span.bytes();
+        // Kernel size comes from the linker script's image extent, the same
+        // source the copy loop below uses. The previous hard-coded 64 MiB
+        // estimate was smaller than an unoptimised build of this kernel, which
+        // left the tail unmapped and killed the trampoline's jump to the
+        // relocated entry with no diagnostic.
+        let span_bytes = kernel_span_bytes();
         if span_bytes == 0 || span_bytes > KERNEL_SPAN_CEILING {
             crate::serial_write("[KASLR] cannot derive kernel span; not relocating\n");
-            core::hint::unreachable_unchecked();
+            return;
         }
-        let num_pages = span.pages();
+        let num_pages = kernel_map_pages(span_bytes);
         // A shift that would alias the tail onto unrelated page-directory
         // entries used to wrap silently via `% 512`.
         crate::serial_write("[KASLR] kernel span pages = ");
@@ -787,12 +722,13 @@ pub unsafe fn activate_kaslr_mapping() {
         for i in 0..num_pages {
             let page_phys = kernel_phys_base + (i as u64 * 2 * 1024 * 1024);
             let page_frame = PhysFrame::containing_address(x86_64::PhysAddr::new(page_phys));
-            // Map at PD index (511 + pd_index_shift + i) in the new PD (which corresponds to LINK_BASE + slide + i * 2MiB)
-            let pd_idx = (511 + pd_index_shift + i) % 512;
-            new_pd[pd_idx].set_frame(
-                page_frame,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::HUGE_PAGE,
-            );
+            let entry_flags =
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::HUGE_PAGE;
+            // Slid destination, same index arithmetic as the copy loop below.
+            new_pd[pd_destination_index(pd_index_shift, i)].set_frame(page_frame, entry_flags);
+            // Old-index alias: the transition runs on the pre-slide stack
+            // pointer, so every kernel page must stay reachable where it was.
+            new_pd[(kernel_base_pd_index() + i) % 512].set_frame(page_frame, entry_flags);
         }
         created_new_pd = true;
     }
@@ -810,62 +746,63 @@ pub unsafe fn activate_kaslr_mapping() {
     crate::serial_write("\n");
     let kernel_base_pd = kernel_base_pd_index();
 
-    // Copy kernel PD entries to new shifted positions in new PD
-    // The kernel typically uses a few 2MiB pages starting at PD index 511
-    // Copy for both huge page and non-huge-page cases
-    // The kernel typically uses a few 2MiB pages starting at PD index 511
-    // Only copy if we didn't create the PD manually (huge page case)
+    // A slide smaller than the kernel span makes the old-index aliases
+    // overwrite the slid entries, and a wrapped tail lands on unrelated ones:
+    // either way `LINK_BASE + slide` resolves the wrong physical page, so
+    // refuse the slide instead of building those tables.
+    if pd_shift_conflicts(pd_index_shift, kernel_pages) {
+        crate::serial_write("[KASLR] slide overlaps or wraps the kernel PD range; not sliding\n");
+        crate::KERNEL_SLIDE.store(0, core::sync::atomic::Ordering::Relaxed);
+        return;
+    }
 
-    let old_pd_frame = old_pdpt_entry_kernel
-        .frame()
-        .expect("Kernel PD not present");
-    let old_pd_virt = VirtAddr::new(hhdm_offset) + old_pd_frame.start_address().as_u64();
-    // SAFETY: every physical frame is readable through the HHDM, and the
-    // frame came from a present PDPTE, so it is a real page-directory
-    // frame the kernel's own boot page tables created.
-    let old_pd = unsafe { &*(old_pd_virt.as_ptr::<PageTable>()) };
+    // Copy kernel PD entries to new shifted positions in new PD, and keep each
+    // page reachable at its old index. Only for the non-huge-page case: when
+    // the huge-page branch above built the PD itself, the old PDPT entry holds
+    // a huge frame and there is no old PD to read.
+    if !created_new_pd {
+        let old_pd_frame = old_pdpt_entry_kernel
+            .frame()
+            .expect("Kernel PD not present");
+        let old_pd_virt = VirtAddr::new(hhdm_offset) + old_pd_frame.start_address().as_u64();
+        // SAFETY: every physical frame is readable through the HHDM, and the
+        // frame came from a present PDPTE, so it is a real page-directory
+        // frame the kernel's own boot page tables created.
+        let old_pd = unsafe { &*(old_pd_virt.as_ptr::<PageTable>()) };
 
-    for i in 0..kernel_pages {
-        let base = kernel_base_pd_index();
-        crate::serial_write("[KASLR] DBG: i=");
-        crate::serial_write_hex(i as u64);
-        crate::serial_write(" base=");
-        crate::serial_write_hex(base as u64);
-        crate::serial_write(" src_idx=");
-        let src_idx = (base + i) % 512;
-        crate::serial_write_hex(src_idx as u64);
-        crate::serial_write(" shift=");
-        crate::serial_write_hex(pd_index_shift as u64);
-        crate::serial_write("\n");
-        crate::serial_write("[KASLR] DBG2: checking src_idx=");
-        crate::serial_write_hex(src_idx as u64);
-        crate::serial_write(" used=");
-        crate::serial_write_hex(if old_pd[src_idx].is_unused() { 0 } else { 1 } as u64);
-        crate::serial_write("\n");
-        if !old_pd[src_idx].is_unused() {
-            let dst_idx = pd_destination_index(pd_index_shift, i);
-            crate::serial_write("[KASLR] copy PD[");
+        for i in 0..kernel_pages {
+            let base = kernel_base_pd_index();
+            crate::serial_write("[KASLR] DBG: i=");
+            crate::serial_write_hex(i as u64);
+            crate::serial_write(" base=");
+            crate::serial_write_hex(base as u64);
+            crate::serial_write(" src_idx=");
+            let src_idx = (base + i) % 512;
             crate::serial_write_hex(src_idx as u64);
-            crate::serial_write("] -> PD[");
-            crate::serial_write_hex(dst_idx as u64);
+            crate::serial_write(" shift=");
+            crate::serial_write_hex(pd_index_shift as u64);
             crate::serial_write("\n");
-            new_pd[dst_idx] = old_pd[src_idx].clone();
-            // The slide is applied just before the trampoline, and the
-            // trampoline executes at its OLD virtual address until the CR3
-            // switch completes. Any page it might be executing from must
-            // therefore remain reachable at its OLD index in the NEW tables.
-            // Aliasing only the trampoline page made any kernel larger
-            // than 2 MiB unbootable: `audit`'s KERNEL_SLIDE lands on PD
-            // index 2, which had no un-slid alias.
-            if !page_aliasing::needs_full_old_aliasing(kernel_span_bytes()) || {
-                let start = kernel_base_pd;
-                let end = (kernel_base_pd + kernel_pages) % 512;
-                if start <= end {
-                    src_idx >= start && src_idx < end
-                } else {
-                    src_idx >= start || src_idx < end
-                }
-            } {
+            crate::serial_write("[KASLR] DBG2: checking src_idx=");
+            crate::serial_write_hex(src_idx as u64);
+            crate::serial_write(" used=");
+            crate::serial_write_hex(if old_pd[src_idx].is_unused() { 0 } else { 1 } as u64);
+            crate::serial_write("\n");
+            if !old_pd[src_idx].is_unused() {
+                let dst_idx = pd_destination_index(pd_index_shift, i);
+                crate::serial_write("[KASLR] copy PD[");
+                crate::serial_write_hex(src_idx as u64);
+                crate::serial_write("] -> PD[");
+                crate::serial_write_hex(dst_idx as u64);
+                crate::serial_write("\n");
+                new_pd[dst_idx] = old_pd[src_idx].clone();
+                // The slide is applied just before the trampoline, and the
+                // trampoline executes at its OLD virtual address until the CR3
+                // switch completes. Every kernel page must therefore remain
+                // reachable at its OLD index in the NEW tables; the guard above
+                // already refused any shift that would collide with the slid
+                // range. Aliasing only the trampoline page made any kernel
+                // larger than 2 MiB unbootable: `audit`'s KERNEL_SLIDE lands
+                // on PD index 2, which had no un-slid alias.
                 new_pd[src_idx] = old_pd[src_idx].clone();
             }
         }
@@ -887,8 +824,9 @@ pub unsafe fn activate_kaslr_mapping() {
     crate::serial_write("\n");
     // Kernel-relative PD index (offset from LINK_BASE)
     let trampoline_pd_index = (((trampoline_virt - LINK_BASE) >> 21) & 0x1FF) as usize;
-    // The absolute PD index within the kernel PDPT[510] is kernel_base_pd (0)
-    let trampoline_pd_index_absolute = kernel_base_pd;
+    // Absolute PD index within the kernel PDPT[510]: the kernel's base index
+    // plus the page's offset from LINK_BASE, wrapped within the directory.
+    let trampoline_pd_index_absolute = (kernel_base_pd + trampoline_pd_index) % 512;
 
     // Get the trampoline's page table entry (physical frame + flags)
     let trampoline_pd_entry = if created_new_pd {
@@ -913,7 +851,7 @@ pub unsafe fn activate_kaslr_mapping() {
         // SAFETY: same HHDM-read of a present PDPTE's frame as above; the
         // entry is only cloned out, never written through this reference.
         let old_pd = unsafe { &*(old_pd_virt.as_ptr::<PageTable>()) };
-        old_pd[trampoline_pd_index].clone()
+        old_pd[trampoline_pd_index_absolute].clone()
     };
 
     crate::serial_write("[KASLR] trampoline PD index (kernel-relative) = ");
@@ -923,25 +861,17 @@ pub unsafe fn activate_kaslr_mapping() {
     crate::serial_write_hex(trampoline_pd_index_absolute as u64);
     crate::serial_write("\n");
     if !trampoline_pd_entry.is_unused() {
-        // Map at old PD index (kernel PD[511]) for OLD virtual address compatibility after CR3 switch
+        // Map at the trampoline page's old PD index for OLD virtual address
+        // compatibility across the CR3 switch.
         new_pd[trampoline_pd_index_absolute] = trampoline_pd_entry.clone();
-        // Map at new shifted PD index (absolute PD index + shift) for NEW virtual address
-        // trampoline_pd_index_absolute = kernel_base_pd = 0
-        // trampoline_pd_index = 0 (kernel-relative page 0)
-        // New PD index = (absolute + shift) % 512 = (0 + shift) % 512
-        let new_pd_index = (trampoline_pd_index_absolute + pd_index_shift) % 512;
+        // Map at the shifted index for the NEW virtual address.
+        let new_pd_index = pd_destination_index(pd_index_shift, trampoline_pd_index);
         crate::serial_write("[KASLR] trampoline new PD index = ");
         crate::serial_write_hex(new_pd_index as u64);
         crate::serial_write("\n");
         new_pd[new_pd_index] = trampoline_pd_entry;
     }
 
-    // Keep every kernel page reachable at its OLD index as well as the new
-    // shifted one. The trampoline runs from its old virtual address across the
-    // CR3 switch, so the new tables must still resolve it there. Aliasing only
-    // the trampoline page is what made any kernel larger than 2 MiB unbootable:
-    // the trampoline page was the sole un-slid alias, and `audit`'s
-    // `KASLR_SLIDE` lands on PD index 2.
     // Point new PDPT[510] to the new PD
     let new_pd_phys = new_pd_frame.start_address().as_u64();
     let new_pd_frame_obj = PhysFrame::containing_address(x86_64::PhysAddr::new(new_pd_phys));

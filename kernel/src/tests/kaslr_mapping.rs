@@ -15,7 +15,9 @@
 //! 2. A shift that would alias the destination page-directory entries is
 //!    reported, not silently wrapped by `% 512`.
 
-use crate::kaslr_reloc::{kernel_map_pages, pd_shift_aliases, ElfSegmentSpan};
+use crate::kaslr_reloc::{
+    kernel_map_pages, pd_shift_aliases, pd_shift_conflicts, ElfSegmentSpan,
+};
 use crate::selftest;
 
 /// A kernel larger than the old 64 MiB constant must map every page it needs.
@@ -124,6 +126,33 @@ fn test_span_is_derived_from_the_segments() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// A slide that lands the kernel on its own old-index aliases, or wraps the
+/// directory, must be refused before the tables are built.
+///
+/// The alias written for one page overwrites an already-slid entry whenever
+/// `shift < pages`, so the rebuild must never proceed with such a slide.
+fn test_shift_conflicting_with_old_aliases_is_refused() -> Result<(), &'static str> {
+    if !pd_shift_conflicts(1, 3) {
+        return Err("shift 1 over 3 pages overwrites the aliases it depends on");
+    }
+    if !pd_shift_conflicts(2, 3) {
+        return Err("shift 2 over 3 pages still overlaps");
+    }
+    // shift == pages is the smallest safe slide: slid and old ranges abut.
+    if pd_shift_conflicts(3, 3) {
+        return Err("shift equal to the page count must not conflict");
+    }
+    // Large shift, comfortably inside the directory.
+    if pd_shift_conflicts(509, 3) {
+        return Err("shift 509 + 3 pages ends exactly at entry 512 and is valid");
+    }
+    // Same overlap question, now wrapping the directory end.
+    if !pd_shift_conflicts(510, 3) {
+        return Err("shift 510 + 3 pages wraps and must conflict");
+    }
+    Ok(())
+}
+
 pub fn register() {
     selftest::register(
         "kaslr:map_pages_follows_image_size_not_a_constant",
@@ -132,6 +161,10 @@ pub fn register() {
     selftest::register(
         "kaslr:shift_that_wraps_the_page_directory_is_reported",
         test_shift_that_wraps_the_page_directory_is_reported,
+    );
+    selftest::register(
+        "kaslr:shift_conflicting_with_old_aliases_is_refused",
+        test_shift_conflicting_with_old_aliases_is_refused,
     );
     selftest::register(
         "kaslr:span_is_derived_from_the_segments",
