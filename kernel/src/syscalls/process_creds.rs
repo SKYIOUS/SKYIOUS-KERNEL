@@ -472,17 +472,19 @@ pub fn sys_getgroups(size: i32, list: *mut u32) -> u64 {
     if size < groups.len() {
         return errno::Errno::EINVAL as u64;
     }
-    // Validate before slicing: from_raw_parts_mut lets ring 0 write the group
-    // list into a kernel address.
-    if !user_access::validate_ptr(
-        list as *const u8,
-        core::mem::size_of::<u32>() * groups.len(),
-    ) {
-        return errno::Errno::EFAULT as u64;
+    if groups.is_empty() {
+        return 0;
     }
-    let slice = unsafe { core::slice::from_raw_parts_mut(list, groups.len()) };
-    for (i, g) in groups.iter().enumerate() {
-        slice[i] = *g;
+    // Fault-aware copy: validate_ptr only range-checks, so slicing over the
+    // raw pointer still lets an unmapped address (or null) fault in ring 0.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            groups.as_ptr() as *const u8,
+            core::mem::size_of::<u32>() * groups.len(),
+        )
+    };
+    if unsafe { user_access::copy_to_user(list as *mut u8, bytes) }.is_err() {
+        return errno::Errno::EFAULT as u64;
     }
     groups.len() as u64
 }
@@ -495,25 +497,28 @@ pub fn sys_setgroups(size: i64, list: *const u32) -> u64 {
         return errno::Errno::EINVAL as u64;
     }
     let count = size as usize;
-    // Validate before slicing: from_raw_parts over a userspace pointer lets
-    // ring 0 adopt kernel memory as the group list.
-    if count > 0
-        && !user_access::validate_ptr(list as *const u8, core::mem::size_of::<u32>() * count)
-    {
-        return errno::Errno::EFAULT as u64;
+    // Decode from a kernel copy made by copy_from_user: validate_ptr only
+    // range-checks, so a raw slice over the user pointer can read kernel
+    // memory, fault on an unmapped address, or assume an alignment the ABI
+    // does not promise.
+    let mut groups_new = alloc::vec::Vec::new();
+    if count > 0 {
+        let mut raw = alloc::vec![0u8; core::mem::size_of::<u32>() * count];
+        if unsafe { user_access::copy_from_user(&mut raw, list as *const u8) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+        groups_new.extend(
+            raw.chunks_exact(core::mem::size_of::<u32>())
+                .map(|c| u32::from_ne_bytes(c.try_into().unwrap_or([0u8; 4]))),
+        );
     }
-    let slice = if count > 0 {
-        unsafe { core::slice::from_raw_parts(list, count) }
-    } else {
-        &[]
-    };
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
     let mut groups = process.groups.lock();
     groups.clear();
-    groups.extend_from_slice(slice);
+    groups.extend_from_slice(&groups_new);
     0
 }
 

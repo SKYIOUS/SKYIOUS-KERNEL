@@ -89,7 +89,7 @@ pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
         }
         Some(FileDescriptor::PtyMaster { .. }) | Some(FileDescriptor::PtySlave { .. }) => {
             let stat = Stat {
-                st_mode: crate::vfs::_S_IFSOCK | 0o666,
+                st_mode: crate::vfs::_S_IFCHR | 0o620,
                 ..Stat::default()
             };
             if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err() {
@@ -99,7 +99,7 @@ pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
         }
         Some(FileDescriptor::Socket(_, _)) | Some(FileDescriptor::UnixSocket(_, _)) => {
             let stat = Stat {
-                st_mode: crate::vfs::_S_IFCHR | 0o620,
+                st_mode: crate::vfs::_S_IFSOCK | 0o666,
                 ..Stat::default()
             };
             if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err() {

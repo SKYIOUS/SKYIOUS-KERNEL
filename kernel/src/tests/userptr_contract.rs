@@ -13,6 +13,11 @@
 //! Each test drives the handler to the point where it touches the pointer, so
 //! a refusal proves the pointer was validated rather than that some earlier
 //! guard (no such fd, no such process, empty list) short-circuited the call.
+//!
+//! `userptr:unmapped_user_pointer_is_refused_without_fault` additionally pins
+//! the fault-aware copies: `validate_ptr` only range-checks, so a pointer below
+//! the user ceiling but unmapped must yield EFAULT from the exception-table
+//! copy, not a ring-0 page fault.
 
 use crate::selftest;
 use crate::syscalls::errno::Errno;
@@ -59,6 +64,44 @@ fn with_process_context<T>(f: impl FnOnce() -> T) -> T {
     let out = f();
     *CURRENT_PROCESS.lock() = previous;
     out
+}
+
+/// Queue one `IN_MODIFY` event for the inotify fd `watch_fd`.
+///
+/// `sys_inotify_add_watch` reads its path from userspace, and no user pages
+/// are mapped during selftests, so the watch cannot be registered through the
+/// syscall path; the pending event is placed into the instance directly.
+fn queue_inotify_event(watch_fd: u64) -> Result<(), &'static str> {
+    use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+    let key = {
+        let guard = CURRENT_PROCESS.lock();
+        let p = match guard.as_ref() {
+            Some(p) => p,
+            None => return Err("no process context"),
+        };
+        let files = p.files.lock();
+        if watch_fd as usize >= files.fd_table.len() {
+            return Err("inotify fd out of range");
+        }
+        match files.fd_table[watch_fd as usize] {
+            Some(FileDescriptor::InotifyFd { instance_key }) => instance_key,
+            _ => return Err("fd is not an inotify fd"),
+        }
+    };
+    let inst = {
+        let instances = crate::syscalls::inotify::INOTIFY_INSTANCES.lock();
+        match instances.get(&key) {
+            Some(inst) => inst.clone(),
+            None => return Err("inotify instance not registered"),
+        }
+    };
+    inst.lock().events.push(crate::syscalls::inotify::PendingEvent {
+        wd: 1,
+        mask: crate::syscalls::inotify::IN_MODIFY,
+        cookie: 0,
+        name: alloc::string::String::new(),
+    });
+    Ok(())
 }
 
 /// `io_uring_register` sliced the raw `arg` for BUFFERS, FILES and EVENTFD
@@ -119,9 +162,11 @@ fn test_inotify_read_rejects_kernel_buffer() -> Result<(), &'static str> {
         if watch_fd > 0xFFFF {
             return Err("inotify_init did not yield an fd");
         }
-        let path = b"/tmp\0";
-        let _wd =
-            crate::syscalls::inotify::sys_inotify_add_watch(watch_fd, path.as_ptr(), 0x0000_00FF);
+        // The read drains a pending event into a kernel buffer before the
+        // copy, so an empty queue would return EAGAIN before touching `buf`.
+        if let Err(e) = queue_inotify_event(watch_fd) {
+            return Err(e);
+        }
 
         let rc = crate::syscalls::fs_io::sys_read(watch_fd, KERNEL_PTR as *mut u8, 64);
         if rc == 0 {
@@ -217,6 +262,81 @@ fn test_clipboard_rejects_kernel_buffer() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Unmapped-but-in-range user pointers must come back as EFAULT.
+///
+/// `validate_ptr` only range-checks, so 0x1000_0000 (below the user ceiling,
+/// unmapped in the selftest address space) used to reach a raw slice and the
+/// handler faulted in ring 0. Every path below now copies through the
+/// exception-table helpers, which turn the same fault into EFAULT.
+fn test_unmapped_user_pointer_is_refused_without_fault() -> Result<(), &'static str> {
+    const UNMAPPED: u64 = 0x0000_1000_0000;
+    with_process_context(|| {
+        let ring_fd = crate::syscalls::io_uring::sys_io_uring_setup(8, 0);
+        if ring_fd > 0xFFFF {
+            return Err("io_uring_setup did not yield an fd");
+        }
+        for op in [
+            crate::syscalls::io_uring::IORING_REGISTER_BUFFERS,
+            crate::syscalls::io_uring::IORING_REGISTER_FILES,
+            crate::syscalls::io_uring::IORING_REGISTER_EVENTFD,
+        ] {
+            let rc = crate::syscalls::io_uring::sys_io_uring_register(ring_fd, op, UNMAPPED, 8);
+            if rc != efault() {
+                return Err("io_uring_register must return EFAULT for an unmapped pointer");
+            }
+        }
+        let sqe_size = core::mem::size_of::<crate::syscalls::io_uring::IoSqEntry>();
+        let rc = crate::syscalls::fs_io::sys_write(ring_fd, UNMAPPED as *const u8, sqe_size);
+        if rc != efault() {
+            return Err("io_uring write() must return EFAULT for an unmapped SQE pointer");
+        }
+
+        let watch_fd = crate::syscalls::inotify::sys_inotify_init(0);
+        if watch_fd > 0xFFFF {
+            return Err("inotify_init did not yield an fd");
+        }
+        if let Err(e) = queue_inotify_event(watch_fd) {
+            return Err(e);
+        }
+        let rc = crate::syscalls::fs_io::sys_read(watch_fd, UNMAPPED as *mut u8, 64);
+        if rc != efault() {
+            return Err("inotify read() must return EFAULT for an unmapped buffer");
+        }
+
+        {
+            use crate::task::process::CURRENT_PROCESS;
+            let guard = CURRENT_PROCESS.lock();
+            let p = match guard.as_ref() {
+                Some(p) => p,
+                None => return Err("no process context"),
+            };
+            *p.groups.lock() = alloc::vec![1u32, 2];
+            p.creds.lock().cap_effective |= crate::syscalls::helpers::CAP_SETGID;
+        }
+        let rc = crate::syscalls::process_creds::sys_getgroups(64, UNMAPPED as *mut u32);
+        if rc != efault() {
+            return Err("getgroups must return EFAULT for an unmapped buffer");
+        }
+        let rc = crate::syscalls::process_creds::sys_setgroups(2, UNMAPPED as *const u32);
+        if rc != efault() {
+            return Err("setgroups must return EFAULT for an unmapped list");
+        }
+
+        // Mode 0 needs non-empty clipboard contents to reach the copy.
+        crate::gui::COMPOSITOR.lock().clipboard = alloc::vec![7u8; 4];
+        let rc = crate::syscalls::gui::sys_clipboard(0, UNMAPPED as *mut u8, 4);
+        if rc != efault() {
+            return Err("clipboard get must return EFAULT for an unmapped buffer");
+        }
+        let rc = crate::syscalls::gui::sys_clipboard(1, UNMAPPED as *mut u8, 4);
+        if rc != efault() {
+            return Err("clipboard set must return EFAULT for an unmapped buffer");
+        }
+        crate::syscalls::gui::sys_clipboard(1, core::ptr::null_mut(), 0);
+        Ok(())
+    })
+}
+
 pub fn register() {
     selftest::register(
         "userptr:io_uring_register_rejects_kernel_pointer",
@@ -241,5 +361,9 @@ pub fn register() {
     selftest::register(
         "userptr:clipboard_rejects_kernel_buffer",
         test_clipboard_rejects_kernel_buffer,
+    );
+    selftest::register(
+        "userptr:unmapped_user_pointer_is_refused_without_fault",
+        test_unmapped_user_pointer_is_refused_without_fault,
     );
 }

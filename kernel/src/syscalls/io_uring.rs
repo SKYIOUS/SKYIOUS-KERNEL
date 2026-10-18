@@ -456,17 +456,21 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
                 addr: u64,
                 len: u64,
             }
-            // Validate the userspace array BEFORE any slice is built over it:
-            // from_raw_parts alone lets ring 0 read a kernel address.
+            // Decode from a kernel copy made by copy_from_user: a slice cast
+            // over the user address lets ring 0 read a kernel address, and the
+            // ABI does not promise the alignment such a cast assumes.
             let iovec_bytes = core::mem::size_of::<IoVec>() * nr_args as usize;
-            if !user_access::validate_ptr(arg as *const u8, iovec_bytes) {
+            let mut raw = alloc::vec![0u8; iovec_bytes];
+            if unsafe { user_access::copy_from_user(&mut raw, arg as *const u8) }.is_err() {
                 return Errno::EFAULT as u64;
             }
-            let iovecs =
-                unsafe { core::slice::from_raw_parts(arg as *const IoVec, nr_args as usize) };
-            inst.fixed_buffers = iovecs
-                .iter()
-                .map(|iov| (iov.addr, iov.len as u32))
+            inst.fixed_buffers = raw
+                .chunks_exact(core::mem::size_of::<IoVec>())
+                .map(|c| {
+                    let addr = u64::from_ne_bytes(c[..8].try_into().unwrap_or([0u8; 8]));
+                    let len = u64::from_ne_bytes(c[8..16].try_into().unwrap_or([0u8; 8]));
+                    (addr, len as u32)
+                })
                 .collect();
             0
         }
@@ -478,14 +482,15 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
             if arg == 0 || nr_args == 0 || nr_args > 1024 {
                 return Errno::EINVAL as u64;
             }
-            if !user_access::validate_ptr(
-                arg as *const u8,
-                core::mem::size_of::<i32>() * nr_args as usize,
-            ) {
+            let fds_bytes = core::mem::size_of::<i32>() * nr_args as usize;
+            let mut raw = alloc::vec![0u8; fds_bytes];
+            if unsafe { user_access::copy_from_user(&mut raw, arg as *const u8) }.is_err() {
                 return Errno::EFAULT as u64;
             }
-            let fds = unsafe { core::slice::from_raw_parts(arg as *const i32, nr_args as usize) };
-            inst.fixed_files = fds.to_vec();
+            inst.fixed_files = raw
+                .chunks_exact(core::mem::size_of::<i32>())
+                .map(|c| i32::from_ne_bytes(c.try_into().unwrap_or([0u8; 4])))
+                .collect();
             0
         }
         IORING_UNREGISTER_FILES => {
@@ -496,10 +501,11 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
             if arg == 0 {
                 return Errno::EINVAL as u64;
             }
-            if !user_access::validate_ptr(arg as *const u8, core::mem::size_of::<i32>()) {
+            let mut raw = [0u8; 4];
+            if unsafe { user_access::copy_from_user(&mut raw, arg as *const u8) }.is_err() {
                 return Errno::EFAULT as u64;
             }
-            let efd_fd = unsafe { core::ptr::read_volatile(arg as *const i32) };
+            let efd_fd = i32::from_ne_bytes(raw);
             if efd_fd < 0 {
                 return Errno::EINVAL as u64;
             }

@@ -240,16 +240,16 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
         Some(FileDescriptor::InotifyFd { instance_key, .. }) => {
             let key = instance_key;
 
-            // inotify_read writes the event header and watch name through this
-            // slice, so an unvalidated `buf` is an arbitrary-address kernel
-            // write. Validate before the slice exists.
-            if !user_access::validate_ptr(buf, count) {
-                return errno::Errno::EFAULT as u64;
-            }
-            match super::inotify::inotify_read(key, unsafe {
-                core::slice::from_raw_parts_mut(buf, count)
-            }) {
-                Ok(n) => n as u64,
+            // inotify_read fills a kernel buffer; the user pointer is only
+            // touched by the fault-aware copy below, never as a raw slice.
+            let mut kbuf = alloc::vec![0u8; count];
+            match super::inotify::inotify_read(key, &mut kbuf) {
+                Ok(n) => {
+                    if unsafe { user_access::copy_to_user(buf, &kbuf[..n]) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    n as u64
+                }
                 Err(e) => e as u64,
             }
         }
@@ -374,18 +374,20 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             let inst = guard
                 .downcast_mut::<crate::syscalls::io_uring::IoUringInstance>()
                 .expect("IoUringFd did not contain IoUringInstance");
-            // submit_sqes reads every entry out of this slice, so an
-            // unvalidated `buf` reads a kernel address in ring 0.
-            if !user_access::validate_ptr(buf, n_sqes * sqe_size) {
-                return errno::Errno::EFAULT as u64;
+            // Decode the SQEs from the kernel copy made at the top of
+            // sys_write: submit_sqes reads every entry, so the user buffer
+            // must never be reinterpreted as a typed slice.
+            let mut sqes = alloc::vec![crate::syscalls::io_uring::IoSqEntry::default(); n_sqes];
+            // SAFETY: both sides are byte buffers of the same length; `data`
+            // was filled by copy_from_user and IoSqEntry is plain data.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    sqes.as_mut_ptr() as *mut u8,
+                    n_sqes * sqe_size,
+                );
             }
-            let sqes = unsafe {
-                core::slice::from_raw_parts(
-                    buf as *const crate::syscalls::io_uring::IoSqEntry,
-                    n_sqes,
-                )
-            };
-            let submitted = inst.submit_sqes(sqes);
+            let submitted = inst.submit_sqes(&sqes);
             if submitted > 0 {
                 inst.process_all();
             }
