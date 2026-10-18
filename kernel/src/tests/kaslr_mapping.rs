@@ -15,9 +15,7 @@
 //! 2. A shift that would alias the destination page-directory entries is
 //!    reported, not silently wrapped by `% 512`.
 
-use crate::kaslr_reloc::{
-    kernel_map_pages, pd_shift_aliases, pd_shift_conflicts, ElfSegmentSpan,
-};
+use crate::kaslr_reloc::{kernel_map_pages, pd_shift_aliases, pd_shift_conflicts, ElfSegmentSpan};
 use crate::selftest;
 
 /// A kernel larger than the old 64 MiB constant must map every page it needs.

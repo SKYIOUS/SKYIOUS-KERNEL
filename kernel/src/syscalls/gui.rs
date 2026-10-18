@@ -287,10 +287,7 @@ pub fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
             // Fault-aware copy: a raw read through `buf` pulls arbitrary
             // addresses into clipboard state that mode 0 hands to userspace.
             let mut new_data = alloc::vec![0u8; len as usize];
-            if unsafe {
-                crate::syscalls::user_access::copy_from_user(&mut new_data, buf)
-            }
-            .is_err()
+            if unsafe { crate::syscalls::user_access::copy_from_user(&mut new_data, buf) }.is_err()
             {
                 return crate::syscalls::errno::Errno::EFAULT as u64;
             }

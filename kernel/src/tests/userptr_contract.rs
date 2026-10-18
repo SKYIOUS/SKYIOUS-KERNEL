@@ -95,12 +95,14 @@ fn queue_inotify_event(watch_fd: u64) -> Result<(), &'static str> {
             None => return Err("inotify instance not registered"),
         }
     };
-    inst.lock().events.push(crate::syscalls::inotify::PendingEvent {
-        wd: 1,
-        mask: crate::syscalls::inotify::IN_MODIFY,
-        cookie: 0,
-        name: alloc::string::String::new(),
-    });
+    inst.lock()
+        .events
+        .push(crate::syscalls::inotify::PendingEvent {
+            wd: 1,
+            mask: crate::syscalls::inotify::IN_MODIFY,
+            cookie: 0,
+            name: alloc::string::String::new(),
+        });
     Ok(())
 }
 
