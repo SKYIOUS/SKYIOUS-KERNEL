@@ -356,10 +356,9 @@ Tested configuration: x86_64 `--release`, QEMU/TCG with OVMF, **smp=1**.
 
 Remaining debt in this area (unchanged, not silently closed): the
 `[KASLR-VERIFY] match:` printer still prints `NO` (see A0.4); `[KASLR] DBG`
-/ `DBG2` / span debug lines still print; `read_kernel_segments` /
-`Elf64Phdr64` retained for the practically-dead 1 GiB huge-page branch;
-`.rodata` still mapped in an `rw-` segment; the A-6 rows in
-`docs/architecture/issues.md` still read "STILL OPEN".
+/ `DBG2` / span debug lines still print; `.rodata` still mapped in an
+`rw-` segment; the A-6 rows in `docs/architecture/issues.md` still read
+"STILL OPEN".
 
 Historically, KASLR randomised the page mapping without correcting a single
 embedded pointer; the kernel booted only because every old address remained
@@ -431,9 +430,9 @@ walking `e_shoff`/section headers. Delete the gate at :455.
       `relocation refused (applied=… failed=…)`) instead of claiming success
 - [x] A refused pass does not claim success: `post_kaslr_continue()`
       continues on the link-time mapping
-- [ ] `read_kernel_segments` and `Elf64Phdr64` deleted — **not done**;
-      retained, used only by the practically-dead 1 GiB huge-page branch in
-      `activate_kaslr_mapping`
+- [x] `read_kernel_segments` and `Elf64Phdr64` deleted (`e9d1697`); the
+      huge-page branch derives its span from `kernel_span_bytes()` and maps
+      the old-index aliases it previously assumed still existed
 
 **Verification:**
 - [x] Test asserting a zero-relocation table reports failure:

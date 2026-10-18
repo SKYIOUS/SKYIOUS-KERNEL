@@ -16,26 +16,28 @@ Fixed in this cycle (AGENTS.md non-negotiable #8). Each was RED→GREEN via
 
 | Defect | Site | Status |
 |---|---|---|
-| `io_uring_register` BUFFERS/FILES/EVENTFD sliced raw user pointers | `syscalls/io_uring.rs:459,475,487` | FIXED |
-| `write()` on io_uring fd built a slice over the SQE pointer | `syscalls/fs_io.rs:371` | FIXED |
-| `read()` on inotify fd wrote through a raw `from_raw_parts_mut` | `syscalls/fs_io.rs:243` | FIXED |
-| `getgroups` wrote the group list through an unchecked pointer | `syscalls/process_creds.rs:475` | FIXED |
-| `setgroups` read the group list from an unchecked pointer | `syscalls/process_creds.rs:490` | FIXED |
-| GUI clipboard copied both directions through a raw pointer | `syscalls/gui.rs:270,282` | FIXED |
+| `io_uring_register` BUFFERS/FILES/EVENTFD sliced raw user pointers | `syscalls/io_uring.rs:464,487,505` | FIXED |
+| `write()` on io_uring fd built a slice over the SQE pointer | `syscalls/fs_io.rs:289` | FIXED |
+| `read()` on inotify fd wrote through a raw `from_raw_parts_mut` | `syscalls/fs_io.rs:248` | FIXED |
+| `getgroups` wrote the group list through an unchecked pointer | `syscalls/process_creds.rs:486` | FIXED |
+| `setgroups` read the group list from an unchecked pointer | `syscalls/process_creds.rs:507` | FIXED |
+| GUI clipboard copied both directions through a raw pointer | `syscalls/gui.rs:273,290` | FIXED |
 
 ## Dynamic ELF loader
 
 | # | Defect | Evidence | Status |
 |---|---|---|---|
 | E-1 | `read_dt_str` scanned the strtab up to `DT_STRSZ`, an attacker-controlled value never bounded by the mapped page. `translate_addr` validates one page; a crafted ELF with `DT_STRSZ = usize::MAX` walked memory until it found a NUL. The leaked bytes became a `DT_NEEDED` name fed to `VFS.resolve_path`. | `kernel/src/elf_dyn.rs` `read_dt_str` | FIXED (`strtab_mapped_bytes` clamp) |
-| E-2 | `parse_dt_entries` looped a hard-coded 1024 entries (16 KiB) past the single validated page, with the `DT_NULL` early exit itself attacker-supplied. `.expect(...)` also panicked the kernel on an unmapped `dyn_vaddr` instead of returning an error. | `kernel/src/elf_dyn.rs` `parse_dt_entries` | FIXED (bounded to one page, `Option` handled) |
+| E-2 | `parse_dt_entries` looped a hard-coded 1024 entries (16 KiB) past the single validated page, with the `DT_NULL` early exit itself attacker-supplied. `.expect(...)` also panicked the kernel on an unmapped `dyn_vaddr` instead of returning an error. | `kernel/src/elf_dyn.rs` `parse_dt_entries` | FIXED (bounded to one page via `dt_entries_in_page`, `Option` handled; bound TAP-covered by `elf_dyn:dt_entry_page_bound_tracks_the_offset`) |
 
 Both share one root cause — treating a single-page `translate_addr` result as
 covering a file-declared length — so both are bounded at that choke point rather
 than per-caller (AGENTS.md non-negotiable #3). E-1's bound is mutation-proven:
 weakening the page-offset mask turns `elf_dyn:dt_strsz_is_bounded_by_the_mapped_region`
-RED. E-2's bound is verified by inspection only; the walk's termination depends
-on a page this environment cannot populate with non-`DT_NULL` entries.
+RED. E-2's page-offset bound is exercised by
+`elf_dyn:dt_entry_page_bound_tracks_the_offset`; the walk's own termination
+remains verified by inspection only — it depends on a page this environment
+cannot populate with non-`DT_NULL` entries.
 
 ## Cross-crate `user_access` stub
 
