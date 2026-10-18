@@ -1,4 +1,4 @@
-# extended_fuzz.ps1 — Extended fuzz run via repeated QEMU boot cycles.
+# extended_fuzz.ps1 - Extended fuzz run via repeated QEMU boot cycles.
 #
 # Since the kernel fuzzer runs at boot time (selftest), extended fuzzing
 # means running many boot cycles with the fuzzer enabled. Each boot
@@ -89,8 +89,8 @@ for ($i = 1; $i -le $Cycles; $i++) {
             $failed++
             Write-Host "FAIL ($($Matches[1]) failed)" -ForegroundColor Red
         } else {
-            $passed++
-            Write-Host "OK (no test output)" -ForegroundColor Yellow
+            $failed++
+            Write-Host "NO VERDICT (no test output)" -ForegroundColor Red
         }
 
         # Progress indicator every 10 cycles

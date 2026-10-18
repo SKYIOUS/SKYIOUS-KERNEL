@@ -1,4 +1,4 @@
-# smp_stress.ps1 — Boot with multiple CPU counts and verify stability.
+# smp_stress.ps1 - Boot with multiple CPU counts and verify stability.
 #
 # Tests SMP by booting with 1, 2, 4, and 8 CPUs, running the self-test
 # suite (which includes stress tests), and verifying no lockups or panics.
@@ -89,9 +89,9 @@ foreach ($cpuCount in $cpuCounts) {
             $results += @{ Cpus = $cpuCount; Status = "FAIL"; Tests = "$($Matches[1])/$($Matches[2])" }
             Write-Host "FAIL ($($Matches[1])/$($Matches[2]), $($Matches[3]) failed)" -ForegroundColor Red
         } elseif ($logContent -match 'SARGA OS.*starting') {
-            $passed++
-            $results += @{ Cpus = $cpuCount; Status = "BOOT OK" }
-            Write-Host "BOOT OK (no test output)" -ForegroundColor Yellow
+            $failed++
+            $results += @{ Cpus = $cpuCount; Status = "NO VERDICT" }
+            Write-Host "NO VERDICT (booted without test output)" -ForegroundColor Red
         } else {
             $failed++
             $results += @{ Cpus = $cpuCount; Status = "NO OUTPUT" }
@@ -112,7 +112,7 @@ Write-Host "Passed: $passed" -ForegroundColor Green
 Write-Host "Failed: $failed" -ForegroundColor $(if ($failed -gt 0) { "Red" } else { "Green" })
 
 foreach ($r in $results) {
-    $color = if ($r.Status -eq "PASS" -or $r.Status -eq "BOOT OK") { "Green" } else { "Red" }
+    $color = if ($r.Status -eq "PASS") { "Green" } else { "Red" }
     $tests = if ($r.Tests) { " ($($r.Tests))" } else { "" }
     Write-Host "  SMP=$($r.Cpus): $($r.Status)$tests" -ForegroundColor $color
 }
