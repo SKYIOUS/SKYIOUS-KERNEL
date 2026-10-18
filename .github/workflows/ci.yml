@@ -139,10 +139,9 @@ jobs:
         run: cargo run -- --kernel "${{ steps.locate_kernel.outputs.kernel }}"
 
       - name: Copy bootimage to root
-        working-directory: builder
         run: |
-          cp target/x86_64-vahi/debug/bootimage-vahi_kernel.bin ../bootimage-vahi_kernel.bin
-          ls -la ../bootimage-vahi_kernel.bin
+          cp target/x86_64-vahi/debug/bootimage-vahi_kernel.bin bootimage-vahi_kernel.bin
+          ls -la bootimage-vahi_kernel.bin
 
       - name: Upload bootimage artifact
         uses: actions/upload-artifact@v4
