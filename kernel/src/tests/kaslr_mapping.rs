@@ -101,12 +101,12 @@ fn test_span_is_derived_from_the_segments() -> Result<(), &'static str> {
     // the span must cover up to the high one, not stop at the first.
     let segments = [
         SegmentAddr {
-            vaddr_start: 0xFFFFFFFF8000_0000,
-            vaddr_end: 0xFFFFFFFF8001_0000,
+            vaddr_start: 0xFFFF_FFFF_8000_0000,
+            vaddr_end: 0xFFFF_FFFF_8001_0000,
         },
         SegmentAddr {
-            vaddr_start: 0xFFFFFFFF8010_0000,
-            vaddr_end: 0xFFFFFFFF804E_0000,
+            vaddr_start: 0xFFFF_FFFF_8010_0000,
+            vaddr_end: 0xFFFF_FFFF_804E_0000,
         },
     ];
     let span = ElfSegmentSpan::from_segments(&segments);
