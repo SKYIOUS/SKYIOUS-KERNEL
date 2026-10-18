@@ -102,6 +102,30 @@ fn test_dt_entry_walk_stops_at_mapped_region() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The entry walk must fit whole entries inside the validated page.
+///
+/// `DT_ENTRIES_PER_PAGE` (256) assumed the table started page-aligned. A
+/// `dyn_vaddr` near the page end made the walk read up to 255 entries past
+/// the single page `translate_addr` validated: the last valid entry starts at
+/// `4096 - 16`, so a table at offset 0xFF8 has zero readable entries.
+fn test_dt_entry_page_bound_tracks_the_offset() -> Result<(), &'static str> {
+    use crate::elf_dyn::dt_entries_in_page;
+
+    if dt_entries_in_page(0x0000_4000_0000) != 256 {
+        return Err("a page-aligned table has 256 readable entries");
+    }
+    if dt_entries_in_page(0x0000_4000_0001) != 255 {
+        return Err("an unaligned table loses one entry per 16 bytes of offset");
+    }
+    if dt_entries_in_page(0x0000_4000_0FF0) != 1 {
+        return Err("the last whole entry sits at offset 0xFF0");
+    }
+    if dt_entries_in_page(0x0000_4000_0FF8) != 0 {
+        return Err("no whole entry fits at offset 0xFF8");
+    }
+    Ok(())
+}
+
 pub fn register() {
     selftest::register(
         "elf_dyn:dt_strsz_is_bounded_by_the_mapped_region",
@@ -110,5 +134,9 @@ pub fn register() {
     selftest::register(
         "elf_dyn:dt_entry_walk_stops_at_mapped_region",
         test_dt_entry_walk_stops_at_mapped_region,
+    );
+    selftest::register(
+        "elf_dyn:dt_entry_page_bound_tracks_the_offset",
+        test_dt_entry_page_bound_tracks_the_offset,
     );
 }

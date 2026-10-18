@@ -163,8 +163,13 @@ pub(crate) fn strtab_mapped_bytes(strtab_vaddr: u64) -> usize {
 }
 
 /// Number of 16-byte dynamic entries readable from a single validated page.
-/// `translate_addr` proves one page; the walk must not read past it.
-const DT_ENTRIES_PER_PAGE: usize = 4096 / 16;
+///
+/// `translate_addr` proves one page at `dyn_vaddr`, so the entries that fit
+/// are the ones ending before the page does: a table near the page end has
+/// fewer than 256 readable entries.
+pub(crate) fn dt_entries_in_page(dyn_vaddr: u64) -> usize {
+    (4096usize - (dyn_vaddr as usize & 0xFFF)) / 16
+}
 
 pub(crate) fn parse_dt_entries(dyn_vaddr: u64, mapper: &impl Translate) -> [(u64, u64); 32] {
     let phys = match mapper.translate_addr(VirtAddr::new(dyn_vaddr)) {
@@ -176,9 +181,10 @@ pub(crate) fn parse_dt_entries(dyn_vaddr: u64, mapper: &impl Translate) -> [(u64
     let mut idx = 0;
     // Bounded by the page translate_addr validated, not by a fixed count: a
     // table with no DT_NULL must not drive a read past mapped memory.
-    for i in 0..DT_ENTRIES_PER_PAGE {
-        // SAFETY: i < DT_ENTRIES_PER_PAGE, so ptr.add(i*2) and ptr.add(i*2+1)
-        // stay within the single page translate_addr validated above.
+    for i in 0..dt_entries_in_page(dyn_vaddr) {
+        // SAFETY: i < dt_entries_in_page(dyn_vaddr), so ptr.add(i*2) and
+        // ptr.add(i*2+1) stay within the single page translate_addr validated
+        // above.
         let tag = unsafe { core::ptr::read_unaligned(ptr.add(i * 2)) };
         // SAFETY: same bound, offset i*2+1 is the last u64 of the pair.
         let val = unsafe { core::ptr::read_unaligned(ptr.add(i * 2 + 1)) };
