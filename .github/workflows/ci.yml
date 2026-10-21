@@ -230,7 +230,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 ovmf
-          OVMF=$(          ls /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -n1)
+          OVMF=""
+          for candidate in /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd \
+                           /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd; do
+            if [ -f "$candidate" ]; then
+              OVMF="$candidate"
+              break
+            fi
+          done
           if [ -z "$OVMF" ]; then
             echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
             exit 1
@@ -302,7 +309,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 ovmf
-          OVMF=$(          ls /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -n1)
+          OVMF=""
+          for candidate in /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd \
+                           /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd; do
+            if [ -f "$candidate" ]; then
+              OVMF="$candidate"
+              break
+            fi
+          done
           if [ -z "$OVMF" ]; then
             echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
             exit 1

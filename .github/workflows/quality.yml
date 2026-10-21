@@ -186,7 +186,7 @@ jobs:
           key: ${{ runner.os }}-cargo-audit-${{ hashFiles('Cargo.lock') }}
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
 
       - name: Audit workspace dependencies
         run: cargo audit
