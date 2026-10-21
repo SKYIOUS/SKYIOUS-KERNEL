@@ -167,6 +167,42 @@ fn test_fd_out_of_bounds() -> Result<(), &'static str> {
     Ok(())
 }
 
+// scheduler::init registers KernelProcessProvider before these selftests run.
+// The registry calls here exercise the kernel provider rather than the host fallback.
+fn test_user_address_inclusive_ceiling() -> Result<(), &'static str> {
+    for addr in [
+        0,
+        1,
+        vahi_types::PAGE_SIZE as u64 - 1,
+        vahi_types::PAGE_SIZE as u64,
+        vahi_types::USER_ADDR_MAX - vahi_types::PAGE_SIZE as u64 + 1,
+        vahi_types::USER_ADDR_MAX - 1,
+        vahi_types::USER_ADDR_MAX,
+    ] {
+        if !vahi_types::is_user_addr(addr) {
+            return Err("process provider rejected a lower canonical address");
+        }
+    }
+    Ok(())
+}
+
+fn test_user_address_rejects_non_user_ranges() -> Result<(), &'static str> {
+    for addr in [
+        vahi_types::USER_ADDR_MAX + 1,
+        vahi_types::USER_ADDR_MAX + vahi_types::PAGE_SIZE as u64,
+        0x0000_FFFF_FFFF_FFFF,
+        0x0001_0000_0000_0000,
+        vahi_types::KERNEL_ADDR_MIN - 1,
+        vahi_types::KERNEL_ADDR_MIN,
+        u64::MAX,
+    ] {
+        if vahi_types::is_user_addr(addr) {
+            return Err("process provider accepted a noncanonical or kernel address");
+        }
+    }
+    Ok(())
+}
+
 // ─── Registration ─────────────────────────────────────────────────
 
 pub fn register() {
@@ -179,4 +215,12 @@ pub fn register() {
     crate::selftest::register("process:fork_cycle", test_fork_cycle);
     crate::selftest::register("process:fd_table_roundtrip", test_fd_table_roundtrip);
     crate::selftest::register("process:fd_out_of_bounds", test_fd_out_of_bounds);
+    crate::selftest::register(
+        "process:user_address_inclusive_ceiling",
+        test_user_address_inclusive_ceiling,
+    );
+    crate::selftest::register(
+        "process:user_address_rejects_non_user_ranges",
+        test_user_address_rejects_non_user_ranges,
+    );
 }
