@@ -646,6 +646,25 @@ def _run_rust_builder(args):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    """Parse CLI arguments and write a Limine GPT disk image to --output.
+
+    The image includes the kernel and an optional initrd; a missing initrd is
+    skipped. Limine binaries may be downloaded and cached. --esp-size accepts
+    bytes or case-insensitive K/M suffixes for KiB/MiB and is rounded up to MiB.
+    Unless --no-bios is set, reserve a BIOS partition and attempt installation
+    if the Windows Limine tool is present; a nonzero status only warns.
+    --rust-builder delegates to the retired Rust builder instead.
+
+    Raises:
+        SystemExit: On argument-parser exit, missing required inputs, download
+            failure, or a failed Rust build or builder process.
+        ValueError: If --esp-size cannot be parsed as an integer size.
+        AssertionError: If the ESP has too few clusters for FAT32.
+        RuntimeError: If the ESP runs out of clusters.
+        OSError: On uncaught file, directory, or subprocess errors. Download
+            I/O errors are normally converted to SystemExit(1).
+        zipfile.BadZipFile: If the downloaded Limine archive is invalid.
+    """
     parser = argparse.ArgumentParser(
         description="Build a bootable GPT disk image with Limine (default production path)",
         epilog="Limine is the default production path; binaries are auto-downloaded "

@@ -1293,6 +1293,8 @@ impl vahi_types::ProcessProvider for KernelProcessProvider {
         None
     }
 
+    /// Accept addresses from zero through `USER_ADDR_MAX` inclusive.
+    /// Does not check whether memory is mapped or accessible.
     fn is_user_address(&self, addr: vahi_types::VirtAddr) -> bool {
         addr <= vahi_types::USER_ADDR_MAX
     }
