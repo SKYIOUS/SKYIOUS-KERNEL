@@ -3,10 +3,9 @@
 //! Extracted from net.rs to keep each module under 1k lines.
 
 use super::errno;
-use super::net_helpers::*;
 use super::*;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+#[cfg(feature = "net")]
 use alloc::vec;
 
 pub fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {

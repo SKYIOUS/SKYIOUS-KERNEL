@@ -1,4 +1,4 @@
-# extended_fuzz.ps1 — Extended fuzz run via repeated QEMU boot cycles.
+# extended_fuzz.ps1 - Extended fuzz run via repeated QEMU boot cycles.
 #
 # Since the kernel fuzzer runs at boot time (selftest), extended fuzzing
 # means running many boot cycles with the fuzzer enabled. Each boot
@@ -9,6 +9,11 @@
 #   .\tests\extended_fuzz.ps1 -Cycles 200        # 200 boot cycles
 #   .\tests\extended_fuzz.ps1 -Cycles 10 -TimeoutSeconds 60
 
+#
+# IMPORTANT: this script must be pointed at a SELF_TEST image. The production
+# image (bootimage-vahi_kernel.bin) is built without the `self_test` feature,
+# so the fuzzer and stress suites are not compiled in and every boot would
+# report success while testing nothing.
 param(
     [int]$Cycles = 60,
     [int]$TimeoutSeconds = 90,
@@ -18,7 +23,7 @@ param(
 $ErrorActionPreference = "Stop"
 $rootDir = $PSScriptRoot | Split-Path -Parent
 $bios = Join-Path $rootDir "OVMF.fd"
-$img = Join-Path $rootDir "bootimage-vahi_kernel.bin"
+$img = Join-Path $rootDir "bootimage-selftest.bin"
 
 if (!(Test-Path $img)) {
     Write-Host "ERROR: Boot image not found at $img" -ForegroundColor Red
@@ -84,8 +89,8 @@ for ($i = 1; $i -le $Cycles; $i++) {
             $failed++
             Write-Host "FAIL ($($Matches[1]) failed)" -ForegroundColor Red
         } else {
-            $passed++
-            Write-Host "OK (no test output)" -ForegroundColor Yellow
+            $failed++
+            Write-Host "NO VERDICT (no test output)" -ForegroundColor Red
         }
 
         # Progress indicator every 10 cycles

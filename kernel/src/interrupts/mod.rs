@@ -183,4 +183,8 @@ static NET_VECTOR: AtomicU8 = AtomicU8::new(InterruptIndex::Network as u8);
 
 // Re-export `IrqFmtBuf` and the stack-buffer formatter for use by other
 // crate modules (fault paths, panic handler, stack trace).
-pub(crate) use diag::{serial_fmt, IrqFmtBuf};
+pub(crate) use diag::serial_fmt;
+// ponytail: F2.2 — IrqFmtBuf is consumed only by the self_test harness; see
+// ADR-029-syscall-module-lint-hygiene.md
+#[cfg(feature = "self_test")]
+pub(crate) use diag::IrqFmtBuf;

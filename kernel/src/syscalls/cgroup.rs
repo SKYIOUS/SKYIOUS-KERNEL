@@ -348,7 +348,7 @@ fn read_user_string(ptr: *const u8, max: usize) -> Result<String, errno::Errno> 
     let trimmed = core::str::from_utf8(&buf)
         .unwrap_or("")
         .trim_matches(|c| c == '\0');
-    Ok(alloc::format!("{}", trimmed))
+    Ok(alloc::string::String::from(trimmed))
 }
 
 /// sys_cgroup_mkdir — handle copy_from_user and delegate

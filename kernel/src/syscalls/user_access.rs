@@ -111,21 +111,14 @@ pub fn init_smap() {
 
 /// Detect SMAP support via CPUID leaf 7 (EBX bit 20).
 fn smap_supported() -> bool {
+    // The previous hand-rolled asm destroyed the CPUID result: rustc
+    // allocated the `out(reg)` operand to RBX itself, so "mov {0}, rbx"
+    // compiled to a no-op and the `pop rbx` restored the stale caller
+    // value. The compiler intrinsic handles RBX preservation correctly.
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        let rbx_val: u64;
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 7",
-            "xor ecx, ecx",
-            "cpuid",
-            "mov {0}, rbx",
-            "pop rbx",
-            out(reg) rbx_val,
-            out("eax") _, out("ecx") _, out("edx") _,
-            options(nomem)
-        );
-        (rbx_val & (1 << 20)) != 0
+    {
+        let features = core::arch::x86_64::__cpuid(7);
+        (features.ebx & (1 << 20)) != 0
     }
     #[cfg(not(target_arch = "x86_64"))]
     false
@@ -201,6 +194,22 @@ pub unsafe fn copy_to_user(dst_ptr: *mut u8, src: &[u8]) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
+}
+
+/// Copy a `T: Copy` struct into a userspace buffer, collapsing the repeated
+/// `from_raw_parts(&T, size_of::<T>()) -> copy_to_user` idiom used by every
+/// stat-family syscall.
+///
+/// # Safety
+///
+/// `dst_ptr` must point to a writable userspace region of at least
+/// `size_of::<T>()` bytes (validated by `copy_to_user` -> `validate_ptr`).
+/// `src` must be a valid, fully-initialized `T: Copy`.
+#[inline]
+pub unsafe fn copy_struct_to_user<T: Copy>(dst_ptr: *mut u8, src: &T) -> Result<(), ()> {
+    let slice =
+        core::slice::from_raw_parts(src as *const T as *const u8, core::mem::size_of::<T>());
+    copy_to_user(dst_ptr, slice)
 }
 
 /// A wrapper for reading a string from userspace.

@@ -322,3 +322,243 @@ Each phase has a verification gate. Don't start the next phase until the current
 | `docs/kernel-future-plan.md` | Superseded by this plan's Tier 3 |
 | `tasks/plan.md` | A4/A5 tasks are complete |
 | `tasks/todo.md` | This plan's task tables replace it |
+
+---
+
+## Phase A0: KASLR Relocation Correctness (issue A-6)
+
+**Status: IMPLEMENTED AND VERIFIED (2026-10-16).** Integrated as commit
+`310b2b4` (`feat(kaslr): validated PIE relocations with slid-address boot`,
+parent `67a1d37`) on `refactor/syscall-hygiene`. The shipped route is the PIC
+link — no `--emit-relocs`, no explicit `relocation-model=static`
+(`kernel/.cargo/config.toml`): the result is a PIE (`ET_DYN`) whose `.rela`
+holds only `R_X86_64_RELATIVE` entries and is placed alloc inside a `PT_LOAD`
+(4,507 entries / 108,168 bytes prod; 4,661 / 111,864 selftest). The
+`--emit-relocs` diagnosis below is kept as history; that route was superseded
+during implementation.
+
+Verified on the exact commit (Phase 5, 2026-10-16):
+- Selftest and prod artifacts rebuilt **bit-exact** from the integrated tree
+  (`F204AD76…`, `9242AA8E…`).
+- TAP gate: **189/189 passed, 0 failed**, including all 12 `kaslr:*`
+  relocation contract tests.
+- Prod boot at slide `0x16600000`: `[KASLR] rela entries=119b in_image=119b
+  out_of_image=0`; boots through services to the `login:` prompt.
+- gdb: RIP executes in the slid address space (RIP − slide resolves to
+  `…switch::schedule + 409`); GOT slots hold `addend + slide`
+  (`0xffffffff966e5000 == 0xffffffff800e5000 + 0x16600000`).
+- ELF: `.rela` is `SHF_ALLOC` inside a `PT_LOAD`; `DT_RELA`/`DT_RELASZ` match
+  the section; no W+X; no differing-permission page sharing.
+
+Tested configuration: x86_64 `--release`, QEMU/TCG with OVMF, **smp=1**.
+**Unproven on this commit:** smp≥2 boots, the 105-boot reliability matrix,
+`--profile audit` builds.
+
+Remaining debt in this area (unchanged, not silently closed): the
+`[KASLR-VERIFY] match:` printer still prints `NO` (see A0.4); `[KASLR] DBG`
+/ `DBG2` / span debug lines still print; `.rodata` still mapped in an
+`rw-` segment; the A-6 rows in `docs/architecture/issues.md` still read
+"STILL OPEN".
+
+Historically, KASLR randomised the page mapping without correcting a single
+embedded pointer; the kernel booted only because every old address remained
+aliased, so a green self-test suite was **not** evidence that KASLR worked.
+
+Evidence ledger: `docs/architecture/issues.md` (A-6), inventory in
+`docs/architecture/UNDONE-audit-profile.md`.
+
+### Architecture decision
+
+`--emit-relocs` is now on the root `.cargo/config.toml`, which produces
+124,765 `.rela.text` + 15,866 `.rela.rodata` + 1 `.rela.data` entries that
+were previously absent. The emitted type is `R_X86_64_64` (291,977 entries),
+**not** `R_X86_64_RELATIVE` — the walk logic differs from the original plan.
+
+The blocker is placement: lld emits these as non-alloc (`sh_addr = 0`) and
+refuses to place them, so `__rela_start`/`__rela_end` never materialise.
+
+*(Superseded — kept as history: the shipped route dropped `--emit-relocs`
+and links PIC; lld then places the `R_X86_64_RELATIVE` table as an alloc
+section inside a `PT_LOAD`. See the status block.)*
+
+### Tasks
+
+#### A0.1 — Diagnose why lld will not place the `.rela` output section
+**Description:** `__rela_start`/`__rela_end` stay missing and `__kernel_end`
+is byte-identical across three different definitions of the section's extent.
+Get lld to state the reason instead of inferring it.
+
+**Acceptance criteria [met via the PIC route]:**
+- [x] Symbol table shows `__rela_start`/`__rela_end` at real addresses
+      (`0xffffffff800fc000`/`0xffffffff80116688` in the prod build;
+      `readelf -sW`, the binutils equivalent of the named `llvm-nm`)
+- [x] `.rela` appears as an output section with `SHF_ALLOC` set
+- [x] The `.rela` section falls inside a `PT_LOAD` (`r--` segment at file
+      offset `0xfb000`)
+
+**Verification:**
+- [x] `cargo build --release --target x86_64-unknown-none --features self_test`
+      (the `--profile audit` build named here was not the run; the `audit`
+      profiles still exist and were not exercised)
+- [x] `readelf -S` shows `.rela` with `Address = 0xffffffff800fc000` and the
+      alloc flag
+- [x] `readelf -sW` shows both symbols with real addresses
+- [x] Boot reports 189/189 (the suite grew past 177 with the relocation
+      contract tests)
+
+**Approaches to try, in order** (do not repeat these, already ruled out):
+1. `-Wl,-t` or `--print-map` trace to see lld's section-placement decision
+2. `*(.rela.*)` catch-all, not an enumerated list
+3. Force `SHF_ALLOC` on the inputs via `llvm-objcopy --set-section-flags`
+4. **Fallback if lld refuses:** have `build.rs` generate a `.S`/`.o` carrying the
+   table as ordinary alloc data, sidestepping lld's own emission entirely
+
+**Dependencies:** None
+**Files:** `linker.ld`, `kernel/build.rs`, `builder/build_limine_image.py`
+**Scope:** S
+
+#### A0.2 — Replace the ELF-header magic gate with a symbol-driven walk
+**Description:** Once A0.1 lands, rewrite `apply_kaslr_relocations`
+(kaslr_reloc.rs:443-499) to iterate `__rela_start..__rela_end` instead of
+walking `e_shoff`/section headers. Delete the gate at :455.
+
+**Acceptance criteria:**
+- [x] `apply_kaslr_relocations` reads no ELF header and never checks magic —
+      the walk iterates linker-emitted `__rela_start..__rela_end` bounds only
+- [x] It returns `RelocationOutcome`; `activate_kaslr_mapping` checks
+      `outcome.succeeded()` and refuses to switch CR3 on refusal (printing
+      `relocation refused (applied=… failed=…)`) instead of claiming success
+- [x] A refused pass does not claim success: `post_kaslr_continue()`
+      continues on the link-time mapping
+- [x] `read_kernel_segments` and `Elf64Phdr64` deleted (`e9d1697`); the
+      huge-page branch derives its span from `kernel_span_bytes()` and maps
+      the old-index aliases it previously assumed still existed
+
+**Verification:**
+- [x] Test asserting a zero-relocation table reports failure:
+      `kaslr:zero_relocations_is_reported_as_failure`
+- [x] Boot serial shows a non-zero applied count (`rela entries=119b
+      in_image=119b out_of_image=0`)
+- [x] 189/189 still pass (suite grew past 177)
+- [ ] `[KASLR] match:` reports YES — **no**; the printer still prints `NO`
+      (see A0.4)
+
+**Dependencies:** A0.1
+**Files:** `kernel/src/kaslr_reloc.rs`, `kernel/src/main.rs`
+**Scope:** M
+
+#### A0.3 — Handle relocation types correctly
+**Description:** The table is `R_X86_64_64`, not `RELATIVE`. Each type needs
+the right treatment: `R_X86_64_64`/1 (291,977) is `*offset += slide`;
+`R_X86_64_32S`/11 (28,922) and `R_X86_64_PC32`/2 (579) are relative-to-symbol
+and must **not** be blindly slid; `GOTPCREL`/9 (1,032) is RIP-relative and
+self-adjusts.
+
+**Acceptance criteria:**
+- [x] Each type is either applied correctly or explicitly skipped with a
+      reason — the PIC table holds only `R_X86_64_RELATIVE` (type 8; all
+      4,507 prod entries); any other type is refused with a counted
+      `unsupported relocation type` reject
+- [x] No relocation is applied to an address outside
+      `[__kernel_start, __kernel_end)` — validation is all-or-nothing; boot
+      reports `in_image=119b out_of_image=0`
+- [x] Skipped/rejected entries are counted and reported, never silently
+      dropped
+
+**Verification:**
+- [x] Counters visible in boot serial (`rela entries=… in_image=…
+      out_of_image=…`)
+- [x] 189/189 pass (suite grew past 177)
+- [ ] Disassemble 3 known `movabs` targets post-slide — **not performed**;
+      equivalent evidence is the gdb GOT-slot inspection showing
+      `slot = addend + slide`
+
+**Dependencies:** A0.2
+**Files:** `kernel/src/kaslr_reloc.rs`
+**Scope:** M
+
+#### A0.4 — Fix the false `match: NO` in the KASLR verification
+**Description:** `main.rs:350` compares a RIP sampled 24 bytes into the
+prologue against the function's *entry* address. The check is wrong, not the
+trampoline. Measured: `actual - slide - link_va = 24`.
+
+**Acceptance criteria:**
+- [ ] `match:` reports YES on a correct slide — **still prints `NO` at
+      `310b2b4`**. The printer compares `actual_rip − slide` against
+      `post_kaslr_continue as *const ()`, which after relocation *is* the
+      slid entry address, and samples the RIP 24 bytes into the prologue —
+      the comparison as written cannot succeed
+- [ ] The check still reports NO when the slide genuinely mismatches — moot
+      until the printer is fixed
+
+**Verification:**
+- [ ] Boot serial shows `match: YES` — it prints `NO`; relocation correctness
+      is proven instead by the gdb/boot evidence in the status block
+- [ ] A deliberately wrong slide is still detected — not tested
+
+**Dependencies:** A0.2
+**Files:** `kernel/src/main.rs`
+**Scope:** XS
+
+#### A0.5 — Decide honest KASLR behaviour if A0.2/A0.3 fail
+**Description:** If the relocation cannot be made to work, the kernel must not
+present a broken KASLR as a working one. Options: gate it off behind an
+explicit opt-in, or report `applied=0` loudly at boot.
+
+**Acceptance criteria:**
+- [x] `apply_kaslr_relocations` cannot report success while applying nothing
+      (`RelocationOutcome` distinguishes empty/refused from applied; a
+      refusal clears `KASLR_APPLIED` and `post_kaslr_continue()` continues
+      unslid)
+- [x] The boot log states the true relocation count
+
+**Verification:**
+- [x] With relocations unavailable, the log says so and does not claim
+      success (`[KASLR] rela entries=0: … refusing to slide` /
+      `[KASLR] WARNING: refusing to slide; …`), covered by
+      `kaslr:zero_relocations_is_reported_as_failure`
+
+**Dependencies:** A0.2, A0.3
+**Files:** `kernel/src/kaslr_reloc.rs`, `kernel/src/main.rs`
+**Scope:** S
+
+### Checkpoint: after A0.1
+- [x] `.rela` is alloc and mapped
+- [x] 189/189 still pass (suite grew past 177; no regression from the
+      section)
+- [x] Image size impact recorded: `.rela` is 108,168 bytes (prod) / 111,864
+      bytes (selftest) — far below the ~3.4 MB `--emit-relocs` risk estimate
+
+### Checkpoint: after A0.4
+- [x] Relocations actually applied; boot serial shows a non-zero count
+      (`in_image=119b`)
+- [ ] `match: YES` — not met; the printer is still wrong (see A0.4)
+- [x] 189/189 pass (suite grew past 177)
+- [ ] A-6 closable in `issues.md` — closable, but the A-6 ledger rows still
+      read "STILL OPEN"; they were not updated in this pass
+
+### Risks
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| lld refuses to place `.rela` outright | HIGH | A0.1 step 4 fallback: generate the table from `build.rs` |
+| Sliding `R_X86_64_PC32` breaks code | HIGH | A0.3 skips relative types; verify by disassembly |
+| Adding `.rela` grows the loadable image ~3.4 MB | MED | Acceptable; it is 3 pages |
+| Full old-page aliasing masked this for years | MED | A0.5 makes it report honestly |
+| Release profile red at plan time (`.size` asm) | LOW | Green since the relocation arc; `--release` builds verified on `310b2b4` |
+
+### Not in this phase
+- `cargo build --release` was red at plan time (pre-existing, 4 errors at
+  `HEAD~3` too); green since the relocation arc, verified on `310b2b4`
+- The 105-boot reliability matrix (needs a re-run after A0.4)
+- `audit_ovf` / `audit_dbg` / `audit_small` boots against the current tree
+- Dead code cleanup: `coverage::record_block` has no callers; `kernel/linker.ld`
+  is a dead duplicate of the root script
+- Wiring `tests/mod.rs` (shared with another contributor's uncommitted work)
+
+### Open questions
+- `.rela` under the `AT(PHYS_BASE + (. - VIRT_BASE))` load addressing:
+  **answered** — it survives; `.rela` sits in a mapped `PT_LOAD` and all
+  entries are applied at boot (no copy-to-RAM handling needed).
+- Does A3.1 (KASLR entropy) wait until A0.2 lands? **No longer blocked** —
+  A0.2 landed.

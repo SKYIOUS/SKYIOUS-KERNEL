@@ -1,4 +1,3 @@
-#![allow(unused_imports)]
 //! process syscalls — re-exports from submodules for backward compatibility.
 //!
 //! Original 1637-line monolith split into:

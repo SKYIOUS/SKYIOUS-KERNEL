@@ -15,27 +15,22 @@ struct RefCountTable {
 
 static REFCOUNTS: Mutex<Option<RefCountTable>> = Mutex::new(None);
 
-/// Initialize the refcount table for physical frames up to `max_phys`.
+/// Initialize refcounts below `max_phys`, the exclusive end of usable RAM.
 ///
-/// # Safety
-/// Must be called exactly once, before any frame allocation.
+/// Must be called exactly once, after heap initialization and before any
+/// reference-counted mappings are created.
 pub fn init(max_phys: u64) {
-    let num_frames = (max_phys as usize >> 12) + 1;
-    // SAFETY: Layout is non-zero because AtomicU16 is 2 bytes and num_frames > 0.
-    let layout = alloc::alloc::Layout::array::<AtomicU16>(num_frames).unwrap();
-    let ptr = unsafe { alloc::alloc::alloc(layout) as *mut AtomicU16 };
-    if !ptr.is_null() {
-        let slice = unsafe { core::slice::from_raw_parts_mut(ptr, num_frames) };
-        for cell in slice.iter_mut() {
-            cell.store(0, Ordering::Relaxed);
-        }
-        let static_ref: &'static [AtomicU16] =
-            unsafe { core::slice::from_raw_parts(ptr as *const AtomicU16, num_frames) };
-        *REFCOUNTS.lock() = Some(RefCountTable {
-            counts: static_ref,
-            deferred: Mutex::new(alloc::vec::Vec::new()),
-        });
-    }
+    let num_frames = usize::try_from(max_phys.div_ceil(4096))
+        .expect("frame refcount table exceeds addressable memory");
+    let mut counts = alloc::vec::Vec::new();
+    counts
+        .try_reserve_exact(num_frames)
+        .expect("frame refcount table allocation failed");
+    counts.resize_with(num_frames, || AtomicU16::new(0));
+    *REFCOUNTS.lock() = Some(RefCountTable {
+        counts: counts.leak(),
+        deferred: Mutex::new(alloc::vec::Vec::new()),
+    });
 }
 
 /// Increment refcount for the given physical frame. Lock-free on the hot path.

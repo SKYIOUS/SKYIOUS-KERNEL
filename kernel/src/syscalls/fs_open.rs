@@ -4,8 +4,6 @@
 use super::errno;
 use super::numbers;
 use super::*;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use crate::vfs::{VfsNode, VFS};
 use alloc::string::String;

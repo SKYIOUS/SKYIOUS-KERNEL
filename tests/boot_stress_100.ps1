@@ -1,6 +1,11 @@
 # boot_stress_100.ps1 — Run 100 consecutive QEMU boots, report pass/fail.
 # Usage: .\tests\boot_stress_100.ps1 [-Timeout 90] [-Smp 1]
 
+#
+# IMPORTANT: this script must be pointed at a SELF_TEST image. The production
+# image (bootimage-vahi_kernel.bin) is built without the `self_test` feature,
+# so the fuzzer and stress suites are not compiled in and every boot would
+# report success while testing nothing.
 param(
     [int]$Timeout = 90,
     [int]$Smp = 1,
@@ -10,9 +15,11 @@ param(
 $Pass = 0
 $Fail = 0
 $FailTokens = @("not ok", "Bail out!", "KERNEL PANIC", "Panicked")
-$PassToken = "starting service"
+# A boot only passes if the TAP summary reports every test passing. Checking
+# only fail-tokens let a boot that produced no verdict at all count as a PASS.
+$PassPattern = "# \d+/\d+ passed, 0 failed"
 $Qemu = "qemu-system-x86_64"
-$Drive = "bootimage-vahi_kernel.bin"
+$Drive = "bootimage-selftest.bin"
 
 if (-not (Test-Path $Drive)) {
     Write-Host "ERROR: $Drive not found. Run 'make boot' first." -ForegroundColor Red
@@ -51,6 +58,17 @@ for ($i = 1; $i -le $Tries; $i++) {
             $failed = $true
             break
         }
+    }
+
+    # Require an explicit all-passed TAP verdict. Without this, a boot that
+    # wedges or dies silently before reporting anything is scored PASS.
+    $sawVerdict = $output -match $PassPattern
+
+    if (-not $failed -and -not $sawVerdict) {
+        Write-Host "  [$i/$Tries] NO VERDICT (boot did not report a TAP summary)" -ForegroundColor Yellow
+        $Fail++
+        Remove-Item $Log -ErrorAction SilentlyContinue
+        continue
     }
 
     if ($failed) {

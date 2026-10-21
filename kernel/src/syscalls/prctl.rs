@@ -69,10 +69,7 @@ pub fn sys_prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, _arg5: u64) -> u6
             0
         }
 
-        PR_GET_NO_NEW_PRIVS => {
-            let val = proc.no_new_privs.load(core::sync::atomic::Ordering::SeqCst) as u64;
-            val
-        }
+        PR_GET_NO_NEW_PRIVS => proc.no_new_privs.load(core::sync::atomic::Ordering::SeqCst) as u64,
 
         PR_SET_NAME => {
             // Set the thread name (16 bytes max, null-terminated)
@@ -120,10 +117,7 @@ pub fn sys_prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, _arg5: u64) -> u6
             seccomp.mode as u64
         }
 
-        PR_GET_DUMPABLE => {
-            let dumpable = proc.dumpable.load(core::sync::atomic::Ordering::SeqCst) as u64;
-            dumpable
-        }
+        PR_GET_DUMPABLE => proc.dumpable.load(core::sync::atomic::Ordering::SeqCst) as u64,
 
         PR_SET_DUMPABLE => {
             if arg2 > 1 {
@@ -144,12 +138,9 @@ pub fn sys_prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, _arg5: u64) -> u6
             0
         }
 
-        PR_GET_CHILD_SUBREAPER => {
-            let val = proc
-                .child_subreaper
-                .load(core::sync::atomic::Ordering::SeqCst) as u64;
-            val
-        }
+        PR_GET_CHILD_SUBREAPER => proc
+            .child_subreaper
+            .load(core::sync::atomic::Ordering::SeqCst) as u64,
 
         PR_SET_TIMERSLACK => {
             proc.timerslack

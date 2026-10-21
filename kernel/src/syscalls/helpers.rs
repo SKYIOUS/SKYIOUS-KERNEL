@@ -1,34 +1,20 @@
-#![allow(unused_imports)]
 use super::errno;
-use super::numbers;
-use crate::gdt;
-use crate::interrupts::IrqFmtBuf;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::Process;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::vfs::{Stat, VfsNode, VFS};
+use crate::vfs::VfsNode;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
-use x86_64::VirtAddr;
 
 pub const CAP_CHOWN: u64 = 1 << 0;
 pub const CAP_DAC_OVERRIDE: u64 = 1 << 1;
 pub const CAP_DAC_READ_SEARCH: u64 = 1 << 2;
 pub const CAP_FOWNER: u64 = 1 << 3;
-#[allow(dead_code)]
 pub const CAP_FSETID: u64 = 1 << 4;
 pub const CAP_KILL: u64 = 1 << 5;
 pub const CAP_SETUID: u64 = 1 << 6;
 pub const CAP_SETGID: u64 = 1 << 7;
-#[allow(dead_code)]
 pub const CAP_SETPCAP: u64 = 1 << 8;
-#[allow(dead_code)]
 pub const CAP_NET_BIND_SERVICE: u64 = 1 << 10;
-#[allow(dead_code)]
 pub const CAP_NET_ADMIN: u64 = 1 << 12;
 pub const CAP_NET_RAW: u64 = 1 << 13;
 pub const CAP_SYS_ADMIN: u64 = 1 << 21;

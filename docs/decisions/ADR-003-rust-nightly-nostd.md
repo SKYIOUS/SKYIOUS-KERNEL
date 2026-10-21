@@ -42,6 +42,19 @@ Required nightly features:
 - Cons: More complex boot path, less portable across firmware
 - Rejected: bootloader_api provides clean UEFI abstraction with physical memory mapping
 
+## Runtime rebuild amendment (2026-10-18)
+
+`kernel/.cargo/config.toml` enables `build-std = ["core", "alloc"]` for kernel
+Cargo invocations. The release profile's `stack-protector=strong` must also
+cover `core`, `alloc`, and the automatically rebuilt `compiler_builtins`.
+Prebuilt runtime crates lack this mitigation; current nightly reports
+`partial_stack_protector`, which the kernel's `deny(warnings)` rejects.
+
+Rebuilding preserves both stack protection and warning enforcement. The existing
+`rust-src` prerequisite supplies the sources. This setting stays under `kernel/`
+so workspace host tools continue to use the prebuilt host standard library.
+Kernel builds invoked from the workspace root still need `-Zbuild-std=core,alloc`.
+
 ## Consequences
 - Nightly updates may occasionally break builds (managed via rust-toolchain.toml pinning)
 - bootloader_api provides framebuffer, memory map, RSDP, and initrd in a portable format

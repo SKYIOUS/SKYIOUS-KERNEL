@@ -105,6 +105,7 @@ impl SignalState {
     }
 
     #[allow(dead_code)]
+    // ponytail: unused (signal delivery not wired to scheduler); upgrade path: call from scheduler pre-return path.
     pub fn pop_any(&mut self) -> Option<u32> {
         if self.pending == 0 {
             return None;

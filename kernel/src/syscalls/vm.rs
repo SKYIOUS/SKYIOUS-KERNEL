@@ -1,10 +1,9 @@
-#![allow(unused_imports)]
 //! VM management syscalls: create, destroy, start, stop, resume,
 //! load_kernel, get_info, set_memory, inject_irq.
 //! Extracted from misc.rs to keep each module focused.
 
+#[cfg(feature = "hypervisor")]
 use super::errno;
-use super::*;
 
 #[cfg(feature = "hypervisor")]
 pub fn sys_vm_create(name_ptr: *const u8, mem_mb: u64) -> u64 {

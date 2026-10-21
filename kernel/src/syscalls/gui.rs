@@ -1,19 +1,7 @@
-#![allow(unused_imports)]
 //! gui syscalls — split from mod.rs (7246 lines).
 use super::errno;
-use super::numbers;
 use super::*;
-use crate::gui::{window::Window, COMPOSITOR};
-use crate::memory::buddy::{BUDDY_ALLOCATOR, MAX_ORDER};
-use crate::memory::physical_memory_offset;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::vfs::{Stat, VfsNode, VFS};
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
 
 pub fn sys_beep(freq_hz: u32, duration_ms: u32) -> u64 {
     crate::drivers::audio::pcspeaker::beep(freq_hz, duration_ms);
@@ -279,8 +267,14 @@ pub fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
             if buf.is_null() {
                 return comp.clipboard.len() as u64;
             }
-            unsafe {
-                core::ptr::copy_nonoverlapping(comp.clipboard.as_ptr(), buf, copy_len);
+            // Fault-aware copy: a raw write through `buf` is a kernel write to
+            // an arbitrary address.
+            if unsafe {
+                crate::syscalls::user_access::copy_to_user(buf, &comp.clipboard[..copy_len])
+            }
+            .is_err()
+            {
+                return crate::syscalls::errno::Errno::EFAULT as u64;
             }
             copy_len as u64
         }
@@ -290,9 +284,12 @@ pub fn sys_clipboard(mode: u64, buf: *mut u8, len: u64) -> u64 {
                 comp.clipboard.clear();
                 return 0;
             }
+            // Fault-aware copy: a raw read through `buf` pulls arbitrary
+            // addresses into clipboard state that mode 0 hands to userspace.
             let mut new_data = alloc::vec![0u8; len as usize];
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf, new_data.as_mut_ptr(), len as usize);
+            if unsafe { crate::syscalls::user_access::copy_from_user(&mut new_data, buf) }.is_err()
+            {
+                return crate::syscalls::errno::Errno::EFAULT as u64;
             }
             comp.clipboard = new_data;
             len

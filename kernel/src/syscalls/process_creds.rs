@@ -1,19 +1,10 @@
-#![allow(unused_imports)]
 //! Process credentials and resource limit syscalls: uid, gid, capabilities,
 //! process groups, resource limits.
 //! Extracted from process.rs to keep each module under 1k lines.
 
 use super::errno;
-use super::numbers;
 use super::*;
-use crate::objects::KernelObject;
-use crate::sync::IrqSafeMutex as Mutex;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
-use crate::vfs::{Stat, VfsNode, VFS};
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::task::process::CURRENT_PROCESS;
 
 #[repr(C)]
 struct RLimit {
@@ -481,9 +472,19 @@ pub fn sys_getgroups(size: i32, list: *mut u32) -> u64 {
     if size < groups.len() {
         return errno::Errno::EINVAL as u64;
     }
-    let slice = unsafe { core::slice::from_raw_parts_mut(list, groups.len()) };
-    for (i, g) in groups.iter().enumerate() {
-        slice[i] = *g;
+    if groups.is_empty() {
+        return 0;
+    }
+    // Fault-aware copy: validate_ptr only range-checks, so slicing over the
+    // raw pointer still lets an unmapped address (or null) fault in ring 0.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            groups.as_ptr() as *const u8,
+            core::mem::size_of::<u32>() * groups.len(),
+        )
+    };
+    if unsafe { user_access::copy_to_user(list as *mut u8, bytes) }.is_err() {
+        return errno::Errno::EFAULT as u64;
     }
     groups.len() as u64
 }
@@ -496,18 +497,28 @@ pub fn sys_setgroups(size: i64, list: *const u32) -> u64 {
         return errno::Errno::EINVAL as u64;
     }
     let count = size as usize;
-    let slice = if count > 0 {
-        unsafe { core::slice::from_raw_parts(list, count) }
-    } else {
-        &[]
-    };
+    // Decode from a kernel copy made by copy_from_user: validate_ptr only
+    // range-checks, so a raw slice over the user pointer can read kernel
+    // memory, fault on an unmapped address, or assume an alignment the ABI
+    // does not promise.
+    let mut groups_new = alloc::vec::Vec::new();
+    if count > 0 {
+        let mut raw = alloc::vec![0u8; core::mem::size_of::<u32>() * count];
+        if unsafe { user_access::copy_from_user(&mut raw, list as *const u8) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+        groups_new.extend(
+            raw.chunks_exact(core::mem::size_of::<u32>())
+                .map(|c| u32::from_ne_bytes(c.try_into().unwrap_or([0u8; 4]))),
+        );
+    }
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
     let mut groups = process.groups.lock();
     groups.clear();
-    groups.extend_from_slice(slice);
+    groups.extend_from_slice(&groups_new);
     0
 }
 

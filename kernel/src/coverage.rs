@@ -26,8 +26,18 @@ unsafe impl Sync for CoverageBitmap {}
 
 impl CoverageBitmap {
     /// Create a new coverage bitmap (heap-allocated).
+    ///
+    /// `Box::new([0u8; COVERAGE_BITMAP_SIZE])` builds the whole 64 KiB array as
+    /// a stack temporary before copying it to the heap. The boot stack is far
+    /// smaller than that, so the temporary runs off its end and wedges the
+    /// kernel before the first test runs. Zeroing a heap slice avoids the
+    /// temporary entirely.
     pub fn new() -> Self {
-        let bitmap = alloc::boxed::Box::new([0u8; COVERAGE_BITMAP_SIZE]);
+        let mut raw = alloc::vec![0u8; COVERAGE_BITMAP_SIZE].into_boxed_slice();
+        raw.fill(0);
+        let bitmap: alloc::boxed::Box<[u8; COVERAGE_BITMAP_SIZE]> = raw
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("slice length is fixed at COVERAGE_BITMAP_SIZE"));
         CoverageBitmap {
             bitmap,
             unique_blocks: 0,

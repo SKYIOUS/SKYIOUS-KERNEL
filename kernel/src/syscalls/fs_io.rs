@@ -4,10 +4,8 @@
 
 use super::errno;
 use super::*;
-use crate::sync::IrqSafeMutex as Mutex;
-use crate::task::process::{FileDescriptor, SocketType, CURRENT_PROCESS};
-use crate::vfs::{VfsNode, VFS};
-use alloc::sync::Arc;
+use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use crate::vfs::VFS;
 use x86_64::structures::paging::PageTableFlags;
 
 // ─── ioctl helper structs (must be at module level, not inside match) ─
@@ -242,10 +240,17 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
         Some(FileDescriptor::InotifyFd { instance_key, .. }) => {
             let key = instance_key;
 
-            match super::inotify::inotify_read(key, unsafe {
-                core::slice::from_raw_parts_mut(buf, count)
-            }) {
-                Ok(n) => n as u64,
+            // inotify_read fills a kernel buffer; the user pointer is only
+            // touched by the fault-aware copy below, never as a raw slice.
+            // ponytail: cap scratch space at 4 KiB; larger reads need chunked draining.
+            let mut kbuf = alloc::vec![0u8; count.min(4096)];
+            match super::inotify::inotify_read(key, &mut kbuf) {
+                Ok(n) => {
+                    if unsafe { user_access::copy_to_user(buf, &kbuf[..n]) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    n as u64
+                }
                 Err(e) => e as u64,
             }
         }
@@ -370,13 +375,20 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
             let inst = guard
                 .downcast_mut::<crate::syscalls::io_uring::IoUringInstance>()
                 .expect("IoUringFd did not contain IoUringInstance");
-            let sqes = unsafe {
-                core::slice::from_raw_parts(
-                    buf as *const crate::syscalls::io_uring::IoSqEntry,
-                    n_sqes,
-                )
-            };
-            let submitted = inst.submit_sqes(sqes);
+            // Decode the SQEs from the kernel copy made at the top of
+            // sys_write: submit_sqes reads every entry, so the user buffer
+            // must never be reinterpreted as a typed slice.
+            let mut sqes = alloc::vec![crate::syscalls::io_uring::IoSqEntry::default(); n_sqes];
+            // SAFETY: both sides are byte buffers of the same length; `data`
+            // was filled by copy_from_user and IoSqEntry is plain data.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    sqes.as_mut_ptr() as *mut u8,
+                    n_sqes * sqe_size,
+                );
+            }
+            let submitted = inst.submit_sqes(&sqes);
             if submitted > 0 {
                 inst.process_all();
             }

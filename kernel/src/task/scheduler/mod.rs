@@ -27,9 +27,13 @@ pub mod tick;
 
 // Re-export public functions at the scheduler:: level for backward compatibility.
 pub use spawn::{
-    add_futex_thread, block_on_pipe, boost_thread_priority, spawn, spawn_thread, wake_futex,
-    wake_pipe, wake_process_blocked, wake_process_futex, with_current_thread,
+    block_on_pipe, boost_thread_priority, spawn, spawn_thread, wake_futex, wake_pipe,
+    wake_process_blocked, wake_process_futex, with_current_thread,
 };
+// ponytail: F2.2 — add_futex_thread is consumed only by the self_test scheduler
+// tests; see ADR-029-syscall-module-lint-hygiene.md
+#[cfg(feature = "self_test")]
+pub use spawn::add_futex_thread;
 pub use switch::{schedule, try_schedule};
 pub use tick::tick;
 
@@ -342,7 +346,7 @@ impl PerCpuScheduler {
         // 3. SCHED_OTHER stride heap — respect CPU affinity
         #[cfg(feature = "verification")]
         let snapshot_passes: alloc::vec::Vec<u64> =
-            self.stride_heap.iter().map(|p| (&*p.0).pass).collect();
+            self.stride_heap.iter().map(|p| (*p.0).pass).collect();
         #[allow(clippy::never_loop)]
         while let Some(PassOrd(t)) = self.stride_heap.pop() {
             if t.affinity_mask & (1u64 << current_cpu) != 0 {
@@ -390,7 +394,7 @@ impl PerCpuScheduler {
                 // Fall back to stride heap
                 #[cfg(feature = "verification")]
                 let stolen_passes: alloc::vec::Vec<u64> =
-                    other.stride_heap.iter().map(|p| (&*p.0).pass).collect();
+                    other.stride_heap.iter().map(|p| (*p.0).pass).collect();
                 if let Some(PassOrd(t)) = other.stride_heap.pop() {
                     if t.affinity_mask & (1u64 << current_cpu) != 0 {
                         #[cfg(feature = "verification")]

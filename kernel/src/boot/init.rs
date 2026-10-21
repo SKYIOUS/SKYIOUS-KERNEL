@@ -145,7 +145,12 @@ pub fn init_architecture() {
     crate::serial_write("[BOOT] HAL init done\n");
 
     crate::serial_write("[BOOT] frame tracker init...\n");
-    let max_phys = crate::limine::max_physical_address();
+    // Match the buddy allocator's usable regions; high reserved/MMIO ranges
+    // must not inflate the dense refcount table beyond the kernel heap.
+    let max_phys = crate::limine::iter_usable_regions()
+        .map(|(_, end)| end)
+        .max()
+        .expect("no usable RAM for frame tracking");
     crate::memory::frame_info::init(max_phys);
     crate::memory::phys::snapshot_baseline();
     crate::serial_write("[BOOT] -> VAHI Frame Tracker: OK\n");
@@ -161,6 +166,7 @@ pub fn init_devices() {
     crate::acpi::init(crate::limine::rsdp_addr());
     crate::serial_write("[BOOT] APIC init...\n");
     crate::apic::init();
+    #[cfg(feature = "self_test")]
     crate::tests::run_all();
     #[cfg(feature = "smp")]
     {

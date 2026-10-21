@@ -61,18 +61,15 @@ fn is_hook_compatible(insns: &[EbpfInsn], hook: &HookPoint) -> bool {
     let ctx_size = hook_context_size(hook);
     for insn in insns {
         let cls = insn.code & 0x07;
-        match cls {
-            0x01 => {
-                let src = insn.src_reg;
-                if src == 1 {
-                    let addr = insn.off as i64;
-                    let end = addr + size_of_load(insn.code) as i64;
-                    if addr < 0 || end > ctx_size as i64 {
-                        return false;
-                    }
+        if cls == 0x01 {
+            let src = insn.src_reg;
+            if src == 1 {
+                let addr = insn.off as i64;
+                let end = addr + size_of_load(insn.code) as i64;
+                if addr < 0 || end > ctx_size as i64 {
+                    return false;
                 }
             }
-            _ => {}
         }
     }
     true

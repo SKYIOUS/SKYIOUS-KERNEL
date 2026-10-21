@@ -14,7 +14,6 @@
 #![deny(warnings)]
 // Targeted clippy suppressions — each lint is named and documented.
 #![allow(
-    dead_code,
     // Design-level: require refactoring to fix properly
     clippy::result_unit_err,
     clippy::too_many_arguments,
@@ -31,24 +30,18 @@
     clippy::return_self_not_must_use,
     // Mechanical style: safe to suppress, fix incrementally
     clippy::unnecessary_cast,
-    clippy::needless_borrow,
-    clippy::useless_format,
     clippy::map_entry,
     clippy::manual_range_contains,
     clippy::collapsible_if,
     clippy::collapsible_match,
     clippy::match_ref_pats,
-    clippy::redundant_closure,
-    clippy::let_and_return,
     clippy::or_fun_call,
     clippy::single_char_pattern,
-    clippy::redundant_field_names,
     clippy::clone_on_copy,
     clippy::iter_cloned_collect,
     clippy::unnecessary_unwrap,
     clippy::comparison_to_empty,
     clippy::write_with_newline,
-    clippy::single_match,
     clippy::needless_return,
     clippy::manual_map,
     clippy::match_like_matches_macro,
@@ -100,10 +93,8 @@
     clippy::fallible_impl_from,
     clippy::ignored_unit_patterns,
     clippy::missing_trait_methods,
-    clippy::redundant_closure_for_method_calls,
     clippy::format_push_string,
     clippy::manual_let_else,
-    clippy::redundant_else,
     clippy::unnecessary_to_owned,
     clippy::use_self,
     clippy::map_unwrap_or,
@@ -147,9 +138,13 @@ mod panic_handler;
 extern crate alloc;
 #[cfg(not(target_arch = "aarch64"))]
 mod acpi;
+// ponytail: F2.2 — acpi_prt tables partially unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod acpi_prt;
 mod allocator;
+// ponytail: F2.2 — apic/msi feature surface unwired; see ADR-029-syscall-module-lint-hygiene.md
 #[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)]
 mod apic;
 pub mod arch;
 #[cfg(feature = "ash")]
@@ -157,6 +152,8 @@ pub mod ash;
 pub mod boot;
 #[cfg(feature = "gpu")]
 pub mod compositor;
+// ponytail: F2.2 — coverage instrumentation field unused on this config; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub mod coverage;
 pub mod crypto;
 pub mod debug;
@@ -169,34 +166,63 @@ mod gdt;
 pub mod gui;
 pub mod hal;
 #[cfg(feature = "hypervisor")]
+// ponytail: F2.2 — hypervisor VMCB/SVM syscall surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub mod hypervisor;
 #[cfg(not(target_arch = "aarch64"))]
 mod interrupts;
+// ponytail: F2.2 — iommu feature surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub mod iommu;
 pub mod ipc;
+// ponytail: F2.2 — kaslr_reloc helpers partially unwired; see ADR-029-syscall-module-lint-hygiene.md
+mod kaslr;
+#[allow(dead_code)]
 mod kaslr_reloc;
+pub(crate) use kaslr::{init_kaslr, KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLIDE};
 #[cfg(not(target_arch = "aarch64"))]
+// ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod keyboard;
 pub mod limine;
 mod memory;
 mod net;
+// ponytail: F2.2 — object/types surface; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub mod objects;
 #[cfg(not(target_arch = "aarch64"))]
 mod pci;
 pub mod pty;
+// ponytail: F2.2 — security/namespace/capability surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod security;
+// ponytail: F2.2 — selftest harness infra; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod selftest;
+// ponytail: F2.2 — shell (kernel_shell) not spawned in current boot path; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod shell;
 mod smp;
+// ponytail: F2.2 — sync RCU/CFI surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod sync;
+// ponytail: F2.2 — syscall impls pending dispatch wiring (ptrace/vm/ash-numbers/tmrfd); see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod syscalls;
+// ponytail: F2.2 — task cgroup/OOM/scheduler surface unwired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod task;
+#[cfg(feature = "self_test")]
 mod tests;
 mod tty;
 #[cfg(feature = "verification")]
 pub use vahi_verified as verified;
-mod vfs;
+// ponytail: F2.2 — vfs pseudo-fs (procfs/epoll/inotify) surface; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
+pub mod vfs;
 #[cfg(not(target_arch = "aarch64"))]
+// ponytail: F2.2 — legacy VGA text-mode Color variants unused under Limine framebuffer; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 mod vga_buffer;
 
 use crate::arch::Arch;
@@ -217,18 +243,30 @@ pub unsafe extern "C" fn _start() -> ! {
         core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'K',
             options(nostack, nomem, preserves_flags));
     }
+    km_entry_marker();
+    // Debug marker: O for first pass, Q for second pass
+    extern "C" {
+        static __kernel_start: u8;
+    }
+    const LINK_BASE: usize = 0xFFFFFFFF80000000;
+    let kernel_start_addr = unsafe { &__kernel_start as *const u8 as usize };
+    let marker = if kernel_start_addr != LINK_BASE {
+        b'Q'
+    } else {
+        b'O'
+    };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3f8",
+            "mov al, {}",
+            "out dx, al",
+            in(reg_byte) marker,
+            options(nostack, preserves_flags)
+        );
+    }
     kernel_main()
 }
-
-/// KASLR: kernel base slide offset (0 if not randomized)
-pub static KERNEL_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// KASLR: has relocation been applied (guard against double-apply)
-pub static KASLR_APPLIED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// Debug: KASLR slide value for verification
-pub static KASLR_DEBUG_SLIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Stack canary value for `-Z stack-protector=strong`
 #[used]
@@ -250,16 +288,16 @@ pub fn oom_kill() -> ! {
     crate::task::oom::handle_oom()
 }
 
-fn init_kaslr() {
-    // Use TSC as entropy source since crypto/limine may not be ready yet
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    // 30-bit address space (1GB range), 2MB alignment => 9 bits entropy (512 slots).
-    // Mask: 0x3FFFFFE00000 = bits 0-20 zeroed (2MB alignment), bits 21-39 random (30-bit range).
-    // But we only want 1 GiB (bits 21-30), so mask with 0x3FE00000 (bits 21-30, 10 bits = 1024 slots * 2MiB = 1 GiB).
-    // 0x3FE00000 = 0b001111111110000000000000000000 = bits 21-30
-    let slide = (tsc & 0x0000_0000_3FE0_0000) | 0x200000;
-    KERNEL_SLIDE.store(slide, core::sync::atomic::Ordering::Relaxed);
-    crate::KASLR_DEBUG_SLIDE.store(slide, core::sync::atomic::Ordering::Relaxed);
+pub unsafe fn km_entry_marker() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3f8",
+            "mov al, 'M'",
+            "out dx, al",
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 pub fn init_serial() {
@@ -438,7 +476,138 @@ pub extern "C" fn post_kaslr_continue() -> ! {
     }
 }
 
+/// Late initialization entry point: runs after KASLR trampoline has switched CR3.
+/// This is called from kernel_main() when KASLR_APPLIED is already set.
+fn goto_late_init() -> ! {
+    crate::serial_write("[DEBUG] goto_late_init entry\n");
+
+    // Skip KASLR re-initialization; trampoline already ran.
+    crate::serial_write("[DEBUG] calling init_serial\n");
+    init_serial();
+
+    // Early debug output to verify serial works
+    let slide = crate::KASLR_DEBUG_SLIDE.load(core::sync::atomic::Ordering::Relaxed);
+    serial_write("[KASLR] init: slide = 0x");
+    serial_write_hex(slide);
+    serial_write("\n[KASLR] init done\n");
+
+    // T-00 test-mode announce
+    #[cfg(feature = "self_test")]
+    serial_write("[SELFTEST] T-00 test mode active\n");
+
+    unsafe {
+        crate::arch::CurrentArch::init_cpu();
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    let hhdm = crate::limine::hhdm_offset();
+    #[cfg(not(target_arch = "aarch64"))]
+    let (mut _mapper, mut _frame_allocator) = unsafe {
+        let phys_mem_offset = x86_64::VirtAddr::new(hhdm);
+        boot::init::init_memory(phys_mem_offset)
+    };
+    #[cfg(target_arch = "aarch64")]
+    {
+        serial_write("[BOOT] memory::init...\n");
+        let hhdm = crate::limine::hhdm_offset();
+        let mut mapper = unsafe { memory::init_aarch64(hhdm) };
+        serial_write("[BOOT] memory::init done\n");
+        serial_write("[BOOT] frame allocator...\n");
+        unsafe { memory::init_frame_allocator_limine() };
+        let mut frame_allocator = memory::buddy::BuddyFrameAllocator;
+        serial_write("[BOOT] heap init...\n");
+        allocator::init_heap(&mut mapper, &mut frame_allocator)
+            .expect("heap initialization failed");
+        serial_write("[BOOT] HHDM mapping done\n");
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    unsafe {
+        boot::init::init_graphics(&mut _mapper, &mut _frame_allocator)
+    };
+
+    // KASLR was already applied by the trampoline on first kernel_main entry.
+    // This is the late init path - no need to activate KASLR again.
+    // Debug: print KASLR slide value
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let slide = crate::KASLR_DEBUG_SLIDE.load(core::sync::atomic::Ordering::Relaxed);
+        serial_write("[KASLR] slide = 0x");
+        serial_write_hex(slide);
+        serial_write("\n");
+    }
+
+    crate::serial_write("[DEBUG] before scheduler init\n");
+    // Continue with normal late init
+    serial_write("[BOOT] scheduler init...\n");
+    crate::serial_write("[DEBUG] calling task::scheduler::init\n");
+    task::scheduler::init();
+
+    #[cfg(feature = "self_test")]
+    {
+        serial_write("[SELF-TEST] registering tests...\n");
+        tests::register_all();
+        serial_write("[SELF-TEST] running...\n");
+        coverage::init();
+        selftest::run_all();
+        serial_write(&alloc::format!(
+            "[COVERAGE] unique={}, total={}, ratio={:.4}\n",
+            coverage::unique_blocks(),
+            coverage::total_hits(),
+            coverage::coverage_ratio()
+        ));
+    }
+
+    serial_write("[BOOT] GUI init...\n");
+    gui::init();
+
+    task::scheduler::spawn(boot::tasks::run_async_tasks);
+    task::scheduler::spawn(drivers::usb::usb_hid_poller);
+    task::scheduler::spawn(boot::tasks::init_os_task);
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        x86_64::instructions::interrupts::enable();
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("msr daifclr, #2");
+    }
+
+    #[cfg(feature = "verification")]
+    {
+        let _vreport = crate::verified::runner::VERIFICATION_RUNNER.lock().report();
+        serial_write("[VERIFY] boot-phase invariant checks complete\n");
+    }
+
+    task::scheduler::schedule();
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
+}
+
 fn kernel_main() -> ! {
+    // Debug marker N at start of kernel_main (second pass)
+    unsafe {
+        core::arch::asm!(
+            "mov dx, 0x3f8",
+            "mov al, 'N'",
+            "out dx, al",
+            options(nostack, preserves_flags)
+        );
+    }
+    // Check if KASLR is already applied by comparing __kernel_start to LINK_BASE.
+    // If KASLR was applied, __kernel_start will be at LINK_BASE + slide.
+    extern "C" {
+        static __kernel_start: u8;
+    }
+    const LINK_BASE: usize = 0xFFFFFFFF80000000;
+    let kernel_start_addr = unsafe { &__kernel_start as *const u8 as usize };
+    if kernel_start_addr != LINK_BASE {
+        // KASLR already applied - jump to late init
+        goto_late_init();
+    }
+
     // Seed stack canary BEFORE any function with stack protection runs.
     let entropy = crate::crypto::GLOBAL_ENTROPY.get_u64();
     let base = if entropy == 0 {
@@ -505,23 +674,18 @@ fn kernel_main() -> ! {
         serial_write_hex(slide);
         serial_write("\n");
 
-        // Apply KASLR relocations to fix up absolute addresses
-        serial_write("[KASLR] Applying relocations...\n");
-        unsafe {
-            crate::kaslr_reloc::apply_kaslr_relocations(slide);
-        }
-        serial_write("[KASLR] Relocations applied\n");
-
-        // Activate KASLR mapping - switch to randomized virtual address space
-        // This function never returns - it jumps to post_kaslr_continue via trampoline
-        serial_write("[KASLR] Activating randomized kernel mapping...\n");
+        // Activate KASLR: build new page tables, apply relocations, and jump via trampoline.
+        // This must happen after memory is initialized (so we can allocate page tables)
+        // but before we touch any relocated statics.
         unsafe {
             crate::kaslr_reloc::activate_kaslr_mapping();
         }
-        // Never reached
-        loop {
-            crate::arch::CurrentArch::halt();
-        }
+        // Reached only when the relocation pass refused: refusal makes zero
+        // writes, so the link-time world is still coherent (no GOT slot was
+        // slid) and the late boot can run from the link mapping, without a
+        // slide, instead of jumping into the slid address space on
+        // unrelocated pointers.
+        post_kaslr_continue();
     }
 }
 

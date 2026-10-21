@@ -1,15 +1,22 @@
 use crate::arch::Arch;
+#[cfg(feature = "smp")]
 use crate::println;
+#[cfg(feature = "smp")]
 use core::arch::global_asm;
 
 use core::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "smp")]
 use x86_64::registers::control::Cr3;
+#[cfg(feature = "smp")]
 use x86_64::structures::paging::{FrameAllocator, PageTable, PhysFrame};
+#[cfg(feature = "smp")]
 use x86_64::VirtAddr;
 
 // The trampoline must be placed at a 4KB aligned physical address in the first 1MB.
 // We use 0x8000.
+#[cfg(feature = "smp")]
 pub const TRAMPOLINE_PHYS: u64 = 0x8000;
+#[cfg(feature = "smp")]
 pub const DATA_PHYS: u64 = 0x7000;
 
 /// Shared data between BSP and APs during boot
@@ -33,6 +40,7 @@ pub static mut BOOT_DATA: SmpBootData = SmpBootData {
 
 /// Allocate a copy of the kernel page directory in the lower 4GB.
 /// Returns the physical frame address, or None if impossible.
+#[cfg(feature = "smp")]
 fn allocate_low_pml4() -> Option<PhysFrame> {
     let offset = crate::memory::physical_memory_offset();
 
@@ -73,6 +81,7 @@ fn allocate_low_pml4() -> Option<PhysFrame> {
     Some(new_frame)
 }
 
+#[cfg(feature = "smp")]
 global_asm!(
     r#"
 .code16
@@ -179,11 +188,13 @@ smp_trampoline_end:
 "#
 );
 
+#[cfg(feature = "smp")]
 extern "C" {
     fn smp_trampoline_start();
     fn smp_trampoline_end();
 }
 
+#[cfg(feature = "smp")]
 pub fn init() {
     crate::serial_write("[SMP] init enter\n");
     let ap_ids: &alloc::vec::Vec<u8> = match crate::acpi::AP_LAPIC_IDS.get() {
@@ -426,6 +437,8 @@ pub fn get_cpu_id() -> usize {
 
 /// Calls a function on a specific CPU core via IPI.
 /// `func` must be a pointer to an `extern "C" fn(u64)`.
+// ponytail: F2.2 — SMP IPI primitive not yet wired into cross-CPU dispatch; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
     // CFI: validate function pointer before dispatching via IPI
     if !crate::sync::cfi::cfi_check(func as *const () as usize) {
@@ -456,6 +469,8 @@ pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
 }
 
 /// Broadcasts a function call to all CPU cores except self.
+// ponytail: F2.2 — SMP broadcast IPI not yet wired; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub fn smp_broadcast(func: extern "C" fn(u64), _arg: u64) {
     // CFI: validate function pointer before broadcasting
     if !crate::sync::cfi::cfi_check(func as *const () as usize) {
@@ -520,6 +535,8 @@ pub fn smp_broadcast_func(kind: u64, arg: u64) {
 
 /// Broadcasts a TLB flush IPI to all other CPU cores.
 /// Phase H1: Ensure memory coherence during page table changes.
+// ponytail: F2.2 — TLB shootdown IPI not yet wired into page-table paths; see ADR-029-syscall-module-lint-hygiene.md
+#[allow(dead_code)]
 pub fn broadcast_tlb_flush(addr: u64) {
     // Broadcast vector 250 (TlbFlush) to all excluding self
     crate::apic::send_broadcast_ipi(250);

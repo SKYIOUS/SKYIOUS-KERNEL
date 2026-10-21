@@ -98,7 +98,18 @@ pub fn verify(insns: &[EbpfInsn]) -> bool {
     let mut visited: BTreeSet<usize> = BTreeSet::new();
     let mut worklist: Vec<usize> = Vec::new();
     worklist.push(0);
+    // Every state_map entry can be re-queued once per distinct merged state.
+    // A loop whose back edge keeps tightening the state therefore never
+    // drains, and the kernel stops making progress inside the self-test.
+    // Bounding the pops makes the verifier total: a program that needs more
+    // work than this is rejected rather than allowed to hang. Linux bounds
+    // the same walk with its 1M instruction complexity limit.
+    let mut budget: u64 = (insns.len() as u64).saturating_mul(MAX_TNUM_STEPS_PER_INSN);
     while let Some(cur) = worklist.pop() {
+        if budget == 0 {
+            return false;
+        }
+        budget -= 1;
         if !visited.insert(cur) {
             continue;
         }
@@ -143,14 +154,20 @@ impl RegState {
 
 #[derive(Debug, Clone)]
 struct VState {
-    regs: [RegState; 11],
-    stack: [Tnum; 64],
+    // Boxed: a bare `[RegState; 11]` + `[Tnum; 64]` is 1200 bytes, and the
+    // verifier holds several clones (pre, post, merged) live at once. Those
+    // stack temporaries overrun the boot stack and wedge the kernel with no
+    // fault, which is what a 2-instruction program appeared to do. Keeping the
+    // payload on the heap makes the depth of this function independent of the
+    // stack limit.
+    regs: alloc::boxed::Box<[RegState; 11]>,
+    stack: alloc::boxed::Box<[Tnum; 64]>,
 }
 impl VState {
     fn new() -> Self {
         VState {
-            regs: [RegState { tnum: Tnum::any() }; 11],
-            stack: [Tnum::any(); 64],
+            regs: alloc::boxed::Box::new([RegState { tnum: Tnum::any() }; 11]),
+            stack: alloc::boxed::Box::new([Tnum::any(); 64]),
         }
     }
     fn init() -> Self {
@@ -251,6 +268,13 @@ fn mask32(t: Tnum) -> Tnum {
     }
 }
 
+/// Per-instruction ceiling on worklist pops in `tnum_verify`.
+///
+/// The walk is a fixpoint over at most `insns.len()` states, and a normal
+/// straight-line program drains in a small multiple of its length. 64 leaves
+/// ample headroom for genuine convergence while still terminating.
+const MAX_TNUM_STEPS_PER_INSN: u64 = 64;
+
 pub fn tnum_verify(insns: &[EbpfInsn]) -> bool {
     if insns.is_empty() || insns.len() > 4096 {
         return false;
@@ -259,7 +283,17 @@ pub fn tnum_verify(insns: &[EbpfInsn]) -> bool {
     state_map.insert(0, VState::init());
     let mut worklist: Vec<usize> = Vec::new();
     worklist.push(0);
+    // Unlike the walk in `verify`, this one has no `visited` set: a node is
+    // re-queued every time its merged state changes, so a back edge that keeps
+    // tightening the state never drains and the kernel stops making progress
+    // inside the self-test. Bounding the pops makes the verifier total -- a
+    // program needing more work than this is rejected, not allowed to hang.
+    let mut budget: u64 = (insns.len() as u64).saturating_mul(MAX_TNUM_STEPS_PER_INSN);
     while let Some(cur) = worklist.pop() {
+        if budget == 0 {
+            return false;
+        }
+        budget -= 1;
         let Some(pre) = state_map.get(&cur).cloned() else {
             continue;
         };

@@ -172,7 +172,7 @@ pub fn sys_swapon(path_ptr: *const u8, _swap_flags: i32) -> u64 {
         return errno::Errno::EIO as u64;
     }
     let mut slots = alloc::vec![];
-    slots.resize_with(slot_count, || crate::memory::swap::SwapSlot::new());
+    slots.resize_with(slot_count, crate::memory::swap::SwapSlot::new);
     if let Some(slot) = slots.get_mut(0) {
         slot.mark_used();
     }

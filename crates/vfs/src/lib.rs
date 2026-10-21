@@ -4,7 +4,7 @@
 //! cache, and support for ext2, ext4, SkyFS, FAT32, ramfs, devfs, FUSE.
 
 #![no_std]
-#![allow(dead_code, unused_variables, unused_imports)]
+#![allow(unused_variables, unused_imports)]
 #![allow(
     clippy::result_unit_err,
     clippy::missing_safety_doc,
