@@ -153,7 +153,7 @@ pub fn current_credentials() -> Credentials {
 pub fn is_user_addr(addr: VirtAddr) -> bool {
     PROCESS_PROVIDER
         .get()
-        .map_or(addr < USER_ADDR_MAX, |p| p.is_user_address(addr))
+        .map_or(addr <= USER_ADDR_MAX, |p| p.is_user_address(addr))
 }
 
 /// Get the current tick count from the registered timer.

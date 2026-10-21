@@ -1294,7 +1294,7 @@ impl vahi_types::ProcessProvider for KernelProcessProvider {
     }
 
     fn is_user_address(&self, addr: vahi_types::VirtAddr) -> bool {
-        addr < vahi_types::USER_ADDR_MAX
+        addr <= vahi_types::USER_ADDR_MAX
     }
 
     fn peer_creds(&self, pid: vahi_types::Pid) -> Option<(u32, u32, u32)> {
