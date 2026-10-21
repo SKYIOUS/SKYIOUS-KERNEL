@@ -46,7 +46,7 @@ and provides the `DefaultHashBuilder` required by `HashMap::new()`.
 - Same DoS-exposure reason as BTreeMap.
 
 ### CI build-std compatibility (amendment 2026-09-25)
-The `t00-harness` pipeline builds the kernel with `-Z build-std=core,alloc`
+The `qemu-selftest` CI pipeline builds the kernel with `-Z build-std=core,alloc`
 (rebuilt `core`/`alloc` from source). Under that flag, `hashbrown 0.14.x` failed CI
 with `E0464: multiple candidates for 'rmeta' dependency 'alloc'`: hashbrown 0.14
 unconditionally executes `extern crate alloc;` (src/lib.rs) and ships a

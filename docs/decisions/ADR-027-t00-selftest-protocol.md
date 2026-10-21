@@ -92,7 +92,7 @@ identical capture on Windows/Linux. Classification (exit codes):
 arguments (the T-00 suite uses `-vga none`).
 
 ## Consequences
-- CI can gate on real results (`ci.yml` `t00-harness` job) and demo
+- CI can gate on real results (`ci.yml` `qemu-selftest` job) and demo
   failure/panic/timeout detection on demand (`.github/workflows/t00-demo.yml`).
 - Timeout remains a failure, never a success; the wall clock is still the
   hang authority — the exit device covers the opposite failure mode

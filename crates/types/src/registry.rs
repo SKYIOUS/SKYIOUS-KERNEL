@@ -149,11 +149,13 @@ pub fn current_credentials() -> Credentials {
 
 /// Check if an address is a valid user-space address.
 ///
-/// Defaults to checking against [`USER_ADDR_MAX`] if no provider is registered.
+/// Delegates to the registered process provider. Without a provider, accepts
+/// addresses from zero through [`USER_ADDR_MAX`] inclusive, without checking
+/// whether memory is mapped or accessible.
 pub fn is_user_addr(addr: VirtAddr) -> bool {
     PROCESS_PROVIDER
         .get()
-        .map_or(addr < USER_ADDR_MAX, |p| p.is_user_address(addr))
+        .map_or(addr <= USER_ADDR_MAX, |p| p.is_user_address(addr))
 }
 
 /// Get the current tick count from the registered timer.

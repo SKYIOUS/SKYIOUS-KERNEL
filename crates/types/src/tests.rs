@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::*;
 
     // ── Credentials ──────────────────────────────────────────────────────────
 
@@ -140,6 +140,48 @@ mod tests {
         assert!(is_user_addr(USER_ADDR_MAX));
         assert!(!is_user_addr(USER_ADDR_MAX + 1));
         assert!(!is_user_addr(0xFFFF_8000_0000_0000));
+    }
+
+    #[test]
+    fn is_user_addr_accepts_low_and_unaligned_addresses() {
+        // This classifies the address range; it does not check mappings or alignment.
+        for addr in [0, 1, PAGE_SIZE as u64 - 1, PAGE_SIZE as u64 + 1] {
+            assert!(is_user_addr(addr), "rejected user address {addr:#018x}");
+        }
+    }
+
+    #[test]
+    fn is_user_addr_classifies_every_byte_across_the_user_ceiling() {
+        // Include both complete pages so page rounding cannot hide a boundary error.
+        for offset in 0..PAGE_SIZE as u64 {
+            let user_addr = USER_ADDR_MAX - offset;
+            let noncanonical_addr = USER_ADDR_MAX + 1 + offset;
+            assert!(
+                is_user_addr(user_addr),
+                "rejected last user page address {user_addr:#018x}"
+            );
+            assert!(
+                !is_user_addr(noncanonical_addr),
+                "accepted first noncanonical page address {noncanonical_addr:#018x}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_user_addr_rejects_noncanonical_and_kernel_ranges() {
+        for addr in [
+            0x0000_FFFF_FFFF_FFFF,
+            0x0001_0000_0000_0000,
+            KERNEL_ADDR_MIN - 1,
+            KERNEL_ADDR_MIN,
+            KERNEL_ADDR_MIN + PAGE_SIZE as u64,
+            u64::MAX,
+        ] {
+            assert!(
+                !is_user_addr(addr),
+                "accepted non-user address {addr:#018x}"
+            );
+        }
     }
 
     // ── VmProt discriminants ─────────────────────────────────────────────────

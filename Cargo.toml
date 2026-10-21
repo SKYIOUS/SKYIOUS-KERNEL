@@ -69,7 +69,8 @@ panic = "abort"
 #   cargo build --profile audit --target x86_64-unknown-none \
 #       --features self_test -Zbuild-std=core,alloc
 #
-# CI builds release; this is an on-demand gate, not a default.
+# PR CI builds release; nightly CI runs the `audit_small` self-test suite.
+# The other variants remain on-demand gates.
 [profile.audit]
 inherits = "dev"
 overflow-checks = true

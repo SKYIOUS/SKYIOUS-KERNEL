@@ -63,8 +63,8 @@
 | Supported filesystems | 2 (TarFS for initrd, DevFS for /dev) |
 | Real hardware | **Never tested** — QEMU only |
 | SMP | Claims support but global locks serialize everything |
-| Selftests | **146/146 pass** (eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
-| Memory leak audit | **PASS** (0 bytes leaked after 146 test cycles) |
+| Selftests | **192/192 pass** (eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
+| Memory leak audit | **PASS** (no leak detected) |
 
 ### Benchmark Results (QEMU/TCG, 512M RAM, 2400 MHz TSC)
 
@@ -458,9 +458,10 @@ cargo build --release           # Release build with LTO
 ### Build Bootimage
 
 ```bash
-# Using the builder crate
-cd builder
-cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
+# Return to the repository root after building the kernel
+cd ..
+# Limine path (CI and local runs use this)
+python builder/build_limine_image.py --kernel target/x86_64-unknown-none/debug/vahi_kernel --initrd kernel/initrd.tar --output bootimage-vahi_kernel.bin
 ```
 
 Or use the convenience scripts:
@@ -483,9 +484,9 @@ Or use the convenience scripts:
 cd kernel
 cargo build
 
-# 3. Create bootimage
-cd ../builder
-cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
+# 3. Create bootimage (back at the repo root)
+cd ..
+python builder/build_limine_image.py --kernel target/x86_64-unknown-none/debug/vahi_kernel --initrd kernel/initrd.tar --output bootimage-vahi_kernel.bin
 ```
 
 ### Run in QEMU
@@ -701,8 +702,9 @@ SKYIOUS KERNEL/
 │   ├── test_login.ps1             # Login test
 │   └── test_panic.ps1             # Panic test
 ├── .github/workflows/             # CI pipeline
-│   ├── build.yml                  # Build + selftest workflow
-│   └── build-kernel.yml           # Kernel build workflow
+│   ├── ci.yml                     # PR gate: fmt, host tests/clippy, kernel matrix, QEMU selftest + boot regression
+│   ├── nightly.yml                # Scheduled: cross-arch, SMP2, audit profile, 25-boot stress, cargo audit
+│   └── t00-demo.yml               # On-demand harness FAIL/PANIC/TIMEOUT demos
 ├── make_bootimage.ps1             # Windows bootimage script
 ├── make_bootimage.sh              # Linux bootimage script
 ├── build_userspace.ps1            # Userspace build script
@@ -755,7 +757,7 @@ docs/
 
 ### Self-Test Results
 
-**146/146 tests pass** — build with `self_test` feature and boot in QEMU:
+**192/192 tests pass** — build with `self_test` feature and boot in QEMU:
 
 ```bash
 cd kernel
@@ -781,7 +783,7 @@ VGA console, confirming the full kernel-to-userspace path works end-to-end.
 | Syscall Round-Trip (getpid) | 591 ns | 633 ns | 1,358 ns | 39.3 µs |
 | Page Alloc/Free | 42 µs | 46 µs | 107 µs | 537 µs |
 
-**Memory Leak Audit**: PASS (0 bytes leaked across 146 test cycles)
+**Memory Leak Audit**: PASS (no leak detected)
 
 ### Integration Tests (QEMU)
 
@@ -798,13 +800,16 @@ Each test runs QEMU in `-nographic` mode, monitors serial output, and returns PA
 ### CI Pipeline
 
 ```yaml
-# .github/workflows/ci.yml
+# .github/workflows/ci.yml (every PR + push to master)
 Jobs:
-  - validate:        cargo fmt, workspace build, clippy -D warnings
-  - build-kernel:    default + all-features + solo-feature builds
-  - build-bootimage: self_test build + Limine bootimage
-  - t00-harness:     QEMU selftest (TAP 146/146)
-  - clippy:         default + all-features + per-crate clippy
+  - format:               cargo fmt --all -- --check
+  - host-tests:           cargo test --workspace --exclude vahi_kernel
+  - host-clippy:          cargo clippy --workspace --exclude vahi_kernel -- -D warnings
+  - kernel-build-matrix:  debug + release + self_test + all-features + solo-feature builds
+  - kernel-clippy:        default + all-features + per-crate clippy, -D warnings
+  - qemu-selftest:        Limine image, T-00 selftest suite (SMP 1) under QEMU
+  - qemu-boot-regression: production image boot, SMP 1 and SMP 2
+# nightly.yml adds: cross-arch builds, SMP 2 suite, audit-profile suite, 25-boot stress, cargo audit
 ```
 
 ---
@@ -882,8 +887,8 @@ cd kernel && cargo build
 # Run tests
 cargo build --features self_test
 
-# Build bootimage
-cd ../builder && cargo run -- ../kernel/target/x86_64-unknown-none/debug/vahi_kernel
+# Build bootimage (from the repo root)
+cd .. && python builder/build_limine_image.py --kernel target/x86_64-unknown-none/debug/vahi_kernel --initrd kernel/initrd.tar --output bootimage-vahi_kernel.bin
 
 # Test in QEMU
 ../run_test_nographic.ps1

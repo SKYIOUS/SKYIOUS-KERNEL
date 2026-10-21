@@ -1,4 +1,4 @@
-# Vahi Kernel Validation Matrix
+﻿# Vahi Kernel Validation Matrix
 
 This document defines the canonical validation gates for the Vahi kernel project.
 
@@ -9,10 +9,11 @@ This document defines the canonical validation gates for the Vahi kernel project
 | Validation | Command | Target | Purpose |
 |------------|---------|--------|---------|
 | Format check | `cargo fmt --check` | workspace | Enforce consistent formatting |
-| Workspace build | `cargo build --workspace` | workspace | Verify all crates compile |
-| Workspace clippy | `cargo clippy --workspace -- -D warnings` | workspace | Lint all crates with deny-warnings |
+| Workspace build | `cargo build --workspace --exclude vahi_kernel` | workspace | Verify all host-buildable crates compile (the kernel builds for its own target in Â§B) |
+| Workspace tests | `cargo test --workspace --exclude vahi_kernel` | workspace | Run host-runnable unit tests (the kernel crate's tests execute under QEMU in T-00) |
+| Workspace clippy | `cargo clippy --workspace --exclude vahi_kernel -- -D warnings` | workspace | Lint all host-buildable crates with deny-warnings |
 
-**Status**: Format check PASS. Workspace build PASS. Workspace clippy PASS (with 2 vendor warnings from hashbrown).
+**Status**: Format check PASS. Workspace build PASS. Workspace tests PASS (2026-10-21; includes `vahi-types`, formerly excluded). Workspace clippy PASS â€” the only output is vendored `bootloader` build-script warnings, which `-D warnings` does not apply to. The kernel cannot build for the host (E0152) and is verified with its own target in Â§B.
 
 ---
 
@@ -25,7 +26,7 @@ This document defines the canonical validation gates for the Vahi kernel project
 | Kernel build (release) | `cargo build --release --target x86_64-unknown-none` | kernel | Optimized production build |
 | Kernel clippy | `cargo clippy --target x86_64-unknown-none -- -D warnings` | kernel | Lint kernel with deny-warnings |
 
-**Status**: All PASS. Kernel builds successfully in debug and release modes. Clippy passes with `-D warnings` (2 vendor warnings from hashbrown).
+**Status**: All PASS (verified 2026-10-21 for default, all-features, release+self_test, and the 19-crate clippy loop). Clippy passes with `-D warnings`; the only output is the workspace profile-location cargo warning (see Â§F) and dependency build-script noise, neither of which `-D warnings` applies to.
 
 ---
 
@@ -45,7 +46,7 @@ Each extracted crate must build for the `x86_64-unknown-none` target:
 | vahi-vfs | `crates/vfs` | Virtual filesystem layer | PASS |
 | vahi-net | `crates/net` | Networking stack | PASS |
 | vahi-objects | `crates/objects` | Kernel object namespace | PASS |
-| vahi-types | `crates/types` | Shared types & trait interfaces | PASS (build only; tests have pre-existing failures) |
+| vahi-types | `crates/types` | Shared types & trait interfaces | PASS (incl. tests) |
 | vahi-limine | `crates/limine` | Limine boot protocol | PASS |
 | vahi-crypto | `crates/crypto` | Cryptographic primitives | PASS |
 | vahi-acpi | `crates/acpi` | ACPI table parsing | PASS |
@@ -53,54 +54,59 @@ Each extracted crate must build for the `x86_64-unknown-none` target:
 | vahi-gdt | `crates/gdt` | GDT/IDT/TSS management | PASS |
 | vahi-ipc | `crates/ipc` | Inter-process communication | PASS |
 
-**Note**: All crates build successfully for `x86_64-unknown-none`. The `vahi-types` crate has pre-existing test failures due to missing imports in the test module — these are NOT regressions from Gates 1–5.
+**Note**: All crates build successfully for `x86_64-unknown-none`. The `vahi-types` test module failures (import scope inside the nested `mod tests`; exclusive `USER_ADDR_MAX` bound) were fixed 2026-10-21; `cargo test -p vahi-types` is 26/26 and CI runs it in the `host-tests` job.
 
 ---
 
 ## D. Tests
 
 ### D.1 Host-runnable unit tests
-- `cargo test --workspace --lib` — Run unit tests in host mode
-- **Status**: Most crates pass. `vahi-types` has pre-existing test failures (missing imports in test module).
+- `cargo test --workspace --exclude vahi_kernel` â€” Run unit tests in host mode (kernel tests execute under QEMU in T-00, not on the host)
+- **Status**: All pass (2026-10-21).
 
 ### D.2 Kernel self-tests
-- **Entry point**: `tests/selftest_gate.sh`
-- **Prerequisites**: Kernel built with `--features self_test`, boot image created
-- **Success criterion**: TAP output shows `# N/N passed, 0 failed` on serial console
-- **Timeout**: 180 seconds default
+- **Entry point**: `tests/run_qemu_tests.py` (ADR-027; supersedes `tests/selftest_gate.sh`)
+- **Prerequisites**: Kernel built with `--features self_test`, Limine boot image created
+- **Success criterion**: TAP output shows `# N/N passed, 0 failed`; runner classifies PASS and exits 0
+- **Timeout**: runner `--timeout` (CI: 2400s)
 
 ### D.3 QEMU boot tests
-- **Canonical image builder**: `python builder/build_limine_image.py --rust-builder` (production) or Limine path
+- **Canonical image builder**: `python builder/build_limine_image.py` (Limine path; the `--rust-builder` image cannot boot this kernel â€” FB-004)
 - **Boot command**: `qemu-system-x86_64 -drive if=pflash,format=raw,file=OVMF.fd -drive format=raw,file=bootimage-vahi_kernel.bin -serial stdio -m 512M`
 - **Success markers**: Limine loading kernel, memory init, frame allocator, heap init, scheduler start
 
 ### D.4 Stress/soak tests
-- `tests/e2e_full_suite.sh` — Comprehensive test suite
-- 100 consecutive boot stress test
-- SMP stress test (4 CPUs)
-- Feature flag build matrix
-- **Status**: Available for local execution; too slow for CI
+- `nightly.yml` `boot-stress` job â€” 25 alternating SMP 1/2 boots (runs nightly)
+- `tests/boot_stress_100.ps1`, `tests/smp_stress.ps1` â€” longer local soak scripts (Windows)
+- Feature flag build matrix â€” `ci.yml` `kernel-build-matrix` job
+- **Status**: Nightly CI keeps a bounded version; the 100-boot soak stays local
 
 ---
 
 ## E. CI Pipeline Stages
 
-### Current CI (`.github/workflows/ci.yml`)
+### PR CI (`.github/workflows/ci.yml` â€” every PR and push to `master`)
 
-1. **build-kernel** — Compile kernel with various feature combinations
-2. **build-bootimage** — Create bootable disk image
-3. **selftest** — Boot in QEMU, verify TAP self-test output (SMP 1 & 2)
-4. **clippy** — Lint kernel and extracted crates with `-D warnings`
+1. **format** â€” `cargo fmt --all -- --check`
+2. **host-tests** â€” `cargo test --workspace --exclude vahi_kernel`
+3. **host-clippy** â€” workspace `-D warnings`, kernel excluded
+4. **kernel-build-matrix** â€” debug/release/self_test/all-features and solo-feature builds
+5. **kernel-clippy** â€” default + all-features + per-crate `-D warnings`
+6. **qemu-selftest** â€” Limine image, full T-00 suite via `tests/run_qemu_tests.py` (SMP 1)
+7. **qemu-boot-regression** â€” production image boot at SMP 1 and SMP 2 (`--expect-ap 1`)
 
-### Nightly CI (`.github/workflows/nightly.yml`)
+### Nightly CI (`.github/workflows/nightly.yml` â€” 06:00 UTC + on demand)
 
-1. **full-build** — Release builds with various features
-2. **build-aarch64** — Experimental aarch64 build
-3. **security-audit** — cargo-audit dependency scanning
+1. **full-builds** â€” release builds (default / self_test / all-features)
+2. **cross-arch** â€” aarch64 build; riscv64 `cargo check` (no linker script; ADR-028)
+3. **selftest-smp2** â€” full T-00 suite at `-smp 2`
+4. **selftest-audit** â€” `audit_small` profile suite (overflow-checks on)
+5. **boot-stress** â€” 25 alternating SMP 1/2 boots
+6. **dependency-audit** â€” `cargo audit` over the workspace lock
 
-### Build Kernel CI (`.github/workflows/build-kernel.yml`)
+### Harness demos (`.github/workflows/t00-demo.yml` â€” on demand)
 
-Simple kernel + bootimage build on push/PR to main.
+FAIL / PANIC / TIMEOUT classification proof using `VAHI_SELFTEST_MODE`.
 
 ---
 
@@ -108,7 +114,7 @@ Simple kernel + bootimage build on push/PR to main.
 
 | Failure | Classification | CI Treatment |
 |---------|----------------|--------------|
-| `vahi-types` test compilation errors (missing imports in test module) | PRE-EXISTING | Excluded from CI test run; build-only validation |
+| `vahi-types` test module failures (import scope in nested `mod tests`, exclusive `USER_ADDR_MAX` bound) | FIXED 2026-10-21 | Fix landed; `host-tests` job now includes it |
 | hashbrown vendor warnings (2 structs never constructed) | PRE-EXISTING | Accepted; vendor patch already in place |
 | Workspace clippy warnings about profile/patch location | PRE-EXISTING | Accepted; cosmetic, does not affect build |
 
@@ -134,8 +140,9 @@ See `.gitignore` for complete list.
 ```bash
 # Quick validation (host only)
 cargo fmt --check
-cargo check --workspace
-cargo clippy --workspace -- -D warnings
+cargo check --workspace --exclude vahi_kernel
+cargo test --workspace --exclude vahi_kernel
+cargo clippy --workspace --exclude vahi_kernel -- -D warnings
 
 # Kernel validation
 cd kernel
@@ -144,12 +151,13 @@ cargo build --target x86_64-unknown-none
 cargo build --release --target x86_64-unknown-none
 cargo clippy --target x86_64-unknown-none -- -D warnings
 
-# Self-test gate (requires boot image)
+# Self-test gate (requires boot image; run from workspace root)
+cd kernel
+cargo build --release --target x86_64-unknown-none --features self_test
 cd ..
-cargo build --features self_test -Zbuild-std=core,alloc --target x86_64-unknown-none  # from kernel/
-python builder/build_limine_image.py --kernel kernel/target/x86_64-unknown-none/debug/vahi_kernel --output bootimage-vahi_kernel.bin
-bash tests/selftest_gate.sh 180 1
+python builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
+python tests/run_qemu_tests.py --image tests/t00_selftest.bin --timeout 540 --qemu-extra "-vga none"
 
-# Full E2E suite (local only)
-bash tests/e2e_full_suite.sh
+# Normal-boot regression
+python tests/run_qemu_tests.py --image tests/t00_normal.bin --boot-only --qemu-extra "-vga none"
 ```

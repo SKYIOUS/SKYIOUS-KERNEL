@@ -11,7 +11,7 @@ decision: [ADR-027](decisions/ADR-027-t00-selftest-protocol.md).
 | Harness demos (pass/fail/timeout/panic) | `kernel/src/tests/harness_tests.rs` | prove the harness detects every result class |
 | Panic result path | `kernel/src/panic_handler.rs` | machine-readable panic marker + exit 0x11 (self_test builds) |
 | Host runner | `tests/run_qemu_tests.py` | build-free boot→classify loop, 7 result classes |
-| CI gate | `.github/workflows/ci.yml` (`t00-harness` job) | full suite on every PR |
+| CI gate | `.github/workflows/ci.yml` (`qemu-selftest` job) | full suite on every PR |
 | CI demo matrix | `.github/workflows/t00-demo.yml` | on-demand FAIL/TIMEOUT/PANIC proof |
 
 ## Running T-00 locally (Windows Git Bash / Linux)
@@ -77,13 +77,14 @@ isa-debug-exit code (0x10 pass / 0x11 panic) to port 0xf4, so QEMU exits
 | FB-001 | P0 | build/KASLR | Uncommitted WIP (`kaslr_reloc.rs` etc.) had 3 duplicate `apply_kaslr_relocations` defs + scope bugs; self_test build failed E0428/E0425; `bootimage-vahi_kernel.bin` (Sep 14) triple-faults pre-userspace | No kernel build possible until stashed; WIP preserved in `git stash` + `T00_QUARANTINE/` | K-00 (audit) |
 | FB-002 | P0 | memory/boot | VGA text buffer (phys 0xB8000) unmapped in HHDM when it falls in the reserved hole 0x9FC00..0x100000 → write via `VGA_BUFFER_VIRT` triple-faults pre-IDT (`-d int`: `v=0e CR2=ffff8000000b8000` → `v=08` → triple fault) | Silent boot death on some QEMU/OVMF memmaps — **fixed in T-00** (min necessary: map 0xB0000–0xC0000 in `boot/init.rs`) | — |
 | FB-003 | P1 | graphics | Splash fill touches first byte past reported FB size: `-d int` shows `v=0e CR2=ffff8000801d5000` = exactly 800×600×4; requires `-vga none` to boot | Every-graphics boot dies with display enabled on QEMU 10.2.50; run + CI use `-vga none` until fixed | K-09 / G-01 |
-| FB-004 | P1 | build/boot | Rust builder (`builder/src/main.rs`, bootloader crate) produces an image that can't boot this kernel ("bootloader config section not found"); CI `build-bootimage` job artifacts are unbootable; `selftest_gate.sh` assumes that path | CI gate was structurally unrunnable; `t00-harness` job now builds via Limine builder | T-01 |
+| FB-004 | P1 | build/boot | Rust builder (`builder/src/main.rs`, bootloader crate) produces an image that can't boot this kernel ("bootloader config section not found"); `selftest_gate.sh` assumes that path | CI gate was structurally unrunnable; `qemu-selftest` job builds via Limine builder; the Rust-builder CI job was deleted 2026-10-21 | T-01 |
 | FB-005 | P1 | userspace | Production path dies at OOM during userspace init (`[OOM] FATAL: Cannot reclaim enough memory`, serial `tests/prodimg.log` of the Sep-14 image) | login only reachable with `-vga none` on current QEMU; memory budget unverified | K-03 |
 
 ## Known limitations
 
 - Suite runtime varies 10s–10min under TCG depending on host/machine state
-  (benchmarks + stress tests dominate); CI budget is 45 min.
+  (benchmarks + stress tests dominate); CI budget is 50 min (job timeout,
+  runner `--timeout 2400`).
 - The kernel-side `QEMU_EXIT_TIMEOUT_BASE` (0x30) guard is reserved but
   not yet implemented in `run_all()`; host wall-clock is the hang authority.
 - Real-hardware (`-device isa-debug-exit` absent) runs fall back to the
