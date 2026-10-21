@@ -708,6 +708,7 @@ pub unsafe fn activate_kaslr_mapping() {
         let span_bytes = kernel_span_bytes();
         if span_bytes == 0 || span_bytes > KERNEL_SPAN_CEILING {
             crate::serial_write("[KASLR] cannot derive kernel span; not relocating\n");
+            crate::KERNEL_SLIDE.store(0, core::sync::atomic::Ordering::Relaxed);
             return;
         }
         let num_pages = kernel_map_pages(span_bytes);
@@ -919,6 +920,7 @@ pub unsafe fn activate_kaslr_mapping() {
         crate::serial_write(" failed=");
         crate::serial_write_hex(outcome.failed());
         crate::serial_write("); continuing at link addresses\n");
+        crate::KERNEL_SLIDE.store(0, core::sync::atomic::Ordering::Relaxed);
         return;
     }
 

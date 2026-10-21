@@ -242,7 +242,8 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
 
             // inotify_read fills a kernel buffer; the user pointer is only
             // touched by the fault-aware copy below, never as a raw slice.
-            let mut kbuf = alloc::vec![0u8; count];
+            // ponytail: cap scratch space at 4 KiB; larger reads need chunked draining.
+            let mut kbuf = alloc::vec![0u8; count.min(4096)];
             match super::inotify::inotify_read(key, &mut kbuf) {
                 Ok(n) => {
                     if unsafe { user_access::copy_to_user(buf, &kbuf[..n]) }.is_err() {
