@@ -389,7 +389,7 @@ mod tests {
         // Simple BPF: LD+RET ALLOW
         let filter = vec![
             SeccompBpfInstruction {
-                code: 0x00 | 0x20 | BPF_W,
+                code: 0x20 | BPF_W,
                 jt: 0,
                 jf: 0,
                 k: 0,
@@ -415,7 +415,7 @@ mod tests {
         // BPF: LD+JEQ k=1 jt=0 jf=1, RET ALLOW, RET KILL
         let filter = vec![
             SeccompBpfInstruction {
-                code: 0x00 | 0x20 | BPF_W,
+                code: 0x20 | BPF_W,
                 jt: 0,
                 jf: 0,
                 k: 0,
@@ -456,7 +456,7 @@ mod tests {
         // BPF: LD+AND k=0xFF+RET ALLOW if acc==0x42
         let filter = vec![
             SeccompBpfInstruction {
-                code: 0x00 | 0x20 | BPF_W,
+                code: 0x20 | BPF_W,
                 jt: 0,
                 jf: 0,
                 k: 0,

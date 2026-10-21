@@ -42,13 +42,13 @@ jobs:
           key: ${{ runner.os }}-cargo-nightly-builds-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
 
       - name: Build release (default features)
-        run: cargo build --release --target x86_64-unknown-none
+        run: cargo build --release --target x86_64-unknown-none --locked
 
       - name: Build release (self_test)
-        run: cargo build --release --target x86_64-unknown-none --features self_test
+        run: cargo build --release --target x86_64-unknown-none --locked --features self_test
 
       - name: Build release (all features)
-        run: cargo build --release --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu"
+        run: cargo build --release --target x86_64-unknown-none --locked --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu"
 
   cross-arch:
     name: Cross-Arch Builds
@@ -78,7 +78,7 @@ jobs:
       - name: Build aarch64
         run: |
           rustup target add aarch64-unknown-none --toolchain nightly
-          cargo build --target aarch64-unknown-none --features smp
+          cargo build --target aarch64-unknown-none --features smp --locked
 
       # No riscv64 linker script exists, so this is check-only. It exists to
       # surface portability breaks that compile cleanly on x86_64 (ADR-028:
@@ -87,7 +87,7 @@ jobs:
       - name: Check riscv64
         run: |
           rustup target add riscv64gc-unknown-none-elf --toolchain nightly
-          cargo check --target riscv64gc-unknown-none-elf
+          cargo check --target riscv64gc-unknown-none-elf --locked
 
   selftest-smp2:
     name: QEMU Self-Test (SMP 2)
@@ -131,7 +131,7 @@ jobs:
 
       - name: Build kernel (release, self_test)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --features self_test
+        run: cargo build --release --target x86_64-unknown-none --locked --features self_test
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
@@ -204,7 +204,7 @@ jobs:
       # within the size the KASLR mapping can relocate (root Cargo.toml).
       - name: Build kernel (audit_small, self_test)
         working-directory: kernel
-        run: cargo build --profile audit_small --target x86_64-unknown-none --features self_test
+        run: cargo build --profile audit_small --target x86_64-unknown-none --features self_test --locked
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/audit_small/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_audit.bin
@@ -272,7 +272,7 @@ jobs:
 
       - name: Build kernel (release, production features)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none
+        run: cargo build --release --target x86_64-unknown-none --locked
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_normal.bin

@@ -119,7 +119,7 @@ impl TransferRing {
 
 /// Everything we keep for one addressed device.
 pub struct Slot {
-    /// The output Device Context buffer pointed to by DCBAAP[slot].
+    /// The output Device Context buffer pointed to by DCBAAP\[slot\].
     pub device_ctx: Box<XhciDeviceContext>,
     /// Endpoint transfer rings. Index 0 = default control EP (EP1 in xHCI's
     /// 1-based DCI numbering). Allocated lazily as endpoints are configured.

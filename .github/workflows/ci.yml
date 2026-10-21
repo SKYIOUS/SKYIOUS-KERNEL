@@ -10,6 +10,7 @@ on:
     branches: [master]
   push:
     branches: [master]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -65,7 +66,10 @@ jobs:
       # vahi_kernel is excluded because it cannot run on the host; its tests
       # execute under QEMU in the qemu-selftest job.
       - name: Workspace unit tests (host)
-        run: cargo test --workspace --exclude vahi_kernel
+        run: cargo test --workspace --exclude vahi_kernel --locked
+
+      - name: Workspace unit tests (host, all features)
+        run: cargo test --workspace --exclude vahi_kernel --all-features --locked
 
   host-clippy:
     name: Host Clippy
@@ -91,7 +95,10 @@ jobs:
           key: ${{ runner.os }}-cargo-host-clippy-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
 
       - name: Clippy (host workspace, kernel excluded)
-        run: cargo clippy --workspace --exclude vahi_kernel -- -D warnings
+        run: cargo clippy --workspace --exclude vahi_kernel --all-targets --locked -- -D warnings
+
+      - name: Clippy (host workspace, all features)
+        run: cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features --locked -- -D warnings
 
   kernel-build-matrix:
     name: Kernel Build Matrix
@@ -120,22 +127,25 @@ jobs:
           key: ${{ runner.os }}-cargo-kernel-build-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
 
       - name: Build (debug, default features)
-        run: cargo build --target x86_64-unknown-none
+        run: cargo build --target x86_64-unknown-none --locked
+
+      - name: Build (debug, no features)
+        run: cargo build --target x86_64-unknown-none --no-default-features --locked
 
       - name: Build (release, default features)
-        run: cargo build --release --target x86_64-unknown-none
+        run: cargo build --release --target x86_64-unknown-none --locked
 
       - name: Build (release, self_test)
-        run: cargo build --release --target x86_64-unknown-none --features self_test
+        run: cargo build --release --target x86_64-unknown-none --features self_test --locked
 
       - name: Build (debug, all features)
-        run: cargo build --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu"
+        run: cargo build --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu" --locked
 
       - name: Build (each feature solo)
         run: |
           for feat in smp net ext4 iommu self_test ash hypervisor verification gpu uhci; do
             echo "Building with feature: $feat"
-            cargo build --target x86_64-unknown-none --no-default-features --features "$feat"
+            cargo build --target x86_64-unknown-none --no-default-features --features "$feat" --locked
           done
 
   kernel-clippy:
@@ -163,15 +173,19 @@ jobs:
 
       - name: Clippy (default features)
         working-directory: kernel
-        run: cargo clippy --target x86_64-unknown-none -- -D warnings
+        run: cargo clippy --target x86_64-unknown-none --locked -- -D warnings
+
+      - name: Clippy (no features)
+        working-directory: kernel
+        run: cargo clippy --target x86_64-unknown-none --no-default-features --locked -- -D warnings
 
       - name: Clippy (all features)
         working-directory: kernel
-        run: cargo clippy --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu" -- -D warnings
+        run: cargo clippy --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu" --locked -- -D warnings
 
       - name: Clippy (release, self_test)
         working-directory: kernel
-        run: cargo clippy --release --target x86_64-unknown-none --features self_test -- -D warnings
+        run: cargo clippy --release --target x86_64-unknown-none --features self_test --locked -- -D warnings
 
       - name: Clippy (extracted crates)
         run: |
@@ -180,7 +194,7 @@ jobs:
                        vahi-acpi vahi-gdt vahi-objects vahi-ipc vahi-pci vahi-syscalls \
                        vahi-verified; do
             echo "Clippy: $crate"
-            cargo clippy -p "$crate" --target x86_64-unknown-none -- -D warnings
+            cargo clippy -p "$crate" --target x86_64-unknown-none --locked -- -D warnings
           done
 
   qemu-selftest:
@@ -227,7 +241,7 @@ jobs:
       # builder image is known unbootable (FB-004).
       - name: Build kernel (release, self_test)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --features self_test
+        run: cargo build --release --target x86_64-unknown-none --features self_test --locked
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
@@ -297,7 +311,7 @@ jobs:
 
       - name: Build kernel (release, production features)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none
+        run: cargo build --release --target x86_64-unknown-none --locked
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_normal.bin

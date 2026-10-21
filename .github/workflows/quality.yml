@@ -1,0 +1,192 @@
+name: Quality Gates
+
+# Checks that AGENTS.md requires but ci.yml does not cover: repo policy,
+# workflow/script lint, rustdoc warnings, secret scanning, dependency audit.
+# Same honesty rule as ci.yml: no swallowed failures, every job is a gate.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  policy:
+    name: Repository Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Policy self-test
+        run: python3 scripts/check_repo_policy.py --self-test
+
+      - name: Enforce AGENTS.md policy
+        env:
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$DIFF_BASE" ] || [ "$DIFF_BASE" = "0000000000000000000000000000000000000000" ]; then
+            python3 scripts/check_repo_policy.py
+          else
+            python3 scripts/check_repo_policy.py --diff-base "$DIFF_BASE"
+          fi
+
+      # Informational snapshot of pre-existing debt. Never fails: the gate
+      # above is the ratchet; this makes the remaining debt visible.
+      - name: Debt inventory
+        if: always()
+        run: python3 scripts/check_repo_policy.py --inventory > policy-inventory.txt
+
+      - name: Upload policy inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-inventory
+          path: policy-inventory.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  workflow-lint:
+    name: Workflow & Script Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: |
+          curl -sSfL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          curl -sSfL -o actionlint_checksums.txt \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+          grep ' actionlint_1.7.12_linux_amd64.tar.gz$' actionlint_checksums.txt | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+
+      - name: actionlint
+        run: ./actionlint -color
+
+      - name: Bash syntax
+        run: |
+          while IFS= read -r file; do
+            bash -n "$file"
+          done < <(git ls-files '*.sh')
+
+      - name: ShellCheck (errors only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          git ls-files '*.sh' | xargs -r shellcheck -S error
+
+      - name: PowerShell syntax (maintained scripts)
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            foreach ($parseError in $parseErrors) {
+              Write-Host "::error file=scripts/$($_.Name),line=$($parseError.Extent.StartLineNumber)::$($parseError.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+  rustdoc:
+    name: Rustdoc Warnings
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-cargo-rustdoc-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+
+      - name: Host crate docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --exclude vahi_kernel --no-deps --locked
+
+      - name: Kernel docs
+        working-directory: kernel
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+
+  secrets:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          curl -sSfL -o gitleaks_checksums.txt \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt
+          grep ' gitleaks_8.30.1_linux_x64.tar.gz$' gitleaks_checksums.txt | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+
+      - name: Scan working tree
+        run: ./gitleaks detect --source . --no-git --redact --max-target-megabytes 2 --verbose
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly
+          rustup override set nightly
+
+      - name: Cache cargo + cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit workspace dependencies
+        run: cargo audit

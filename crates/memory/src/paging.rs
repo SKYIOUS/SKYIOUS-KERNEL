@@ -21,7 +21,7 @@ pub enum IsolationMode {
 }
 
 /// Statistics for Copy-on-Write operations on an address space.
-/// Uses atomics for safe access through Arc<Process>.
+/// Uses atomics for safe access through `Arc<Process>`.
 #[derive(Debug)]
 pub struct CowStats {
     /// Number of COW faults resolved.

@@ -1,7 +1,7 @@
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+mod unit {
     use crate::*;
 
     // ── Credentials ──────────────────────────────────────────────────────────
@@ -212,6 +212,7 @@ mod tests {
     fn pipe_handle_copy_and_clone() {
         let p = PipeHandle(7);
         let q = p; // Copy
+        #[allow(clippy::clone_on_copy)] // The test asserts Clone is implemented too.
         let r = p.clone();
         assert_eq!(p, q);
         assert_eq!(p, r);
@@ -243,7 +244,7 @@ mod tests {
 
     #[test]
     fn user_addr_max_below_kernel_addr_min() {
-        assert!(USER_ADDR_MAX < KERNEL_ADDR_MIN);
+        const { assert!(USER_ADDR_MAX < KERNEL_ADDR_MIN) };
     }
 
     #[test]
