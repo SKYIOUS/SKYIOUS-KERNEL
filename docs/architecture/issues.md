@@ -49,8 +49,10 @@ cannot populate with non-`DT_NULL` entries.
 The stub previously reported success for work it never did, which is the worst
 failure mode available (silent data corruption). Returning `Err(())` makes every
 affected call site refuse cleanly with no call-site change. **Consequence to be
-aware of:** AF_UNIX send/recv and `socketpair` are non-functional in this state —
-they were already broken, but now they fail visibly rather than corrupting data.
+aware of:** AF_UNIX send/recv remain non-functional in this state — they were
+already broken, but now they fail visibly rather than corrupting data.
+`socketpair` creation now installs real fds (FD-4), but data transfer over the
+pair still goes through the stubbed copies.
 
 ## Syscall ABI — argument order
 
@@ -78,7 +80,7 @@ the live table and its flags under one lock.
 | FD-1 | `socket()` (AF_UNIX and AF_INET) and `accept()` installed the new fd into a clone; every returned socket fd was phantom — `setsockopt`, `bind`, `close` resolved it as `EBADF`. | `kernel/src/syscalls/net_socket.rs` (`sys_socket`, `sys_accept`) | FIXED — pinned by `userptr:setsockopt_rejects_unimplemented_options` (socket → setsockopt → close → second close `EBADF`) |
 | FD-2 | `close()` cleared, and `dup()`/`dup2()`/`fcntl(F_DUPFD)` wrote fds into a clone: `close` left the fd live, `dup*` returned fd numbers absent from the real table. `fcntl(F_SETFD/F_SETFL)` lost flag writes the same way. | `kernel/src/syscalls/fs_open.rs` (`sys_close`, `sys_dup`, `sys_dup2`, `sys_fcntl`) | FIXED |
 | FD-3 | `epoll_create1()` and `memfd_create()` registered fds in a clone; `MFD_CLOEXEC` was dropped too. | `kernel/src/syscalls/epoll.rs`, `kernel/src/syscalls/shm.rs` (`sys_memfd_create`) | FIXED |
-| FD-4 | `sys_socketpair` delegates to `crates/net/src/unix.rs:460`, which returns two raw `UNIX_SOCKETS` handles as fd numbers and copies them to `sv`; no `FileDescriptor::UnixSocket` is installed, so both fds are unusable and the handles leak. The kernel wrapper must install the pair via `with_fd_table`. | `kernel/src/syscalls/net_socket.rs:562`, `crates/net/src/unix.rs:460-520` | OPEN |
+| FD-4 | `sys_socketpair` delegated to `crates/net/src/unix.rs`, which returned two raw `UNIX_SOCKETS` handles as fd numbers; no `FileDescriptor::UnixSocket` was installed, so both fds were unusable and the handles leaked. | `kernel/src/syscalls/net_socket.rs` (`sys_socketpair`), `crates/net/src/unix.rs` (`create_unix_socketpair`) | FIXED — kernel installs both fds via `with_fd_table` and rolls back fds plus handles on `EFAULT`; pinned by `userptr:socketpair_rolls_back_on_bad_user_buffer`. Positive-path TAP needs mapped user pages, same constraint as the ABI-arg tests. |
 
 ---
 

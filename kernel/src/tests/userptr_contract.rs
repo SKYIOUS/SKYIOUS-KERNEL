@@ -390,6 +390,37 @@ fn test_setsockopt_rejects_unimplemented_options() -> Result<(), &'static str> {
     })
 }
 
+/// `socketpair` must install both fds before touching userspace. A bad `sv`
+/// must return EFAULT and roll back the fds and crate-side socket handles.
+fn test_socketpair_rolls_back_on_bad_user_buffer() -> Result<(), &'static str> {
+    with_process_context(|| {
+        let handles_before = crate::net::unix::UNIX_SOCKETS.lock().len();
+        let fds_before = fd_count();
+        let rc = crate::syscalls::net_socket::sys_socketpair(1, 1, 0, core::ptr::null_mut());
+        if rc != efault() {
+            return Err("socketpair with null sv did not return EFAULT");
+        }
+        if crate::net::unix::UNIX_SOCKETS.lock().len() != handles_before {
+            return Err("socketpair leaked UNIX_SOCKETS handles on EFAULT");
+        }
+        if fd_count() != fds_before {
+            return Err("socketpair leaked process fds on EFAULT");
+        }
+        Ok(())
+    })
+}
+
+fn fd_count() -> usize {
+    let process = {
+        let lock = crate::task::process::CURRENT_PROCESS.lock();
+        match *lock {
+            Some(ref p) => p.clone(),
+            None => return 0,
+        }
+    };
+    process.with_fd_table(|table, _| table.iter().filter(|slot| slot.is_some()).count())
+}
+
 pub fn register() {
     selftest::register(
         "userptr:io_uring_register_rejects_kernel_pointer",
@@ -423,5 +454,9 @@ pub fn register() {
     selftest::register(
         "userptr:setsockopt_rejects_unimplemented_options",
         test_setsockopt_rejects_unimplemented_options,
+    );
+    selftest::register(
+        "userptr:socketpair_rolls_back_on_bad_user_buffer",
+        test_socketpair_rolls_back_on_bad_user_buffer,
     );
 }
