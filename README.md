@@ -458,6 +458,8 @@ cargo build --release           # Release build with LTO
 ### Build Bootimage
 
 ```bash
+# Return to the repository root after building the kernel
+cd ..
 # Limine path (CI and local runs use this)
 python builder/build_limine_image.py --kernel target/x86_64-unknown-none/debug/vahi_kernel --initrd kernel/initrd.tar --output bootimage-vahi_kernel.bin
 ```

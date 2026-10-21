@@ -18,7 +18,7 @@ No external dependencies — pure Python stdlib (struct, os, hashlib, uuid, bina
 
 ## Build Paths
 
-1. **Limine (default)**: `--limine-dir` or auto-download — uses the Limine
+1. **Limine (default production path)**: `--limine-dir` or auto-download — uses the Limine
    bootloader with binaries auto-downloaded from GitHub releases. This is the
    path CI and local runs use.
    NOTE: The `limine` Rust crate v0.6.5 (protocol revision 6) works with the
@@ -585,11 +585,9 @@ class GPTDiskImage:
 # ── Rust Builder Path ───────────────────────────────────────────────────────
 
 def _run_rust_builder(args):
-    """Build using the Rust builder (production build path).
+    """Build using the retired Rust builder, whose image cannot boot this kernel.
 
-    The Rust builder uses the custom Vahi UEFI bootloader which is the
-    production-tested boot path. The Limine path below is a verified
-    alternative; both boot to userspace.
+    Limine is the default production path (FB-004).
     """
     import subprocess
     import shutil
@@ -649,9 +647,10 @@ def _run_rust_builder(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build a bootable GPT disk image",
-        epilog="Use --rust-builder to build via the Rust builder (production path), "
-               "or --limine-dir to build with Limine binaries (alternative)."
+        description="Build a bootable GPT disk image with Limine (default production path)",
+        epilog="Limine is the default production path; binaries are auto-downloaded "
+               "unless --limine-dir is supplied. The Rust builder (--rust-builder) "
+               "is retired: its image cannot boot this kernel (FB-004)."
     )
     parser.add_argument('--kernel', default='kernel/target/x86_64-unknown-none/debug/vahi_kernel',
                         help='Path to kernel ELF')
@@ -661,10 +660,10 @@ def main():
     parser.add_argument('--no-bios', action='store_true', help='Skip BIOS boot partition')
     parser.add_argument('--limine-dir', default=None, help='Path to Limine binary directory')
     parser.add_argument('--rust-builder', action='store_true',
-                        help='Use the Rust builder (production path, requires builder/ to be compiled)')
+                        help='Use the retired Rust builder; its image cannot boot this kernel (FB-004)')
     args = parser.parse_args()
 
-    # ── Rust builder path (production) ──
+    # ── Rust builder path (retired) ──
     if args.rust_builder:
         _run_rust_builder(args)
         return
