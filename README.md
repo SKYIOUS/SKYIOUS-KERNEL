@@ -607,7 +607,6 @@ SKYIOUS KERNEL/
 ├── kernel/                        # Vahi kernel crate
 │   ├── Cargo.toml                 # v0.3.0, nightly Rust
 │   ├── rust-toolchain.toml        # nightly, rust-src, llvm-tools
-│   ├── build.rs                   # Initrd embedding, hash verification
 │   ├── linker.ld                  # x86_64 linker script (higher-half)
 │   ├── aarch64-linker.ld          # aarch64 linker script (physical)
 │   ├── aarch64-unknown-none.json  # aarch64 target spec
