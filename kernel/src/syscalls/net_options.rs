@@ -31,14 +31,11 @@ pub fn sys_setsockopt(
             return errno::Errno::EBADF as u64;
         }
 
-        // Socket options — smoltcp sockets are non-blocking; most are accepted but unused
+        // Only SO_REUSEPORT is implemented. Returning success for every other
+        // option while doing nothing told callers that buffer sizes, linger,
+        // keepalive and TCP tunables had taken effect.
         match _level {
             SOL_SOCKET => match _optname {
-                SO_RCVTIMEO | SO_SNDTIMEO => 0u64,
-                SO_REUSEADDR => {
-                    // Accept SO_REUSEADDR — allows reusing local addresses
-                    0u64
-                }
                 SO_REUSEPORT => {
                     // Record SO_REUSEPORT flag for this socket
                     let (pid, handle) = {
@@ -60,84 +57,6 @@ pub fn sys_setsockopt(
                         true
                     };
                     set_reuse_port(pid, handle, enable);
-                    0u64
-                }
-                SO_KEEPALIVE => {
-                    // Accept SO_KEEPALIVE — TCP keepalive
-                    0u64
-                }
-                SO_LINGER => {
-                    // Accept SO_LINGER — linger on close
-                    0u64
-                }
-                SO_SNDBUF => {
-                    // Accept SO_SNDBUF — send buffer size
-                    0u64
-                }
-                SO_RCVBUF => {
-                    // Accept SO_RCVBUF — receive buffer size
-                    0u64
-                }
-                SO_ERROR => {
-                    // Accept SO_ERROR — get socket error
-                    0u64
-                }
-                SO_TYPE => {
-                    // Accept SO_TYPE — get socket type
-                    0u64
-                }
-                SO_BINDTODEVICE => {
-                    // Accept SO_BINDTODEVICE — bind to network interface
-                    0u64
-                }
-                _ => errno::Errno::ENOPROTOOPT as u64,
-            },
-            IPPROTO_TCP => match _optname {
-                TCP_NODELAY => {
-                    // Disable Nagle's algorithm — accept but don't implement yet
-                    0u64
-                }
-                TCP_KEEPIDLE => {
-                    // TCP keepalive idle time
-                    0u64
-                }
-                TCP_KEEPINTVL => {
-                    // TCP keepalive interval
-                    0u64
-                }
-                TCP_KEEPCNT => {
-                    // TCP keepalive count
-                    0u64
-                }
-                TCP_MAXSEG => {
-                    // TCP maximum segment size
-                    0u64
-                }
-                _ => errno::Errno::ENOPROTOOPT as u64,
-            },
-            IPPROTO_IP => match _optname {
-                IP_TOS => {
-                    // Type of service
-                    0u64
-                }
-                IP_TTL => {
-                    // Time to live
-                    0u64
-                }
-                IP_MULTICAST_TTL => {
-                    // Multicast TTL
-                    0u64
-                }
-                IP_MULTICAST_LOOP => {
-                    // Multicast loopback
-                    0u64
-                }
-                IP_ADD_MEMBERSHIP => {
-                    // Join multicast group
-                    0u64
-                }
-                IP_DROP_MEMBERSHIP => {
-                    // Leave multicast group
                     0u64
                 }
                 _ => errno::Errno::ENOPROTOOPT as u64,

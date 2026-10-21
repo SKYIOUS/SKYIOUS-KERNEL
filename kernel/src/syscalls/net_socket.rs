@@ -20,16 +20,18 @@ pub fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
         };
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let mut fd_table = process.files.lock().fd_table.clone();
-            let fd_obj = FileDescriptor::UnixSocket(handle, crate::task::process::SocketType::Unix);
-            for (i, slot) in fd_table.iter_mut().enumerate() {
-                if slot.is_none() {
-                    *slot = Some(fd_obj);
-                    return i as u64;
+            return process.with_fd_table(|fd_table, _| {
+                let fd_obj =
+                    FileDescriptor::UnixSocket(handle, crate::task::process::SocketType::Unix);
+                for (i, slot) in fd_table.iter_mut().enumerate() {
+                    if slot.is_none() {
+                        *slot = Some(fd_obj);
+                        return i as u64;
+                    }
                 }
-            }
-            fd_table.push(Some(fd_obj));
-            return (fd_table.len() - 1) as u64;
+                fd_table.push(Some(fd_obj));
+                (fd_table.len() - 1) as u64
+            });
         }
         return errno::Errno::ESRCH as u64;
     }
@@ -102,16 +104,17 @@ pub fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> u64 {
         };
         let process_lock = CURRENT_PROCESS.lock();
         if let Some(ref process) = *process_lock {
-            let mut fd_table = process.files.lock().fd_table.clone();
-            let fd_obj = FileDescriptor::Socket(handle, socket_type);
-            for (i, slot) in fd_table.iter_mut().enumerate() {
-                if slot.is_none() {
-                    *slot = Some(fd_obj);
-                    return i as u64;
+            return process.with_fd_table(|fd_table, _| {
+                let fd_obj = FileDescriptor::Socket(handle, socket_type);
+                for (i, slot) in fd_table.iter_mut().enumerate() {
+                    if slot.is_none() {
+                        *slot = Some(fd_obj);
+                        return i as u64;
+                    }
                 }
-            }
-            fd_table.push(Some(fd_obj));
-            return (fd_table.len() - 1) as u64;
+                fd_table.push(Some(fd_obj));
+                (fd_table.len() - 1) as u64
+            });
         }
         errno::Errno::ESRCH as u64
     }
@@ -371,7 +374,7 @@ pub fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 
                 None => return errno::Errno::ESRCH as u64,
             }
         };
-        let mut fd_table = process.files.lock().fd_table.clone();
+        let fd_table = process.files.lock().fd_table.clone();
         if (sockfd as usize) >= fd_table.len() {
             return errno::Errno::EBADF as u64;
         }
@@ -428,20 +431,17 @@ pub fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 
             TCP_BIND_ENDPOINTS.lock().insert((pid, new_handle), ep);
         }
 
-        for (i, slot) in fd_table.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(FileDescriptor::Socket(
-                    new_handle,
-                    crate::task::process::SocketType::Tcp,
-                ));
-                return i as u64;
+        process.with_fd_table(|fd_table, _| {
+            let fd_obj = FileDescriptor::Socket(new_handle, crate::task::process::SocketType::Tcp);
+            for (i, slot) in fd_table.iter_mut().enumerate() {
+                if slot.is_none() {
+                    *slot = Some(fd_obj);
+                    return i as u64;
+                }
             }
-        }
-        fd_table.push(Some(FileDescriptor::Socket(
-            new_handle,
-            crate::task::process::SocketType::Tcp,
-        )));
-        (fd_table.len() - 1) as u64
+            fd_table.push(Some(fd_obj));
+            (fd_table.len() - 1) as u64
+        })
     }
 }
 

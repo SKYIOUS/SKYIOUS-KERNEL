@@ -26,30 +26,8 @@ pub(crate) const IOV_MAX: usize = 1024;
 // ─── Socket option constants ──────────────────────────────────────
 
 pub(crate) const SOL_SOCKET: i32 = 1;
-pub(crate) const SO_RCVTIMEO: i32 = 20;
-pub(crate) const SO_SNDTIMEO: i32 = 21;
-pub(crate) const SO_REUSEADDR: i32 = 2;
 pub(crate) const SO_REUSEPORT: i32 = 15;
-pub(crate) const SO_KEEPALIVE: i32 = 9;
-pub(crate) const SO_LINGER: i32 = 13;
-pub(crate) const SO_SNDBUF: i32 = 7;
-pub(crate) const SO_RCVBUF: i32 = 8;
-pub(crate) const SO_ERROR: i32 = 4;
-pub(crate) const SO_TYPE: i32 = 3;
-pub(crate) const SO_BINDTODEVICE: i32 = 25;
 pub(crate) const IPPROTO_TCP: i32 = 6;
-pub(crate) const TCP_NODELAY: i32 = 1;
-pub(crate) const TCP_KEEPIDLE: i32 = 4;
-pub(crate) const TCP_KEEPINTVL: i32 = 5;
-pub(crate) const TCP_KEEPCNT: i32 = 6;
-pub(crate) const TCP_MAXSEG: i32 = 2;
-pub(crate) const IPPROTO_IP: i32 = 0;
-pub(crate) const IP_TOS: i32 = 1;
-pub(crate) const IP_TTL: i32 = 2;
-pub(crate) const IP_MULTICAST_TTL: i32 = 33;
-pub(crate) const IP_MULTICAST_LOOP: i32 = 34;
-pub(crate) const IP_ADD_MEMBERSHIP: i32 = 35;
-pub(crate) const IP_DROP_MEMBERSHIP: i32 = 36;
 
 // ─── Linux tcp_info struct ─────────────────────────────────────────
 

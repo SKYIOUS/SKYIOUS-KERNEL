@@ -85,20 +85,22 @@ pub fn sys_epoll_create1(flags: i32) -> u64 {
     // Register as a file descriptor in the current process
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref proc) = *lock {
-        let mut fd_table = proc.files.lock().fd_table.clone();
-        let fd_num = find_free_fd(&fd_table);
-        if fd_num >= fd_table.len() {
-            fd_table.resize(fd_num + 1, None);
-        }
-        // Use EventFd as a placeholder — epoll key is tracked in EPOLL_FD_MAP
-        fd_table[fd_num] = Some(FileDescriptor::EventFd(Arc::new(
-            crate::sync::IrqSafeMutex::new(crate::task::process::EventFdData {
-                counter: epoll_key,
-                semaphore: false,
-                nonblock: false,
-                key: 0, // epoll placeholder — not used for blocking
-            }),
-        )));
+        let fd_num = proc.with_fd_table(|fd_table, _| {
+            let fd_num = find_free_fd(fd_table);
+            if fd_num >= fd_table.len() {
+                fd_table.resize(fd_num + 1, None);
+            }
+            // Use EventFd as a placeholder — epoll key is tracked in EPOLL_FD_MAP
+            fd_table[fd_num] = Some(FileDescriptor::EventFd(Arc::new(
+                crate::sync::IrqSafeMutex::new(crate::task::process::EventFdData {
+                    counter: epoll_key,
+                    semaphore: false,
+                    nonblock: false,
+                    key: 0, // epoll placeholder — not used for blocking
+                }),
+            )));
+            fd_num
+        });
         // Map this fd to the epoll key
         EPOLL_FD_MAP
             .lock()

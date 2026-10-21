@@ -390,6 +390,17 @@ impl Process {
         f(entry)
     }
 
+    /// Mutate the live fd table and flags under one lock. Handlers that clone
+    /// the table lose every write, so all fd-table mutations go through here.
+    pub fn with_fd_table<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Vec<Option<FileDescriptor>>, &mut Vec<u64>) -> R,
+    {
+        let mut guard = self.files.lock();
+        let files: &mut ProcessFiles = &mut guard;
+        f(&mut files.fd_table, &mut files.fd_flags)
+    }
+
     /// Create a new handle with bind-time security check.
     #[allow(clippy::result_unit_err)]
     pub fn new_handle(

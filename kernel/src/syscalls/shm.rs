@@ -614,33 +614,34 @@ pub fn sys_memfd_create(name_ptr: *const u8, flags: u32) -> u64 {
         node,
         offset: crate::sync::IrqSafeMutex::new(0),
     };
-    let mut fd_table = process.files.lock().fd_table.clone();
-    let fd = {
-        let mut slot = None;
-        for (i, s) in fd_table.iter_mut().enumerate() {
-            if s.is_none() {
-                *s = Some(fd_obj.clone());
-                slot = Some(i);
-                break;
+    let fd = process.with_fd_table(|fd_table, fd_flags| {
+        let fd = {
+            let mut slot = None;
+            for (i, s) in fd_table.iter_mut().enumerate() {
+                if s.is_none() {
+                    *s = Some(fd_obj.clone());
+                    slot = Some(i);
+                    break;
+                }
             }
-        }
-        match slot {
-            Some(i) => i,
-            None => {
-                fd_table.push(Some(fd_obj));
-                fd_table.len() - 1
+            match slot {
+                Some(i) => i,
+                None => {
+                    fd_table.push(Some(fd_obj));
+                    fd_table.len() - 1
+                }
             }
-        }
-    };
+        };
 
-    // MFD_CLOEXEC
-    if (flags & 0x0001) != 0 {
-        let mut fd_flags = process.files.lock().fd_flags.clone();
-        if fd >= fd_flags.len() {
-            fd_flags.resize(fd + 1, 0);
+        // MFD_CLOEXEC
+        if (flags & 0x0001) != 0 {
+            if fd >= fd_flags.len() {
+                fd_flags.resize(fd + 1, 0);
+            }
+            fd_flags[fd] |= 0x80000; // FD_CLOEXEC
         }
-        fd_flags[fd] |= 0x80000; // FD_CLOEXEC
-    }
+        fd
+    });
 
     fd as u64
 }

@@ -54,7 +54,7 @@ Each extracted crate must build for the `x86_64-unknown-none` target:
 | vahi-gdt | `crates/gdt` | GDT/IDT/TSS management | PASS |
 | vahi-ipc | `crates/ipc` | Inter-process communication | PASS |
 
-**Note**: All crates build successfully for `x86_64-unknown-none`. The `vahi-types` test module failures (import scope inside the nested `mod tests`; exclusive `USER_ADDR_MAX` bound) were fixed 2026-10-21; `cargo test -p vahi-types` is 26/26 and CI runs it in the `host-tests` job.
+**Note**: All crates build successfully for `x86_64-unknown-none`. The `vahi-types` test module failures (import scope inside the nested `mod tests`; exclusive `USER_ADDR_MAX` bound) were fixed 2026-10-21; `cargo test -p vahi-types` is 29/29 and CI runs it in the `host-tests` job.
 
 ---
 

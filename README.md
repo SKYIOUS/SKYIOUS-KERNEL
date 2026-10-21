@@ -63,7 +63,7 @@
 | Supported filesystems | 2 (TarFS for initrd, DevFS for /dev) |
 | Real hardware | **Never tested** — QEMU only |
 | SMP | Claims support but global locks serialize everything |
-| Selftests | **192/192 pass** (eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
+| Selftests | **195/195 pass** (eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
 | Memory leak audit | **PASS** (no leak detected) |
 
 ### Benchmark Results (QEMU/TCG, 512M RAM, 2400 MHz TSC)
@@ -607,7 +607,6 @@ SKYIOUS KERNEL/
 ├── kernel/                        # Vahi kernel crate
 │   ├── Cargo.toml                 # v0.3.0, nightly Rust
 │   ├── rust-toolchain.toml        # nightly, rust-src, llvm-tools
-│   ├── build.rs                   # Initrd embedding, hash verification
 │   ├── linker.ld                  # x86_64 linker script (higher-half)
 │   ├── aarch64-linker.ld          # aarch64 linker script (physical)
 │   ├── aarch64-unknown-none.json  # aarch64 target spec
@@ -757,7 +756,7 @@ docs/
 
 ### Self-Test Results
 
-**192/192 tests pass** — build with `self_test` feature and boot in QEMU:
+**195/195 tests pass** — build with `self_test` feature and boot in QEMU:
 
 ```bash
 cd kernel
