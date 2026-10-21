@@ -427,10 +427,10 @@ exact CI commands:
 
 | # | Defect | Evidence | Status |
 |---|---|---|---|
-| X-1 | `vahi-sync` compiles x86-only intrinsics and asm unconditionally: `core::arch::x86_64::__cpuid` and `asm!("pushfq; pop {rflags}; cli", options(att_syntax))` in the IRQ-save path | `crates/sync/src/lib.rs:205,255`; aarch64 build: `E0433: cannot find x86_64 in arch` + `error: the att_syntax option is only supported on x86`; riscv64 check: same two errors | OPEN |
+| P-1 | `vahi-sync` compiles x86-only intrinsics and asm unconditionally: `core::arch::x86_64::__cpuid` and `asm!("pushfq; pop {rflags}; cli", options(att_syntax))` in the IRQ-save path | `crates/sync/src/lib.rs:205,255`; aarch64 build: `E0433: cannot find x86_64 in arch` + `error: the att_syntax option is only supported on x86`; riscv64 check: same two errors | OPEN |
 
 The build stops at the first crate, so breakage beyond `vahi-sync` is unknown
-until X-1 is fixed. The job is intentionally left failing: a red nightly is a
+until P-1 is fixed. The job is intentionally left failing: a red nightly is a
 finding, not noise.
 
 ## Dependency vulnerabilities (cargo audit, nightly)

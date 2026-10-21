@@ -30,7 +30,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
 - Honest reds found and recorded (not suppressed): `cargo audit` fails on
   `xmas-elf 0.9.1` (RUSTSEC-2025-0018, issues.md V-1); nightly cross-arch is
   red — aarch64 build and riscv64 check stop at unguarded x86 asm/cpuid in
-  `crates/sync/src/lib.rs:205,255` (issues.md X-1).
+  `crates/sync/src/lib.rs:205,255` (issues.md P-1).
 
 ## Verified this session (2026-09-23)
 
