@@ -14,7 +14,8 @@ use crate::memory::paging::AddressSpace;
 use crate::selftest;
 use crate::sync::IrqSafeMutex;
 use crate::task::process::{
-    route_signal_to_signalfd_for, FileDescriptor, Process, SignalFdData, SIGNAL_FDS, SI_CHILD,
+    route_signal_to_signalfd_for, FileDescriptor, Process, SignalFdData, CURRENT_PROCESS,
+    SIGNAL_FDS, SI_CHILD,
 };
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -168,6 +169,76 @@ fn test_signalfd_contention_bails() -> Result<(), &'static str> {
     Ok(())
 }
 
+// ─── fd-table write-through contract ──────────────────────────────
+
+/// `dup`/`dup2`/`fcntl` must mutate the live fd table and flag vector: every
+/// returned fd resolves, and flag writes read back. An earlier version wrote
+/// into a clone, so the returned numbers were absent from the real table.
+fn test_fd_dup_fcntl_write_through() -> Result<(), &'static str> {
+    use crate::syscalls::epoll::sys_epoll_create1;
+    use crate::syscalls::errno::Errno;
+    use crate::syscalls::fs_open::{sys_close, sys_dup, sys_dup2, sys_fcntl};
+
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc);
+    let out = (|| {
+        const F_DUPFD: i32 = 0;
+        const F_GETFD: i32 = 1;
+        const F_SETFD: i32 = 2;
+        const F_GETFL: i32 = 3;
+        const F_SETFL: i32 = 4;
+        const O_NONBLOCK: u64 = 0x800;
+
+        let fd = crate::syscalls::net_socket::sys_socket(1, 1, 0);
+        if fd > 0xFFFF {
+            return Err("socket(AF_UNIX) did not yield an fd");
+        }
+        let dup_fd = sys_dup(fd);
+        if dup_fd > 0xFFFF || dup_fd == fd {
+            return Err("dup did not install a new fd");
+        }
+        if sys_close(dup_fd) != 0 {
+            return Err("close(dup fd) failed");
+        }
+        if sys_dup(dup_fd) != Errno::EBADF as u64 {
+            return Err("dup of closed fd did not return EBADF");
+        }
+        let fcntl_fd = sys_fcntl(fd, F_DUPFD, 0);
+        if fcntl_fd > 0xFFFF || sys_close(fcntl_fd) != 0 {
+            return Err("fcntl(F_DUPFD) did not install a closable fd");
+        }
+        let target = fd + 10;
+        if sys_dup2(fd, target) != target {
+            return Err("dup2 did not install the target fd");
+        }
+        if sys_fcntl(target, F_SETFD, 1) != 0 || sys_fcntl(target, F_GETFD, 0) != 1 {
+            return Err("FD_CLOEXEC did not write through");
+        }
+        if sys_fcntl(target, F_SETFL, O_NONBLOCK) != 0
+            || sys_fcntl(target, F_GETFL, 0) & O_NONBLOCK == 0
+        {
+            return Err("O_NONBLOCK did not write through");
+        }
+        if sys_close(target) != 0 {
+            return Err("close(dup2 fd) failed");
+        }
+        let ep = sys_epoll_create1(0);
+        if ep > 0xFFFF {
+            return Err("epoll_create1 did not install an fd");
+        }
+        if sys_fcntl(ep, F_SETFD, 1) != 0 || sys_fcntl(ep, F_GETFD, 0) != 1 {
+            return Err("epoll fd flags did not write through");
+        }
+        if sys_close(ep) != 0 || sys_close(fd) != 0 {
+            return Err("close of socket/epoll fd failed");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
 pub fn register() {
     selftest::register("contract:exit_code_encoding", test_exit_code_encoding);
     selftest::register("contract:signalfd_mask_matrix", test_signalfd_mask_matrix);
@@ -175,5 +246,9 @@ pub fn register() {
     selftest::register(
         "contract:signalfd_contention_bails",
         test_signalfd_contention_bails,
+    );
+    selftest::register(
+        "contract:dup_fcntl_epoll_write_through",
+        test_fd_dup_fcntl_write_through,
     );
 }
