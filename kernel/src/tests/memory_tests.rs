@@ -140,25 +140,41 @@ fn test_buddy_alloc_order1() -> Result<(), &'static str> {
 }
 
 fn test_refcount_increment_decrement() -> Result<(), &'static str> {
-    use crate::memory::phys;
+    use crate::memory::{frame_info, phys};
     use x86_64::PhysAddr;
     if !phys::is_initialized() {
         return Err("not initialized");
     }
+    frame_info::drain_deferred();
+    let free_before = phys::total_free_frames();
     let f = phys::alloc_frame().ok_or("alloc failed")?;
     let pa = PhysAddr::new(f);
-    // Refcounts start at 0; increment/decrement are called by the mapping layer
-    let count_before = crate::memory::frame_info::count(pa);
-    crate::memory::frame_info::increment(pa);
-    let count_after_inc = crate::memory::frame_info::count(pa);
-    if count_after_inc != count_before + 1 {
+    if frame_info::count(pa) != 0 {
+        return Err("allocated frame should have zero initial refcount");
+    }
+    frame_info::increment(pa);
+    if frame_info::count(pa) != 1 {
         return Err("refcount should increase by 1 after increment");
     }
-    let remaining = crate::memory::frame_info::decrement(pa);
-    if remaining != count_before {
-        return Err("refcount should return to original after decrement");
+    frame_info::increment(pa);
+    if frame_info::count(pa) != 2 || frame_info::decrement(pa) != 1 {
+        return Err("shared frame should retain one reference after decrement");
     }
-    phys::free_frame(f);
+    frame_info::drain_deferred();
+    if phys::is_free(f) {
+        return Err("referenced frame must not be freed");
+    }
+    if frame_info::decrement(pa) != 0 || frame_info::count(pa) != 0 {
+        return Err("final decrement should return refcount to zero");
+    }
+    if phys::is_free(f) {
+        return Err("zero-refcount frame should wait for deferred drain");
+    }
+    // The zero transition transfers ownership to the deferred queue.
+    frame_info::drain_deferred();
+    if !phys::is_free(f) || phys::total_free_frames() != free_before {
+        return Err("deferred drain should free the frame exactly once");
+    }
     Ok(())
 }
 
