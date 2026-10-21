@@ -417,13 +417,37 @@ Two of these failed on first run for **wrong arithmetic in the test**, not
 production code (`pd_shift_aliases(100,32)` is 643 > 512, so it does alias;
 `from_counts(4096,4096)` sets failed=4096). Corrected, then green.
 
-## Documentation## Documentation## Documentation
+## Cross-arch portability (aarch64 / riscv64) — CI now builds these (2026-10-21)
 
-- `docs/VALIDATION_MATRIX.md` D.2 names `tests/selftest_gate.sh` with a 180s
-  timeout as the entry point; ADR-027 §5 says that bash gate is superseded by
-  `tests/run_qemu_tests.py` (CI timeout 2400s). The matrix contradicts the ADR.
-- `docs/VALIDATION_MATRIX.md` D.4 cites `tests/e2e_full_suite.sh`, which does not
-  exist in the tree.
+The nightly `cross-arch` job runs `cargo build --target aarch64-unknown-none
+--features smp` and `cargo check --target riscv64gc-unknown-none-elf` in
+`kernel/` (ADR-028: riscv64 was never built in CI, which is how this stayed
+hidden). Both are RED at the time of writing, reproduced locally with the
+exact CI commands:
+
+| # | Defect | Evidence | Status |
+|---|---|---|---|
+| X-1 | `vahi-sync` compiles x86-only intrinsics and asm unconditionally: `core::arch::x86_64::__cpuid` and `asm!("pushfq; pop {rflags}; cli", options(att_syntax))` in the IRQ-save path | `crates/sync/src/lib.rs:205,255`; aarch64 build: `E0433: cannot find x86_64 in arch` + `error: the att_syntax option is only supported on x86`; riscv64 check: same two errors | OPEN |
+
+The build stops at the first crate, so breakage beyond `vahi-sync` is unknown
+until X-1 is fixed. The job is intentionally left failing: a red nightly is a
+finding, not noise.
+
+## Dependency vulnerabilities (cargo audit, nightly)
+
+The nightly `dependency-audit` job fails on any vulnerability (no fallback).
+Verified locally 2026-10-21 with `cargo audit` (0.22.2):
+
+| # | Defect | Evidence | Status |
+|---|---|---|---|
+| V-1 | `xmas-elf 0.9.1` (the kernel's ELF loader, untrusted input path) — RUSTSEC-2025-0018: potential out-of-bounds read with a malformed ELF file and the HashTable API; fixed in >= 0.10 | `cargo audit`: `error: 1 vulnerability found!` | OPEN — nightly stays red until the upgrade lands and the ELF loader is re-tested |
+
+`cargo audit` additionally reports 3 non-failing warnings (unmaintained
+`atomic-polyfill 1.0.3`, unmaintained `proc-macro-error2 2.0.1`, yanked
+`spin 0.9.8`) — informational; warnings do not fail the gate.
+
+## Documentation
+
 - ADR-013 and ADR-014 are missing from `docs/decisions/` while
   `docs/architecture/strategic-roadmap-to-linux-parity.md` references them.
 - `kernel/src/tests/mod.rs` gates `sync_tests::register()` on `target_arch` but

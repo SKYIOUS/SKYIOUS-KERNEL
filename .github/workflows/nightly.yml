@@ -1,15 +1,24 @@
 name: Nightly
 
+# Extended gates that are too slow for every PR. Same honesty rule as ci.yml:
+# no swallowed failures, no `|| true`. A red nightly is a finding, not noise.
+
 on:
   schedule:
     - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  full-build:
+  full-builds:
+    name: Full Release Builds
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: kernel
@@ -19,7 +28,7 @@ jobs:
       - name: Install nightly Rust
         run: |
           rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
           rustup target add x86_64-unknown-none --toolchain nightly
           rustup override set nightly
 
@@ -29,20 +38,22 @@ jobs:
           path: |
             ~/.cargo/registry/
             ~/.cargo/git/
-            kernel/target/
-          key: ${{ runner.os }}-nightly-${{ hashFiles('kernel/Cargo.lock') }}
+            target/
+          key: ${{ runner.os }}-cargo-nightly-builds-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
 
-      - name: Build release
-        run: cargo build --release
+      - name: Build release (default features)
+        run: cargo build --release --target x86_64-unknown-none
 
-      - name: Build self_test release
-        run: cargo build --release --features self_test
+      - name: Build release (self_test)
+        run: cargo build --release --target x86_64-unknown-none --features self_test
 
-      - name: Build with all features
-        run: cargo build --no-default-features --features "smp,net,ext4,uhci,ash,hypervisor,verification,gpu"
+      - name: Build release (all features)
+        run: cargo build --release --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu"
 
-  build-aarch64:
+  cross-arch:
+    name: Cross-Arch Builds
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: kernel
@@ -52,8 +63,7 @@ jobs:
       - name: Install nightly Rust
         run: |
           rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview
-          rustup target add aarch64-unknown-none --toolchain nightly
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
           rustup override set nightly
 
       - name: Cache cargo
@@ -62,30 +72,268 @@ jobs:
           path: |
             ~/.cargo/registry/
             ~/.cargo/git/
-            kernel/target/
-          key: ${{ runner.os }}-aarch64-${{ hashFiles('kernel/Cargo.lock') }}
+            target/
+          key: ${{ runner.os }}-cargo-cross-arch-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
 
       - name: Build aarch64
-        run: cargo build --target aarch64-unknown-none --features "smp"
+        run: |
+          rustup target add aarch64-unknown-none --toolchain nightly
+          cargo build --target aarch64-unknown-none --features smp
 
-  security-audit:
+      # No riscv64 linker script exists, so this is check-only. It exists to
+      # surface portability breaks that compile cleanly on x86_64 (ADR-028:
+      # the syscall-init seam bug was masked only because riscv64 was never
+      # built in CI).
+      - name: Check riscv64
+        run: |
+          rustup target add riscv64gc-unknown-none-elf --toolchain nightly
+          cargo check --target riscv64gc-unknown-none-elf
+
+  selftest-smp2:
+    name: QEMU Self-Test (SMP 2)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: Install nightly Rust
         run: |
           rustup set profile minimal
-          rustup toolchain install nightly
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
+          rustup target add x86_64-unknown-none --toolchain nightly
           rustup override set nightly
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-cargo-nightly-smp2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
 
-      - name: Audit kernel
+      - name: Cache Limine binaries
+        uses: actions/cache@v4
+        with:
+          path: /tmp/limine-binary
+          key: limine-${{ hashFiles('builder/build_limine_image.py') }}
+
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf
+          OVMF=$(          ls /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -n1)
+          if [ -z "$OVMF" ]; then
+            echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
+            exit 1
+          fi
+          echo "OVMF=$OVMF" >> "$GITHUB_ENV"
+
+      - name: Build kernel (release, self_test)
         working-directory: kernel
-        run: cargo audit || echo "cargo-audit: advisory check complete (warnings allowed)"
+        run: cargo build --release --target x86_64-unknown-none --features self_test
 
-      - name: Audit builder
-        working-directory: builder
-        run: cargo audit || echo "cargo-audit: advisory check complete (warnings allowed)"
+      - name: Build boot image (Limine)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
+
+      # SMP 2 showed a roughly 1-in-10 intermittent failure that was never
+      # reproduced (issues.md "SMP scaling"); this run pins it.
+      - name: Run T-00 suite (SMP 2)
+        run: |
+          python3 tests/run_qemu_tests.py \
+            --image tests/t00_selftest.bin \
+            --ovmf "$OVMF" \
+            --smp 2 \
+            --timeout 2400 \
+            --qemu-extra "-vga none" \
+            --serial tests/t00_smp2_serial.log \
+            --log tests/t00_smp2.log
+
+      - name: Upload serial + runner logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-smp2-logs
+          path: |
+            tests/t00_smp2.log
+            tests/t00_smp2_serial.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  selftest-audit:
+    name: QEMU Self-Test (audit profile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-cargo-nightly-audit-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+
+      - name: Cache Limine binaries
+        uses: actions/cache@v4
+        with:
+          path: /tmp/limine-binary
+          key: limine-${{ hashFiles('builder/build_limine_image.py') }}
+
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf
+          OVMF=$(          ls /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -n1)
+          if [ -z "$OVMF" ]; then
+            echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
+            exit 1
+          fi
+          echo "OVMF=$OVMF" >> "$GITHUB_ENV"
+
+      # audit_small keeps overflow-checks + debug-assertions on while staying
+      # within the size the KASLR mapping can relocate (root Cargo.toml).
+      - name: Build kernel (audit_small, self_test)
+        working-directory: kernel
+        run: cargo build --profile audit_small --target x86_64-unknown-none --features self_test
+
+      - name: Build boot image (Limine)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/audit_small/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_audit.bin
+
+      - name: Run T-00 suite (audit_small)
+        run: |
+          python3 tests/run_qemu_tests.py \
+            --image tests/t00_audit.bin \
+            --ovmf "$OVMF" \
+            --timeout 2400 \
+            --qemu-extra "-vga none" \
+            --serial tests/t00_audit_serial.log \
+            --log tests/t00_audit.log
+
+      - name: Upload serial + runner logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-audit-logs
+          path: |
+            tests/t00_audit.log
+            tests/t00_audit_serial.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  boot-stress:
+    name: Boot Stress (25 boots)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup override set nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-cargo-nightly-stress-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+
+      - name: Cache Limine binaries
+        uses: actions/cache@v4
+        with:
+          path: /tmp/limine-binary
+          key: limine-${{ hashFiles('builder/build_limine_image.py') }}
+
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf
+          OVMF=$(          ls /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -n1)
+          if [ -z "$OVMF" ]; then
+            echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
+            exit 1
+          fi
+          echo "OVMF=$OVMF" >> "$GITHUB_ENV"
+
+      - name: Build kernel (release, production features)
+        working-directory: kernel
+        run: cargo build --release --target x86_64-unknown-none
+
+      - name: Build boot image (Limine)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_normal.bin
+
+      # Alternating SMP 1/2; `bash -e` aborts on the first failed boot so a
+      # single flake fails the job (that is the point of the stress).
+      - name: 25 alternating boots (strict)
+        run: |
+          for i in $(seq 1 25); do
+            if [ $((i % 2)) -eq 0 ]; then
+              smp=2
+              extra="--expect-ap 1"
+            else
+              smp=1
+              extra=""
+            fi
+            echo "=== boot $i/25 (smp $smp) ==="
+            python3 tests/run_qemu_tests.py \
+              --image tests/t00_normal.bin \
+              --ovmf "$OVMF" \
+            --boot-only --smp "$smp" $extra \
+            --qemu-extra "-vga none" \
+            --serial "tests/stress_${i}_serial.log" \
+            --log "tests/stress_$i.log"
+          done
+
+      - name: Upload boot logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-stress-logs
+          path: tests/stress_*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup set profile minimal
+          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
+          rustup override set nightly
+
+      - name: Cache cargo + cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # The root workspace lock covers kernel, builder and every extracted
+      # crate. Vulnerabilities fail the job; this step has no fallback.
+      - name: Audit workspace dependencies
+        run: cargo audit

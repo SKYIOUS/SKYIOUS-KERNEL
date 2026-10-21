@@ -1,7 +1,33 @@
 # Tested & Working — Vahi Kernel / SkyOS
 
-Living status document. Last updated: 2026-09-23 (session: KASLR + T-00/K-02/K-03 repair arc, pre-commit verification).
+Living status document. Last updated: 2026-10-21 (session: CI rigor rewrite + full local gate verification).
 Every claim here was reproduced on this machine; re-verify after any change.
+
+## Verified this session (2026-10-21)
+
+- CI rewritten to the honesty rule (no `continue-on-error`, no `|| true`):
+  `ci.yml` 7 gate jobs, `nightly.yml` 6 extended gates, `t00-demo.yml`
+  3 harness demos; `build-kernel.yml` deleted (dead `main` trigger, FB-004
+  path). All workflow YAML parse-validated with PyYAML.
+- Host gates, exact commands (all run this session, this tree):
+  `cargo test --workspace --exclude vahi_kernel` → 120 passed, 0 failed,
+  exit 0; `cargo clippy --workspace --exclude vahi_kernel -- -D warnings` →
+  exit 0 (only vendored `bootloader` build-script warnings);
+  `cargo fmt --all -- --check` → exit 0.
+- Kernel gates: debug, release, release+self_test, all-features, and all 10
+  solo-feature builds → exit 0; kernel clippy default / all-features /
+  release+self_test / 19-crate loop → all exit 0 with `-D warnings`.
+- QEMU gates (QEMU 10.2.50, OVMF.fd, `-vga none`): T-00 suite on the
+  release+self_test Limine image → **PASS 192/192, 0 failed** at `-smp 1`
+  (9.1s) and `-smp 2` (17.7s); `audit_small` profile suite → **PASS
+  192/192** (24.2s); production image `--boot-only` → PASS at `-smp 1`, and
+  `-smp 2 --expect-ap 1` → PASS (1/1 AP up, VFS init reached); 25 alternating
+  boots → 25/25 PASS (K-02 flake not reproduced). Memory leak audit: PASS
+  (no leak detected).
+- Honest reds found and recorded (not suppressed): `cargo audit` fails on
+  `xmas-elf 0.9.1` (RUSTSEC-2025-0018, issues.md V-1); nightly cross-arch is
+  red — aarch64 build and riscv64 check stop at unguarded x86 asm/cpuid in
+  `crates/sync/src/lib.rs:205,255` (issues.md X-1).
 
 ## Verified this session (2026-09-23)
 
@@ -34,7 +60,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
 - New subsystems confirmed: hypervisor (16 files), ebpf (7), gui (15), compositor (8), crypto (3), objects (12), ash (8)
 - 18 extracted crates: sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci
 - Feature flags: default = smp,net,ext4,iommu; all-features = smp,net,ext4,uhci,ash,hypervisor,verification,gpu
-- CI: 5 jobs (validate, build-kernel, build-bootimage, t00-harness, clippy) — all green
+- CI (rewritten 2026-10-21): 7 PR jobs in `ci.yml` (format, host tests, host clippy, kernel build matrix, kernel clippy, QEMU self-test, QEMU boot regression); `nightly.yml` adds cross-arch, SMP 2, audit-profile, boot-stress and `cargo audit`; `t00-demo.yml` proves harness FAIL/PANIC/TIMEOUT detection on demand
 - Build: `cargo build` in kernel/ → 0 errors; `cargo clippy -- -D warnings` → clean
 -- QEMU boot: TAP version 13, 134/134 passed, 0 failed at smp 1 and 2 (2026-09-23: 146/146 at smp 1 and 2)
 
@@ -65,8 +91,8 @@ target/x86_64-unknown-none/debug/vahi_kernel`
 
 | Path | Status | Notes |
 |------|--------|-------|
-| **Rust builder** | ✅ Production | `python builder/build_limine_image.py --rust-builder` — uses custom Vahi UEFI bootloader |
-| **Limine (Python)** | ⚠️ Experimental | `python builder/build_limine_image.py` — auto-downloads Limine v12.7.0 binaries |
+| **Rust builder** | Retired (FB-004) | `python builder/build_limine_image.py --rust-builder` — custom Vahi UEFI bootloader; its image cannot boot this kernel |
+| **Limine (Python)** | Production / CI | `python builder/build_limine_image.py` — auto-downloads Limine v12.7.0 binaries |
 
 ### Limine Compatibility Gap — RESOLVED 2026-09-03
 

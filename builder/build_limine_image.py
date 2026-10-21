@@ -18,15 +18,15 @@ No external dependencies — pure Python stdlib (struct, os, hashlib, uuid, bina
 
 ## Build Paths
 
-1. **Rust builder (recommended)**: `--rust-builder` — uses the custom Vahi UEFI
-   bootloader. This is the production-tested path. The Rust builder is
-   compiled from `builder/src/main.rs`.
-
-2. **Limine (alternative)**: `--limine-dir` or auto-download — uses the Limine
-   bootloader with binaries auto-downloaded from GitHub releases.
+1. **Limine (default)**: `--limine-dir` or auto-download — uses the Limine
+   bootloader with binaries auto-downloaded from GitHub releases. This is the
+   path CI and local runs use.
    NOTE: The `limine` Rust crate v0.6.5 (protocol revision 6) works with the
    v12.7.0 bootloader. The old "init hangs in a futex loop" issue was root-
    caused to a kernel mmap bug (fixed 2026-09-03), not the boot protocol.
+
+2. **Rust builder (retired)**: `--rust-builder` — custom Vahi UEFI bootloader
+   from `builder/src/main.rs`. Its image cannot boot this kernel (FB-004).
 """
 
 import struct
@@ -769,7 +769,7 @@ def main():
     print(f"\nTo boot (BIOS):")
     print(f'  qemu-system-x86_64 -drive format=raw,file={args.output} -serial stdio -m 512')
     print(f"\nNOTE: The Limine path boots to userspace with init forks verified.")
-    print(f"      For the production build, use: python builder/build_limine_image.py --rust-builder")
+    print(f"      The Rust builder path (--rust-builder) is retired: its image cannot boot this kernel (FB-004).")
 
 
 if __name__ == '__main__':
