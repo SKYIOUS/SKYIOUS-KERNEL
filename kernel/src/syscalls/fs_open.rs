@@ -232,62 +232,57 @@ pub fn sys_close(fd: u64) -> u64 {
             None => return errno::Errno::ESRCH as u64,
         }
     };
-    let mut found = false;
-    let mut fd_table = process.files.lock().fd_table.clone();
-    if (fd as usize) < fd_table.len() {
-        if let Some(ref desc) = fd_table[fd as usize] {
-            if let FileDescriptor::Socket(_handle, _stype) = desc {
-                #[cfg(feature = "net")]
-                {
-                    // Clean up SO_REUSEPORT group membership
-                    super::net_helpers::remove_from_reuseport(process.id, *_handle);
-                    // Clean up TCP connection stats
-                    super::net_helpers::tcp_stats_remove(process.id, *_handle);
-                    crate::net::SOCKETS.lock().remove(*_handle);
-                }
-            }
-            if let FileDescriptor::UnixSocket(handle, _) = desc {
-                crate::net::unix::cleanup_unix_socket(*handle);
-            }
-            if let FileDescriptor::SignalFd(handle) = desc {
-                super::SIGNAL_FDS.lock().remove(handle);
-            }
-            if let FileDescriptor::InotifyFd { instance_key, .. } = desc {
-                super::inotify::inotify_close(*instance_key);
-            }
-            if let FileDescriptor::EventFd(data) = desc {
-                // Wake any threads blocked reading so they see the fd is gone
-                let key = data.lock().key;
-                crate::task::scheduler::wake_pipe(key);
-            }
-            if let FileDescriptor::TimerFd(data) = desc {
-                // Wake any threads blocked reading so they see the fd is gone
-                let key = data.lock().key;
-                crate::task::scheduler::wake_pipe(key);
-            }
-            if let FileDescriptor::IoUringFd(data) = desc {
-                // Wake any threads blocked waiting on completions
-                let key = data
-                    .lock()
-                    .downcast_ref::<crate::syscalls::io_uring::IoUringInstance>()
-                    .map_or(0, |i| i.key);
-                crate::task::scheduler::wake_pipe(key);
-            }
-            found = true;
+    let desc = process.with_fd_table(|fd_table, fd_flags| {
+        if (fd as usize) >= fd_table.len() {
+            return None;
         }
-        fd_table[fd as usize] = None;
+        let desc = fd_table[fd as usize].take();
+        if desc.is_some() && (fd as usize) < fd_flags.len() {
+            fd_flags[fd as usize] = 0;
+        }
+        desc
+    });
+    let Some(desc) = desc else {
+        return errno::Errno::EBADF as u64;
+    };
+    if let FileDescriptor::Socket(_handle, _stype) = &desc {
+        #[cfg(feature = "net")]
+        {
+            // Clean up SO_REUSEPORT group membership
+            super::net_helpers::remove_from_reuseport(process.id, *_handle);
+            // Clean up TCP connection stats
+            super::net_helpers::tcp_stats_remove(process.id, *_handle);
+            crate::net::SOCKETS.lock().remove(*_handle);
+        }
     }
-    drop(fd_table);
-    let mut flags = process.files.lock().fd_flags.clone();
-    if (fd as usize) < flags.len() {
-        flags[fd as usize] = 0;
+    if let FileDescriptor::UnixSocket(handle, _) = &desc {
+        crate::net::unix::cleanup_unix_socket(*handle);
     }
-    drop(flags);
-    if found {
-        0
-    } else {
-        errno::Errno::EBADF as u64
+    if let FileDescriptor::SignalFd(handle) = &desc {
+        super::SIGNAL_FDS.lock().remove(handle);
     }
+    if let FileDescriptor::InotifyFd { instance_key, .. } = &desc {
+        super::inotify::inotify_close(*instance_key);
+    }
+    if let FileDescriptor::EventFd(data) = &desc {
+        // Wake any threads blocked reading so they see the fd is gone
+        let key = data.lock().key;
+        crate::task::scheduler::wake_pipe(key);
+    }
+    if let FileDescriptor::TimerFd(data) = &desc {
+        // Wake any threads blocked reading so they see the fd is gone
+        let key = data.lock().key;
+        crate::task::scheduler::wake_pipe(key);
+    }
+    if let FileDescriptor::IoUringFd(data) = &desc {
+        // Wake any threads blocked waiting on completions
+        let key = data
+            .lock()
+            .downcast_ref::<crate::syscalls::io_uring::IoUringInstance>()
+            .map_or(0, |i| i.key);
+        crate::task::scheduler::wake_pipe(key);
+    }
+    0
 }
 
 // ─── dup / dup2 ───────────────────────────────────────────────────
@@ -295,25 +290,25 @@ pub fn sys_close(fd: u64) -> u64 {
 pub fn sys_dup(old_fd: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
-        let mut fd_table = p.files.lock().fd_table.clone();
-        if old_fd as usize >= fd_table.len() || fd_table[old_fd as usize].is_none() {
-            return errno::Errno::EBADF as u64;
-        }
-        let old_desc = fd_table[old_fd as usize].clone().unwrap();
-        let mut flags = p.files.lock().fd_flags.clone();
-        for (i, slot) in fd_table.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(old_desc);
-                if i >= flags.len() {
-                    flags.resize(i + 1, 0);
-                }
-                flags[i] = 0;
-                return i as u64;
+        return p.with_fd_table(|fd_table, fd_flags| {
+            if old_fd as usize >= fd_table.len() || fd_table[old_fd as usize].is_none() {
+                return errno::Errno::EBADF as u64;
             }
-        }
-        fd_table.push(Some(old_desc));
-        flags.push(0);
-        return (fd_table.len() - 1) as u64;
+            let old_desc = fd_table[old_fd as usize].clone().unwrap();
+            for (i, slot) in fd_table.iter_mut().enumerate() {
+                if slot.is_none() {
+                    *slot = Some(old_desc);
+                    if i >= fd_flags.len() {
+                        fd_flags.resize(i + 1, 0);
+                    }
+                    fd_flags[i] = 0;
+                    return i as u64;
+                }
+            }
+            fd_table.push(Some(old_desc));
+            fd_flags.push(0);
+            (fd_table.len() - 1) as u64
+        });
     }
     errno::Errno::ESRCH as u64
 }
@@ -321,29 +316,26 @@ pub fn sys_dup(old_fd: u64) -> u64 {
 pub fn sys_dup2(old_fd: u64, new_fd: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
-        let mut fd_table = p.files.lock().fd_table.clone();
-        if old_fd as usize >= fd_table.len() || fd_table[old_fd as usize].is_none() {
-            return errno::Errno::EBADF as u64;
-        }
-        let old_desc = fd_table[old_fd as usize].clone();
-        let old_flags = {
-            let flags = p.files.lock().fd_flags.clone();
-            if (old_fd as usize) < flags.len() {
-                flags[old_fd as usize]
+        return p.with_fd_table(|fd_table, fd_flags| {
+            if old_fd as usize >= fd_table.len() || fd_table[old_fd as usize].is_none() {
+                return errno::Errno::EBADF as u64;
+            }
+            let old_desc = fd_table[old_fd as usize].clone();
+            let old_flags = if (old_fd as usize) < fd_flags.len() {
+                fd_flags[old_fd as usize]
             } else {
                 0
+            };
+            if new_fd as usize >= fd_table.len() {
+                fd_table.resize(new_fd as usize + 1, None);
             }
-        };
-        if new_fd as usize >= fd_table.len() {
-            fd_table.resize(new_fd as usize + 1, None);
-        }
-        let mut flags = p.files.lock().fd_flags.clone();
-        if flags.len() < fd_table.len() {
-            flags.resize(fd_table.len(), 0);
-        }
-        fd_table[new_fd as usize] = old_desc;
-        flags[new_fd as usize] = old_flags & !0x80000;
-        return new_fd;
+            if fd_flags.len() < fd_table.len() {
+                fd_flags.resize(fd_table.len(), 0);
+            }
+            fd_table[new_fd as usize] = old_desc;
+            fd_flags[new_fd as usize] = old_flags & !0x80000;
+            new_fd
+        });
     }
     errno::Errno::ESRCH as u64
 }
@@ -353,27 +345,28 @@ pub fn sys_dup2(old_fd: u64, new_fd: u64) -> u64 {
 pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
     let lock = CURRENT_PROCESS.lock();
     if let Some(ref p) = *lock {
-        let mut fd_table = p.files.lock().fd_table.clone();
+        let fd_table = p.files.lock().fd_table.clone();
         if fd as usize >= fd_table.len() || fd_table[fd as usize].is_none() {
             return errno::Errno::EBADF as u64;
         }
         match cmd {
             F_DUPFD => {
                 let desc = fd_table[fd as usize].clone().unwrap();
-                let mut flags = p.files.lock().fd_flags.clone();
-                for (i, slot) in fd_table.iter_mut().enumerate() {
-                    if slot.is_none() && i as u64 > arg {
-                        *slot = Some(desc);
-                        if i >= flags.len() {
-                            flags.resize(i + 1, 0);
+                p.with_fd_table(|fd_table, fd_flags| {
+                    for (i, slot) in fd_table.iter_mut().enumerate() {
+                        if slot.is_none() && i as u64 > arg {
+                            *slot = Some(desc);
+                            if i >= fd_flags.len() {
+                                fd_flags.resize(i + 1, 0);
+                            }
+                            fd_flags[i] = 0;
+                            return i as u64;
                         }
-                        flags[i] = 0;
-                        return i as u64;
                     }
-                }
-                fd_table.push(Some(desc));
-                flags.push(0);
-                (fd_table.len() - 1) as u64
+                    fd_table.push(Some(desc));
+                    fd_flags.push(0);
+                    (fd_table.len() - 1) as u64
+                })
             }
             F_GETFD => {
                 let flags = p.files.lock().fd_flags.clone();
@@ -383,18 +376,17 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
                     0
                 }
             }
-            F_SETFD => {
-                let mut flags = p.files.lock().fd_flags.clone();
-                if (fd as usize) >= flags.len() {
-                    flags.resize(fd as usize + 1, 0);
+            F_SETFD => p.with_fd_table(|_, fd_flags| {
+                if (fd as usize) >= fd_flags.len() {
+                    fd_flags.resize(fd as usize + 1, 0);
                 }
                 if arg & 1 != 0 {
-                    flags[fd as usize] |= 0x80000;
+                    fd_flags[fd as usize] |= 0x80000;
                 } else {
-                    flags[fd as usize] &= !0x80000;
+                    fd_flags[fd as usize] &= !0x80000;
                 }
                 0
-            }
+            }),
             F_GETFL => {
                 let flags = p.files.lock().fd_flags.clone();
                 if (fd as usize) < flags.len() {
@@ -403,14 +395,13 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
                     0
                 }
             }
-            F_SETFL => {
-                let mut flags = p.files.lock().fd_flags.clone();
-                if fd as usize >= flags.len() {
-                    flags.resize(fd as usize + 1, 0);
+            F_SETFL => p.with_fd_table(|_, fd_flags| {
+                if fd as usize >= fd_flags.len() {
+                    fd_flags.resize(fd as usize + 1, 0);
                 }
-                flags[fd as usize] = arg & 0xFFFF;
+                fd_flags[fd as usize] = arg & 0xFFFF;
                 0
-            }
+            }),
             _ => errno::Errno::EINVAL as u64,
         }
     } else {

@@ -339,6 +339,57 @@ fn test_unmapped_user_pointer_is_refused_without_fault() -> Result<(), &'static 
     })
 }
 
+/// `setsockopt` returned 0 for every option with an empty body, so callers
+/// believed buffer sizes, linger, keepalive and TCP tunables had taken effect.
+/// Only SO_REUSEPORT is implemented; every other option must refuse.
+#[cfg(feature = "net")]
+fn test_setsockopt_rejects_unimplemented_options() -> Result<(), &'static str> {
+    with_process_context(|| {
+        let fd = crate::syscalls::net_socket::sys_socket(1, 1, 0);
+        if fd > 0xFFFF {
+            return Err("socket(AF_UNIX, SOCK_STREAM) did not yield an fd");
+        }
+        const SOL_SOCKET: i32 = 1;
+        const IPPROTO_TCP: i32 = 6;
+        const IPPROTO_IP: i32 = 0;
+        let cases = [
+            (SOL_SOCKET, 20, "SO_RCVTIMEO"),
+            (SOL_SOCKET, 21, "SO_SNDTIMEO"),
+            (SOL_SOCKET, 2, "SO_REUSEADDR"),
+            (SOL_SOCKET, 9, "SO_KEEPALIVE"),
+            (SOL_SOCKET, 13, "SO_LINGER"),
+            (SOL_SOCKET, 7, "SO_SNDBUF"),
+            (SOL_SOCKET, 8, "SO_RCVBUF"),
+            (SOL_SOCKET, 4, "SO_ERROR"),
+            (SOL_SOCKET, 3, "SO_TYPE"),
+            (SOL_SOCKET, 25, "SO_BINDTODEVICE"),
+            (IPPROTO_TCP, 1, "TCP_NODELAY"),
+            (IPPROTO_IP, 2, "IP_TTL"),
+        ];
+        let mut result = Ok(());
+        for (level, optname, name) in cases {
+            let rc = crate::syscalls::net_options::sys_setsockopt(
+                fd,
+                level,
+                optname,
+                core::ptr::null(),
+                0,
+            );
+            if rc != Errno::ENOPROTOOPT as u64 {
+                result = Err(name);
+                break;
+            }
+        }
+        if result.is_ok() && crate::syscalls::fs_open::sys_close(fd) != 0 {
+            result = Err("close(socket fd) failed");
+        }
+        if result.is_ok() && crate::syscalls::fs_open::sys_close(fd) != Errno::EBADF as u64 {
+            result = Err("second close(socket fd) did not return EBADF");
+        }
+        result
+    })
+}
+
 pub fn register() {
     selftest::register(
         "userptr:io_uring_register_rejects_kernel_pointer",
@@ -367,5 +418,10 @@ pub fn register() {
     selftest::register(
         "userptr:unmapped_user_pointer_is_refused_without_fault",
         test_unmapped_user_pointer_is_refused_without_fault,
+    );
+    #[cfg(feature = "net")]
+    selftest::register(
+        "userptr:setsockopt_rejects_unimplemented_options",
+        test_setsockopt_rejects_unimplemented_options,
     );
 }

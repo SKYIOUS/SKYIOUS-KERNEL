@@ -43,13 +43,16 @@ offset  size  field
 
 ## `setsockopt` supported options
 
-| Level       | Option        | Value |
-|-------------|---------------|-------|
-| SOL_SOCKET=1| SO_RCVTIMEO   | 20    |
-| SOL_SOCKET=1| SO_SNDTIMEO   | 21    |
-| IPPROTO_TCP=6 | TCP_NODELAY | 1     |
+| Level        | Option       | Value |
+|--------------|--------------|-------|
+| SOL_SOCKET=1 | SO_REUSEPORT | 15    |
 
-Timeouts are accepted but unused (sockets are non-blocking in the kernel).
+Every other level/option returns `ENOPROTOOPT`. Options with no effect are not
+reported as success: buffer sizes, linger, keepalive, timeouts and TCP
+tunables are not implemented.
+
+`getsockopt` supports `SO_TYPE`, `SO_ERROR`, `SO_ACCEPTCONN`, `SO_PEERCRED`
+(AF_UNIX) and `TCP_INFO`; everything else returns `ENOPROTOOPT`.
 
 ## Implementation notes
 

@@ -66,6 +66,20 @@ point where a swapped register is observable. Asserting a discriminator there
 would pass regardless of the dispatch row. See the module doc in
 `kernel/src/tests/abi_args.rs`.
 
+## Process fd table — mutations applied to a clone (2026-10-21)
+
+Every handler below took `process.files.lock().fd_table.clone()`, mutated the
+copy and dropped it, so the real table never changed. All fd-table mutations now
+go through `Process::with_fd_table` (`kernel/src/task/process.rs`), which mutates
+the live table and its flags under one lock.
+
+| # | Defect | Evidence | Status |
+|---|---|---|---|
+| FD-1 | `socket()` (AF_UNIX and AF_INET) and `accept()` installed the new fd into a clone; every returned socket fd was phantom — `setsockopt`, `bind`, `close` resolved it as `EBADF`. | `kernel/src/syscalls/net_socket.rs` (`sys_socket`, `sys_accept`) | FIXED — pinned by `userptr:setsockopt_rejects_unimplemented_options` (socket → setsockopt → close → second close `EBADF`) |
+| FD-2 | `close()` cleared, and `dup()`/`dup2()`/`fcntl(F_DUPFD)` wrote fds into a clone: `close` left the fd live, `dup*` returned fd numbers absent from the real table. `fcntl(F_SETFD/F_SETFL)` lost flag writes the same way. | `kernel/src/syscalls/fs_open.rs` (`sys_close`, `sys_dup`, `sys_dup2`, `sys_fcntl`) | FIXED |
+| FD-3 | `epoll_create1()` and `memfd_create()` registered fds in a clone; `MFD_CLOEXEC` was dropped too. | `kernel/src/syscalls/epoll.rs`, `kernel/src/syscalls/shm.rs` (`sys_memfd_create`) | FIXED |
+| FD-4 | `sys_socketpair` delegates to `crates/net/src/unix.rs:460`, which returns two raw `UNIX_SOCKETS` handles as fd numbers and copies them to `sv`; no `FileDescriptor::UnixSocket` is installed, so both fds are unusable and the handles leak. The kernel wrapper must install the pair via `with_fd_table`. | `kernel/src/syscalls/net_socket.rs:562`, `crates/net/src/unix.rs:460-520` | OPEN |
+
 ---
 
 ## NVMe driver
@@ -261,8 +275,9 @@ while doing nothing. `SO_LINGER`, `SO_SNDBUF`, `SO_RCVBUF`, `SO_ERROR`,
 code at all. A program that sets `SO_LINGER` before `close()` expects a blocking
 close and gets none; `SO_RCVBUF`/`SO_SNDBUF` sizing is ignored entirely.
 `docs/socket-api.md:53-57` documents 3 supported options while ~15 are accepted.
-Returning `ENOPROTOOPT` for unimplemented options (as the `_` arm already does)
-would be honest and matches Linux behaviour for options a kernel does not have.
+**FIXED 2026-10-21**: unimplemented options now return `ENOPROTOOPT`;
+`SO_REUSEPORT` is the only settable option and `docs/socket-api.md` matches.
+Pinned by `userptr:setsockopt_rejects_unimplemented_options`.
 
 ### Crate structure vs ADR-001 (monolith)
 
