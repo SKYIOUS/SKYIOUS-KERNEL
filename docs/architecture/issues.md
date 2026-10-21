@@ -43,16 +43,16 @@ cannot populate with non-`DT_NULL` entries.
 
 | # | Defect | Evidence | Status |
 |---|---|---|---|
-| U-1 | `crates/syscalls/src/user_access.rs` shipped `copy_from_user`/`copy_to_user`/`read_user_string` returning `Ok` while copying nothing. `crates/net/src/unix.rs:13` and `crates/vfs/src/devfs.rs:9` bind to it, so AF_UNIX `sendto` transmitted zeros and returned success, `recvfrom` reported bytes written while the user buffer kept stale data, and `socketpair` returned success without writing the descriptors. | `crates/syscalls/src/user_access.rs` | PARTIALLY FIXED — now returns `Err(())` |
-| U-2 | Wiring the real SMAP-aware copies across the crate boundary needs `#[no_mangle]` exports from the kernel, mirroring `vahi_kernel_get_ticks` (`crates/net/src/lib.rs:69-80`). Until then the net/vfs paths fail closed instead of working. | — | OPEN |
+| U-1 | `crates/syscalls/src/user_access.rs` shipped `copy_from_user`/`copy_to_user`/`read_user_string` returning `Ok` while copying nothing. `crates/net/src/unix.rs:13` and `crates/vfs/src/devfs.rs:9` bind to it, so AF_UNIX `sendto` transmitted zeros and returned success, `recvfrom` reported bytes written while the user buffer kept stale data, and `socketpair` returned success without writing the descriptors. | `crates/syscalls/src/user_access.rs` | FIXED — kernel target delegates to the real copies; host builds return `Err(())` |
+| U-2 | Wiring the real SMAP-aware copies across the crate boundary needs `#[no_mangle]` exports from the kernel, mirroring `vahi_kernel_get_ticks` (`crates/net/src/lib.rs:69-80`). Until then the net/vfs paths fail closed instead of working. | `kernel/src/syscalls/user_access.rs` (`vahi_kernel_copy_from_user`, `vahi_kernel_copy_to_user`, `vahi_kernel_read_user_string`) | FIXED — kernel exports the three symbols and `vahi-syscalls` binds them under `target_os = "none"`; `nm` shows both copy symbols in the linked binary and the kernel link would fail if they were unresolved |
 
 The stub previously reported success for work it never did, which is the worst
-failure mode available (silent data corruption). Returning `Err(())` makes every
-affected call site refuse cleanly with no call-site change. **Consequence to be
-aware of:** AF_UNIX send/recv remain non-functional in this state — they were
-already broken, but now they fail visibly rather than corrupting data.
-`socketpair` creation now installs real fds (FD-4), but data transfer over the
-pair still goes through the stubbed copies.
+failure mode available (silent data corruption). Host builds still return
+`Err(())` so no host test silently "succeeds" without moving bytes. **Consequence
+to be aware of:** TAP selftests run on kernel pointers, so every user-copy path
+still returns `EFAULT` there; AF_UNIX send/recv and devfs argument copies are now
+wired but only a real userspace program exercises the success path.
+`socketpair` creation installs real fds (FD-4).
 
 ## Syscall ABI — argument order
 
@@ -249,7 +249,7 @@ Notable clusters:
 | # | Duplication | Status |
 |---|---|---|
 | D-1 | `crates/net/src/congestion.rs` vs `crates/net/src/tcp_congestion.rs` | **CONFIRMED** — first is 81 lines, zero callers |
-| D-2 | `crates/syscalls/src/user_access.rs` (stubs, now return `Err`) vs `kernel/src/syscalls/user_access.rs` (real SMAP impl) | **CONFIRMED** — see U-1/U-2 |
+| D-2 | `crates/syscalls/src/user_access.rs` (host-only fail-closed stubs; kernel target delegates to exports) vs `kernel/src/syscalls/user_access.rs` (real SMAP impl) | RESOLVED — see U-1/U-2; the crate side is now only an ABI bridge, not a second implementation |
 
 **Refuted:** `crates/memory/src/buddy.rs` holds both `BuddyAllocator` and
 `BuddyFrameAllocator`, which looks like duplication. It is not: the former is the
