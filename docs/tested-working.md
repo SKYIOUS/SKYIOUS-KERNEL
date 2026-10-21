@@ -10,7 +10,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
   3 harness demos; `build-kernel.yml` deleted (dead `main` trigger, FB-004
   path). All workflow YAML parse-validated with PyYAML.
 - Host gates, exact commands (all run this session, this tree):
-  `cargo test --workspace --exclude vahi_kernel` → 120 passed, 0 failed,
+  `cargo test --workspace --exclude vahi_kernel` → 123 passed, 0 failed,
   exit 0; `cargo clippy --workspace --exclude vahi_kernel -- -D warnings` →
   exit 0 (only vendored `bootloader` build-script warnings);
   `cargo fmt --all -- --check` → exit 0.
@@ -18,12 +18,15 @@ Every claim here was reproduced on this machine; re-verify after any change.
   solo-feature builds → exit 0; kernel clippy default / all-features /
   release+self_test / 19-crate loop → all exit 0 with `-D warnings`.
 - QEMU gates (QEMU 10.2.50, OVMF.fd, `-vga none`): T-00 suite on the
-  release+self_test Limine image → **PASS 192/192, 0 failed** at `-smp 1`
-  (9.1s) and `-smp 2` (17.7s); `audit_small` profile suite → **PASS
-  192/192** (24.2s); production image `--boot-only` → PASS at `-smp 1`, and
-  `-smp 2 --expect-ap 1` → PASS (1/1 AP up, VFS init reached); 25 alternating
-  boots → 25/25 PASS (K-02 flake not reproduced). Memory leak audit: PASS
-  (no leak detected).
+  release+self_test Limine image → **PASS 194/194, 0 failed** at `-smp 1`
+  (13.4s) and `-smp 2` (15.6s); `audit_small` profile suite → **PASS
+  194/194** (22.6s); production image `--boot-only` → PASS at `-smp 1` (7.5s),
+  and `-smp 2 --expect-ap 1` → PASS (12.0s, 1/1 AP up, VFS init reached); 25
+  alternating boots → 25/25 PASS (K-02 flake not reproduced). Memory leak
+  audit: PASS (no leak detected).
+- Suite grew 192 → 194 with CodeRabbit's process address-boundary selftests
+  (`6a09d07`); host suite grew 120 → 123 with the matching `vahi-types`
+  boundary tests. All counts above re-verified on `6a09d07`.
 - Honest reds found and recorded (not suppressed): `cargo audit` fails on
   `xmas-elf 0.9.1` (RUSTSEC-2025-0018, issues.md V-1); nightly cross-arch is
   red — aarch64 build and riscv64 check stop at unguarded x86 asm/cpuid in
