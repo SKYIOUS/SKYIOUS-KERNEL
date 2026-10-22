@@ -42,7 +42,7 @@ jobs:
           echo "OVMF=$OVMF" >> "$GITHUB_ENV"
       - name: Build kernel (self_test, VAHI_SELFTEST_MODE=fail)
         working-directory: kernel
-        run: VAHI_SELFTEST_MODE=fail cargo build --release --target x86_64-unknown-none --features self_test
+        run: VAHI_SELFTEST_MODE=fail cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu"
       - name: Build bootimage (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_fail.bin
       # The runner must exit 1 (FAIL) for the demo to pass; the exit code is
@@ -94,7 +94,7 @@ jobs:
           echo "OVMF=$OVMF" >> "$GITHUB_ENV"
       - name: Build kernel (self_test, VAHI_SELFTEST_MODE=panic)
         working-directory: kernel
-        run: VAHI_SELFTEST_MODE=panic cargo build --release --target x86_64-unknown-none --features self_test
+        run: VAHI_SELFTEST_MODE=panic cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu"
       - name: Build bootimage (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_panic.bin
       # The runner must exit 2 (PANIC) for the demo to pass.
@@ -145,7 +145,7 @@ jobs:
           echo "OVMF=$OVMF" >> "$GITHUB_ENV"
       - name: Build kernel (self_test, VAHI_SELFTEST_MODE=timeout)
         working-directory: kernel
-        run: VAHI_SELFTEST_MODE=timeout cargo build --release --target x86_64-unknown-none --features self_test
+        run: VAHI_SELFTEST_MODE=timeout cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu"
       - name: Build bootimage (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_timeout.bin
       # The runner must exit 3 (TIMEOUT) for the demo to pass.
