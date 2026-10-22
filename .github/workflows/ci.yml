@@ -256,7 +256,9 @@ jobs:
       # builder image is known unbootable (FB-004).
       - name: Build kernel (release, self_test)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
+        run: |
+          cargo clean
+          cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
