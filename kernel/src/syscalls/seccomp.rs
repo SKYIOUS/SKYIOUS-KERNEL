@@ -61,6 +61,9 @@ pub fn sys_seccomp(op: u32, flags: u32, user_insns: *const u8) -> u64 {
                     // struct sock_fprog on x86_64: u16 len at 0, six padding bytes,
                     // pointer at 8. Copy the whole 16-byte object.
                     let mut hdr = [0u8; 16];
+                    // SAFETY: copy_from_user validates the source is a valid user-space
+                    // pointer and handles faults via the exception table. The destination
+                    // is a local stack-allocated buffer.
                     if unsafe { user_access::copy_from_user(&mut hdr, user_insns) }.is_err() {
                         return errno::Errno::EFAULT as u64;
                     }

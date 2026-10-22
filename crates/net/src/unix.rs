@@ -94,12 +94,17 @@ pub fn write_sockaddr_un(addr_ptr: *mut u8, addrlen_ptr: *mut u32, path: &str) {
 
     let copy_len = core::cmp::min(capacity, total_len);
     if copy_len > 0 {
+        // SAFETY: copy_to_user validates the destination is a valid user-space
+        // pointer and handles faults via the exception table. The source buffer
+        // is a local stack-allocated slice.
         unsafe {
             let _ = user_access::copy_to_user(addr_ptr, &buf[..copy_len]);
         }
     }
     // POSIX: *addrlen receives the full address length even when the caller's
     // buffer is too small.
+    // SAFETY: copy_to_user validates the destination is a valid user-space
+    // pointer and handles faults via the exception table.
     unsafe {
         let _ =
             user_access::copy_to_user(addrlen_ptr as *mut u8, &(total_len as u32).to_ne_bytes());

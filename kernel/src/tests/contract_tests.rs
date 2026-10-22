@@ -636,9 +636,8 @@ fn test_memfd_create_install_write_through() -> Result<(), &'static str> {
         if (fd2 as i64) < 0 {
             return Err("memfd_create with MFD_CLOEXEC failed");
         }
-        let cloexec_ok = proc.with_fd_table(|_, flags| {
-            flags.get(fd2 as usize).map_or(false, |f| f & 0x80000 != 0)
-        });
+        let cloexec_ok = proc
+            .with_fd_table(|_, flags| flags.get(fd2 as usize).map_or(false, |f| f & 0x80000 != 0));
         if !cloexec_ok {
             return Err("MFD_CLOEXEC did not reach fd_flags");
         }
