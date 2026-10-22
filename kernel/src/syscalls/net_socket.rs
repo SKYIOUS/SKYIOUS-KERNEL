@@ -359,24 +359,20 @@ fn accept_socket(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32, flags: u
     {
         let process = CURRENT_PROCESS.lock().as_ref().cloned();
         if let Some(process) = process {
-            let unix_handle = process.with_fd_table(|fd_table, _| {
-                match fd_table.get(sockfd as usize) {
+            let unix_handle =
+                process.with_fd_table(|fd_table, _| match fd_table.get(sockfd as usize) {
                     Some(Some(FileDescriptor::UnixSocket(h, _))) => Some(*h),
                     _ => None,
-                }
-            });
+                });
             if let Some(handle) = unix_handle {
-                let new_handle =
-                    match crate::net::unix::accept_unix(handle, addr_ptr, addrlen_ptr) {
-                        Ok(h) => h,
-                        Err(e) => return e as u64,
-                    };
+                let new_handle = match crate::net::unix::accept_unix(handle, addr_ptr, addrlen_ptr)
+                {
+                    Ok(h) => h,
+                    Err(e) => return e as u64,
+                };
                 return install_accepted_fd(
                     &process,
-                    FileDescriptor::UnixSocket(
-                        new_handle,
-                        crate::task::process::SocketType::Unix,
-                    ),
+                    FileDescriptor::UnixSocket(new_handle, crate::task::process::SocketType::Unix),
                     flags,
                 );
             }
@@ -465,12 +461,7 @@ fn accept_socket(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32, flags: u
     }
 }
 
-pub fn sys_accept4(
-    sockfd: u64,
-    addr_ptr: *mut u8,
-    addrlen_ptr: *mut u32,
-    flags: u64,
-) -> u64 {
+pub fn sys_accept4(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32, flags: u64) -> u64 {
     if flags & !(SOCK_CLOEXEC | SOCK_NONBLOCK) != 0 {
         return errno::Errno::EINVAL as u64;
     }

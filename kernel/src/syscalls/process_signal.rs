@@ -187,29 +187,44 @@ pub fn sys_kill(pid: i64, sig: u32) -> u64 {
 }
 
 pub fn sys_sigprocmask(how: i32, set_ptr: *const u64, oldset_ptr: *mut u64) -> u64 {
+    // Validate and read every input before touching process state, so an
+    // EINVAL/EFAULT returns with `blocked` and `oldset` unchanged.
+    if how != 0 && how != 1 && how != 2 {
+        return errno::Errno::EINVAL as u64;
+    }
+
+    let new_val = if set_ptr.is_null() {
+        None
+    } else {
+        let mut raw = [0u8; core::mem::size_of::<u64>()];
+        // SAFETY: copy_from_user validates the user range and converts a fault
+        // in the copy into a refusal, so no raw userspace dereference happens.
+        if unsafe { user_access::copy_from_user(&mut raw, set_ptr as *const u8) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+        Some(u64::from_ne_bytes(raw))
+    };
+
     let lock = CURRENT_PROCESS.lock();
     let proc = match *lock {
         Some(ref p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
     let mut sigstate = proc.signals.lock();
-    let blocked = &mut sigstate.blocked;
 
     if !oldset_ptr.is_null() {
-        let old = *blocked;
+        let old = sigstate.blocked;
         if unsafe { user_access::copy_to_user(oldset_ptr as *mut u8, &old.to_ne_bytes()) }.is_err()
         {
             return errno::Errno::EFAULT as u64;
         }
     }
 
-    if !set_ptr.is_null() {
-        let val = unsafe { *set_ptr };
+    if let Some(val) = new_val {
         match how {
-            0 => *blocked |= val,  // SIG_BLOCK
-            1 => *blocked &= !val, // SIG_UNBLOCK
-            2 => *blocked = val,   // SIG_SETMASK
-            _ => return errno::Errno::EINVAL as u64,
+            0 => sigstate.blocked |= val,  // SIG_BLOCK
+            1 => sigstate.blocked &= !val, // SIG_UNBLOCK
+            _ => sigstate.blocked = val,   // SIG_SETMASK
         }
     }
     0

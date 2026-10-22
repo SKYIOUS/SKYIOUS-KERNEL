@@ -461,6 +461,10 @@ pub extern "C" fn post_kaslr_continue() -> ! {
         core::arch::asm!("msr daifclr, #2");
     } // Clear IRQ mask
 
+    // Terminal marker for the boot-only QEMU gate: every startup step that
+    // must complete before a boot counts as finished has now run.
+    serial_write("[BOOT] init complete\n");
+
     #[cfg(feature = "verification")]
     {
         let _vreport = crate::verified::runner::VERIFICATION_RUNNER.lock().report();
@@ -573,6 +577,10 @@ fn goto_late_init() -> ! {
     unsafe {
         core::arch::asm!("msr daifclr, #2");
     }
+
+    // Terminal marker for the boot-only QEMU gate: every startup step that
+    // must complete before a boot counts as finished has now run.
+    serial_write("[BOOT] init complete\n");
 
     #[cfg(feature = "verification")]
     {

@@ -197,6 +197,14 @@ jobs:
             cargo clippy -p "$crate" --target x86_64-unknown-none --locked -- -D warnings
           done
 
+      - name: Clippy (solo features)
+        working-directory: kernel
+        run: |
+          for feat in smp net ext4 iommu self_test ash hypervisor verification gpu uhci; do
+            echo "Clippy: feature=$feat"
+            cargo clippy --target x86_64-unknown-none --no-default-features --features "$feat" --locked -- -D warnings
+          done
+
   qemu-selftest:
     name: QEMU Self-Test Suite
     runs-on: ubuntu-latest
@@ -260,6 +268,7 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image tests/t00_selftest.bin \
             --ovmf "$OVMF" \
+            --expect-count 207 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
             --serial tests/t00_ci_serial.log \

@@ -4,8 +4,8 @@
 Reads recent runs, jobs, artifacts and logs of the watched workflows through
 the `gh` CLI and renders a static site: site/index.html redirects to the
 report, site/ci/index.html holds run history, per-job results, artifact
-indexes, downloaded logs and TAP summaries. Only data from runs on the
-default branch is published (ci-pages.yml triggers on master only).
+indexes, downloaded logs and TAP summaries. Runs are filtered to the default
+branch (master), so pull-request data never reaches the published site.
 """
 
 import argparse
@@ -26,6 +26,7 @@ WORKFLOWS = (
     ("t00-demo", "t00-demo.yml"),
 )
 RUN_LIMIT = 10
+DEFAULT_BRANCH = "master"
 MAX_EMBED_BYTES = 20 * 1024 * 1024
 BAD_CONCLUSIONS = {"failure", "timed_out", "cancelled", "startup_failure", "action_required"}
 TAP_RE = re.compile(r"#\s*(\d+)/(\d+) passed(?:,\s*(\d+) failed)?")
@@ -60,6 +61,7 @@ def repo_slug():
 def fetch_runs(repo, workflow_file):
     return gh_json(
         "run", "list", "--repo", repo, "--workflow", workflow_file,
+        "--branch", DEFAULT_BRANCH,
         "--limit", str(RUN_LIMIT),
         "--json",
         "databaseId,displayTitle,event,headBranch,status,conclusion,createdAt,url,number",
@@ -318,6 +320,23 @@ def self_test():
         "steps": [{"number": 1, "name": "compile", "conclusion": "success", "status": "completed"}],
     }])
     assert 'class="bad"' in jobs and "compile" in jobs, "job and step rendering"
+    branch_calls = []
+    original_gh = gh
+
+    def fake_gh(*args):
+        branch_calls.append(args)
+        return "[]"
+
+    globals()["gh"] = fake_gh
+    try:
+        assert fetch_runs("owner/repo", "ci.yml") == []
+    finally:
+        globals()["gh"] = original_gh
+    branch_args = branch_calls[0]
+    assert "--branch" in branch_args, "run list must filter by branch"
+    assert branch_args[branch_args.index("--branch") + 1] == DEFAULT_BRANCH, (
+        "run list must filter to the default branch"
+    )
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

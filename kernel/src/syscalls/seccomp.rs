@@ -55,15 +55,28 @@ pub fn sys_seccomp(op: u32, flags: u32, user_insns: *const u8) -> u64 {
                 return errno::Errno::EINVAL as u64;
             }
 
-            // Read the sock_fprog header (2 bytes len + 8 bytes pointer)
-            let mut hdr = [0u8; 12];
-            if unsafe { user_access::copy_from_user(&mut hdr, user_insns) }.is_err() {
-                return errno::Errno::EFAULT as u64;
-            }
-            let len = u16::from_ne_bytes([hdr[0], hdr[1]]) as usize;
-            let insns_ptr = u64::from_ne_bytes([
-                hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11],
-            ]);
+            let (len, insns_ptr) = {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    // struct sock_fprog on x86_64: u16 len at 0, six padding bytes,
+                    // pointer at 8. Copy the whole 16-byte object.
+                    let mut hdr = [0u8; 16];
+                    if unsafe { user_access::copy_from_user(&mut hdr, user_insns) }.is_err() {
+                        return errno::Errno::EFAULT as u64;
+                    }
+                    let len = u16::from_ne_bytes([hdr[0], hdr[1]]) as usize;
+                    let insns_ptr = u64::from_ne_bytes([
+                        hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
+                    ]);
+                    (len, insns_ptr)
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    // Other architectures (aarch64, riscv64) have different sock_fprog layouts.
+                    // Fall back to rejecting the filter until proper ABI is implemented.
+                    return errno::Errno::ENOSYS as u64;
+                }
+            };
 
             if len == 0 || len > 4096 {
                 return errno::Errno::EINVAL as u64;
@@ -128,60 +141,66 @@ pub fn sys_seccomp(op: u32, flags: u32, user_insns: *const u8) -> u64 {
     }
 }
 
-/// Check if the current syscall is allowed by seccomp.
-/// Called from the syscall dispatch path.
-/// Returns true if the syscall should proceed, false to block.
-pub fn check_syscall(nr: u64, args: &[u64; 6]) -> bool {
+/// Check the current syscall against seccomp.
+/// Returns `None` to allow the syscall, or `Some(errno)` with the value the
+/// syscall must return without executing.
+pub fn check_syscall(nr: u64, args: &[u64; 6]) -> Option<u64> {
     let lock = CURRENT_PROCESS.lock();
     let proc = match *lock {
         Some(ref p) => p,
-        None => return true, // No process = allow
+        None => return None, // No process = allow
     };
 
-    let _sec_guard = proc.security.lock();
-    let seccomp = &_sec_guard.seccomp;
-    match seccomp.mode {
-        SECCOMP_MODE_DISABLED => true,
-        SECCOMP_MODE_STRICT => SeccompState::check_strict(nr),
-        SECCOMP_MODE_FILTER => {
-            #[allow(unreachable_patterns)]
-            let action = seccomp.check_filter(nr, args);
-            match action & SECCOMP_RET_ACTION {
-                SECCOMP_RET_ALLOW => true,
-                SECCOMP_RET_KILL_PROCESS => {
-                    crate::serial_write("[SECCOMP] Killed process syscall=");
-                    crate::serial_write(&alloc::format!("{} pid={}\n", nr, proc.id));
-                    drop(_sec_guard);
-                    drop(lock);
-                    super::process::sys_exit(0x19 + 128); // SIGSYS
-                    false
-                }
-                SECCOMP_RET_TRAP => {
-                    // Send SIGSYS to the process
-                    crate::serial_write("[SECCOMP] Trap syscall=");
-                    crate::serial_write(&alloc::format!("{} pid={}\n", nr, proc.id));
-                    true // Allow for now; signal delivery handled separately
-                }
-                SECCOMP_RET_ERRNO => {
-                    // Return errno (lower 16 bits)
-                    let err = (action & 0xFFFF) as u64;
-                    if err == 0 {
-                        return true;
-                    } // errno 0 = EPERM
-                    false
-                }
-                SECCOMP_RET_TRACE => {
-                    // Allow, but would notify ptracer
-                    true
-                }
-                SECCOMP_RET_LOG => {
-                    // Allow and log
-                    crate::serial_write("[SECCOMP] Log syscall=");
-                    crate::serial_write(&alloc::format!("{} pid={}\n", nr, proc.id));
-                    true
-                }
-                _ => true,
+    let mode = proc.security.lock().seccomp.mode;
+    if mode == SECCOMP_MODE_DISABLED {
+        return None;
+    }
+    if mode == SECCOMP_MODE_STRICT {
+        return if SeccompState::check_strict(nr) {
+            None
+        } else {
+            Some(errno::Errno::EPERM as u64)
+        };
+    }
+
+    let action = proc.security.lock().seccomp.check_filter(nr, args);
+    match action & SECCOMP_RET_ACTION {
+        SECCOMP_RET_ALLOW => None,
+        SECCOMP_RET_KILL_PROCESS => {
+            crate::serial_write("[SECCOMP] Killed process syscall=");
+            crate::serial_write(&alloc::format!("{} pid={}\n", nr, proc.id));
+            drop(lock);
+            super::process::sys_exit(128 + 31); // SIGSYS
+                                                // sys_exit never returns; this is unreachable
+            #[allow(unreachable_code)]
+            Some(errno::Errno::EPERM as u64)
+        }
+        SECCOMP_RET_TRAP => {
+            crate::serial_write("[SECCOMP] Trap syscall=");
+            crate::serial_write(&alloc::format!("{} pid={}\n", nr, proc.id));
+            // SIGSYS is delivered on the syscall return path after this denial.
+            proc.signals
+                .lock()
+                .raise(crate::syscalls::signal::Signal::SIGSYS);
+            Some(errno::Errno::EPERM as u64)
+        }
+        SECCOMP_RET_ERRNO => {
+            // The filter's low 16 bits are a positive Linux errno; syscalls
+            // return negative errno values here.
+            let requested = (action & 0xFFFF) as i64;
+            if requested == 0 {
+                Some(errno::Errno::EPERM as u64)
+            } else {
+                Some((-requested) as u64)
             }
         }
+        SECCOMP_RET_LOG => {
+            crate::serial_write("[SECCOMP] Log syscall=");
+            crate::serial_write(&alloc::format!("{} pid={}\n", nr, proc.id));
+            None
+        }
+        // No ptrace/tracer plumbing exists, so TRACE and every unknown action
+        // deny rather than silently run the syscall.
+        _ => Some(errno::Errno::EPERM as u64),
     }
 }
