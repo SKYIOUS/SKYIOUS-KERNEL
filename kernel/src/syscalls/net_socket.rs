@@ -322,37 +322,63 @@ pub fn sys_listen(sockfd: u64, _backlog: u64) -> u64 {
     }
 }
 
+const SOCK_CLOEXEC: u64 = 0x80000;
+const SOCK_NONBLOCK: u64 = 0x800;
+
+/// Install an accepted socket into the live fd table, applying the accept4
+/// flags in the same lock so the fd is never visible without its flags.
+fn install_accepted_fd(
+    process: &alloc::sync::Arc<crate::task::process::Process>,
+    fd_obj: FileDescriptor,
+    flags: u64,
+) -> u64 {
+    process.with_fd_table(|fd_table, fd_flags| {
+        let idx = match fd_table.iter().position(|slot| slot.is_none()) {
+            Some(i) => i,
+            None => {
+                fd_table.push(None);
+                fd_table.len() - 1
+            }
+        };
+        fd_table[idx] = Some(fd_obj);
+        if fd_flags.len() <= idx {
+            fd_flags.resize(idx + 1, 0);
+        }
+        fd_flags[idx] = flags;
+        idx as u64
+    })
+}
+
 pub fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 {
-    // AF_UNIX check
+    accept_socket(sockfd, addr_ptr, addrlen_ptr, 0)
+}
+
+fn accept_socket(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32, flags: u64) -> u64 {
+    // AF_UNIX check. The process is cloned out of the global so no lock is
+    // held across accept_unix, which can block on an empty backlog.
     {
-        let process_lock = CURRENT_PROCESS.lock();
-        if let Some(ref process) = *process_lock {
-            let fd_table = process.files.lock().fd_table.clone();
-            if (sockfd as usize) < fd_table.len() {
-                if let Some(FileDescriptor::UnixSocket(handle, _)) = fd_table[sockfd as usize] {
-                    drop(fd_table);
-                    let new_handle =
-                        match crate::net::unix::accept_unix(handle, addr_ptr, addrlen_ptr) {
-                            Ok(h) => h,
-                            Err(e) => return e as u64,
-                        };
-                    let fd_obj = FileDescriptor::UnixSocket(
+        let process = CURRENT_PROCESS.lock().as_ref().cloned();
+        if let Some(process) = process {
+            let unix_handle = process.with_fd_table(|fd_table, _| {
+                match fd_table.get(sockfd as usize) {
+                    Some(Some(FileDescriptor::UnixSocket(h, _))) => Some(*h),
+                    _ => None,
+                }
+            });
+            if let Some(handle) = unix_handle {
+                let new_handle =
+                    match crate::net::unix::accept_unix(handle, addr_ptr, addrlen_ptr) {
+                        Ok(h) => h,
+                        Err(e) => return e as u64,
+                    };
+                return install_accepted_fd(
+                    &process,
+                    FileDescriptor::UnixSocket(
                         new_handle,
                         crate::task::process::SocketType::Unix,
-                    );
-                    let process_lock2 = CURRENT_PROCESS.lock();
-                    if let Some(ref process2) = *process_lock2 {
-                        let mut fd_table2 = process2.files.lock().fd_table.clone();
-                        for (i, slot) in fd_table2.iter_mut().enumerate() {
-                            if slot.is_none() {
-                                *slot = Some(fd_obj);
-                                return i as u64;
-                            }
-                        }
-                        fd_table2.push(Some(fd_obj));
-                        return (fd_table2.len() - 1) as u64;
-                    }
-                }
+                    ),
+                    flags,
+                );
             }
         }
     }
@@ -431,21 +457,34 @@ pub fn sys_accept(sockfd: u64, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> u64 
             TCP_BIND_ENDPOINTS.lock().insert((pid, new_handle), ep);
         }
 
-        process.with_fd_table(|fd_table, _| {
-            let fd_obj = FileDescriptor::Socket(new_handle, crate::task::process::SocketType::Tcp);
-            for (i, slot) in fd_table.iter_mut().enumerate() {
-                if slot.is_none() {
-                    *slot = Some(fd_obj);
-                    return i as u64;
-                }
-            }
-            fd_table.push(Some(fd_obj));
-            (fd_table.len() - 1) as u64
-        })
+        install_accepted_fd(
+            &process,
+            FileDescriptor::Socket(new_handle, crate::task::process::SocketType::Tcp),
+            flags,
+        )
     }
 }
 
-pub fn sys_sendto(sockfd: u64, buf: *const u8, len: u64, addr_ptr: *const u8, addrlen: u64) -> u64 {
+pub fn sys_accept4(
+    sockfd: u64,
+    addr_ptr: *mut u8,
+    addrlen_ptr: *mut u32,
+    flags: u64,
+) -> u64 {
+    if flags & !(SOCK_CLOEXEC | SOCK_NONBLOCK) != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    accept_socket(sockfd, addr_ptr, addrlen_ptr, flags)
+}
+
+pub fn sys_sendto(
+    sockfd: u64,
+    buf: *const u8,
+    len: u64,
+    _flags: u64,
+    addr_ptr: *const u8,
+    addrlen: u64,
+) -> u64 {
     if let Some(result) = with_unix_sock(sockfd, |h| {
         crate::net::unix::sendto_unix(h, buf, len, addr_ptr, addrlen)
     }) {
@@ -500,6 +539,7 @@ pub fn sys_recvfrom(
     sockfd: u64,
     buf: *mut u8,
     len: u64,
+    _flags: u64,
     addr_ptr: *mut u8,
     addrlen_ptr: *mut u32,
 ) -> u64 {
@@ -516,6 +556,7 @@ pub fn sys_recvfrom(
     sockfd: u64,
     buf: *mut u8,
     len: u64,
+    _flags: u64,
     addr_ptr: *mut u8,
     addrlen_ptr: *mut u32,
 ) -> u64 {
