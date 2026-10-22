@@ -806,8 +806,9 @@ Jobs:
 # quality.yml adds: AGENTS.md policy gate (unsafe/SAFETY, no_std, TODOs, links, ADR/docs map),
 # actionlint + ShellCheck, rustdoc -D warnings, gitleaks secret scan, cargo audit
 # nightly.yml adds: cross-arch builds, SMP 2 suite, audit-profile suite, 25-boot stress, cargo audit
-# ci-pages.yml publishes the report site (run history, jobs, artifacts, TAP logs) to
-# GitHub Pages after every watched workflow on master: https://<owner>.github.io/<repo>/ci/
+# ci-pages.yml publishes the report site (run history, jobs, artifacts, TAP logs,
+# whole-report ZIP download) to GitHub Pages after every watched workflow on master:
+# https://<owner>.github.io/<repo>/ci/
 ```
 
 ---
