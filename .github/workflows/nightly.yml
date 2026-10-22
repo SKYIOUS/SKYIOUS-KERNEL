@@ -39,7 +39,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-builds-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-nightly-builds-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-all
 
       - name: Build release (default features)
         run: cargo build --release --target x86_64-unknown-none --locked
@@ -73,7 +73,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-cross-arch-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-cross-arch-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-smp
 
       - name: Build aarch64
         run: |
@@ -110,7 +110,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-smp2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-nightly-smp2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp
 
       - name: Cache Limine binaries
         uses: actions/cache@v4
@@ -190,7 +190,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-audit-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-nightly-audit-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-audit_small-self_test
 
       - name: Cache Limine binaries
         uses: actions/cache@v4
@@ -269,7 +269,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-stress-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-nightly-stress-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-production
 
       - name: Cache Limine binaries
         uses: actions/cache@v4
