@@ -268,7 +268,7 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image tests/t00_selftest.bin \
             --ovmf "$OVMF" \
-            --expect-count 207 \
+            --expect-count 209 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
             --serial tests/t00_ci_serial.log \
