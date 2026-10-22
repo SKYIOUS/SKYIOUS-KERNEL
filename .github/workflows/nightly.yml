@@ -42,13 +42,13 @@ jobs:
           key: ${{ runner.os }}-cargo-nightly-builds-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
 
       - name: Build release (default features)
-        run: cargo build --release --target x86_64-unknown-none
+        run: cargo build --release --target x86_64-unknown-none --locked
 
       - name: Build release (self_test)
-        run: cargo build --release --target x86_64-unknown-none --features self_test
+        run: cargo build --release --target x86_64-unknown-none --locked --features self_test
 
       - name: Build release (all features)
-        run: cargo build --release --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu"
+        run: cargo build --release --target x86_64-unknown-none --locked --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu"
 
   cross-arch:
     name: Cross-Arch Builds
@@ -78,7 +78,7 @@ jobs:
       - name: Build aarch64
         run: |
           rustup target add aarch64-unknown-none --toolchain nightly
-          cargo build --target aarch64-unknown-none --features smp
+          cargo build --target aarch64-unknown-none --features smp --locked
 
       # No riscv64 linker script exists, so this is check-only. It exists to
       # surface portability breaks that compile cleanly on x86_64 (ADR-028:
@@ -87,7 +87,7 @@ jobs:
       - name: Check riscv64
         run: |
           rustup target add riscv64gc-unknown-none-elf --toolchain nightly
-          cargo check --target riscv64gc-unknown-none-elf
+          cargo check --target riscv64gc-unknown-none-elf --locked
 
   selftest-smp2:
     name: QEMU Self-Test (SMP 2)
@@ -122,7 +122,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 ovmf
-          OVMF=$(          ls /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -n1)
+          OVMF=""
+          for candidate in /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd \
+                           /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd; do
+            if [ -f "$candidate" ]; then
+              OVMF="$candidate"
+              break
+            fi
+          done
           if [ -z "$OVMF" ]; then
             echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
             exit 1
@@ -131,7 +138,7 @@ jobs:
 
       - name: Build kernel (release, self_test)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --features self_test
+        run: cargo build --release --target x86_64-unknown-none --locked --features self_test
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
@@ -193,7 +200,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 ovmf
-          OVMF=$(          ls /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -n1)
+          OVMF=""
+          for candidate in /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd \
+                           /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd; do
+            if [ -f "$candidate" ]; then
+              OVMF="$candidate"
+              break
+            fi
+          done
           if [ -z "$OVMF" ]; then
             echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
             exit 1
@@ -204,7 +218,7 @@ jobs:
       # within the size the KASLR mapping can relocate (root Cargo.toml).
       - name: Build kernel (audit_small, self_test)
         working-directory: kernel
-        run: cargo build --profile audit_small --target x86_64-unknown-none --features self_test
+        run: cargo build --profile audit_small --target x86_64-unknown-none --features self_test --locked
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/audit_small/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_audit.bin
@@ -263,7 +277,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 ovmf
-          OVMF=$(          ls /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -n1)
+          OVMF=""
+          for candidate in /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd \
+                           /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd; do
+            if [ -f "$candidate" ]; then
+              OVMF="$candidate"
+              break
+            fi
+          done
           if [ -z "$OVMF" ]; then
             echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
             exit 1
@@ -272,7 +293,7 @@ jobs:
 
       - name: Build kernel (release, production features)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none
+        run: cargo build --release --target x86_64-unknown-none --locked
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_normal.bin
@@ -284,16 +305,16 @@ jobs:
           for i in $(seq 1 25); do
             if [ $((i % 2)) -eq 0 ]; then
               smp=2
-              extra="--expect-ap 1"
+              extra=(--expect-ap 1)
             else
               smp=1
-              extra=""
+              extra=()
             fi
             echo "=== boot $i/25 (smp $smp) ==="
             python3 tests/run_qemu_tests.py \
               --image tests/t00_normal.bin \
               --ovmf "$OVMF" \
-            --boot-only --smp "$smp" $extra \
+            --boot-only --smp "$smp" "${extra[@]}" \
             --qemu-extra "-vga none" \
             --serial "tests/stress_${i}_serial.log" \
             --log "tests/stress_$i.log"
@@ -331,7 +352,7 @@ jobs:
           key: ${{ runner.os }}-cargo-audit-${{ hashFiles('Cargo.lock') }}
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
 
       # The root workspace lock covers kernel, builder and every extracted
       # crate. Vulnerabilities fail the job; this step has no fallback.

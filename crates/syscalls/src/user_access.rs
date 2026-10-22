@@ -14,22 +14,45 @@
 //!     the caller kept uninitialised stack garbage.
 //!
 //! Returning an error converts that from silent data corruption into a clean
-//! refusal at every call site, with no change to any caller. Wiring the real
-//! SMAP-aware copies in needs `#[no_mangle]` exports across the crate boundary
-//! (the same shape as `vahi_kernel_get_ticks` in `crates/net/src/lib.rs`); that
-//! is tracked in `docs/architecture/issues.md` rather than done here.
+//! refusal at every call site, with no change to any caller. On the kernel
+//! target the real SMAP-aware copies are reached through `#[no_mangle]`
+//! exports, the same shape as `vahi_kernel_get_ticks` in `crates/net/src/lib.rs`
+//! (see `docs/architecture/issues.md` U-2). Host builds keep the failing stubs.
 
 extern crate alloc;
+
+#[cfg(target_os = "none")]
+extern "Rust" {
+    fn vahi_kernel_copy_from_user(dst: &mut [u8], src: *const u8) -> Result<(), ()>;
+    fn vahi_kernel_copy_to_user(dst: *mut u8, src: &[u8]) -> Result<(), ()>;
+    fn vahi_kernel_read_user_string(
+        ptr: *const u8,
+        max_len: usize,
+    ) -> Result<alloc::string::String, ()>;
+}
 
 /// Copy data from user space to kernel space.
 ///
 /// # Safety
 ///
 /// `src_ptr` must be a valid user-space pointer for `dst.len()` bytes.
+#[cfg(target_os = "none")]
+#[allow(clippy::result_unit_err)]
+pub unsafe fn copy_from_user(dst: &mut [u8], src_ptr: *const u8) -> Result<(), ()> {
+    // SAFETY: this function's contract is the kernel export's contract; the
+    // export validates the range and handles faults.
+    unsafe { vahi_kernel_copy_from_user(dst, src_ptr) }
+}
+
+/// No copy is performed on host builds, so reporting `Ok(())` would make the
+/// caller read whatever was already in the buffer as if it were user data.
+///
+/// # Safety
+///
+/// `src_ptr` must be a valid user-space pointer for `dst.len()` bytes.
+#[cfg(not(target_os = "none"))]
 #[allow(clippy::result_unit_err)]
 pub unsafe fn copy_from_user(_dst: &mut [u8], _src_ptr: *const u8) -> Result<(), ()> {
-    // No copy was performed, so reporting Ok(()) would make the caller read
-    // whatever was already in the buffer as if it were user data.
     Err(())
 }
 
@@ -38,9 +61,21 @@ pub unsafe fn copy_from_user(_dst: &mut [u8], _src_ptr: *const u8) -> Result<(),
 /// # Safety
 ///
 /// `dst_ptr` must be a valid user-space pointer for `src.len()` bytes.
+#[cfg(target_os = "none")]
+#[allow(clippy::result_unit_err)]
+pub unsafe fn copy_to_user(dst_ptr: *mut u8, src: &[u8]) -> Result<(), ()> {
+    // SAFETY: same contract as `copy_from_user`, delegated to the kernel export.
+    unsafe { vahi_kernel_copy_to_user(dst_ptr, src) }
+}
+
+/// Same reasoning as `copy_from_user`: nothing was written to the user buffer.
+///
+/// # Safety
+///
+/// `dst_ptr` must be a valid user-space pointer for `src.len()` bytes.
+#[cfg(not(target_os = "none"))]
 #[allow(clippy::result_unit_err)]
 pub unsafe fn copy_to_user(_dst_ptr: *mut u8, _src: &[u8]) -> Result<(), ()> {
-    // Same reasoning as copy_from_user: nothing was written to the user buffer.
     Err(())
 }
 
@@ -55,13 +90,28 @@ pub fn user_copy_active() -> bool {
 ///
 /// # Safety
 /// `ptr` must be a valid user-space pointer.
+#[cfg(target_os = "none")]
+#[allow(clippy::result_unit_err)]
+pub unsafe fn read_user_string(
+    ptr: *const u8,
+    max_len: usize,
+) -> Result<alloc::string::String, ()> {
+    // SAFETY: same contract as the kernel export.
+    unsafe { vahi_kernel_read_user_string(ptr, max_len) }
+}
+
+/// Returning an empty string would read as a successful empty argument, so
+/// callers would operate on `""` instead of failing. Refuse instead.
+///
+/// # Safety
+///
+/// `ptr` must be a valid user-space pointer.
+#[cfg(not(target_os = "none"))]
 #[allow(clippy::result_unit_err)]
 pub unsafe fn read_user_string(
     _ptr: *const u8,
     _max_len: usize,
 ) -> Result<alloc::string::String, ()> {
-    // Returning an empty string reads as a successful empty argument, so
-    // callers would operate on "" instead of failing. Refuse instead.
     Err(())
 }
 

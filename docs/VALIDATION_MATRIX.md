@@ -85,17 +85,25 @@ Each extracted crate must build for the `x86_64-unknown-none` target:
 
 ## E. CI Pipeline Stages
 
-### PR CI (`.github/workflows/ci.yml` â€” every PR and push to `master`)
+### PR CI (`.github/workflows/ci.yml` - every PR and push to `master`)
 
-1. **format** â€” `cargo fmt --all -- --check`
-2. **host-tests** â€” `cargo test --workspace --exclude vahi_kernel`
-3. **host-clippy** â€” workspace `-D warnings`, kernel excluded
-4. **kernel-build-matrix** â€” debug/release/self_test/all-features and solo-feature builds
-5. **kernel-clippy** â€” default + all-features + per-crate `-D warnings`
+1. **format** - `cargo fmt --all -- --check`
+2. **host-tests** - `cargo test --workspace --exclude vahi_kernel` (default + all features)
+3. **host-clippy** - workspace `--all-targets -D warnings`, kernel excluded (default + all features)
+4. **kernel-build-matrix** - debug/release/self_test/no-features/all-features and solo-feature builds
+5. **kernel-clippy** - default + no-features + all-features + per-crate `-D warnings`
 6. **qemu-selftest** â€” Limine image, full T-00 suite via `tests/run_qemu_tests.py` (SMP 1)
 7. **qemu-boot-regression** â€” production image boot at SMP 1 and SMP 2 (`--expect-ap 1`)
 
-### Nightly CI (`.github/workflows/nightly.yml` â€” 06:00 UTC + on demand)
+### Quality Gates (`.github/workflows/quality.yml` — every PR and push to `master`)
+
+1. **policy** — `scripts/check_repo_policy.py` full scan plus added-line ratchets (unsafe/SAFETY, unwrap, dead_code)
+2. **workflow-lint** — actionlint, `bash -n`, ShellCheck (`-S error`), PowerShell parser
+3. **rustdoc** — `RUSTDOCFLAGS=-D warnings` for host crates and the kernel
+4. **secrets** — gitleaks working-tree scan
+5. **dependency-audit** — `cargo audit` over the workspace lock
+
+### Nightly CI (`.github/workflows/nightly.yml` - 06:00 UTC + on demand)
 
 1. **full-builds** â€” release builds (default / self_test / all-features)
 2. **cross-arch** â€” aarch64 build; riscv64 `cargo check` (no linker script; ADR-028)
@@ -107,6 +115,13 @@ Each extracted crate must build for the `x86_64-unknown-none` target:
 ### Harness demos (`.github/workflows/t00-demo.yml` â€” on demand)
 
 FAIL / PANIC / TIMEOUT classification proof using `VAHI_SELFTEST_MODE`.
+
+### CI Reports (`.github/workflows/ci-pages.yml` - after any watched workflow on `master`)
+
+1. **build** - `scripts/generate_ci_report.py` renders run history, jobs, artifacts, TAP
+   summaries and downloaded logs into a static site
+2. **deploy** - publishes the site to GitHub Pages; the report lives under `/ci/`
+   (site root redirects there)
 
 ---
 

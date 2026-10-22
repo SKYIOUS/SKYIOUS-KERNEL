@@ -43,14 +43,16 @@ cannot populate with non-`DT_NULL` entries.
 
 | # | Defect | Evidence | Status |
 |---|---|---|---|
-| U-1 | `crates/syscalls/src/user_access.rs` shipped `copy_from_user`/`copy_to_user`/`read_user_string` returning `Ok` while copying nothing. `crates/net/src/unix.rs:13` and `crates/vfs/src/devfs.rs:9` bind to it, so AF_UNIX `sendto` transmitted zeros and returned success, `recvfrom` reported bytes written while the user buffer kept stale data, and `socketpair` returned success without writing the descriptors. | `crates/syscalls/src/user_access.rs` | PARTIALLY FIXED — now returns `Err(())` |
-| U-2 | Wiring the real SMAP-aware copies across the crate boundary needs `#[no_mangle]` exports from the kernel, mirroring `vahi_kernel_get_ticks` (`crates/net/src/lib.rs:69-80`). Until then the net/vfs paths fail closed instead of working. | — | OPEN |
+| U-1 | `crates/syscalls/src/user_access.rs` shipped `copy_from_user`/`copy_to_user`/`read_user_string` returning `Ok` while copying nothing. `crates/net/src/unix.rs:13` and `crates/vfs/src/devfs.rs:9` bind to it, so AF_UNIX `sendto` transmitted zeros and returned success, `recvfrom` reported bytes written while the user buffer kept stale data, and `socketpair` returned success without writing the descriptors. | `crates/syscalls/src/user_access.rs` | FIXED — kernel target delegates to the real copies; host builds return `Err(())` |
+| U-2 | Wiring the real SMAP-aware copies across the crate boundary needs `#[no_mangle]` exports from the kernel, mirroring `vahi_kernel_get_ticks` (`crates/net/src/lib.rs:69-80`). Until then the net/vfs paths fail closed instead of working. | `kernel/src/syscalls/user_access.rs` (`vahi_kernel_copy_from_user`, `vahi_kernel_copy_to_user`, `vahi_kernel_read_user_string`) | FIXED — kernel exports the three symbols and `vahi-syscalls` binds them under `target_os = "none"`; `nm` shows both copy symbols in the linked binary and the kernel link would fail if they were unresolved |
 
 The stub previously reported success for work it never did, which is the worst
-failure mode available (silent data corruption). Returning `Err(())` makes every
-affected call site refuse cleanly with no call-site change. **Consequence to be
-aware of:** AF_UNIX send/recv and `socketpair` are non-functional in this state —
-they were already broken, but now they fail visibly rather than corrupting data.
+failure mode available (silent data corruption). Host builds still return
+`Err(())` so no host test silently "succeeds" without moving bytes. **Consequence
+to be aware of:** TAP selftests run on kernel pointers, so every user-copy path
+still returns `EFAULT` there; AF_UNIX send/recv and devfs argument copies are now
+wired but only a real userspace program exercises the success path.
+`socketpair` creation installs real fds (FD-4).
 
 ## Syscall ABI — argument order
 
@@ -76,9 +78,9 @@ the live table and its flags under one lock.
 | # | Defect | Evidence | Status |
 |---|---|---|---|
 | FD-1 | `socket()` (AF_UNIX and AF_INET) and `accept()` installed the new fd into a clone; every returned socket fd was phantom — `setsockopt`, `bind`, `close` resolved it as `EBADF`. | `kernel/src/syscalls/net_socket.rs` (`sys_socket`, `sys_accept`) | FIXED — pinned by `userptr:setsockopt_rejects_unimplemented_options` (socket → setsockopt → close → second close `EBADF`) |
-| FD-2 | `close()` cleared, and `dup()`/`dup2()`/`fcntl(F_DUPFD)` wrote fds into a clone: `close` left the fd live, `dup*` returned fd numbers absent from the real table. `fcntl(F_SETFD/F_SETFL)` lost flag writes the same way. | `kernel/src/syscalls/fs_open.rs` (`sys_close`, `sys_dup`, `sys_dup2`, `sys_fcntl`) | FIXED |
-| FD-3 | `epoll_create1()` and `memfd_create()` registered fds in a clone; `MFD_CLOEXEC` was dropped too. | `kernel/src/syscalls/epoll.rs`, `kernel/src/syscalls/shm.rs` (`sys_memfd_create`) | FIXED |
-| FD-4 | `sys_socketpair` delegates to `crates/net/src/unix.rs:460`, which returns two raw `UNIX_SOCKETS` handles as fd numbers and copies them to `sv`; no `FileDescriptor::UnixSocket` is installed, so both fds are unusable and the handles leak. The kernel wrapper must install the pair via `with_fd_table`. | `kernel/src/syscalls/net_socket.rs:562`, `crates/net/src/unix.rs:460-520` | OPEN |
+| FD-2 | `close()` cleared, and `dup()`/`dup2()`/`fcntl(F_DUPFD)` wrote fds into a clone: `close` left the fd live, `dup*` returned fd numbers absent from the real table. `fcntl(F_SETFD/F_SETFL)` lost flag writes the same way; `F_DUPFD` also skipped a free fd equal to `arg`. | `kernel/src/syscalls/fs_open.rs` (`sys_close`, `sys_dup`, `sys_dup2`, `sys_fcntl`) | FIXED — pinned by `contract:dup_fcntl_epoll_write_through` (dup → close → `dup` `EBADF`, `F_DUPFD`, `dup2`, `FD_CLOEXEC`/`O_NONBLOCK` read-back) |
+| FD-3 | `epoll_create1()` and `memfd_create()` registered fds in a clone; `MFD_CLOEXEC` was dropped too. | `kernel/src/syscalls/epoll.rs`, `kernel/src/syscalls/shm.rs` (`sys_memfd_create`) | FIXED — epoll install pinned by `contract:dup_fcntl_epoll_write_through`; `memfd_create` still needs a user string pointer, so TAP cannot reach its install path |
+| FD-4 | `sys_socketpair` delegated to `crates/net/src/unix.rs`, which returned two raw `UNIX_SOCKETS` handles as fd numbers; no `FileDescriptor::UnixSocket` was installed, so both fds were unusable and the handles leaked. | `kernel/src/syscalls/net_socket.rs` (`sys_socketpair`), `crates/net/src/unix.rs` (`create_unix_socketpair`) | FIXED — kernel installs both fds via `with_fd_table` and rolls back fds plus handles on `EFAULT`; pinned by `userptr:socketpair_rolls_back_on_bad_user_buffer`. Positive-path TAP needs mapped user pages, same constraint as the ABI-arg tests. |
 
 ---
 
@@ -247,7 +249,7 @@ Notable clusters:
 | # | Duplication | Status |
 |---|---|---|
 | D-1 | `crates/net/src/congestion.rs` vs `crates/net/src/tcp_congestion.rs` | **CONFIRMED** — first is 81 lines, zero callers |
-| D-2 | `crates/syscalls/src/user_access.rs` (stubs, now return `Err`) vs `kernel/src/syscalls/user_access.rs` (real SMAP impl) | **CONFIRMED** — see U-1/U-2 |
+| D-2 | `crates/syscalls/src/user_access.rs` (host-only fail-closed stubs; kernel target delegates to exports) vs `kernel/src/syscalls/user_access.rs` (real SMAP impl) | RESOLVED — see U-1/U-2; the crate side is now only an ABI bridge, not a second implementation |
 
 **Refuted:** `crates/memory/src/buddy.rs` holds both `BuddyAllocator` and
 `BuddyFrameAllocator`, which looks like duplication. It is not: the former is the

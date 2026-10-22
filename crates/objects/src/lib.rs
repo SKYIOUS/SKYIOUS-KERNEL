@@ -304,9 +304,9 @@ mod tests {
     #[test]
     fn object_header_ref_dec() {
         let h = ObjectHeader::new(TYPE_FILE, SecurityDescriptor::default());
-        h.ref_inc();
-        h.ref_inc();
-        h.ref_inc();
+        assert_eq!(h.ref_inc(), 2);
+        assert_eq!(h.ref_inc(), 3);
+        assert_eq!(h.ref_inc(), 4);
         assert_eq!(h.ref_current(), 4);
         assert_eq!(h.ref_dec(), 3);
         assert_eq!(h.ref_dec(), 2);

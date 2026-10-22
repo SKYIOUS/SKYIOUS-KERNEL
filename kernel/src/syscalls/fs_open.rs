@@ -354,7 +354,7 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
                 let desc = fd_table[fd as usize].clone().unwrap();
                 p.with_fd_table(|fd_table, fd_flags| {
                     for (i, slot) in fd_table.iter_mut().enumerate() {
-                        if slot.is_none() && i as u64 > arg {
+                        if slot.is_none() && i as u64 >= arg {
                             *slot = Some(desc);
                             if i >= fd_flags.len() {
                                 fd_flags.resize(i + 1, 0);

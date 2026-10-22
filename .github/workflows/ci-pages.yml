@@ -1,0 +1,65 @@
+name: CI Reports
+
+# Publishes the CI report site to GitHub Pages:
+#   https://<owner>.github.io/<repo>/ci/
+# Fires when any watched workflow (ci.yml, quality.yml, nightly.yml,
+# t00-demo.yml) completes on master, plus manual dispatch. The branches
+# filter excludes pull-request runs so untrusted PR data never reaches the
+# published site. Pages is enabled by configure-pages (source: GitHub
+# Actions) on first deploy.
+
+on:
+  workflow_run:
+    workflows: ["CI", "Quality Gates", "Nightly", "T-00 Harness Demo Matrix"]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  pages: write
+
+concurrency:
+  group: ci-reports-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build report site
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable / configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Self-test generator
+        run: python3 scripts/generate_ci_report.py --self-test
+
+      - name: Generate report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/generate_ci_report.py --output site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy report site
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

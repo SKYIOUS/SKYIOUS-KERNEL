@@ -3,7 +3,7 @@
 #[cfg(target_arch = "x86_64")]
 /// Get the current CPU's APIC ID.
 ///
-/// Uses CPUID leaf 1 (EBX[31:24]) which returns the initial APIC ID.
+/// Uses CPUID leaf 1 (EBX\[31:24\]) which returns the initial APIC ID.
 /// This is unique per CPU on x86_64 systems.
 pub fn get_cpu_id() -> usize {
     // SAFETY: CPUID leaf 1 is safe and returns the initial APIC ID in EBX[31:24].

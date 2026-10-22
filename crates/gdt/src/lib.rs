@@ -6,7 +6,7 @@
 //! ## Invariants
 //!
 //! - GDT must be loaded before any segment register manipulation.
-//! - TSS privilege stack table[0] points to the current thread's kernel stack.
+//! - TSS privilege stack table\[0\] points to the current thread's kernel stack.
 //! - Per-CPU GDT/TSS instances are allocated and leaked (never freed).
 
 #![no_std]

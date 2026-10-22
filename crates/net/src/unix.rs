@@ -457,7 +457,8 @@ pub fn cleanup_unix_socket(handle: u64) {
     }
 }
 
-pub fn sys_socketpair(domain: u64, type_: u64, _protocol: u64, sv: *mut i32) -> Result<u64, Errno> {
+/// Create a connected AF_UNIX socket pair and return both handles.
+pub fn create_unix_socketpair(domain: u64, type_: u64) -> Result<(u64, u64), Errno> {
     if domain != AF_UNIX as u64 {
         return Err(Errno::EAFNOSUPPORT);
     }
@@ -495,18 +496,26 @@ pub fn sys_socketpair(domain: u64, type_: u64, _protocol: u64, sv: *mut i32) -> 
         socks.insert(h1, sock1);
         socks.insert(h2, sock2);
     }
-    // Stub: the real implementation in kernel/src/syscalls/ accesses
-    // CURRENT_PROCESS to install FDs into the process fd table.
-    // In the standalone crate, return the handle pair as raw indices.
-    let fd1 = h1 as u32;
-    let fd2 = h2 as u32;
-    let arr: [i32; 2] = [fd1 as i32, fd2 as i32];
+    Ok((h1, h2))
+}
+
+/// Standalone crate path: creates the pair and copies the raw handles to `sv`.
+/// The kernel wrapper installs real fds instead of calling this.
+pub fn sys_socketpair(domain: u64, type_: u64, _protocol: u64, sv: *mut i32) -> Result<u64, Errno> {
+    let (h1, h2) = create_unix_socketpair(domain, type_)?;
+    let arr: [i32; 2] = [h1 as i32, h2 as i32];
+    // SAFETY: `arr` is a live 8-byte local array; the slice covers exactly it.
     unsafe {
-        user_access::copy_to_user(
+        if user_access::copy_to_user(
             sv as *mut u8,
-            core::slice::from_raw_parts(&arr as *const i32 as *const u8, 8),
+            core::slice::from_raw_parts(arr.as_ptr() as *const u8, 8),
         )
-        .map_err(|_| Errno::EFAULT)?;
+        .is_err()
+        {
+            cleanup_unix_socket(h1);
+            cleanup_unix_socket(h2);
+            return Err(Errno::EFAULT);
+        }
     }
     Ok(0)
 }

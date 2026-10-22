@@ -63,7 +63,7 @@
 | Supported filesystems | 2 (TarFS for initrd, DevFS for /dev) |
 | Real hardware | **Never tested** — QEMU only |
 | SMP | Claims support but global locks serialize everything |
-| Selftests | **195/195 pass** (eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
+| Selftests | **197/197 pass** (eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
 | Memory leak audit | **PASS** (no leak detected) |
 
 ### Benchmark Results (QEMU/TCG, 512M RAM, 2400 MHz TSC)
@@ -722,32 +722,27 @@ Comprehensive documentation lives in the [`docs/`](docs/) directory:
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/ARCHITECTURE.md) | Kernel architecture overview, boot flow, module design |
-| [Build Guide](docs/BUILD.md) | Build prerequisites, QEMU setup, VirtualBox |
-| [Syscall ABI](docs/SYSCALL_ABI.md) | Frozen syscall ABI specification (v1.0) |
-| [Memory Map](docs/MEMORY_MAP.md) | Virtual address space layout |
-| [Scheduler](docs/SCHEDULER.md) | Preemptive + cooperative hybrid scheduler design |
-| [VFS Design](docs/VFS_DESIGN.md) | VFS traits, filesystem stack, path resolution |
-| [Driver Model](docs/DRIVER_MODEL.md) | Character, block, network, PCI driver architecture |
-| [Contributing](docs/CONTRIBUTING.md) | PR workflow, code style, testing |
-| [Changelog](docs/CHANGELOG.md) | Version history and release notes |
+| [Architecture](docs/architecture/CRATE_ARCHITECTURE.md) | Crate boundaries, module design, architecture reviews |
+| [Build & Run](#build--run) | Prerequisites, build steps, QEMU setup |
+| [Syscall Interface](docs/interfaces/syscalls.md) | Syscall ABI and dispatch contracts |
+| [Memory Interface](docs/interfaces/memory.md) | Virtual address space and allocator contracts |
+| [Scheduler](docs/decisions/ADR-016-scheduler-architecture.md) | Scheduler architecture decision |
+| [VFS Design](docs/filesystem-design.md) | VFS traits, filesystem stack, path resolution |
+| [Driver Model](docs/interfaces/drivers.md) | Character, block, network, PCI driver interfaces |
+| [Contributing](CONTRIBUTING.md) | PR workflow, ownership, verification |
+| [Plan](docs/PLAN.md) | Current work, priorities, verification gates |
 
 Additional deep-dive directories:
 
 ```
 docs/
-â”œâ”€â”€ api/           # Syscall API reference (read, write, open, mmap, execve, GUI, VFS, drivers, libc)
-â”œâ”€â”€ architecture/  # Overview, memory, process, scheduling, interrupts, syscall, SMP, IPC, sync, time
-â”œâ”€â”€ build/         # Prerequisites, building, boot images, config, cross-compilation, Docker, troubleshooting
-â”œâ”€â”€ contributing/  # Code of conduct, PRs, issues, maintainers, license
-â”œâ”€â”€ design/        # Philosophy, why Rust, async model, VFS, memory safety, GUI, networking, driver model, ELF
-â”œâ”€â”€ drivers/       # PS/2, mouse, keyboard, graphics, RTC, E1000, VirtIO-Net, PCI, ACPI
-â”œâ”€â”€ future/        # 8-phase roadmap (stabilization, networking, GUI, userspace, drivers, security, performance, portability)
-â”œâ”€â”€ guide/         # Getting started, QEMU, adding a syscall, writing a driver, debugging, testing, VFS guide
-â”œâ”€â”€ reference/     # x86_64, UEFI, ELF, PCI IDs, PS/2 scan codes, I/O ports, IRQ table, memory map
-â”œâ”€â”€ security/      # Memory protection, syscall security, user isolation, future security
-â”œâ”€â”€ syscalls/      # Individual syscall documentation
-â””â”€â”€ testing/       # Unit, integration, memory, syscall, network, stress, regression, CI/CD
+├── architecture/    # Crate architecture, reviews, issue ledger, roadmap
+├── decisions/       # ADRs — binding architectural decisions
+├── interfaces/      # Public API contracts (memory, task, vfs, drivers, syscalls)
+├── invariants/      # Cross-module invariants
+├── roadmap-revised/ # Milestones, testing strategy, CI/CD, technical debt
+├── verified-proofs/ # Proofs for scheduler, locks, journal, interrupts
+└── *.md             # PLAN, ROADMAP, security, filesystem, ASH, harness docs
 ```
 
 ---
@@ -756,7 +751,7 @@ docs/
 
 ### Self-Test Results
 
-**195/195 tests pass** — build with `self_test` feature and boot in QEMU:
+**197/197 tests pass** — build with `self_test` feature and boot in QEMU:
 
 ```bash
 cd kernel
@@ -802,13 +797,17 @@ Each test runs QEMU in `-nographic` mode, monitors serial output, and returns PA
 # .github/workflows/ci.yml (every PR + push to master)
 Jobs:
   - format:               cargo fmt --all -- --check
-  - host-tests:           cargo test --workspace --exclude vahi_kernel
-  - host-clippy:          cargo clippy --workspace --exclude vahi_kernel -- -D warnings
-  - kernel-build-matrix:  debug + release + self_test + all-features + solo-feature builds
-  - kernel-clippy:        default + all-features + per-crate clippy, -D warnings
+  - host-tests:           cargo test --workspace --exclude vahi_kernel (default + all features)
+  - host-clippy:          cargo clippy --workspace --exclude vahi_kernel --all-targets (default + all features)
+  - kernel-build-matrix:  debug + release + self_test + no-features + all-features + solo-feature builds
+  - kernel-clippy:        default + no-features + all-features + per-crate clippy, -D warnings
   - qemu-selftest:        Limine image, T-00 selftest suite (SMP 1) under QEMU
   - qemu-boot-regression: production image boot, SMP 1 and SMP 2
+# quality.yml adds: AGENTS.md policy gate (unsafe/SAFETY, no_std, TODOs, links, ADR/docs map),
+# actionlint + ShellCheck, rustdoc -D warnings, gitleaks secret scan, cargo audit
 # nightly.yml adds: cross-arch builds, SMP 2 suite, audit-profile suite, 25-boot stress, cargo audit
+# ci-pages.yml publishes the report site (run history, jobs, artifacts, TAP logs) to
+# GitHub Pages after every watched workflow on master: https://<owner>.github.io/<repo>/ci/
 ```
 
 ---
@@ -872,10 +871,10 @@ We welcome contributions under the **SKYIOUS Software License (SSL)**.
 
 ### Getting Started
 
-1. Read the [Contribution Guidelines](docs/CONTRIBUTING.md)
-2. Check the [Architecture Overview](docs/ARCHITECTURE.md)
-3. Review the [Future Roadmap](docs/future/)
-4. Set up your [development environment](docs/guide/getting_started.md)
+1. Read the [Contribution Guidelines](CONTRIBUTING.md)
+2. Check the [Architecture Overview](docs/architecture/CRATE_ARCHITECTURE.md)
+3. Review the [Future Roadmap](docs/ROADMAP.md)
+4. Set up your [development environment](#build--run)
 
 ### Development Workflow
 

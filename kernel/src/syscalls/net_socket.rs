@@ -559,6 +559,53 @@ pub fn sys_recvfrom(
     errno::Errno::EBADF as u64
 }
 
-pub fn sys_socketpair(domain: u64, type_: u64, protocol: u64, sv: *mut i32) -> u64 {
-    crate::net::unix::sys_socketpair(domain, type_, protocol, sv).unwrap_or_else(|e| e as u64)
+pub fn sys_socketpair(domain: u64, type_: u64, _protocol: u64, sv: *mut i32) -> u64 {
+    let (h1, h2) = match crate::net::unix::create_unix_socketpair(domain, type_) {
+        Ok(pair) => pair,
+        Err(e) => return e as u64,
+    };
+    let process_lock = CURRENT_PROCESS.lock();
+    let Some(ref process) = *process_lock else {
+        crate::net::unix::cleanup_unix_socket(h1);
+        crate::net::unix::cleanup_unix_socket(h2);
+        return errno::Errno::ESRCH as u64;
+    };
+    let (fd1, fd2) = process.with_fd_table(|table, _| {
+        (
+            alloc_fd(
+                table,
+                FileDescriptor::UnixSocket(h1, crate::task::process::SocketType::Unix),
+            ),
+            alloc_fd(
+                table,
+                FileDescriptor::UnixSocket(h2, crate::task::process::SocketType::Unix),
+            ),
+        )
+    });
+    let fds = [fd1 as i32, fd2 as i32];
+    // SAFETY: `fds` is a live 8-byte local array; the slice covers exactly it.
+    let bytes = unsafe { core::slice::from_raw_parts(fds.as_ptr() as *const u8, 8) };
+    // SAFETY: copy_to_user validates `sv` against the user address range and
+    // handles faults; a failure is rolled back below.
+    if unsafe { super::user_access::copy_to_user(sv as *mut u8, bytes) }.is_err() {
+        process.with_fd_table(|table, _| {
+            table[fd1] = None;
+            table[fd2] = None;
+        });
+        crate::net::unix::cleanup_unix_socket(h1);
+        crate::net::unix::cleanup_unix_socket(h2);
+        return errno::Errno::EFAULT as u64;
+    }
+    0
+}
+
+fn alloc_fd(table: &mut alloc::vec::Vec<Option<FileDescriptor>>, fd: FileDescriptor) -> usize {
+    for (i, slot) in table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(fd);
+            return i;
+        }
+    }
+    table.push(Some(fd));
+    table.len() - 1
 }

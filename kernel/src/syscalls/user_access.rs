@@ -234,3 +234,30 @@ pub unsafe fn read_user_string(
     buf.truncate(actual_len);
     alloc::string::String::from_utf8(buf).map_err(|_| ())
 }
+// --- Cross-crate bridge ---------------------------------------
+// `vahi_syscalls::user_access` declares these Rust-ABI symbols for `vahi-net`
+// and `vahi-vfs`. One definition in the kernel image, like
+// `vahi_kernel_get_ticks` (kernel/src/interrupts/mod.rs:50): per-crate bodies
+// would either duplicate the symbol or silently stub it.
+
+#[no_mangle]
+pub unsafe fn vahi_kernel_copy_from_user(dst: &mut [u8], src: *const u8) -> Result<(), ()> {
+    // SAFETY: caller upholds the documented pointer contract; this body
+    // performs the validated, fault-aware copy.
+    unsafe { copy_from_user(dst, src) }
+}
+
+#[no_mangle]
+pub unsafe fn vahi_kernel_copy_to_user(dst: *mut u8, src: &[u8]) -> Result<(), ()> {
+    // SAFETY: same contract as `vahi_kernel_copy_from_user`.
+    unsafe { copy_to_user(dst, src) }
+}
+
+#[no_mangle]
+pub unsafe fn vahi_kernel_read_user_string(
+    ptr: *const u8,
+    max_len: usize,
+) -> Result<alloc::string::String, ()> {
+    // SAFETY: same contract as `vahi_kernel_copy_from_user`.
+    unsafe { read_user_string(ptr, max_len) }
+}
