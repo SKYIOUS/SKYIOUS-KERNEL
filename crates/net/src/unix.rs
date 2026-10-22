@@ -79,15 +79,30 @@ pub fn write_sockaddr_un(addr_ptr: *mut u8, addrlen_ptr: *mut u32, path: &str) {
     if addr_ptr.is_null() || addrlen_ptr.is_null() {
         return;
     }
+    let mut cap_buf = [0u8; 4];
+    // SAFETY: addrlen_ptr is non-null; copy_from_user validates the range.
+    if unsafe { user_access::copy_from_user(&mut cap_buf, addrlen_ptr as *const u8) }.is_err() {
+        return;
+    }
+    let capacity = u32::from_ne_bytes(cap_buf) as usize;
+
     let path_bytes = path.as_bytes();
     let total_len = 2 + core::cmp::min(path_bytes.len(), 108usize);
     let mut buf = vec![0u8; total_len];
     buf[..2].copy_from_slice(&AF_UNIX.to_ne_bytes());
     buf[2..total_len].copy_from_slice(&path_bytes[..total_len - 2]);
-    let len32 = total_len as u32;
+
+    let copy_len = core::cmp::min(capacity, total_len);
+    if copy_len > 0 {
+        unsafe {
+            let _ = user_access::copy_to_user(addr_ptr, &buf[..copy_len]);
+        }
+    }
+    // POSIX: *addrlen receives the full address length even when the caller's
+    // buffer is too small.
     unsafe {
-        let _ = user_access::copy_to_user(addr_ptr, &buf);
-        let _ = user_access::copy_to_user(addrlen_ptr as *mut u8, &len32.to_ne_bytes());
+        let _ =
+            user_access::copy_to_user(addrlen_ptr as *mut u8, &(total_len as u32).to_ne_bytes());
     }
 }
 
