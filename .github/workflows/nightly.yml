@@ -147,13 +147,12 @@ jobs:
 
       # SMP 2 showed a roughly 1-in-10 intermittent failure that was never
       # reproduced (issues.md "SMP scaling"); this run pins it.
-      # TODO: Update --expect-count to 207 when default+self_test suite runs here (currently explicit features)
       - name: Run T-00 suite (SMP 2)
         run: |
           python3 tests/run_qemu_tests.py \
             --image tests/t00_selftest.bin \
             --ovmf "$OVMF" \
-            --expect-count 207 \
+            --expect-count 209 \
             --smp 2 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
@@ -220,7 +219,6 @@ jobs:
 
       # audit_small keeps overflow-checks + debug-assertions on while staying
       # within the size the KASLR mapping can relocate (root Cargo.toml).
-      # TODO: Update --expect-count to 207 when default+self_test suite runs here (currently explicit features)
       - name: Build kernel (audit_small, self_test)
         working-directory: kernel
         run: |
@@ -235,7 +233,7 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image tests/t00_audit.bin \
             --ovmf "$OVMF" \
-            --expect-count 207 \
+            --expect-count 209 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
             --serial tests/t00_audit_serial.log \

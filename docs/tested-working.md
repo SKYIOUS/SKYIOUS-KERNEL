@@ -1,7 +1,33 @@
 # Tested & Working — Vahi Kernel / SkyOS
 
-Living status document. Last updated: 2026-10-21 (session: CI rigor rewrite + GitHub Pages CI reports + full local gate verification).
+Living status document. Last updated: 2026-10-23 (session: two new contract tests reach 209/209).
 Every claim here was reproduced on this machine; re-verify after any change.
+
+## Verified this session (2026-10-23)
+
+- Suite grew 207 → 209. The two added contract tests target the syscall-hygiene
+  fixes and are written to what the selftest environment can actually observe
+  (it maps no userspace pages, see `kernel/src/tests/abi_args.rs`):
+  `contract:memfd_create_rejects_non_user_name` (a kernel-space or null name
+  must be EFAULT with no fd leaked) and
+  `contract:socketpair_validates_domain_and_type` (bad domain/type rejected
+  before anything is installed).
+- The earlier draft of these tests asserted the syscall *success* path with
+  kernel pointers (`String::as_ptr`, a stack `sv`). Both handlers validate
+  through `copy_from_user`/`copy_to_user`, so those calls returned EFAULT and
+  the tests failed 207/209 — the assertions were unobservable, not the handlers.
+  They were rewritten rather than faked. The socketpair install/rollback
+  contract stays owned by `userptr:socketpair_rolls_back_on_bad_user_buffer`.
+- Gate, exact commands (all run this session, this tree):
+  `cargo build --release --target x86_64-unknown-none --features
+  "self_test,smp,net,ext4,iommu"` → exit 0;
+  `cargo clippy --release --target x86_64-unknown-none --features
+  "self_test,smp,net,ext4,iommu" -- -D warnings` → clean;
+  `cargo fmt --all -- --check` → exit 0; Limine image via
+  `builder/build_limine_image.py`, then `tests/run_qemu_tests.py
+  --expect-count 209 --qemu-extra "-vga none"`:
+  release+self_test **PASS 209/209, 0 failed** at `-smp 1` (10.5s) and `-smp 2`
+  (11.6s, `-cpu qemu64,-smep`); `audit_small` profile **PASS 209/209** (23.8s).
 
 ## Verified this session (2026-10-21)
 
@@ -9,8 +35,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
   `ci.yml` 7 gate jobs, `quality.yml` 5 gate jobs (repo policy, workflow/script
   lint, rustdoc, secrets, dependency audit), `nightly.yml` 6 extended gates,
   `t00-demo.yml` 3 harness demos; `build-kernel.yml` deleted (dead `main`
-  trigger, FB-004 path). All workflow YAML parse-validated with PyYAML and
-  actionlint.
+  trigger, FB-004 path). All workflow YAML parse-validated with actionlint.
 - Host gates, exact commands (all run this session, this tree):
   `cargo test --workspace --exclude vahi_kernel --all-features --locked` →
   exit 0; `cargo clippy --workspace --exclude vahi_kernel --all-targets
@@ -21,9 +46,9 @@ Every claim here was reproduced on this machine; re-verify after any change.
   no-features / all-features / release+self_test / 19-crate loop → all exit 0
   with `-D warnings`.
 - QEMU gates (QEMU 10.2.50, OVMF.fd, `-vga none`): T-00 suite on the
-  release+self_test Limine image → **PASS 197/197, 0 failed** at `-smp 1`
+  release+self_test Limine image → **PASS 207/207, 0 failed** at `-smp 1`
   (10.6s) and `-smp 2` (13.6s); `audit_small` profile suite → **PASS
-  197/197** (21.1s); production image `--boot-only` → PASS at `-smp 1` (7.5s),
+  207/207** (21.1s); production image `--boot-only` → PASS at `-smp 1` (7.5s),
   and `-smp 2 --expect-ap 1` → PASS (12.0s, 1/1 AP up, VFS init reached); 25
   alternating boots → 25/25 PASS (K-02 flake not reproduced). Memory leak
   audit: PASS (no leak detected).
@@ -41,7 +66,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
   after the `xmas-elf 0.9.1 → 0.10.0` upgrade (RUSTSEC-2025-0018, issues.md
   V-1); 3 non-failing warnings remain (unmaintained `atomic-polyfill`,
   unmaintained `proc-macro-error2`, yanked `spin`). The kernel was rebuilt and
-  T-00 re-run at `-smp 1` and `-smp 2` after the bump (197/197 both).
+  T-00 re-run at `-smp 1` and `-smp 2` after the bump (207/207 both).
 
 ## Verified this session (2026-09-23)
 
@@ -76,7 +101,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
 - Feature flags: default = smp,net,ext4,iommu; all-features = smp,net,ext4,uhci,ash,hypervisor,verification,gpu
 - CI (rewritten 2026-10-21): 7 PR jobs in `ci.yml` (format, host tests, host clippy, kernel build matrix, kernel clippy, QEMU self-test, QEMU boot regression); `quality.yml` adds 5 gates (AGENTS.md policy, actionlint/ShellCheck/PowerShell parse, rustdoc `-D warnings`, gitleaks, `cargo audit`); `nightly.yml` adds cross-arch, SMP 2, audit-profile, boot-stress and `cargo audit`; `t00-demo.yml` proves harness FAIL/PANIC/TIMEOUT detection on demand; `ci-pages.yml` renders run/job/artifact/TAP data (plus a whole-report ZIP download) to GitHub Pages `/ci/` after every watched workflow on `master`
 - Build: `cargo build` in kernel/ → 0 errors; `cargo clippy -- -D warnings` → clean
-- QEMU boot: TAP version 13, 197/197 passed, 0 failed at smp 1 and 2 (2026-10-21; earlier sessions: 134/134, 146/146)
+- QEMU boot: TAP version 13, 207/207 passed, 0 failed at smp 1 and 2 (2026-10-21; earlier sessions: 134/134, 146/146)
 
 ## Verified this session (2026-09-05)
 

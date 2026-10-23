@@ -73,10 +73,14 @@ test(vfs): add TarFS read/write tests
 Before merging any change:
 1. `cargo build --target x86_64-unknown-none` — compiles
 2. `cargo build --target x86_64-unknown-none --features self_test` — tests compile
-3. QEMU boot test — boots to login prompt
-4. Selftests — all pass (134/134)
-5. Interface docs — updated if public API changed
-6. Invariant docs — updated if invariants changed
+3. `cargo fmt --all -- --check` — formatting
+4. `cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features -- -D warnings` — lints
+5. `python scripts/check_repo_policy.py --diff-base origin/master` — AGENTS.md policy
+6. QEMU boot test — boots to login prompt
+7. Selftests — all pass (209/209)
+8. Interface docs — updated if public API changed
+9. Invariant docs — updated if invariants changed
+10. CI `Quality Gates` workflow must be green
 
 ### 8. What NOT to Touch
 
