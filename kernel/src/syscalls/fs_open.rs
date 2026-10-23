@@ -4,7 +4,7 @@
 use super::errno;
 use super::numbers;
 use super::*;
-use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
+use crate::task::process::{FileDescriptor, Process, CURRENT_PROCESS};
 use crate::vfs::{VfsNode, VFS};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -107,7 +107,6 @@ pub fn sys_open_path(path: &str) -> Result<u64, errno::Errno> {
 pub fn open_file(path: &str, flags: i32, mode: u32) -> u64 {
     const O_CREAT: i32 = 0x40;
     const O_DIRECTORY: i32 = 0x10000;
-    const O_CLOEXEC: i32 = 0x80000;
     let vfs = VFS.lock();
     if let Some(node) = vfs.resolve_path(path) {
         let subj = crate::security::current_subject();
@@ -135,17 +134,8 @@ pub fn open_file(path: &str, flags: i32, mode: u32) -> u64 {
         }
         if let Some(p) = get_current_process() {
             let fd = add_fd(&p, node.clone() as Arc<dyn VfsNode>, flags);
-            if (fd as i64) >= 0 {
-                if node.is_dir() {
-                    store_dir_path(&p, fd, path);
-                }
-                if (flags & O_CLOEXEC) != 0 {
-                    let mut fd_flags = p.files.lock().fd_flags.clone();
-                    if (fd as usize) >= fd_flags.len() {
-                        fd_flags.resize(fd as usize + 1, 0);
-                    }
-                    fd_flags[fd as usize] |= 0x80000;
-                }
+            if (fd as i64) >= 0 && node.is_dir() {
+                store_dir_path(&p, fd, path);
             }
             return fd;
         }
@@ -183,15 +173,7 @@ pub fn open_file(path: &str, flags: i32, mode: u32) -> u64 {
             let _ = new_node.chmod(raw_mode & !umask_val);
             let _ = new_node.chown(euid, egid);
             if let Some(p) = get_current_process() {
-                let fd = add_fd(&p, new_node as Arc<dyn VfsNode>, flags);
-                if (fd as i64) >= 0 && (flags & O_CLOEXEC) != 0 {
-                    let mut fd_flags = p.files.lock().fd_flags.clone();
-                    if (fd as usize) >= fd_flags.len() {
-                        fd_flags.resize(fd as usize + 1, 0);
-                    }
-                    fd_flags[fd as usize] |= 0x80000;
-                }
-                return fd;
+                return add_fd(&p, new_node as Arc<dyn VfsNode>, flags);
             }
         }
     }
@@ -245,6 +227,10 @@ pub fn sys_close(fd: u64) -> u64 {
     let Some(desc) = desc else {
         return errno::Errno::EBADF as u64;
     };
+    // add_fd installs a handle-table entry at the same index; leaving it
+    // behind keeps the slot "in use" for add_fd and leaks the VfsObject.
+    // Invalid handles (sockets, inherited stdio) are a no-op.
+    process.close_handle(fd);
     if let FileDescriptor::Socket(_handle, _stype) = &desc {
         #[cfg(feature = "net")]
         {
@@ -399,7 +385,10 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
                 if fd as usize >= fd_flags.len() {
                     fd_flags.resize(fd as usize + 1, 0);
                 }
-                fd_flags[fd as usize] = arg & 0xFFFF;
+                // F_SETFL cannot change O_ACCMODE or O_CLOEXEC (the latter is
+                // a descriptor flag owned by F_SETFD).
+                fd_flags[fd as usize] =
+                    (fd_flags[fd as usize] & (0x3 | 0x80000)) | (arg & 0xFFFF & !0x3);
                 0
             }),
             _ => errno::Errno::EINVAL as u64,
@@ -411,36 +400,78 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
 
 // ─── pipe ─────────────────────────────────────────────────────────
 
+/// Install both pipe ends into the live fd table under one lock, so the pair
+/// is all-or-nothing. `flags` is stored in `fd_flags` for both ends.
+pub fn install_pipe(
+    process: &Arc<Process>,
+    reader: Arc<dyn VfsNode>,
+    writer: Arc<dyn VfsNode>,
+    flags: u64,
+) -> (u64, u64) {
+    process.with_fd_table(|fd_table, fd_flags| {
+        let mut r = None;
+        let mut w = None;
+        for (i, slot) in fd_table.iter().enumerate() {
+            if slot.is_none() {
+                if r.is_none() {
+                    r = Some(i);
+                } else {
+                    w = Some(i);
+                    break;
+                }
+            }
+        }
+        let r = r.unwrap_or(fd_table.len());
+        let w = w.unwrap_or_else(|| {
+            if r == fd_table.len() {
+                fd_table.len() + 1
+            } else {
+                fd_table.len()
+            }
+        });
+        let end = core::cmp::max(r, w) + 1;
+        if fd_table.len() < end {
+            fd_table.resize(end, None);
+        }
+        if fd_flags.len() < end {
+            fd_flags.resize(end, 0);
+        }
+        fd_table[r] = Some(FileDescriptor::File {
+            node: reader,
+            offset: crate::sync::IrqSafeMutex::new(0),
+        });
+        fd_table[w] = Some(FileDescriptor::File {
+            node: writer,
+            offset: crate::sync::IrqSafeMutex::new(0),
+        });
+        fd_flags[r] = flags;
+        fd_flags[w] = flags;
+        (r as u64, w as u64)
+    })
+}
+
 pub fn sys_pipe(fds_ptr: *mut u32) -> u64 {
-    let (reader, writer) = crate::vfs::pipe::Pipe::new();
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
     };
-    let r_fd = {
-        let obj = crate::vfs::VfsObject::new(reader, crate::objects::TYPE_FILE)
-            as Arc<dyn crate::objects::KernelObject>;
-        match process.new_handle(obj, crate::objects::security::ACCESS_READ, 0) {
-            Ok(fd) => fd,
-            Err(_) => return errno::Errno::EACCES as u64,
-        }
-    };
-    let w_fd = {
-        let obj = crate::vfs::VfsObject::new(writer, crate::objects::TYPE_FILE)
-            as Arc<dyn crate::objects::KernelObject>;
-        match process.new_handle(obj, crate::objects::security::ACCESS_WRITE, 1) {
-            Ok(fd) => fd,
-            Err(_) => {
-                process.close_handle(r_fd);
-                return errno::Errno::EACCES as u64;
-            }
-        }
-    };
+    let (reader, writer) = crate::vfs::pipe::Pipe::new();
+    let (r_fd, w_fd) = install_pipe(&process, reader, writer, 0);
     let fds = [r_fd as u32, w_fd as u32];
+    // SAFETY: `fds` is a live two-element local array and the slice covers
+    // exactly its bytes.
     let bytes = unsafe {
         core::slice::from_raw_parts(&fds as *const _ as *const u8, core::mem::size_of_val(&fds))
     };
+    // SAFETY: copy_to_user validates `fds_ptr` against the user range and
+    // handles faults; the install is rolled back on failure.
     if unsafe { user_access::copy_to_user(fds_ptr as *mut u8, bytes) }.is_err() {
+        process.with_fd_table(|fd_table, fd_flags| {
+            fd_table[r_fd as usize] = None;
+            fd_flags[r_fd as usize] = 0;
+            fd_table[w_fd as usize] = None;
+            fd_flags[w_fd as usize] = 0;
+        });
         return errno::Errno::EFAULT as u64;
     }
     0

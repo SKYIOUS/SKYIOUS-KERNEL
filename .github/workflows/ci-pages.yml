@@ -3,10 +3,10 @@ name: CI Reports
 # Publishes the CI report site to GitHub Pages:
 #   https://<owner>.github.io/<repo>/ci/
 # Fires when any watched workflow (ci.yml, quality.yml, nightly.yml,
-# t00-demo.yml) completes on master, plus manual dispatch. The branches
-# filter excludes pull-request runs so untrusted PR data never reaches the
-# published site. Pages is enabled by configure-pages (source: GitHub
-# Actions) on first deploy.
+# t00-demo.yml) completes on master, plus manual dispatch on master. The
+# report generator also filters runs to master, so pull-request data never
+# reaches the published site. GitHub Pages must be enabled once in repository
+# settings with Source: GitHub Actions; configure-pages does not enable it.
 
 on:
   workflow_run:
@@ -28,15 +28,14 @@ concurrency:
 jobs:
   build:
     name: Build report site
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: Enable / configure GitHub Pages
+      - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Self-test generator
         run: python3 scripts/generate_ci_report.py --self-test

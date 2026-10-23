@@ -157,7 +157,7 @@ The plan has three tiers:
 | Task | What | Done When |
 |------|------|-----------|
 | F5.1 | **CI builds all feature combos**: default, all-features, each feature solo | `ci.yml` matrix covers all combos |
-| F5.2 | **CI runs clippy with `-D warnings`** on all feature combos (not just default) | Zero clippy regressions |
+| F5.2 | **CI runs clippy with `-D warnings`** on default, no-features, all-features, release+self_test, extracted crates; solo-feature builds are not clippy'd (tracked as gap) | Zero clippy regressions on gated combos |
 | F5.3 | **Nightly QEMU selftest in CI**: Build bootimage, run QEMU, parse serial for "N passed, 0 failed" | CI green means kernel boots and tests pass |
 | F5.4 | **Dependabot or manual audit**: Ensure crates haven't gone stale or have CVEs | Quarterly check or automated |
 

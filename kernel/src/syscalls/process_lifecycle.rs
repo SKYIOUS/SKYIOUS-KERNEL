@@ -739,12 +739,100 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
     return child_pid;
 }
 
+/// Release the page tables and frame references taken by the COW clone when
+/// clone fails before the child is registered anywhere.
+fn discard_cloned_child(child: &crate::task::process::Process) {
+    if let Some(ref isolate) = child.isolate {
+        isolate.destroy();
+    }
+    child.address_space.destroy();
+}
+
+/// Write a `u32` into a not-yet-running child's address space.
+///
+/// `CLONE_CHILD_SETTID` targets the child's memory. After `clone_cow` that
+/// memory is only reachable through the child's page tables — the active CR3
+/// is still the parent's — and every writable leaf is COW-marked, so a plain
+/// `copy_to_user` would write the parent's private copy and the child would
+/// never observe its tid. Resolve through the child's PML4 and break COW on
+/// the child side before writing.
+fn write_child_u32(
+    address_space: &crate::memory::paging::AddressSpace,
+    addr: u64,
+    value: u32,
+) -> Result<(), ()> {
+    use x86_64::structures::paging::mapper::TranslateResult;
+    use x86_64::structures::paging::{Page, PageTableFlags, Translate};
+
+    if !user_access::validate_ptr(addr as *const u8, core::mem::size_of::<u32>()) {
+        return Err(());
+    }
+
+    let bytes = value.to_ne_bytes();
+    let mut done = 0usize;
+    while done < bytes.len() {
+        let va = x86_64::VirtAddr::new(addr + done as u64);
+        // SAFETY: the child has not been spawned yet, so this PML4 is
+        // exclusively owned here and no other CPU can walk or mutate it. The
+        // mapper resolves the child's tables through the HHDM; it never
+        // switches CR3, so the parent keeps running on its own address space.
+        let mapper = unsafe { address_space.mapper() }.ok_or(())?;
+        let (mut phys, mut flags, frame_size) = match mapper.translate(va) {
+            TranslateResult::Mapped {
+                frame,
+                offset,
+                flags,
+            } => (frame.start_address().as_u64() + offset, flags, frame.size()),
+            _ => return Err(()),
+        };
+        if !flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE) {
+            return Err(());
+        }
+        if frame_size == 4096 && (flags.bits() & (1 << 9)) != 0 {
+            // SAFETY: `va` is inside a mapped 4 KiB user leaf of this address
+            // space; handle_cow duplicates the shared frame into this
+            // space's own tables before the write below.
+            if unsafe { address_space.handle_cow(Page::containing_address(va)) } != Some(true) {
+                return Err(());
+            }
+            let remapped = match mapper.translate(va) {
+                TranslateResult::Mapped {
+                    frame,
+                    offset,
+                    flags,
+                    ..
+                } => (frame.start_address().as_u64() + offset, flags),
+                _ => return Err(()),
+            };
+            phys = remapped.0;
+            flags = remapped.1;
+        }
+        if !flags.contains(PageTableFlags::WRITABLE) {
+            return Err(());
+        }
+
+        let chunk = core::cmp::min(4096 - (va.as_u64() & 0xFFF) as usize, bytes.len() - done);
+        // SAFETY: `phys` translates a present writable user leaf of the
+        // child's tables and the physical-memory offset maps RAM; `chunk`
+        // stays inside that 4 KiB page, and `bytes` has enough bytes left.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr().add(done),
+                (crate::memory::physical_memory_offset() + phys) as *mut u8,
+                chunk,
+            );
+        }
+        done += chunk;
+    }
+    Ok(())
+}
+
 pub fn sys_clone(
     flags: u64,
     child_stack: u64,
     parent_tid: *mut u32,
-    child_tls: u64,
     child_tidptr: *mut u32,
+    child_tls: u64,
     regs_ptr: *mut u64,
 ) -> u64 {
     use crate::memory::buddy::BuddyFrameAllocator;
@@ -803,15 +891,14 @@ pub fn sys_clone(
     }
 
     if flags & CLONE_CHILD_SETTID != 0 && !child_tidptr.is_null() {
-        let val = child_pid as u32;
-        if unsafe {
-            user_access::copy_to_user(
-                child_tidptr as *mut u8,
-                core::slice::from_raw_parts(&val as *const u32 as *const u8, 4),
-            )
-        }
+        if write_child_u32(
+            &child_process.address_space,
+            child_tidptr as u64,
+            child_pid as u32,
+        )
         .is_err()
         {
+            discard_cloned_child(&child_process);
             return errno::Errno::EFAULT as u64;
         }
     }
@@ -826,6 +913,7 @@ pub fn sys_clone(
         }
         .is_err()
         {
+            discard_cloned_child(&child_process);
             return errno::Errno::EFAULT as u64;
         }
     }
@@ -839,9 +927,15 @@ pub fn sys_clone(
         match sched.current_thread.as_ref() {
             Some(t) => match t.clone_thread(child_arc.clone(), regs_ptr, child_stack) {
                 Some(t) => t,
-                None => return errno::Errno::ENOMEM as u64,
+                None => {
+                    discard_cloned_child(&child_arc);
+                    return errno::Errno::ENOMEM as u64;
+                }
             },
-            None => return errno::Errno::EPERM as u64,
+            None => {
+                discard_cloned_child(&child_arc);
+                return errno::Errno::EPERM as u64;
+            }
         }
     };
 
@@ -878,7 +972,7 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
             };
             let children_pids = parent.children.lock();
 
-            for (index, &child_pid) in children_pids.iter().enumerate() {
+            for &child_pid in children_pids.iter() {
                 if pid != -1 && child_pid != pid as u64 {
                     continue;
                 }
@@ -886,28 +980,43 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
                 if let Some(child) = process_table.get(&child_pid) {
                     let status = child.exit_code.load(core::sync::atomic::Ordering::Relaxed);
                     if status != i32::MIN {
-                        child_to_reap = Some((child_pid, status, index));
+                        child_to_reap = Some((child_pid, status));
                         break;
                     }
                 }
             }
         }
 
-        if let Some((child_pid, status, index)) = child_to_reap.take() {
+        if let Some((child_pid, status)) = child_to_reap.take() {
             if !status_ptr.is_null() {
-                unsafe {
-                    *status_ptr = status;
+                let bytes = status.to_ne_bytes();
+                // SAFETY: status_ptr is non-null; copy_to_user validates the
+                // userspace range and reports a fault instead of writing a
+                // kernel address.
+                if unsafe { user_access::copy_to_user(status_ptr as *mut u8, &bytes) }.is_err() {
+                    return errno::Errno::EFAULT as u64;
                 }
             }
 
+            // The snapshot above dropped the table lock for the user copy, so
+            // the index it saw may describe a different child now. Re-resolve
+            // by pid and treat a vanished parent/child as a lost race.
             {
-                let process_table = crate::task::process::PROCESS_TABLE.lock();
-                let parent = process_table.get(&parent_id).unwrap();
-                parent.children.lock().remove(index);
+                let mut process_table = crate::task::process::PROCESS_TABLE.lock();
+                let parent = match process_table.get(&parent_id) {
+                    Some(p) => p.clone(),
+                    None => return errno::Errno::ECHILD as u64,
+                };
+                let mut children = parent.children.lock();
+                match children.iter().position(|&p| p == child_pid) {
+                    Some(index) => {
+                        children.remove(index);
+                    }
+                    None => return errno::Errno::ECHILD as u64,
+                }
+                drop(children);
+                process_table.remove(&child_pid);
             }
-            crate::task::process::PROCESS_TABLE
-                .lock()
-                .remove(&child_pid);
             return child_pid;
         }
 

@@ -39,13 +39,13 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-builds-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-nightly-builds-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-all
 
       - name: Build release (default features)
         run: cargo build --release --target x86_64-unknown-none --locked
 
       - name: Build release (self_test)
-        run: cargo build --release --target x86_64-unknown-none --locked --features self_test
+        run: cargo build --release --target x86_64-unknown-none --locked --features "self_test,smp,net,ext4,iommu"
 
       - name: Build release (all features)
         run: cargo build --release --target x86_64-unknown-none --locked --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu"
@@ -73,7 +73,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-cross-arch-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-cross-arch-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-smp
 
       - name: Build aarch64
         run: |
@@ -110,7 +110,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-smp2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-nightly-smp2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp
 
       - name: Cache Limine binaries
         uses: actions/cache@v4
@@ -138,7 +138,9 @@ jobs:
 
       - name: Build kernel (release, self_test)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --locked --features self_test
+        run: |
+          cargo clean
+          cargo build --release --target x86_64-unknown-none --locked --features "self_test,smp,net,ext4,iommu"
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
@@ -150,6 +152,7 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image tests/t00_selftest.bin \
             --ovmf "$OVMF" \
+            --expect-count 209 \
             --smp 2 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
@@ -188,7 +191,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-audit-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-nightly-audit-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-audit_small-self_test
 
       - name: Cache Limine binaries
         uses: actions/cache@v4
@@ -218,7 +221,9 @@ jobs:
       # within the size the KASLR mapping can relocate (root Cargo.toml).
       - name: Build kernel (audit_small, self_test)
         working-directory: kernel
-        run: cargo build --profile audit_small --target x86_64-unknown-none --features self_test --locked
+        run: |
+          cargo clean
+          cargo build --profile audit_small --target x86_64-unknown-none --locked --features "self_test,smp,net,ext4,iommu"
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/audit_small/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_audit.bin
@@ -228,6 +233,7 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image tests/t00_audit.bin \
             --ovmf "$OVMF" \
+            --expect-count 209 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
             --serial tests/t00_audit_serial.log \
@@ -265,7 +271,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-stress-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-nightly-stress-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-production
 
       - name: Cache Limine binaries
         uses: actions/cache@v4

@@ -136,7 +136,7 @@ jobs:
         run: cargo build --release --target x86_64-unknown-none --locked
 
       - name: Build (release, self_test)
-        run: cargo build --release --target x86_64-unknown-none --features self_test --locked
+        run: cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
 
       - name: Build (debug, all features)
         run: cargo build --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu" --locked
@@ -169,7 +169,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-kernel-clippy-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-kernel-clippy-v2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-all
 
       - name: Clippy (default features)
         working-directory: kernel
@@ -185,7 +185,7 @@ jobs:
 
       - name: Clippy (release, self_test)
         working-directory: kernel
-        run: cargo clippy --release --target x86_64-unknown-none --features self_test --locked -- -D warnings
+        run: cargo clippy --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked -- -D warnings
 
       - name: Clippy (extracted crates)
         run: |
@@ -195,6 +195,14 @@ jobs:
                        vahi-verified; do
             echo "Clippy: $crate"
             cargo clippy -p "$crate" --target x86_64-unknown-none --locked -- -D warnings
+          done
+
+      - name: Clippy (solo features)
+        working-directory: kernel
+        run: |
+          for feat in smp net ext4 iommu self_test ash hypervisor verification gpu uhci; do
+            echo "Clippy: feature=$feat"
+            cargo clippy --target x86_64-unknown-none --no-default-features --features "$feat" --locked -- -D warnings
           done
 
   qemu-selftest:
@@ -218,7 +226,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-qemu-selftest-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-qemu-selftest-v2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp-net-ext4-iommu
 
       - name: Cache Limine binaries
         uses: actions/cache@v4
@@ -248,7 +256,9 @@ jobs:
       # builder image is known unbootable (FB-004).
       - name: Build kernel (release, self_test)
         working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --features self_test --locked
+        run: |
+          cargo clean
+          cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
 
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
@@ -260,6 +270,7 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image tests/t00_selftest.bin \
             --ovmf "$OVMF" \
+            --expect-count 209 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
             --serial tests/t00_ci_serial.log \
@@ -297,7 +308,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-qemu-boot-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-qemu-boot-v2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp-net-ext4-iommu
 
       - name: Cache Limine binaries
         uses: actions/cache@v4

@@ -197,6 +197,43 @@ fn futex_entry(args: &SyscallArgs) -> u64 {
     )
 }
 
+/// Read the sixth syscall argument from the saved register frame. Internal
+/// callers of `syscall_handler` pass a null frame; they have no sixth argument.
+pub(crate) fn syscall_arg6(regs: *mut u64) -> u64 {
+    if regs.is_null() {
+        return 0;
+    }
+    #[cfg(target_arch = "x86_64")]
+    const INDEX: usize = 6; // r9
+    #[cfg(target_arch = "aarch64")]
+    const INDEX: usize = 5; // x5
+                            // SAFETY: syscall entry saves at least the six argument registers before
+                            // dispatch; INDEX addresses the sixth one for the active architecture.
+    unsafe { *regs.add(INDEX) }
+}
+
+fn sendto_entry(args: &SyscallArgs) -> u64 {
+    net::sys_sendto(
+        args.a1,
+        args.a2 as *const u8,
+        args.a3,
+        args.a4,
+        args.a5 as *const u8,
+        syscall_arg6(args.regs),
+    )
+}
+
+fn recvfrom_entry(args: &SyscallArgs) -> u64 {
+    net::sys_recvfrom(
+        args.a1,
+        args.a2 as *mut u8,
+        args.a3,
+        args.a4,
+        args.a5 as *mut u8,
+        syscall_arg6(args.regs) as *mut u32,
+    )
+}
+
 /// Dispatch table indexed by syscall number. `None` = unknown syscall.
 const TABLE_SIZE: usize = 475;
 
@@ -352,27 +389,11 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     sys_handler!(
         t,
         args,
-        numbers::SYS_SENDTO,
-        net::sys_sendto(
-            args.a1,
-            args.a2 as *const u8,
-            args.a3,
-            args.a4 as *const u8,
-            args.a5
-        )
+        numbers::SYS_ACCEPT4,
+        net::sys_accept4(args.a1, args.a2 as *mut u8, args.a3 as *mut u32, args.a4)
     );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_RECVFROM,
-        net::sys_recvfrom(
-            args.a1,
-            args.a2 as *mut u8,
-            args.a3,
-            args.a4 as *mut u8,
-            args.a5 as *mut u32,
-        )
-    );
+    sys_handler!(t, args, numbers::SYS_SENDTO, sendto_entry(args));
+    sys_handler!(t, args, numbers::SYS_RECVFROM, recvfrom_entry(args));
     sys_handler!(
         t,
         args,
@@ -447,8 +468,8 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
             args.a1,
             args.a2,
             args.a3 as *mut u32,
-            args.a4,
-            args.a5 as *mut u32,
+            args.a4 as *mut u32,
+            args.a5,
             args.regs
         )
     );
@@ -1468,6 +1489,21 @@ pub extern "sysv64" fn syscall_handler(
     do_syscall(n, arg1, arg2, arg3, arg4, arg5, regs_ptr)
 }
 
+#[cfg(feature = "ash")]
+fn ash_syscall_denied(n: u64, arg1: u64, arg2: u64, arg3: u64) -> Option<u64> {
+    match crate::ash::hooks::syscall::hook_syscall_entry(n, arg1, arg2, arg3) {
+        crate::ash::AshResult::Drop | crate::ash::AshResult::Handled => {
+            Some(errno::Errno::EPERM as u64)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "ash"))]
+fn ash_syscall_denied(_n: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> Option<u64> {
+    None
+}
+
 pub fn do_syscall(
     n: u64,
     arg1: u64,
@@ -1477,20 +1513,48 @@ pub fn do_syscall(
     arg5: u64,
     regs_ptr: *mut u64,
 ) -> u64 {
-    #[cfg(feature = "ash")]
-    {
-        match crate::ash::hooks::syscall::hook_syscall_entry(n, arg1, arg2, arg3) {
-            crate::ash::AshResult::Drop | crate::ash::AshResult::Handled => {
-                return errno::Errno::EPERM as u64;
-            }
-            _ => {}
-        }
+    if let Some(denied) = ash_syscall_denied(n, arg1, arg2, arg3) {
+        return denied;
     }
+    let seccomp_denial =
+        seccomp::check_syscall(n, &[arg1, arg2, arg3, arg4, arg5, syscall_arg6(regs_ptr)]);
+    do_syscall_body(n, arg1, arg2, arg3, arg4, arg5, regs_ptr, seccomp_denial)
+}
 
-    if !seccomp::check_syscall(n, &[arg1, arg2, arg3, arg4, arg5, 0]) {
-        return errno::Errno::EPERM as u64;
+/// Dispatch a syscall whose seccomp filter the caller already evaluated. Linux
+/// emulation filters the original Linux number; re-filtering the mapped Vahi
+/// number here would apply the wrong rule and run the filter twice.
+pub(crate) fn do_syscall_unchecked(
+    n: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    regs_ptr: *mut u64,
+) -> u64 {
+    if let Some(denied) = ash_syscall_denied(n, arg1, arg2, arg3) {
+        return denied;
     }
+    do_syscall_body(n, arg1, arg2, arg3, arg4, arg5, regs_ptr, None)
+}
 
+/// Complete a syscall denied by seccomp without executing it. It still runs
+/// the shared return path so `SECCOMP_RET_TRAP` keeps delivering SIGSYS.
+pub(crate) fn do_syscall_denied(n: u64, denial: u64, regs_ptr: *mut u64) -> u64 {
+    do_syscall_body(n, 0, 0, 0, 0, 0, regs_ptr, Some(denial))
+}
+
+fn do_syscall_body(
+    n: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    regs_ptr: *mut u64,
+    seccomp_denial: Option<u64>,
+) -> u64 {
     let args = SyscallArgs {
         n,
         a1: arg1,
@@ -1501,7 +1565,9 @@ pub fn do_syscall(
         regs: regs_ptr,
     };
 
-    let result = if (n as usize) < TABLE_SIZE {
+    let result = if let Some(err) = seccomp_denial {
+        err
+    } else if (n as usize) < TABLE_SIZE {
         match SYSCALL_TABLE[n as usize] {
             Some(handler) => handler(&args),
             None => {

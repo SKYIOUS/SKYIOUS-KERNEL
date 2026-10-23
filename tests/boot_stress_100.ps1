@@ -1,88 +1,76 @@
-# boot_stress_100.ps1 — Run 100 consecutive QEMU boots, report pass/fail.
-# Usage: .\tests\boot_stress_100.ps1 [-Timeout 90] [-Smp 1]
-
+# boot_stress_100.ps1 — Run 100 consecutive QEMU boots via the Python runner.
+# Usage: .\tests\boot_stress_100.ps1 [-Timeout 300] [-Smp 1] [-Tries 100]
+#        [-Image tests/t00_selftest.bin]
 #
-# IMPORTANT: this script must be pointed at a SELF_TEST image. The production
-# image (bootimage-vahi_kernel.bin) is built without the `self_test` feature,
-# so the fuzzer and stress suites are not compiled in and every boot would
-# report success while testing nothing.
+# Uses the Python test runner which correctly parses TAP and kills QEMU
+# after the verdict, avoiding the idle-loop hang of raw QEMU execution.
 param(
-    [int]$Timeout = 90,
+    [int]$Timeout = 300,
     [int]$Smp = 1,
-    [int]$Tries = 100
+    [int]$Tries = 100,
+    [string]$Image = "tests/t00_selftest.bin"
 )
 
-$Pass = 0
-$Fail = 0
-$FailTokens = @("not ok", "Bail out!", "KERNEL PANIC", "Panicked")
-# A boot only passes if the TAP summary reports every test passing. Checking
-# only fail-tokens let a boot that produced no verdict at all count as a PASS.
-$PassPattern = "# \d+/\d+ passed, 0 failed"
-$Qemu = "qemu-system-x86_64"
-$Drive = "bootimage-selftest.bin"
-
-if (-not (Test-Path $Drive)) {
-    Write-Host "ERROR: $Drive not found. Run 'make boot' first." -ForegroundColor Red
+if (-not (Test-Path $Image)) {
+    Write-Host "ERROR: $Image not found. Build the selftest image first." -ForegroundColor Red
     exit 1
 }
 
 Write-Host "Boot stress test: $Tries tries, SMP=$Smp, timeout=${Timeout}s" -ForegroundColor Cyan
 
+$Pass = 0
+$Fail = 0
+$PanicCycles = @()
+
 for ($i = 1; $i -le $Tries; $i++) {
-    $Log = "$env:TEMP\boot_stress_$i.log"
+    Write-Host -NoNewline "  [$i/$Tries] " -ForegroundColor Gray
+
     $args = @(
-        "-drive", "file=$Drive,format=raw",
-        "-m", "512M",
-        "-smp", "$Smp",
-        "-serial", "file:$Log",
-        "-display", "none",
-        "-no-reboot",
-        "-accel", "tcg"
+        "--image", $Image,
+        "--timeout", $Timeout.ToString(),
+        "--smp", $Smp,
+        "--qemu-extra", "-vga none"
     )
 
-    $proc = Start-Process -FilePath $Qemu -ArgumentList $args -PassThru -NoNewWindow
-    $exited = $proc.WaitForExit($Timeout * 1000)
+    try {
+        $result = py -3 tests/run_qemu_tests.py @args 2>&1
+        $exitCode = $LASTEXITCODE
 
-    if (-not $exited) {
-        $proc.Kill()
-        Write-Host "  [$i/$Tries] TIMEOUT" -ForegroundColor Yellow
-        $Fail++
-        continue
-    }
-
-    $output = if (Test-Path $Log) { Get-Content $Log -Raw } else { "" }
-
-    $failed = $false
-    foreach ($token in $FailTokens) {
-        if ($output -match [regex]::Escape($token)) {
-            $failed = $true
-            break
+        if ($result -match 'RESULT: PASS') {
+            Write-Host "PASS" -ForegroundColor Green
+            $Pass++
+        }
+        elseif ($result -match 'RESULT: PANIC') {
+            Write-Host "PANIC" -ForegroundColor Red
+            $Fail++
+            $PanicCycles += $i.ToString().PadLeft(3, '0')
+        }
+        elseif ($result -match 'RESULT: FAIL') {
+            Write-Host "FAIL" -ForegroundColor Red
+            $Fail++
+        }
+        elseif ($result -match 'RESULT: (BOOT_FAILURE|UNEXPECTED_EXIT|TIMEOUT|INFRASTRUCTURE_ERROR)') {
+            $reason = $matches[1]
+            Write-Host "$reason" -ForegroundColor Red
+            $Fail++
+        }
+        else {
+            Write-Host "UNKNOWN RESULT" -ForegroundColor Red
+            Write-Host $result
+            $Fail++
         }
     }
-
-    # Require an explicit all-passed TAP verdict. Without this, a boot that
-    # wedges or dies silently before reporting anything is scored PASS.
-    $sawVerdict = $output -match $PassPattern
-
-    if (-not $failed -and -not $sawVerdict) {
-        Write-Host "  [$i/$Tries] NO VERDICT (boot did not report a TAP summary)" -ForegroundColor Yellow
+    catch {
+        Write-Host "ERROR: $_" -ForegroundColor Red
         $Fail++
-        Remove-Item $Log -ErrorAction SilentlyContinue
-        continue
     }
-
-    if ($failed) {
-        Write-Host "  [$i/$Tries] FAIL" -ForegroundColor Red
-        $Fail++
-    } else {
-        Write-Host "  [$i/$Tries] PASS" -ForegroundColor Green
-        $Pass++
-    }
-
-    Remove-Item $Log -ErrorAction SilentlyContinue
 }
 
 Write-Host ""
 Write-Host "Results: $Pass/$Tries passed, $Fail failed" -ForegroundColor $(if ($Fail -eq 0) { "Green" } else { "Red" })
+
+if ($PanicCycles.Count -gt 0) {
+    Write-Host "Panic cycles: $($PanicCycles -join ', ')" -ForegroundColor Red
+}
 
 if ($Fail -gt 0) { exit 1 }

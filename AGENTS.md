@@ -95,7 +95,7 @@ kernel/src/
   tests/{mod,apic,benchmarks,contract,ebpf,ext2_fs,fuzzer,futex,harness,init,memory,new_features,panic_path,pata_read,process_lifecycle,scheduler,skyfs,stress,sync,vfs}.rs  # Test suite
   verified/{mod,concurrency,journal,scheduler,runner}.rs  # Verified proofs
   vfs/mod.rs                                         # VFS layer
-crates/                                              # Extracted crates (18 total)
+crates/                                              # Extracted crates (19 total)
   sync/       vahi-sync       — IrqSafeMutex (90 lines)
   memory/     vahi-memory     — buddy, slab, paging, swap, frame_info
   crypto/     vahi-crypto     — SHA-256, HMAC, PBKDF2, entropy (308 lines)
@@ -105,7 +105,6 @@ crates/                                              # Extracted crates (18 tota
   types/      vahi-types      — Shared types, Errno, credentials, VMA
   arch/       vahi-arch       — x86_64, aarch64, HAL
   gdt/        vahi-gdt        — GDT/IDT/TSS management
-  interrupts/ vahi-interrupts — IRQ, page fault, exceptions
   task/       vahi-task       — process, thread, scheduler, OOM
   syscalls/   vahi-syscalls   — syscall numbers, dispatch, ptrace/seccomp/namespaces
   vfs/        vahi-vfs        — VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE
@@ -115,6 +114,7 @@ crates/                                              # Extracted crates (18 tota
   objects/    vahi-objects    — KernelObject trait, handle table, security
   ipc/        vahi-ipc        — IPC primitives
   pci/        vahi-pci        — PCI subsystem
+  verified/   vahi-verified   — Verified proofs (concurrency, journal, scheduler, runner)
 ```
 
 ## Operating protocol (how every task runs)
@@ -207,6 +207,10 @@ crates/                                              # Extracted crates (18 tota
 - **Selftests**: build with `--features self_test`, boot in QEMU, check serial output
 - **Gate**: `python tests/run_qemu_tests.py --image <image> --timeout 540 --qemu-extra "-vga none"`
 - **Clippy**: `cd kernel && cargo clippy --release --target x86_64-unknown-none -- -D warnings`
+- **Format**: `cargo fmt --all -- --check`
+- **Host checks**: `cargo test --workspace --exclude vahi_kernel --all-features --locked` and `cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features --locked -- -D warnings`
+- **Policy gate**: `python scripts/check_repo_policy.py --self-test` then `python scripts/check_repo_policy.py --diff-base origin/master`
+- **Rustdoc**: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude vahi_kernel --no-deps --locked`
 - **Commits**: conventional prefixes (`feat:`/`fix:`/`docs:`/`refactor:`/`chore:`),
   atomic per concern, subject ≤72 chars; docs invalidated by a change ship in
   the same commit.
@@ -218,9 +222,9 @@ workspace root `Cargo.toml` owns `[profile.release]`; `kernel/Cargo.toml`'s own
 will be ignored"), so kernel-specific profile settings do not apply.
 
 ## Workspace structure
-- `Cargo.toml` (root) — workspace members: kernel, builder, 18 crates
+- `Cargo.toml` (root) — workspace members: kernel, builder, 19 crates
 - `kernel/` — the kernel (its own Cargo.toml, .cargo/config.toml, linker.ld)
-- `crates/` — 18 extracted crates (sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci)
+- `crates/` — 19 extracted crates (sync, memory, crypto, hal, limine, apic, types, arch, gdt, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci, verified)
 - `builder/` — Python scripts for Limine-bootable GPT disk images
 - `scripts/` — build.sh, run_qemu.sh (and PowerShell equivalents)
 - `tests/` — QEMU test harness, boot stress, selftest gate

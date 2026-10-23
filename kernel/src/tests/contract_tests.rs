@@ -220,8 +220,21 @@ fn test_fd_dup_fcntl_write_through() -> Result<(), &'static str> {
         {
             return Err("O_NONBLOCK did not write through");
         }
+        if sys_fcntl(target, F_GETFD, 0) != 1 {
+            return Err("F_SETFL erased O_CLOEXEC");
+        }
         if sys_close(target) != 0 {
             return Err("close(dup2 fd) failed");
+        }
+        let d3 = crate::syscalls::compat::sys_dup3(fd, fd + 20, 0x80000);
+        if d3 != fd + 20 || sys_fcntl(d3, F_GETFD, 0) != 1 {
+            return Err("dup3 O_CLOEXEC did not land on the live fd");
+        }
+        if crate::syscalls::compat::sys_dup3(fd, fd + 21, 0x1) != Errno::EINVAL as u64 {
+            return Err("dup3 accepted a flag other than O_CLOEXEC");
+        }
+        if sys_close(d3) != 0 {
+            return Err("close of dup3 fd failed");
         }
         let ep = sys_epoll_create1(0);
         if ep > 0xFFFF {
@@ -232,6 +245,432 @@ fn test_fd_dup_fcntl_write_through() -> Result<(), &'static str> {
         }
         if sys_close(ep) != 0 || sys_close(fd) != 0 {
             return Err("close of socket/epoll fd failed");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+// ─── fd-install write-through contract ────────────────────────────
+
+fn fd_is_file(proc: &Arc<Process>, fd: u64) -> bool {
+    proc.with_fd_table(|table, _| {
+        matches!(
+            table.get(fd as usize),
+            Some(Some(FileDescriptor::File { .. }))
+        )
+    })
+}
+
+fn fd_count(proc: &Arc<Process>) -> usize {
+    proc.with_fd_table(|table, _| table.iter().filter(|slot| slot.is_some()).count())
+}
+
+/// `install_pipe` must write both ends into the live table (the previous
+/// handle-only install left the returned numbers absent, so read/write hit
+/// EBADF) and store the pipe2 flags in the same lock.
+fn test_pipe_install_write_through() -> Result<(), &'static str> {
+    const O_CLOEXEC: u64 = 0x80000;
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let (reader, writer) = crate::vfs::pipe::Pipe::new();
+        let (r, w) = crate::syscalls::fs_open::install_pipe(&proc, reader, writer, O_CLOEXEC);
+        if !fd_is_file(&proc, r) || !fd_is_file(&proc, w) {
+            return Err("pipe fds missing from the live fd table");
+        }
+        let flags_ok = proc.with_fd_table(|_, flags| {
+            flags.get(r as usize) == Some(&O_CLOEXEC) && flags.get(w as usize) == Some(&O_CLOEXEC)
+        });
+        if !flags_ok {
+            return Err("pipe O_CLOEXEC did not reach fd_flags");
+        }
+        let io_ok = proc.with_fd_table(|table, _| {
+            let reader = match table.get(r as usize) {
+                Some(Some(FileDescriptor::File { node, .. })) => node.clone(),
+                _ => return false,
+            };
+            let writer = match table.get(w as usize) {
+                Some(Some(FileDescriptor::File { node, .. })) => node.clone(),
+                _ => return false,
+            };
+            writer.write(b"ping").is_ok()
+                && matches!(reader.read(4), Ok(data) if data.as_slice() == b"ping")
+        });
+        if !io_ok {
+            return Err("pipe ends are not readable/writable");
+        }
+        if crate::syscalls::fs_open::sys_close(r) != 0
+            || crate::syscalls::fs_open::sys_close(w) != 0
+        {
+            return Err("close of a pipe fd failed");
+        }
+        let cleared = proc.with_fd_table(|table, flags| {
+            table.get(r as usize).map_or(true, |slot| slot.is_none())
+                && table.get(w as usize).map_or(true, |slot| slot.is_none())
+                && flags.get(r as usize).copied().unwrap_or(0) == 0
+                && flags.get(w as usize).copied().unwrap_or(0) == 0
+        });
+        if !cleared {
+            return Err("close left pipe fd entries behind");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+/// `open` must return a number that indexes the live fd table and honour
+/// O_CLOEXEC there; the resolver below is the always-mounted ctlfs node.
+fn test_open_install_write_through() -> Result<(), &'static str> {
+    use crate::syscalls::errno::Errno;
+
+    const O_CLOEXEC: i32 = 0x80000;
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let fd = crate::syscalls::fs_open::open_file("/ctl/kernel/hostname", O_CLOEXEC, 0);
+        if (fd as i64) < 0 {
+            return Err("open(/ctl/kernel/hostname) failed");
+        }
+        if !fd_is_file(&proc, fd) {
+            return Err("open fd missing from the live fd table");
+        }
+        let cloexec = proc.with_fd_table(|_, flags| {
+            flags
+                .get(fd as usize)
+                .map_or(false, |f| f & O_CLOEXEC as u64 != 0)
+        });
+        if !cloexec {
+            return Err("open O_CLOEXEC did not reach fd_flags");
+        }
+        let readable = proc.with_fd_table(|table, _| match table.get(fd as usize) {
+            Some(Some(FileDescriptor::File { node, .. })) => {
+                node.read(16).map_or(false, |data| !data.is_empty())
+            }
+            _ => false,
+        });
+        if !readable {
+            return Err("open fd does not resolve to a readable node");
+        }
+        if crate::syscalls::fs_open::sys_close(fd) != 0 {
+            return Err("close of open fd failed");
+        }
+        if crate::syscalls::fs_open::sys_close(fd) != Errno::EBADF as u64 {
+            return Err("second close of open fd did not return EBADF");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+/// `openpty` must install master and slave in the live table and close both;
+/// the previous clone-only install returned numbers that resolved to EBADF.
+fn test_openpty_install_write_through() -> Result<(), &'static str> {
+    use crate::syscalls::errno::Errno;
+
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let packed = crate::syscalls::gui::sys_openpty();
+        if (packed as i64) < 0 {
+            return Err("openpty failed");
+        }
+        let m = packed & 0xFFFF;
+        let s = (packed >> 16) & 0xFFFF;
+        let installed = proc.with_fd_table(|table, _| {
+            matches!(
+                table.get(m as usize),
+                Some(Some(FileDescriptor::PtyMaster { .. }))
+            ) && matches!(
+                table.get(s as usize),
+                Some(Some(FileDescriptor::PtySlave { .. }))
+            )
+        });
+        if !installed {
+            return Err("pty fds missing from the live fd table");
+        }
+        if crate::syscalls::fs_open::sys_close(m) != 0
+            || crate::syscalls::fs_open::sys_close(s) != 0
+        {
+            return Err("close of a pty fd failed");
+        }
+        let cleared = proc.with_fd_table(|table, _| {
+            table.get(m as usize).map_or(true, |slot| slot.is_none())
+                && table.get(s as usize).map_or(true, |slot| slot.is_none())
+        });
+        if !cleared {
+            return Err("close left pty fd entries behind");
+        }
+        if crate::syscalls::fs_open::sys_close(m) != Errno::EBADF as u64 {
+            return Err("second close of pty fd did not return EBADF");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+/// `sys_close` must drop the handle-table entry too: otherwise `add_fd` keeps
+/// skipping the freed index and every open/close pair burns a number.
+fn test_open_close_frees_fd_and_handle() -> Result<(), &'static str> {
+    use crate::syscalls::errno::Errno;
+    use crate::syscalls::fs_open::{open_file, sys_close};
+
+    const O_CLOEXEC: i32 = 0x80000;
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let fd = open_file("/ctl/kernel/hostname", O_CLOEXEC, 0);
+        if (fd as i64) < 0 {
+            return Err("open(/ctl/kernel/hostname) failed");
+        }
+        if !proc.handle_table.lock().is_valid(fd) {
+            return Err("open fd has no handle-table entry");
+        }
+        if sys_close(fd) != 0 {
+            return Err("close of open fd failed");
+        }
+        if proc.handle_table.lock().is_valid(fd) {
+            return Err("close left the handle-table entry behind");
+        }
+        let again = open_file("/ctl/kernel/hostname", O_CLOEXEC, 0);
+        if again != fd {
+            return Err("open after close did not reuse the freed fd number");
+        }
+        if sys_close(again) != 0 {
+            return Err("close of reopened fd failed");
+        }
+        if sys_close(again) != Errno::EBADF as u64 {
+            return Err("double close did not return EBADF");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+/// AF_UNIX accept must install the returned fd into the live table (not a
+/// clone) and accept4 must put its flags on that same live slot. The backlog
+/// is staged directly because bind/connect need user-memory sockaddrs.
+fn test_unix_accept_installs_live_fd() -> Result<(), &'static str> {
+    use crate::syscalls::fs_open::sys_close;
+    use crate::syscalls::net_socket::{sys_accept, sys_accept4};
+
+    const SOCK_CLOEXEC: u64 = 0x80000;
+    const SOCK_NONBLOCK: u64 = 0x800;
+
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let listener = crate::net::unix::create_unix_socket(1)
+            .map_err(|_| "create_unix_socket(listener) failed")?;
+        let listen_fd = proc.with_fd_table(|fd_table, _| {
+            fd_table.push(Some(FileDescriptor::UnixSocket(
+                listener,
+                crate::task::process::SocketType::Unix,
+            )));
+            (fd_table.len() - 1) as u64
+        });
+        {
+            let socks = crate::net::unix::UNIX_SOCKETS.lock();
+            let sock = socks.get(&listener).ok_or("listener missing")?;
+            let mut inner = sock.inner.lock();
+            inner.is_listening = true;
+            inner.bind_path = Some(alloc::string::String::from("/contract.sock"));
+        }
+
+        let client = crate::net::unix::create_unix_socket(1)
+            .map_err(|_| "create_unix_socket(client) failed")?;
+        crate::net::unix::UNIX_SOCKETS
+            .lock()
+            .get(&listener)
+            .ok_or("listener missing")?
+            .inner
+            .lock()
+            .backlog
+            .push(client);
+
+        let fd = sys_accept(listen_fd, core::ptr::null_mut(), core::ptr::null_mut());
+        if (fd as i64) < 0 {
+            return Err("accept on a queued AF_UNIX connection failed");
+        }
+        let live = proc.with_fd_table(|table, _| {
+            matches!(
+                table.get(fd as usize),
+                Some(Some(FileDescriptor::UnixSocket(h, _))) if *h != listener
+            )
+        });
+        if !live {
+            return Err("accepted fd is not live in the real fd table");
+        }
+
+        let client2 = crate::net::unix::create_unix_socket(1)
+            .map_err(|_| "create_unix_socket(client2) failed")?;
+        crate::net::unix::UNIX_SOCKETS
+            .lock()
+            .get(&listener)
+            .ok_or("listener missing")?
+            .inner
+            .lock()
+            .backlog
+            .push(client2);
+
+        let fd4 = sys_accept4(
+            listen_fd,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            SOCK_CLOEXEC | SOCK_NONBLOCK,
+        );
+        if (fd4 as i64) < 0 {
+            return Err("accept4 on a queued AF_UNIX connection failed");
+        }
+        let flags_ok = proc.with_fd_table(|table, flags| {
+            matches!(
+                table.get(fd4 as usize),
+                Some(Some(FileDescriptor::UnixSocket(..)))
+            ) && flags.get(fd4 as usize).map_or(false, |f| {
+                f & (SOCK_CLOEXEC | SOCK_NONBLOCK) == SOCK_CLOEXEC | SOCK_NONBLOCK
+            })
+        });
+        if !flags_ok {
+            return Err("accept4 flags did not land on the live fd");
+        }
+        if sys_close(fd) != 0 || sys_close(fd4) != 0 || sys_close(listen_fd) != 0 {
+            return Err("close of accepted AF_UNIX fds failed");
+        }
+        crate::net::unix::cleanup_unix_socket(client);
+        crate::net::unix::cleanup_unix_socket(client2);
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+/// pipe2 accepts only O_CLOEXEC|O_NONBLOCK; anything else is EINVAL and must
+/// not install (or leak) a pipe pair.
+fn test_pipe2_rejects_unknown_flags() -> Result<(), &'static str> {
+    use crate::syscalls::errno::Errno;
+
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let before = fd_count(&proc);
+        for flags in [0x1, 0x4000, i32::MIN] {
+            let rc = crate::syscalls::compat::sys_pipe2(core::ptr::null_mut(), flags);
+            if rc != Errno::EINVAL as u64 {
+                return Err("pipe2 accepted an unsupported flag");
+            }
+        }
+        if fd_count(&proc) != before {
+            return Err("rejected pipe2 installed fds");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+/// A bad `fds` buffer must roll back both entries, not leak them.
+fn test_pipe_rolls_back_on_bad_user_buffer() -> Result<(), &'static str> {
+    use crate::syscalls::errno::Errno;
+
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let before = fd_count(&proc);
+        let rc = crate::syscalls::fs_open::sys_pipe(core::ptr::null_mut());
+        if rc != Errno::EFAULT as u64 {
+            return Err("pipe with a null fds pointer did not return EFAULT");
+        }
+        if fd_count(&proc) != before {
+            return Err("pipe leaked fds on EFAULT");
+        }
+        let rc = crate::syscalls::compat::sys_pipe2(core::ptr::null_mut(), 0x80000);
+        if rc != Errno::EFAULT as u64 {
+            return Err("pipe2 with a null fds pointer did not return EFAULT");
+        }
+        if fd_count(&proc) != before {
+            return Err("pipe2 leaked fds on EFAULT");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+/// `memfd_create` must route its name through `read_user_string` and reject
+/// any pointer outside the userspace range instead of dereferencing it.
+///
+/// The selftest environment maps no userspace pages (see `abi_args.rs`), so the
+/// success path — read a name, create the tmpfs node, install the fd — cannot be
+/// driven here. Asserting an install would pass regardless of the handler and is
+/// the vacuous coverage this repo rejects. What *is* observable, and what the
+/// syscall-hygiene fix is actually about, is that a kernel-space name is
+/// EFAULT-rejected and leaks no fd.
+fn test_memfd_create_rejects_non_user_name() -> Result<(), &'static str> {
+    use crate::syscalls::errno::Errno;
+    use crate::syscalls::shm::sys_memfd_create;
+
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let before = fd_count(&proc);
+        // .rodata string: a kernel address, must not be dereferenced.
+        let kernel_name = b"test_memfd\0";
+        let rc = sys_memfd_create(kernel_name.as_ptr(), 0);
+        if rc != Errno::EFAULT as u64 {
+            return Err("memfd_create did not reject a kernel-space name");
+        }
+        let rc = sys_memfd_create(core::ptr::null(), 0);
+        if rc != Errno::EFAULT as u64 {
+            return Err("memfd_create with null name did not return EFAULT");
+        }
+        if fd_count(&proc) != before {
+            return Err("rejected memfd_create leaked an fd");
+        }
+        Ok(())
+    })();
+    *CURRENT_PROCESS.lock() = previous;
+    out
+}
+
+/// `socketpair` must reject a non-AF_UNIX domain (EAFNOSUPPORT) and an unknown
+/// socket type (EINVAL) before installing anything.
+///
+/// The install/rollback contract is owned by
+/// `userptr:socketpair_rolls_back_on_bad_user_buffer`; the success path needs
+/// mapped userspace pages the selftest environment does not provide (see
+/// `abi_args.rs`), so this test pins only the argument-validation half.
+fn test_socketpair_validates_domain_and_type() -> Result<(), &'static str> {
+    use crate::syscalls::errno::Errno;
+    use crate::syscalls::net_socket::sys_socketpair;
+
+    let previous = CURRENT_PROCESS.lock().clone();
+    let proc = make_proc()?;
+    *CURRENT_PROCESS.lock() = Some(proc.clone());
+    let out = (|| {
+        let before = fd_count(&proc);
+        let rc = sys_socketpair(99, 1, 0, core::ptr::null_mut());
+        if rc != Errno::EAFNOSUPPORT as u64 {
+            return Err("socketpair accepted a non-AF_UNIX domain");
+        }
+        let rc = sys_socketpair(1, 99, 0, core::ptr::null_mut());
+        if rc != Errno::EINVAL as u64 {
+            return Err("socketpair accepted an unknown socket type");
+        }
+        if fd_count(&proc) != before {
+            return Err("rejected socketpair installed an fd");
         }
         Ok(())
     })();
@@ -250,5 +689,41 @@ pub fn register() {
     selftest::register(
         "contract:dup_fcntl_epoll_write_through",
         test_fd_dup_fcntl_write_through,
+    );
+    selftest::register(
+        "contract:pipe_install_write_through",
+        test_pipe_install_write_through,
+    );
+    selftest::register(
+        "contract:open_install_write_through",
+        test_open_install_write_through,
+    );
+    selftest::register(
+        "contract:openpty_install_write_through",
+        test_openpty_install_write_through,
+    );
+    selftest::register(
+        "contract:pipe_rolls_back_on_bad_user_buffer",
+        test_pipe_rolls_back_on_bad_user_buffer,
+    );
+    selftest::register(
+        "contract:open_close_frees_fd_and_handle",
+        test_open_close_frees_fd_and_handle,
+    );
+    selftest::register(
+        "contract:unix_accept_installs_live_fd",
+        test_unix_accept_installs_live_fd,
+    );
+    selftest::register(
+        "contract:pipe2_rejects_unknown_flags",
+        test_pipe2_rejects_unknown_flags,
+    );
+    selftest::register(
+        "contract:memfd_create_rejects_non_user_name",
+        test_memfd_create_rejects_non_user_name,
+    );
+    selftest::register(
+        "contract:socketpair_validates_domain_and_type",
+        test_socketpair_validates_domain_and_type,
     );
 }

@@ -199,11 +199,44 @@ fn this_cpu() -> u16 {
             return f();
         }
     }
-    // __cpuid(1) is the LLVM CPUID builtin (handles the callee-saved rbx
-    // internally); leaf 1 never faults on x86_64 and EBX[31:24] is the
-    // caller's initial APIC ID, unique per CPU.
-    let r = core::arch::x86_64::__cpuid(1);
-    ((r.ebx >> 24) & 0xFF) as u16
+    #[cfg(target_arch = "x86_64")]
+    {
+        // __cpuid(1) is the LLVM CPUID builtin (handles the callee-saved rbx
+        // internally); leaf 1 never faults on x86_64 and EBX[31:24] is the
+        // caller's initial APIC ID, unique per CPU.
+        let r = core::arch::x86_64::__cpuid(1);
+        ((r.ebx >> 24) & 0xFF) as u16
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // On aarch64, read MPIDR_EL1 to get the CPU ID (Aff0 field).
+        let id: u64;
+        // SAFETY: Reading MPIDR_EL1 is a read-only system register access
+        // that does not modify state and is always valid on AArch64.
+        unsafe {
+            core::arch::asm!("mrs {}, mpidr_el1", out(reg) id);
+        }
+        (id & 0xFF) as u16
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        // On RISC-V, read the hart ID from mhartid CSR.
+        let hart_id: usize;
+        // SAFETY: Reading mhartid CSR is a read-only system register access
+        // that is always valid on RISC-V.
+        unsafe {
+            core::arch::asm!("csrr {}, mhartid", out(reg) hart_id);
+        }
+        hart_id as u16
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        0
+    }
 }
 
 /// Current CPU id (host-test mock — no CPUID on the test host).
@@ -248,13 +281,55 @@ pub unsafe fn set_cpu_id_provider(f: CpuIdProvider) {
 #[cfg(not(all(test, not(target_os = "none"))))]
 #[inline(always)]
 fn save_and_disable_interrupts() -> u64 {
-    let rflags: u64;
-    // SAFETY: pushfq/pop captures flags, cli disables interrupts.
-    // No memory barrier needed — spin::Mutex provides its own ordering.
-    unsafe {
-        core::arch::asm!("pushfq; pop {rflags}; cli", rflags = out(reg) rflags, options(att_syntax));
+    #[cfg(target_arch = "x86_64")]
+    {
+        let rflags: u64;
+        // SAFETY: pushfq/pop captures flags, cli disables interrupts.
+        // No memory barrier needed — spin::Mutex provides its own ordering.
+        unsafe {
+            core::arch::asm!("pushfq; pop {rflags}; cli", rflags = out(reg) rflags, options(att_syntax));
+        }
+        rflags
     }
-    rflags
+    #[cfg(target_arch = "aarch64")]
+    {
+        // On aarch64, save PSTATE and disable interrupts (DAIF mask).
+        let daif: u64;
+        // SAFETY: Reading DAIF and setting DAIFSET are read-only system register
+        // accesses that do not modify memory and are safe on AArch64.
+        unsafe {
+            core::arch::asm!(
+                "mrs {}, daif",
+                "msr daifset, #0xf",  // mask all interrupts (A=1, I=1, F=1, D=1)
+                out(reg) daif,
+                options(nostack, preserves_flags)
+            );
+        }
+        daif
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        // On RISC-V, save mstatus and disable interrupts (clear MIE).
+        let mstatus: usize;
+        // SAFETY: csrrci atomically reads and clears the MIE bit in mstatus.
+        // This is a read-modify-write on a CSR that is always valid on RISC-V.
+        unsafe {
+            core::arch::asm!(
+                "csrrci {}, mstatus, 0x8",  // clear MIE bit (bit 3)
+                out(reg) mstatus,
+                options(nostack, preserves_flags)
+            );
+        }
+        mstatus as u64
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        0
+    }
 }
 
 /// Save RFLAGS and disable interrupts (test mock — no-op on host).
@@ -272,10 +347,36 @@ fn save_and_disable_interrupts() -> u64 {
 #[cfg(not(all(test, not(target_os = "none"))))]
 #[inline(always)]
 fn restore_interrupts(rflags: u64) {
-    if rflags & IF_BIT != 0 {
-        // SAFETY: sti is only issued if interrupts were enabled at the time
-        // save_and_disable_interrupts() was called.
-        unsafe { core::arch::asm!("sti") };
+    #[cfg(target_arch = "x86_64")]
+    {
+        if rflags & IF_BIT != 0 {
+            // SAFETY: sti is only issued if interrupts were enabled at the time
+            // save_and_disable_interrupts() was called.
+            unsafe { core::arch::asm!("sti") };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // On aarch64, restore DAIF from saved value.
+        // SAFETY: Restoring DAIF to a previously saved value is a read-only
+        // system register write that restores interrupt state.
+        unsafe { core::arch::asm!("msr daif, {}", in(reg) rflags) };
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        // On RISC-V, restore mstatus from saved value.
+        // SAFETY: Restoring mstatus to a previously saved value restores the
+        // interrupt enable state (MIE bit) and other status bits.
+        unsafe { core::arch::asm!("csrw mstatus, {}", in(reg) rflags) };
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        // No-op for unsupported architectures
+        let _ = rflags;
     }
 }
 
