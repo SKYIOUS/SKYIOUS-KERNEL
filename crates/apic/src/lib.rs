@@ -122,8 +122,14 @@ pub trait SerialWriter: Send + Sync {
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
-pub static PICS: vahi_sync::IrqSafeMutex<pic8259::ChainedPics> =
-    vahi_sync::IrqSafeMutex::new(unsafe { pic8259::ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+pub static PICS: vahi_hal::sync::IrqSafeMutex<pic8259::ChainedPics> =
+    vahi_hal::sync::IrqSafeMutex::new(unsafe {
+        // SAFETY: PIC_1_OFFSET and PIC_2_OFFSET are constant port addresses.
+        // Initializing the chained PICs is a one-time operation at boot
+        // that configures the hardware interrupt controller. No other
+        // code accesses these ports before this initialization completes.
+        pic8259::ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
+    });
 
 /// Monotonic 100 Hz tick count (delegates to the kernel clock registered
 /// in `vahi-types` — the single shared clock, no per-crate extern stubs).

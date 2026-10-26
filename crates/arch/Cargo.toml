@@ -5,6 +5,5 @@ edition = "2021"
 description = "Architecture-specific code for the Vahi kernel (x86_64, aarch64)"
 
 [dependencies]
-vahi-sync = { path = "../sync" }
+vahi-hal = { path = "../hal" }
 spin = "0.9.8"
-

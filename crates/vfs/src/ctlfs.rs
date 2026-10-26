@@ -2,7 +2,7 @@ use crate::{get_ticks, FileSystem, Stat, VfsNode, S_IFDIR, S_IFREG};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 enum CtlInner {
     Dir,
     File(alloc::boxed::Box<dyn Fn() -> Vec<u8> + Send + Sync>),

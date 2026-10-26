@@ -5,7 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use crossbeam_queue::ArrayQueue;
 use vahi_drivers::input::InputEvent;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use vahi_syscalls::user_access;
 
 enum DevNodeInner {

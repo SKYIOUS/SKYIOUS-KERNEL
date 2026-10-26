@@ -3,7 +3,7 @@ pub mod virtio;
 
 use alloc::sync::Arc;
 use e1000::E1000Device;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use virtio::VirtIONetDevice;
 
 pub enum NicDevice {

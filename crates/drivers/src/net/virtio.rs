@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, RxToken, TxToken};
 use smoltcp::time::Instant;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::VirtAddr;
 
 /// VirtIO PCI IDs

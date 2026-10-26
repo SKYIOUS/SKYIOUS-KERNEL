@@ -1,5 +1,5 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 const RING_SIZE: usize = 256;
 const DMA_SIZE: usize = 1024 * 1024;

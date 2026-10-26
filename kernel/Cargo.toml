@@ -6,7 +6,6 @@ version = "0.3.0"
 edition = "2021"
 
 [dependencies]
-vahi-sync = { path = "../crates/sync" }
 vahi-memory = { path = "../crates/memory" }
 vahi-crypto = { path = "../crates/crypto" }
 vahi-hal = { path = "../crates/hal" }

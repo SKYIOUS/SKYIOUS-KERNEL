@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 pub const PAGE_SIZE: usize = 4096;
 // ponytail: FIFO eviction, LRU if perf matters

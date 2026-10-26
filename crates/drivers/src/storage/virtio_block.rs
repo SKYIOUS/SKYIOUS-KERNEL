@@ -14,7 +14,7 @@ use crate::net::virtio::{
 };
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::instructions::port::Port;
 use x86_64::VirtAddr;
 

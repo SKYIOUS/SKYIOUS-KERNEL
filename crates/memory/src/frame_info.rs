@@ -5,7 +5,7 @@
 //! circular dependencies with the buddy allocator.
 
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::PhysAddr;
 
 struct RefCountTable {

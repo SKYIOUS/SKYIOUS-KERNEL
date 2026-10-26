@@ -116,19 +116,19 @@ fn list_index(layout: &Layout) -> Option<usize> {
     BLOCK_SIZES.iter().position(|&s| s >= required_block_size)
 }
 
-/// A wrapper around vahi_sync::IrqSafeMutex to permit trait implementations.
+/// A wrapper around vahi_hal::sync::IrqSafeMutex to permit trait implementations.
 pub struct Locked<A> {
-    inner: vahi_sync::IrqSafeMutex<A>,
+    inner: vahi_hal::sync::IrqSafeMutex<A>,
 }
 
 impl<A> Locked<A> {
     pub const fn new(inner: A) -> Self {
         Locked {
-            inner: vahi_sync::IrqSafeMutex::new(inner),
+            inner: vahi_hal::sync::IrqSafeMutex::new(inner),
         }
     }
 
-    pub fn lock(&self) -> vahi_sync::IrqSafeMutexGuard<'_, A> {
+    pub fn lock(&self) -> vahi_hal::sync::IrqSafeMutexGuard<'_, A> {
         self.inner.lock()
     }
 }

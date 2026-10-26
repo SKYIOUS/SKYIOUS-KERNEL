@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crossbeam_queue::ArrayQueue;
 use lazy_static::lazy_static;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 const PTY_BUF_SIZE: usize = 4096;
 const MAX_PTYS: usize = 16;

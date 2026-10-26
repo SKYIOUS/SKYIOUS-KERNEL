@@ -132,7 +132,7 @@ pub fn init_gs_base(cpu_id: usize) {
     // disabled (rdmsr/cpuid are), unique per CPU (initial APIC id / stored
     // cpu_id), and no panic or allocation (none present).
     unsafe {
-        vahi_sync::set_cpu_id_provider(current_cpu_id);
+        vahi_hal::sync::set_cpu_id_provider(current_cpu_id);
     }
 }
 

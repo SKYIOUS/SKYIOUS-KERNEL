@@ -18,7 +18,7 @@ pub mod xhci;
 use crate::usb::core::UsbHostController;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 use crate::usb::xhci::XhciController;
 

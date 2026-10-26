@@ -5,7 +5,6 @@ resolver = "2"
 members = [
     "kernel",
     "builder",
-    "crates/sync",
     "crates/memory",
     "crates/arch",
     "crates/task",
@@ -28,7 +27,6 @@ members = [
 # builder is std-only (Python build scripts). Build explicitly with: cargo build -p builder
 default-members = [
     "kernel",
-    "crates/sync",
     "crates/memory",
     "crates/arch",
     "crates/task",

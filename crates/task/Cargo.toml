@@ -5,8 +5,8 @@ edition = "2021"
 description = "Shared task vocabulary (PTY, async task types) for the Vahi kernel"
 
 [dependencies]
+vahi-hal = { path = "../hal" }
 vahi-types = { path = "../types" }
-vahi-sync = { path = "../sync" }
 spin = "0.9.8"
 bitflags = "2"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }

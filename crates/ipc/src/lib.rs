@@ -31,7 +31,7 @@ use vahi_types::Errno;
 /// Mutex type: IrqSafeMutex on bare-metal (disables interrupts),
 /// spin::Mutex in test mode (no privileged instructions).
 #[cfg(not(all(test, not(target_os = "none"))))]
-type IpcMutex<T> = vahi_sync::IrqSafeMutex<T>;
+type IpcMutex<T> = vahi_hal::sync::IrqSafeMutex<T>;
 #[cfg(all(test, not(target_os = "none")))]
 type IpcMutex<T> = spin::Mutex<T>;
 
