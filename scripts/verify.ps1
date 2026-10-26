@@ -27,6 +27,9 @@ function Invoke-Gate {
 Invoke-Gate "fmt" $RootDir { cargo fmt --all -- --check }
 Invoke-Gate "policy self-test" $RootDir { & $Python scripts/check_repo_policy.py --self-test }
 Invoke-Gate "policy (worktree)" $RootDir { & $Python scripts/check_repo_policy.py --worktree }
+Invoke-Gate "host tests (default features)" $RootDir { cargo test --workspace --exclude vahi_kernel --locked }
+Invoke-Gate "host tests (all features)" $RootDir { cargo test --workspace --exclude vahi_kernel --all-features --locked }
+Invoke-Gate "host clippy (all features)" $RootDir { cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features --locked -- -D warnings }
 Invoke-Gate "build (release, self_test)" $KernelDir {
     cargo build --release --target $Target --features $Features --locked
 }

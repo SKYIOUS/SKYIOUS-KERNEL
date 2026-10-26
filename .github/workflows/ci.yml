@@ -7,9 +7,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [master]
+    branches: [master, 'refactor/**', 'feat/**', 'fix/**']
   push:
-    branches: [master]
+    branches: [master, 'refactor/**', 'feat/**', 'fix/**']
   workflow_dispatch:
 
 permissions:
@@ -29,14 +29,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install nightly Rust
-        run: |
-          rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
-          rustup target add x86_64-unknown-none --toolchain nightly
-          rustup override set nightly
-
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rustfmt
       - name: Format check
         run: cargo fmt --all -- --check
 
@@ -46,14 +42,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install nightly Rust
-        run: |
-          rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
-          rustup target add x86_64-unknown-none --toolchain nightly
-          rustup override set nightly
-
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -62,12 +54,10 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-host-tests-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
-
       # vahi_kernel is excluded because it cannot run on the host; its tests
       # execute under QEMU in the qemu-selftest job.
       - name: Workspace unit tests (host)
         run: cargo test --workspace --exclude vahi_kernel --locked
-
       - name: Workspace unit tests (host, all features)
         run: cargo test --workspace --exclude vahi_kernel --all-features --locked
 
@@ -77,14 +67,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install nightly Rust
-        run: |
-          rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
-          rustup target add x86_64-unknown-none --toolchain nightly
-          rustup override set nightly
-
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -93,10 +79,8 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-host-clippy-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
-
       - name: Clippy (host workspace, kernel excluded)
         run: cargo clippy --workspace --exclude vahi_kernel --all-targets --locked -- -D warnings
-
       - name: Clippy (host workspace, all features)
         run: cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features --locked -- -D warnings
 
@@ -109,14 +93,10 @@ jobs:
         working-directory: kernel
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install nightly Rust
-        run: |
-          rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
-          rustup target add x86_64-unknown-none --toolchain nightly
-          rustup override set nightly
-
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -125,28 +105,16 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-kernel-build-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
-
       - name: Build (debug, default features)
         run: cargo build --target x86_64-unknown-none --locked
-
       - name: Build (debug, no features)
         run: cargo build --target x86_64-unknown-none --no-default-features --locked
-
       - name: Build (release, default features)
         run: cargo build --release --target x86_64-unknown-none --locked
-
       - name: Build (release, self_test)
         run: cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
-
       - name: Build (debug, all features)
         run: cargo build --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu" --locked
-
-      - name: Build (each feature solo)
-        run: |
-          for feat in smp net ext4 iommu self_test ash hypervisor verification gpu uhci; do
-            echo "Building with feature: $feat"
-            cargo build --target x86_64-unknown-none --no-default-features --features "$feat" --locked
-          done
 
   kernel-clippy:
     name: Kernel Clippy
@@ -154,14 +122,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install nightly Rust
-        run: |
-          rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
-          rustup target add x86_64-unknown-none --toolchain nightly
-          rustup override set nightly
-
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -170,23 +134,18 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-kernel-clippy-v2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-all
-
       - name: Clippy (default features)
         working-directory: kernel
         run: cargo clippy --target x86_64-unknown-none --locked -- -D warnings
-
       - name: Clippy (no features)
         working-directory: kernel
         run: cargo clippy --target x86_64-unknown-none --no-default-features --locked -- -D warnings
-
       - name: Clippy (all features)
         working-directory: kernel
         run: cargo clippy --target x86_64-unknown-none --no-default-features --features "smp,net,ext4,iommu,uhci,ash,hypervisor,verification,gpu" --locked -- -D warnings
-
       - name: Clippy (release, self_test)
         working-directory: kernel
         run: cargo clippy --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked -- -D warnings
-
       - name: Clippy (extracted crates)
         run: |
           for crate in vahi-sync vahi-memory vahi-arch vahi-task vahi-vfs vahi-net \
@@ -196,7 +155,6 @@ jobs:
             echo "Clippy: $crate"
             cargo clippy -p "$crate" --target x86_64-unknown-none --locked -- -D warnings
           done
-
       - name: Clippy (solo features)
         working-directory: kernel
         run: |
@@ -211,14 +169,10 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install nightly Rust
-        run: |
-          rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
-          rustup target add x86_64-unknown-none --toolchain nightly
-          rustup override set nightly
-
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -227,42 +181,19 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-qemu-selftest-v2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp-net-ext4-iommu
-
       - name: Cache Limine binaries
         uses: actions/cache@v4
         with:
           path: /tmp/limine-binary
           key: limine-${{ hashFiles('builder/build_limine_image.py') }}
-
-      - name: Install QEMU + OVMF
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 ovmf
-          OVMF=""
-          for candidate in /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd \
-                           /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd; do
-            if [ -f "$candidate" ]; then
-              OVMF="$candidate"
-              break
-            fi
-          done
-          if [ -z "$OVMF" ]; then
-            echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
-            exit 1
-          fi
-          echo "OVMF=$OVMF" >> "$GITHUB_ENV"
-
+      - uses: ./.github/actions/setup-qemu
       # The Limine path is the boot path CI and local runs use; the Rust
       # builder image is known unbootable (FB-004).
       - name: Build kernel (release, self_test)
         working-directory: kernel
-        run: |
-          cargo clean
-          cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
-
+        run: cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
-
       # -vga none required until FB-003 (splash fill touches the byte past the
       # reported framebuffer size) is fixed.
       - name: Run T-00 suite (SMP 1)
@@ -275,7 +206,6 @@ jobs:
             --qemu-extra "-vga none" \
             --serial tests/t00_ci_serial.log \
             --log tests/t00_ci_run.log
-
       - name: Upload serial + runner logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -293,14 +223,10 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install nightly Rust
-        run: |
-          rustup set profile minimal
-          rustup toolchain install nightly --component rust-src,llvm-tools-preview,clippy,rustfmt
-          rustup target add x86_64-unknown-none --toolchain nightly
-          rustup override set nightly
-
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -309,38 +235,17 @@ jobs:
             ~/.cargo/git/
             target/
           key: ${{ runner.os }}-cargo-qemu-boot-v2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp-net-ext4-iommu
-
       - name: Cache Limine binaries
         uses: actions/cache@v4
         with:
           path: /tmp/limine-binary
           key: limine-${{ hashFiles('builder/build_limine_image.py') }}
-
-      - name: Install QEMU + OVMF
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 ovmf
-          OVMF=""
-          for candidate in /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd \
-                           /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd; do
-            if [ -f "$candidate" ]; then
-              OVMF="$candidate"
-              break
-            fi
-          done
-          if [ -z "$OVMF" ]; then
-            echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
-            exit 1
-          fi
-          echo "OVMF=$OVMF" >> "$GITHUB_ENV"
-
+      - uses: ./.github/actions/setup-qemu
       - name: Build kernel (release, production features)
         working-directory: kernel
         run: cargo build --release --target x86_64-unknown-none --locked
-
       - name: Build boot image (Limine)
         run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_normal.bin
-
       - name: Boot (SMP 1, production image)
         run: |
           python3 tests/run_qemu_tests.py \
@@ -350,7 +255,6 @@ jobs:
             --qemu-extra "-vga none" \
             --serial tests/boot_smp1_serial.log \
             --log tests/boot_smp1.log
-
       # K-02: SMP 2 is the topology CI and the docs gate on it; absence
       # of AP markers on an -smp 2 boot is a regression signal.
       - name: Boot (SMP 2, expect 1 AP, production image)
@@ -362,7 +266,6 @@ jobs:
             --qemu-extra "-vga none" \
             --serial tests/boot_smp2_serial.log \
             --log tests/boot_smp2.log
-
       - name: Upload boot logs
         if: always()
         uses: actions/upload-artifact@v4

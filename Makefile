@@ -48,7 +48,8 @@ kernel-debug:
 # Create disk image only
 image:
 	python3 $(BUILDER_DIR)/build_limine_image.py \
-		--kernel $(KERNEL_DIR)/target/x86_64-unknown-none/$(PROFILE)/vahi_kernel \
+		--kernel target/x86_64-unknown-none/$(PROFILE)/vahi_kernel \
+		--initrd kernel/initrd.tar \
 		--output $(IMAGE)
 
 # Clean build artifacts
