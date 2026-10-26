@@ -63,7 +63,7 @@
 | Supported filesystems | 2 (TarFS for initrd, DevFS for /dev) |
 | Real hardware | **Never tested** — QEMU only |
 | SMP | Claims support but global locks serialize everything |
-| Selftests | **228/228 pass** (eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
+| Selftests | **all pass** (count pinned in `tests/selftest_count.txt`; eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
 | Memory leak audit | **PASS** (no leak detected) |
 
 ### Benchmark Results (QEMU/TCG, 512M RAM, 2400 MHz TSC)
@@ -751,7 +751,7 @@ docs/
 
 ### Self-Test Results
 
-**228/228 tests pass** — build with `self_test` feature and boot in QEMU:
+**All selftests pass** — the canonical count lives in `tests/selftest_count.txt`. Build with `self_test` and boot in QEMU:
 
 ```bash
 cd kernel

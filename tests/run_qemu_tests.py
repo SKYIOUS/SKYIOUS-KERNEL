@@ -22,12 +22,13 @@ for PASS/FAIL; exit codes only classify completion, panic and timeout.
 
 With --boot-only, PASS requires the final init marker "[BOOT] init complete"
 (plus --expect-ap when set); any panic marker before it fails the run. With
---expect-count N, the TAP plan and summary must both report exactly N tests.
+--expect-count N, the TAP plan and summary must both report exactly N tests;
+--expect-count auto reads the canonical N from tests/selftest_count.txt.
 
 Usage:
     python tests/run_qemu_tests.py --image bootimage-vahi_kernel.bin
     python tests/run_qemu_tests.py --image tests/t00_selftest.bin --timeout 900
-    python tests/run_qemu_tests.py --image tests/t00_selftest.bin --expect-count 207
+    python tests/run_qemu_tests.py --image tests/t00_selftest.bin --expect-count auto
 
 Windows note: serial goes to a file (-serial file:...) because QEMU's Windows
 stdio is not a byte pipe; that keeps capture identical across hosts.
@@ -281,9 +282,9 @@ def main() -> int:
     ap.add_argument("--expect-ap", type=int, default=0,
                     help="with --boot-only: require N '[AP] count incremented' "
                          "markers (SMP regression, K-02)")
-    ap.add_argument("--expect-count", type=int, default=None,
-                    help="require exactly N TAP tests (plan and summary); "
-                         "a mismatch is FAIL")
+    ap.add_argument("--expect-count", default=None,
+                    help="require exactly N TAP tests (plan and summary), or "
+                         "'auto' to read tests/selftest_count.txt; a mismatch is FAIL")
     ap.add_argument("--qemu-extra", default="",
                     help="extra QEMU arguments as one quoted string "
                          "(e.g. \"-vga none\")")
@@ -291,6 +292,21 @@ def main() -> int:
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     image = args.image if os.path.isabs(args.image) else os.path.join(os.getcwd(), args.image)
+    expect_count = args.expect_count
+    if expect_count == "auto":
+        count_path = os.path.join(root, "tests", "selftest_count.txt")
+        try:
+            with open(count_path, encoding="utf-8") as handle:
+                expect_count = int(handle.read().strip())
+        except (OSError, ValueError) as exc:
+            print(f"INFRASTRUCTURE_ERROR: cannot read test count from {count_path}: {exc}")
+            return INFRA_ERROR
+    elif expect_count is not None:
+        try:
+            expect_count = int(expect_count)
+        except ValueError:
+            print(f"INFRASTRUCTURE_ERROR: --expect-count must be an integer or 'auto': {expect_count}")
+            return INFRA_ERROR
     qemu = find_qemu(args.qemu)
     if not qemu:
         print("INFRASTRUCTURE_ERROR: qemu-system-x86_64 not found (use --qemu)")
@@ -331,7 +347,7 @@ def main() -> int:
     try:
         code, detail = run(image, qemu, ovmf, args.timeout, args.smp, args.mem,
                            log_path, serial_path, args.boot_wait, args.boot_only,
-                           args.expect_ap, args.expect_count,
+                           args.expect_ap, expect_count,
                            shlex.split(args.qemu_extra))
     except OSError as exc:
         code, detail = INFRA_ERROR, f"runner I/O failure: {exc}"

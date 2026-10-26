@@ -3,8 +3,9 @@
 
 Whole-repo gates are rules the tree already satisfies. Ratcheted rules
 (unsafe/SAFETY, unwrap, blanket dead_code) pre-date this gate, so they are
-enforced on added lines only via --diff-base. The full debt inventory is
-printed with --inventory but does not fail the run.
+enforced on added lines only via --diff-base (committed branch state) or
+--worktree (uncommitted state, including untracked files). The full debt
+inventory is printed with --inventory but does not fail the run.
 
 Exit codes: 0 clean, 1 policy violation, 2 infrastructure error.
 """
@@ -287,18 +288,49 @@ def check_diff(base: str) -> None:
     except (OSError, subprocess.CalledProcessError):
         print(f"INFRASTRUCTURE_ERROR: diff base not found: {base}", file=sys.stderr)
         sys.exit(2)
+    scan_added_rust(git_output(
+        ["diff", "--unified=0", "--no-color", "--no-ext-diff", f"{base}...HEAD", "--", "*.rs"]
+    ))
+    added = git_output(
+        ["diff", "--name-only", "--diff-filter=A", f"{base}...HEAD", "--", "*.rs"]
+    )
+    check_new_file_lengths([item.strip() for item in added.splitlines() if item.strip()])
+
+
+def check_worktree() -> None:
+    """Check uncommitted additions: staged, unstaged and untracked Rust files."""
+    scan_added_rust(git_output(
+        ["diff", "--unified=0", "--no-color", "--no-ext-diff", "HEAD", "--", "*.rs"]
+    ))
+    untracked = [
+        item.strip() for item in git_output(
+            ["ls-files", "--others", "--exclude-standard", "--", "*.rs"]
+        ).splitlines() if item.strip()
+    ]
+    for rel in untracked:
+        full = ROOT / rel
+        if not full.is_file():
+            continue
+        text = read_text(rel)
+        for number, line in enumerate(text.splitlines(), 1):
+            check_added_line(rel, number, line)
+    check_new_file_lengths(untracked)
+
+
+def git_output(args: list[str]) -> str:
     try:
-        raw = subprocess.check_output(
-            ["git", "diff", "--unified=0", "--no-color", "--no-ext-diff", f"{base}...HEAD", "--", "*.rs"],
-            cwd=ROOT, text=True, encoding="utf-8", errors="replace",
+        return subprocess.check_output(
+            ["git", *args], cwd=ROOT, text=True, encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.CalledProcessError) as exc:
-        print(f"INFRASTRUCTURE_ERROR: git diff failed: {exc}", file=sys.stderr)
+        print(f"INFRASTRUCTURE_ERROR: git {' '.join(args)} failed: {exc}", file=sys.stderr)
         sys.exit(2)
 
+
+def scan_added_rust(diff_text: str) -> None:
     current = ""
     new_line = 0
-    for line in raw.splitlines():
+    for line in diff_text.splitlines():
         if line.startswith("+++ b/"):
             current = line[6:]
             continue
@@ -309,17 +341,14 @@ def check_diff(base: str) -> None:
         if not current or not line:
             continue
         if line.startswith("+"):
-            content = line[1:]
-            check_added_line(current, new_line, content)
+            check_added_line(current, new_line, line[1:])
             new_line += 1
         elif line.startswith(" "):
             new_line += 1
 
-    added = subprocess.check_output(
-        ["git", "diff", "--name-only", "--diff-filter=A", f"{base}...HEAD", "--", "*.rs"],
-        cwd=ROOT, text=True, encoding="utf-8", errors="replace",
-    )
-    for rel in [item.strip() for item in added.splitlines() if item.strip()]:
+
+def check_new_file_lengths(files: list[str]) -> None:
+    for rel in files:
         full = ROOT / rel
         if not full.is_file():
             continue
@@ -398,13 +427,29 @@ def self_test() -> int:
     crlf_ranges = cfg_test_ranges(crlf)
     assert not line_is_test("kernel/src/x.rs", crlf, 1, crlf_ranges)
     assert line_is_test("kernel/src/x.rs", crlf, 4, crlf_ranges)
+    saved = list(violations)
+    try:
+        violations.clear()
+        scan_added_rust(
+            "diff --git a/x.rs b/x.rs\n"
+            "+++ b/x.rs\n"
+            "@@ -0,0 +7,1 @@\n"
+            "+fn f() { todo!() }\n"
+        )
+        assert any("x.rs:7" in item for item in violations), violations
+    finally:
+        violations.clear()
+        violations.extend(saved)
     print("policy self-test passed")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--diff-base", default=None, help="git ref to diff added lines against")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--diff-base", default=None, help="git ref to diff committed added lines against")
+    scope.add_argument("--worktree", action="store_true",
+                       help="diff uncommitted added lines (staged, unstaged, untracked) against HEAD")
     parser.add_argument("--inventory", action="store_true", help="print all ratcheted debt locations")
     parser.add_argument("--self-test", action="store_true", help="test the policy patterns")
     args = parser.parse_args()
@@ -444,6 +489,8 @@ def main() -> int:
     check_workflows()
     if args.diff_base:
         check_diff(args.diff_base)
+    elif args.worktree:
+        check_worktree()
     if args.inventory:
         run_inventory()
 
