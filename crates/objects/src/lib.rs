@@ -244,12 +244,13 @@ mod tests {
         assert_eq!(TYPE_SEMAPHORE.name(), "Semaphore");
         assert_eq!(TYPE_TIMER.name(), "Timer");
         assert_eq!(TYPE_EVENT.name(), "Event");
+        assert_eq!(TYPE_MQUEUE.name(), "MQueue");
     }
 
     #[test]
     fn object_type_id_unknown() {
         assert_eq!(ObjectTypeId(0).name(), "Unknown");
-        assert_eq!(ObjectTypeId(15).name(), "Unknown");
+        assert_eq!(ObjectTypeId(16).name(), "Unknown");
         assert_eq!(ObjectTypeId(99).name(), "Unknown");
         assert_eq!(ObjectTypeId(u16::MAX).name(), "Unknown");
     }
