@@ -163,10 +163,10 @@ jobs:
             cargo clippy --target x86_64-unknown-none --no-default-features --features "$feat" --locked -- -D warnings
           done
 
-  qemu-selftest:
-    name: QEMU Self-Test Suite
+  build-kernel:
+    name: Build Kernel & Boot Images
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
@@ -180,7 +180,63 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-qemu-selftest-v2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp-net-ext4-iommu
+          key: ${{ runner.os }}-cargo-build-kernel-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
+      - name: Cache Limine binaries
+        uses: actions/cache@v4
+        with:
+          path: /tmp/limine-binary
+          key: limine-${{ hashFiles('builder/build_limine_image.py') }}
+      # Build release + self_test kernel (for selftest suite)
+      - name: Build kernel (release, self_test)
+        working-directory: kernel
+        run: cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
+      # Build release + production kernel (for boot regression)
+      - name: Build kernel (release, production)
+        working-directory: kernel
+        run: cargo build --release --target x86_64-unknown-none --locked
+      - name: Build boot image (self_test)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output t00_selftest.bin
+      - name: Build boot image (production)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output t00_normal.bin
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-binaries
+          path: |
+            target/x86_64-unknown-none/release/vahi_kernel
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload boot images
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-images
+          path: |
+            t00_selftest.bin
+            t00_normal.bin
+          if-no-files-found: error
+          retention-days: 1
+
+  qemu-selftest:
+    name: QEMU Self-Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build-kernel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
+      - name: Download kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-binaries
+          path: kernel/target/x86_64-unknown-none/release
+      - name: Download boot images
+        uses: actions/download-artifact@v4
+        with:
+          name: boot-images
+          path: tests
       - name: Cache Limine binaries
         uses: actions/cache@v4
         with:
@@ -189,13 +245,6 @@ jobs:
       - uses: ./.github/actions/setup-qemu
       # The Limine path is the boot path CI and local runs use; the Rust
       # builder image is known unbootable (FB-004).
-      - name: Build kernel (release, self_test)
-        working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked
-      - name: Build boot image (Limine)
-        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
-      # -vga none required until FB-003 (splash fill touches the byte past the
-      # reported framebuffer size) is fixed.
       - name: Run T-00 suite (SMP 1)
         run: |
           python3 tests/run_qemu_tests.py \
@@ -220,32 +269,30 @@ jobs:
   qemu-boot-regression:
     name: QEMU Boot Regression
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
+    needs: [build-kernel]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Download kernel artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            target/
-          key: ${{ runner.os }}-cargo-qemu-boot-v2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp-net-ext4-iommu
+          name: kernel-binaries
+          path: kernel/target/x86_64-unknown-none/release
+      - name: Download boot images
+        uses: actions/download-artifact@v4
+        with:
+          name: boot-images
+          path: tests
       - name: Cache Limine binaries
         uses: actions/cache@v4
         with:
           path: /tmp/limine-binary
           key: limine-${{ hashFiles('builder/build_limine_image.py') }}
       - uses: ./.github/actions/setup-qemu
-      - name: Build kernel (release, production features)
-        working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --locked
-      - name: Build boot image (Limine)
-        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_normal.bin
       - name: Boot (SMP 1, production image)
         run: |
           python3 tests/run_qemu_tests.py \

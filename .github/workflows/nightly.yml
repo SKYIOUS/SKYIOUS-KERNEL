@@ -77,10 +77,10 @@ jobs:
           rustup target add riscv64gc-unknown-none-elf --toolchain ${{ steps.install-toolchain.outputs.channel }}
           cargo check --target riscv64gc-unknown-none-elf --locked
 
-  selftest-smp2:
-    name: QEMU Self-Test (SMP 2)
+  build-kernel-nightly:
+    name: Build Kernel & Boot Images (nightly)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
@@ -94,18 +94,72 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: ${{ runner.os }}-cargo-nightly-smp2-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-self_test-smp
+          key: ${{ runner.os }}-cargo-build-kernel-nightly-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}
       - name: Cache Limine binaries
         uses: actions/cache@v4
         with:
           path: /tmp/limine-binary
           key: limine-${{ hashFiles('builder/build_limine_image.py') }}
-      - uses: ./.github/actions/setup-qemu
+      # Build release + self_test kernel (for selftest suites)
       - name: Build kernel (release, self_test)
         working-directory: kernel
         run: cargo build --release --target x86_64-unknown-none --locked --features "self_test,smp,net,ext4,iommu"
-      - name: Build boot image (Limine)
-        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_selftest.bin
+      # Build audit_small + self_test kernel (for audit profile suite)
+      - name: Build kernel (audit_small, self_test)
+        working-directory: kernel
+        run: cargo build --profile audit_small --target x86_64-unknown-none --locked --features "self_test,smp,net,ext4,iommu"
+      # Build release + production kernel (for boot stress)
+      - name: Build kernel (release, production)
+        working-directory: kernel
+        run: cargo build --release --target x86_64-unknown-none --locked
+      - name: Build boot image (self_test)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output t00_selftest.bin
+      - name: Build boot image (audit_small)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/audit_small/vahi_kernel --initrd kernel/initrd.tar --output t00_audit.bin
+      - name: Build boot image (production)
+        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output t00_normal.bin
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-binaries-nightly
+          path: |
+            target/x86_64-unknown-none/release/vahi_kernel
+            target/x86_64-unknown-none/audit_small/vahi_kernel
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload boot images
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-images-nightly
+          path: |
+            t00_selftest.bin
+            t00_audit.bin
+            t00_normal.bin
+          if-no-files-found: error
+          retention-days: 1
+
+  selftest-smp2:
+    name: QEMU Self-Test (SMP 2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build-kernel-nightly]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-toolchain
+        with:
+          target: x86_64-unknown-none
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
+      - name: Download kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-binaries-nightly
+          path: kernel/target/x86_64-unknown-none/release
+      - name: Download boot images
+        uses: actions/download-artifact@v4
+        with:
+          name: boot-images-nightly
+          path: tests
+      - uses: ./.github/actions/setup-qemu
       # SMP 2 showed a roughly 1-in-10 intermittent failure that was never
       # reproduced (issues.md "SMP scaling"); this run pins it.
       - name: Run T-00 suite (SMP 2)
@@ -133,34 +187,27 @@ jobs:
   selftest-audit:
     name: QEMU Self-Test (audit profile)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
+    needs: [build-kernel-nightly]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Download kernel artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            target/
-          key: ${{ runner.os }}-cargo-nightly-audit-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-audit_small-self_test
-      - name: Cache Limine binaries
-        uses: actions/cache@v4
+          name: kernel-binaries-nightly
+          path: kernel/target/x86_64-unknown-none
+      - name: Download boot images
+        uses: actions/download-artifact@v4
         with:
-          path: /tmp/limine-binary
-          key: limine-${{ hashFiles('builder/build_limine_image.py') }}
+          name: boot-images-nightly
+          path: tests
       - uses: ./.github/actions/setup-qemu
       # audit_small keeps overflow-checks + debug-assertions on while staying
       # within the size the KASLR mapping can relocate (root Cargo.toml).
-      - name: Build kernel (audit_small, self_test)
-        working-directory: kernel
-        run: cargo build --profile audit_small --target x86_64-unknown-none --locked --features "self_test,smp,net,ext4,iommu"
-      - name: Build boot image (Limine)
-        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/audit_small/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_audit.bin
       - name: Run T-00 suite (audit_small)
         run: |
           python3 tests/run_qemu_tests.py \
@@ -186,33 +233,24 @@ jobs:
     name: Boot Stress (25 boots)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [build-kernel-nightly]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Download kernel artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            target/
-          key: ${{ runner.os }}-cargo-nightly-stress-${{ hashFiles('Cargo.lock', 'kernel/Cargo.lock') }}-production
-      - name: Cache Limine binaries
-        uses: actions/cache@v4
+          name: kernel-binaries-nightly
+          path: kernel/target/x86_64-unknown-none/release
+      - name: Download boot images
+        uses: actions/download-artifact@v4
         with:
-          path: /tmp/limine-binary
-          key: limine-${{ hashFiles('builder/build_limine_image.py') }}
+          name: boot-images-nightly
+          path: tests
       - uses: ./.github/actions/setup-qemu
-      - name: Build kernel (release, production features)
-        working-directory: kernel
-        run: cargo build --release --target x86_64-unknown-none --locked
-      - name: Build boot image (Limine)
-        run: python3 builder/build_limine_image.py --kernel target/x86_64-unknown-none/release/vahi_kernel --initrd kernel/initrd.tar --output tests/t00_normal.bin
-      # Alternating SMP 1/2; `bash -e` aborts on the first failed boot so a
-      # single flake fails the job (that is the point of the stress).
       - name: 25 alternating boots (strict)
         run: |
           for i in $(seq 1 25); do
