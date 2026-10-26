@@ -5,7 +5,9 @@
 
 use x86_64::{
     registers::control::Cr3,
-    structures::paging::{FrameAllocator, OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB},
+    structures::paging::{
+        FrameAllocator, FrameDeallocator, OffsetPageTable, Page, PageTable, PhysFrame, Size4KiB,
+    },
     VirtAddr,
 };
 
@@ -119,6 +121,66 @@ impl AddressSpace {
         let pml4_virt = virt_offset + self.pml4_frame.start_address().as_u64();
         let pml4 = &mut *(pml4_virt.as_mut_ptr::<PageTable>());
         Some(OffsetPageTable::new(pml4, virt_offset))
+    }
+
+    /// Maps one userspace-accessible page into this address space.
+    ///
+    /// The frame is zeroed through the physical-memory map before the
+    /// mapping is installed, so a caller reading the page through
+    /// `copy_from_user` cannot observe stale allocator contents.
+    pub fn map_user_page(
+        &mut self,
+        page: Page<Size4KiB>,
+        frame_allocator: &mut (impl FrameAllocator<Size4KiB> + FrameDeallocator<Size4KiB>),
+    ) -> Option<PhysFrame> {
+        use x86_64::structures::paging::{Mapper, PageTableFlags};
+
+        // SAFETY: `self` uniquely owns the PML4.
+        let mut mapper = unsafe { self.mapper()? };
+        let frame = frame_allocator.allocate_frame()?;
+        let phys_offset = *crate::PHYSICAL_MEMORY_OFFSET.get()?;
+        // SAFETY: `frame` was just allocated by `frame_allocator` and the
+        // physical-memory offset maps every managed frame writable, so the
+        // whole 4 KiB frame is valid to overwrite.
+        unsafe {
+            core::ptr::write_bytes(
+                (phys_offset + frame.start_address().as_u64()) as *mut u8,
+                0,
+                4096,
+            );
+        }
+
+        let flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        // SAFETY: `page` lives in this address space and `map_to` returns an
+        // error instead of overwriting an already-present leaf.
+        match unsafe { mapper.map_to(page, frame, flags, frame_allocator) } {
+            Ok(flush) => flush.flush(),
+            Err(_) => {
+                // SAFETY: `frame` was allocated above and was never mapped.
+                unsafe { frame_allocator.deallocate_frame(frame) };
+                return None;
+            }
+        }
+
+        self.user_page_count = self.user_page_count.saturating_add(1);
+        Some(frame)
+    }
+
+    /// Removes one userspace page mapping and returns the frame that backed it.
+    pub fn unmap_user_page(&mut self, page: Page<Size4KiB>) -> Option<PhysFrame> {
+        use x86_64::structures::paging::Mapper;
+
+        // SAFETY: `self` uniquely owns the PML4.
+        let mut mapper = unsafe { self.mapper()? };
+        match mapper.unmap(page) {
+            Ok((frame, flush)) => {
+                flush.flush();
+                self.user_page_count = self.user_page_count.saturating_sub(1);
+                Some(frame)
+            }
+            Err(_) => None,
+        }
     }
 
     /// Clones this address space using Copy-on-Write for user-space pages.
