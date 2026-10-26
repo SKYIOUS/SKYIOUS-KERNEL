@@ -250,6 +250,13 @@ pub fn sys_close(fd: u64) -> u64 {
     if let FileDescriptor::InotifyFd { instance_key, .. } = &desc {
         super::inotify::inotify_close(*instance_key);
     }
+    if let FileDescriptor::Mqueue(obj) = &desc {
+        // mqueue_flush_file runs on the last fput: a dup still holds this
+        // description, so only the final close deregisters the notification.
+        if alloc::sync::Arc::strong_count(obj) == 1 {
+            obj.queue().clear_notify(process.id);
+        }
+    }
     if let FileDescriptor::EventFd(data) = &desc {
         // Wake any threads blocked reading so they see the fd is gone
         let key = data.lock().key;

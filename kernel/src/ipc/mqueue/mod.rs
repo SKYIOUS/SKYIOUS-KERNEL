@@ -1,17 +1,20 @@
 //! POSIX message queue syscalls.
 //!
 //! Implements mq_open (240), mq_unlink (241), mq_timedsend (242),
-//! mq_timedreceive (243) and mq_getsetattr (245). mq_notify (244) is not
-//! implemented and falls through to `ENOSYS` in dispatch.
+//! mq_timedreceive (243), mq_notify (244) and mq_getsetattr (245).
 //!
-//! A queue descriptor is an ordinary fd, so `close(2)`, `dup(2)`, `poll(2)`,
-//! `select(2)` and epoll work on it with no special casing. The name lives in
-//! the namespace map; open descriptors hold the queue directly and keep
-//! working after `mq_unlink`.
+//! Names live in the process's IPC namespace, so `unshare(CLONE_NEWIPC)` (and
+//! clone with that flag) gives a process an independent, empty queue
+//! namespace. A queue descriptor is an ordinary fd, so `close(2)`, `dup(2)`,
+//! `poll(2)`, `select(2)` and epoll work on it with no special casing. Open
+//! descriptors hold the queue directly and keep working after `mq_unlink`.
 //!
 //! Names are the Linux syscall ABI form: no leading slash, because glibc and
 //! musl strip the `/` of the POSIX name before entering the kernel. A slash
 //! inside the name is rejected with EACCES, matching `lookup_one_len`.
+//!
+//! Timeout arguments are absolute CLOCK_REALTIME deadlines, as the Linux
+//! syscalls define them.
 //!
 //! Syscall entry points take raw pointers but validate them internally.
 //! The `not_unsafe_ptr_arg_deref` lint is suppressed because these are
@@ -23,14 +26,14 @@ pub mod object;
 pub mod queue;
 
 use crate::ipc::mqueue::object::MqObject;
-use crate::ipc::mqueue::queue::{MqAttr, MqQueueHandle};
+use crate::ipc::mqueue::queue::{charge_msgbytes, message_bytes, MqAttr, MqNotify, MqQueueHandle};
+use crate::sync::IrqSafeMutex as Mutex;
 use crate::syscalls::errno::Errno;
-use crate::syscalls::helpers::{
-    check_file_permission, get_current_egid, get_current_euid, has_capability, CAP_SYS_RESOURCE,
-};
+use crate::syscalls::helpers::{check_file_permission, CAP_SYS_RESOURCE};
+use crate::syscalls::namespaces::IpcNamespace;
+use crate::syscalls::posix_timers::{timespec, SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD};
 use crate::syscalls::user_access;
 use crate::task::process::{FileDescriptor, Process, CURRENT_PROCESS};
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 
@@ -52,23 +55,48 @@ const DFLT_QUEUESMAX: usize = 256;
 const HARD_MSGMAX: i64 = 65536;
 const HARD_MSGSIZEMAX: i64 = 16 * 1024 * 1024;
 
+/// `RLIMIT_MSGQUEUE` index in `ResourceLimits` (Linux ordering).
+const RLIMIT_MSGQUEUE: usize = 12;
+
+/// `_NSIG`: valid signal numbers are 1..=64.
+const NSIG: i32 = 64;
+
 /// Internal FD_CLOEXEC bit used by the fd table, as in `F_SETFD`.
 const FD_CLOEXEC: u64 = 0x80000;
 
 /// A name in the queue namespace: the queue plus the inode-like metadata
 /// that every open of that name shares.
 #[derive(Clone)]
-struct MqEntry {
+pub struct MqEntry {
     queue: Arc<MqQueueHandle>,
     mode: u32,
     uid: u32,
     gid: u32,
 }
 
-lazy_static::lazy_static! {
-    /// Global message queue namespace: name -> queue entry.
-    static ref MQ_NAMESPACE: crate::sync::IrqSafeMutex<BTreeMap<String, MqEntry>> =
-        crate::sync::IrqSafeMutex::new(BTreeMap::new());
+/// Credentials of the calling process, snapshotted before any namespace lock
+/// is taken. The permission helpers re-enter the process tables, so they must
+/// never run while an IPC namespace lock is held.
+struct Caller {
+    euid: u32,
+    egid: u32,
+    privileged: bool,
+    umask: u32,
+    msgqueue_limit: u64,
+}
+
+impl Caller {
+    fn capture(process: &Process) -> Self {
+        let cred = *process.creds.lock();
+        let limit = process.limits.lock().rlim_cur[RLIMIT_MSGQUEUE];
+        Caller {
+            euid: cred.euid,
+            egid: cred.egid,
+            privileged: cred.euid == 0 || (cred.cap_effective & CAP_SYS_RESOURCE) != 0,
+            umask: *process.umask.lock(),
+            msgqueue_limit: u64::try_from(limit).unwrap_or(u64::MAX),
+        }
+    }
 }
 
 /// Read and validate a queue name.
@@ -135,6 +163,71 @@ unsafe fn copy_mq_attr_to_user(attr_ptr: *mut u8, attr: &MqAttr) -> Result<(), E
     Ok(())
 }
 
+/// Copy the absolute deadline. Linux validates it in the syscall wrapper,
+/// before the descriptor is even looked up.
+///
+/// # Safety
+/// `ptr` must be null or a userspace pointer; the range is validated by
+/// `copy_from_user`.
+unsafe fn read_deadline(ptr: *const u8) -> Result<Option<u64>, Errno> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    let mut ts = timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a live stack object and the slice covers exactly its
+    // size; `copy_from_user` copies at most that many bytes into it.
+    let slice = core::slice::from_raw_parts_mut(
+        &mut ts as *mut timespec as *mut u8,
+        core::mem::size_of::<timespec>(),
+    );
+    if user_access::copy_from_user(slice, ptr).is_err() {
+        return Err(Errno::EFAULT);
+    }
+    if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+        return Err(Errno::EINVAL);
+    }
+    let ns = (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64);
+    Ok(Some(ns))
+}
+
+/// Full kernel ABI `struct sigevent` (64 bytes); only `mq_notify` fields are
+/// read, but the whole structure must be copied to fault exactly where Linux
+/// does.
+#[repr(C)]
+struct MqSigevent {
+    _value: i64,
+    signo: i32,
+    notify: i32,
+    _pad: [u8; 48],
+}
+
+/// # Safety
+/// `ptr` must be a userspace pointer; the range is validated by
+/// `copy_from_user`.
+unsafe fn read_sigevent(ptr: *const u8) -> Result<MqSigevent, Errno> {
+    let mut ev = MqSigevent {
+        _value: 0,
+        signo: 0,
+        notify: 0,
+        _pad: [0; 48],
+    };
+    // SAFETY: `ev` is a live stack object and the slice covers exactly its
+    // size; `copy_from_user` copies at most that many bytes into it.
+    let slice = core::slice::from_raw_parts_mut(
+        &mut ev as *mut MqSigevent as *mut u8,
+        core::mem::size_of::<MqSigevent>(),
+    );
+    if user_access::copy_from_user(slice, ptr).is_err() {
+        return Err(Errno::EFAULT);
+    }
+    Ok(ev)
+}
+
 /// Install `obj` in the lowest free fd slot. Cannot fail: the caller already
 /// holds the process. mq descriptors are always close-on-exec (mq_overview(7)).
 fn install_fd(process: &Process, obj: Arc<MqObject>) -> i32 {
@@ -176,14 +269,87 @@ fn lookup(mqd: i32, need_read: bool, need_write: bool) -> Result<Arc<MqObject>, 
     Ok(obj)
 }
 
-/// Attribute limits for the creating process: `CAP_SYS_RESOURCE` lifts the
-/// default caps to the hard caps, as on Linux.
-fn attr_limits() -> (i64, i64) {
-    if has_capability(CAP_SYS_RESOURCE) {
-        (HARD_MSGMAX, HARD_MSGSIZEMAX)
-    } else {
-        (DFLT_MSGMAX, DFLT_MSGSIZEMAX)
+/// The calling process's IPC namespace.
+fn ipc_namespace(process: &Process) -> Arc<Mutex<IpcNamespace>> {
+    process.security.lock().namespaces.ipc_ns.clone()
+}
+
+fn current_pid() -> u64 {
+    CURRENT_PROCESS.lock().as_ref().map_or(0, |p| p.id)
+}
+
+/// CLOCK_REALTIME in nanoseconds. If the RTC was never initialized the clock
+/// has no epoch, so fall back to uptime: a deadline that cannot be compared
+/// against a real wall clock must still expire instead of blocking forever.
+fn realtime_now_ns() -> u64 {
+    let (sec, nsec) = crate::drivers::rtc::read_realtime();
+    if sec == 0 && nsec == 0 {
+        return crate::interrupts::get_ticks().saturating_mul(10_000_000);
     }
+    (sec.max(0) as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nsec.max(0) as u64)
+}
+
+/// Deliver a fired notification to its owning process.
+///
+/// Called after the queue lock is released: PROCESS_TABLE then the per-process
+/// signal lock is the documented order, and no queue lock may be held here.
+fn deliver(notify: MqNotify) {
+    if notify.kind != SIGEV_SIGNAL || notify.signo == 0 {
+        return;
+    }
+    let bit = notify.signo.wrapping_sub(1);
+    if bit >= 64 {
+        return;
+    }
+    let delivered = {
+        let table = crate::task::process::PROCESS_TABLE.lock();
+        match table.get(&notify.owner_pid) {
+            Some(proc) => {
+                proc.signals.lock().pending |= 1u64 << bit;
+                true
+            }
+            None => false,
+        }
+    };
+    if delivered {
+        // Same wake path as kill(2): the owner may be blocked in another
+        // syscall and only sees EINTR when that wait is woken.
+        crate::syscalls::futex::wake_process_futex_threads(notify.owner_pid);
+        crate::syscalls::futex::wake_process_blocked_threads(notify.owner_pid);
+    }
+}
+
+/// One blocking iteration on a full or empty queue: `Some(errno)` stops the
+/// caller, `None` sleeps a tick and retries.
+///
+/// ponytail: waits poll at the timer tick because this scheduler has no
+/// wait-queue primitive; wake-up latency and timeout overshoot are bounded by
+/// one tick (10 ms at 100 Hz). Upgrade when the scheduler grows wait queues.
+fn wait_step(mq: &MqObject, deadline: Option<u64>) -> Option<u64> {
+    if mq.flags() & O_NONBLOCK != 0 {
+        return Some(Errno::EAGAIN as u64);
+    }
+    if crate::syscalls::signal::has_pending_signal() {
+        return Some(Errno::EINTR as u64);
+    }
+    if deadline.is_some_and(|d| realtime_now_ns() >= d) {
+        return Some(Errno::ETIMEDOUT as u64);
+    }
+    crate::task::scheduler::sleep_until_tick(crate::interrupts::get_ticks() + 1);
+    None
+}
+
+fn open_entry(process: &Process, entry: MqEntry, oflag: i32) -> u64 {
+    let obj = Arc::new(MqObject::new(
+        entry.queue,
+        oflag,
+        entry.mode,
+        entry.uid,
+        entry.gid,
+    ));
+    install_fd(process, obj) as u64
 }
 
 // ─── mq_open ────────────────────────────────────────────────────────
@@ -219,34 +385,42 @@ pub fn mq_open(name_ptr: *const u8, oflag: i32, mode: i32, attr_ptr: *mut u8) ->
         Some(p) => p,
         None => return Errno::ESRCH as u64,
     };
+    let caller = Caller::capture(&process);
+    let ipc_ns = ipc_namespace(&process);
 
-    // Lock order: MQ_NAMESPACE → fd table (via install_fd, after unlocking).
+    // Access bits for the requested direction: 4 read, 2 write.
+    let need: u32 = match oflag & 3 {
+        O_RDONLY => 4,
+        O_WRONLY => 2,
+        _ => 6,
+    };
+
+    // Lookup and creation happen under one namespace lock, so two creators
+    // cannot both charge and insert the same name.
     let entry = {
-        let mut ns = MQ_NAMESPACE.lock();
-        match ns.get(&name).cloned() {
-            Some(existing) => {
+        let mut ns = ipc_ns.lock();
+        match ns.mqueues.get(&name).cloned() {
+            Some(entry) => {
+                drop(ns);
                 if (oflag & O_CREAT) != 0 && (oflag & O_EXCL) != 0 {
                     return Errno::EEXIST as u64;
                 }
-                let need = match oflag & 3 {
-                    O_RDONLY => 4,
-                    O_WRONLY => 2,
-                    _ => 6,
-                };
-                if !check_file_permission(existing.mode, existing.uid, existing.gid, need) {
+                // Permission helpers take process locks; run them unlocked.
+                if !check_file_permission(entry.mode, entry.uid, entry.gid, need) {
                     return Errno::EACCES as u64;
                 }
-                existing
+                entry
             }
             None => {
                 if (oflag & O_CREAT) == 0 {
                     return Errno::ENOENT as u64;
                 }
-                if ns.len() >= DFLT_QUEUESMAX && !has_capability(CAP_SYS_RESOURCE) {
-                    return Errno::ENOSPC as u64;
-                }
                 let attr = attr.unwrap_or_else(MqAttr::default_attrs);
-                let (max_msgs, max_size) = attr_limits();
+                let (max_msgs, max_size) = if caller.privileged {
+                    (HARD_MSGMAX, HARD_MSGSIZEMAX)
+                } else {
+                    (DFLT_MSGMAX, DFLT_MSGSIZEMAX)
+                };
                 if attr.mq_maxmsg <= 0
                     || attr.mq_maxmsg > max_msgs
                     || attr.mq_msgsize <= 0
@@ -254,26 +428,29 @@ pub fn mq_open(name_ptr: *const u8, oflag: i32, mode: i32, attr_ptr: *mut u8) ->
                 {
                     return Errno::EINVAL as u64;
                 }
-                let entry = MqEntry {
-                    queue: Arc::new(MqQueueHandle::new(attr)),
-                    mode: (mode as u32) & !*process.umask.lock() & 0o777,
-                    uid: get_current_euid(),
-                    gid: get_current_egid(),
+                let charge = match message_bytes(&attr) {
+                    Ok(c) => c,
+                    Err(e) => return e as u64,
                 };
-                ns.insert(name, entry.clone());
+                if ns.mqueues.len() >= DFLT_QUEUESMAX && !caller.privileged {
+                    return Errno::ENOSPC as u64;
+                }
+                if let Err(e) = charge_msgbytes(caller.euid, charge, caller.msgqueue_limit) {
+                    return e as u64;
+                }
+                let entry = MqEntry {
+                    queue: Arc::new(MqQueueHandle::new(attr, caller.euid, charge)),
+                    mode: (mode as u32) & !caller.umask & 0o777,
+                    uid: caller.euid,
+                    gid: caller.egid,
+                };
+                ns.mqueues.insert(name, entry.clone());
                 entry
             }
         }
     };
 
-    let obj = Arc::new(MqObject::new(
-        entry.queue,
-        oflag,
-        entry.mode,
-        entry.uid,
-        entry.gid,
-    ));
-    install_fd(&process, obj) as u64
+    open_entry(&process, entry, oflag)
 }
 
 // ─── mq_send ────────────────────────────────────────────────────────
@@ -284,6 +461,16 @@ pub fn mq_open(name_ptr: *const u8, oflag: i32, mode: i32, attr_ptr: *mut u8) ->
 /// msg_len: length of message
 /// prio: message priority (0 to MQ_PRIO_MAX-1)
 pub fn mq_send(mqd: i32, msg_ptr: *const u8, msg_len: usize, prio: u64) -> u64 {
+    send_common(mqd, msg_ptr, msg_len, prio, None)
+}
+
+fn send_common(
+    mqd: i32,
+    msg_ptr: *const u8,
+    msg_len: usize,
+    prio: u64,
+    deadline: Option<u64>,
+) -> u64 {
     if prio >= MQ_PRIO_MAX {
         return Errno::EINVAL as u64;
     }
@@ -306,12 +493,16 @@ pub fn mq_send(mqd: i32, msg_ptr: *const u8, msg_len: usize, prio: u64) -> u64 {
 
     loop {
         match mq.queue().send(&buf, prio as u32) {
-            Ok(()) => return 0,
-            Err(Errno::EAGAIN) if mq.flags() & O_NONBLOCK == 0 => {
-                if crate::syscalls::signal::has_pending_signal() {
-                    return Errno::EINTR as u64;
+            Ok(notify) => {
+                if let Some(notify) = notify {
+                    deliver(notify);
                 }
-                crate::task::scheduler::sleep_until_tick(crate::interrupts::get_ticks() + 1);
+                return 0;
+            }
+            Err(Errno::EAGAIN) => {
+                if let Some(e) = wait_step(&mq, deadline) {
+                    return e;
+                }
             }
             Err(e) => return e as u64,
         }
@@ -326,6 +517,16 @@ pub fn mq_send(mqd: i32, msg_ptr: *const u8, msg_len: usize, prio: u64) -> u64 {
 /// msg_len: size of message buffer (at least the queue's mq_msgsize)
 /// prio_ptr: userspace pointer to store priority (optional)
 pub fn mq_receive(mqd: i32, msg_ptr: *mut u8, msg_len: usize, prio_ptr: *mut u32) -> u64 {
+    receive_common(mqd, msg_ptr, msg_len, prio_ptr, None)
+}
+
+fn receive_common(
+    mqd: i32,
+    msg_ptr: *mut u8,
+    msg_len: usize,
+    prio_ptr: *mut u32,
+    deadline: Option<u64>,
+) -> u64 {
     let mq = match lookup(mqd, true, false) {
         Ok(m) => m,
         Err(e) => return e as u64,
@@ -342,11 +543,10 @@ pub fn mq_receive(mqd: i32, msg_ptr: *mut u8, msg_len: usize, prio_ptr: *mut u32
     let (received_len, prio) = loop {
         match mq.queue().receive(&mut buf) {
             Ok(r) => break r,
-            Err(Errno::EAGAIN) if mq.flags() & O_NONBLOCK == 0 => {
-                if crate::syscalls::signal::has_pending_signal() {
-                    return Errno::EINTR as u64;
+            Err(Errno::EAGAIN) => {
+                if let Some(e) = wait_step(&mq, deadline) {
+                    return e;
                 }
-                crate::task::scheduler::sleep_until_tick(crate::interrupts::get_ticks() + 1);
             }
             Err(e) => return e as u64,
         }
@@ -371,7 +571,9 @@ pub fn mq_receive(mqd: i32, msg_ptr: *mut u8, msg_len: usize, prio_ptr: *mut u32
     received_len as u64
 }
 
-/// mq_timedsend. Absolute CLOCK_REALTIME deadlines are not supported yet.
+// ─── mq_timedsend / mq_timedreceive ─────────────────────────────────
+
+/// Send with an absolute CLOCK_REALTIME deadline (null = block forever).
 pub fn mq_timedsend(
     mqd: i32,
     msg_ptr: *const u8,
@@ -379,15 +581,16 @@ pub fn mq_timedsend(
     prio: u64,
     timeout_ptr: *const u8,
 ) -> u64 {
-    if !timeout_ptr.is_null() {
-        // ponytail: needs a CLOCK_REALTIME wait primitive; refuse rather than
-        // block past the caller's deadline. Upgrade when one exists.
-        return Errno::ENOSYS as u64;
-    }
-    mq_send(mqd, msg_ptr, msg_len, prio)
+    // SAFETY: `timeout_ptr` is null or a userspace pointer; `read_deadline`
+    // validates the range through `copy_from_user`.
+    let deadline = match unsafe { read_deadline(timeout_ptr) } {
+        Ok(d) => d,
+        Err(e) => return e as u64,
+    };
+    send_common(mqd, msg_ptr, msg_len, prio, deadline)
 }
 
-/// mq_timedreceive. Absolute CLOCK_REALTIME deadlines are not supported yet.
+/// Receive with an absolute CLOCK_REALTIME deadline (null = block forever).
 pub fn mq_timedreceive(
     mqd: i32,
     msg_ptr: *mut u8,
@@ -395,16 +598,79 @@ pub fn mq_timedreceive(
     prio_ptr: *mut u32,
     timeout_ptr: *const u8,
 ) -> u64 {
-    if !timeout_ptr.is_null() {
-        return Errno::ENOSYS as u64;
+    // SAFETY: `timeout_ptr` is null or a userspace pointer; `read_deadline`
+    // validates the range through `copy_from_user`.
+    let deadline = match unsafe { read_deadline(timeout_ptr) } {
+        Ok(d) => d,
+        Err(e) => return e as u64,
+    };
+    receive_common(mqd, msg_ptr, msg_len, prio_ptr, deadline)
+}
+
+// ─── mq_notify ──────────────────────────────────────────────────────
+
+/// Register or deregister `SIGEV_SIGNAL` notification for an empty queue.
+///
+/// A null `notification` deregisters only when the caller owns the current
+/// registration, and is otherwise ignored (Linux documents this as
+/// unspecified). `SIGEV_THREAD` needs the netlink notification transport,
+/// which this kernel does not have; it is refused rather than silently
+/// downgraded.
+pub fn mq_notify(mqd: i32, notification: *const u8) -> u64 {
+    let event = if notification.is_null() {
+        None
+    } else {
+        // SAFETY: `notification` is a userspace pointer; `read_sigevent`
+        // validates the range through `copy_from_user`.
+        match unsafe { read_sigevent(notification) } {
+            Ok(ev) => Some(ev),
+            Err(e) => return e as u64,
+        }
+    };
+
+    // Linux validates the event before looking the descriptor up.
+    if let Some(ev) = &event {
+        if ev.notify != SIGEV_NONE && ev.notify != SIGEV_SIGNAL && ev.notify != SIGEV_THREAD {
+            return Errno::EINVAL as u64;
+        }
+        if ev.notify == SIGEV_SIGNAL && !(1..=NSIG).contains(&ev.signo) {
+            return Errno::EINVAL as u64;
+        }
+        if ev.notify == SIGEV_THREAD {
+            return Errno::ENOSYS as u64;
+        }
     }
-    mq_receive(mqd, msg_ptr, msg_len, prio_ptr)
+
+    let mq = match lookup(mqd, false, false) {
+        Ok(m) => m,
+        Err(e) => return e as u64,
+    };
+
+    let Some(ev) = event else {
+        mq.queue().clear_notify(current_pid());
+        return 0;
+    };
+
+    let notify = MqNotify {
+        owner_pid: current_pid(),
+        signo: if ev.notify == SIGEV_SIGNAL {
+            ev.signo as u32
+        } else {
+            0
+        },
+        kind: ev.notify,
+    };
+    match mq.queue().register_notify(notify) {
+        Ok(()) => 0,
+        Err(e) => e as u64,
+    }
 }
 
 // ─── mq_unlink ──────────────────────────────────────────────────────
 
-/// Remove a message queue name. Descriptors already open keep working; a
-/// later `mq_open` of the same name creates a new queue.
+/// Remove a message queue name from the caller's IPC namespace. Descriptors
+/// already open keep working; a later `mq_open` of the same name creates a
+/// new queue.
 pub fn mq_unlink(name_ptr: *const u8) -> u64 {
     // SAFETY: `name_ptr` is a userspace pointer; `read_name` validates the
     // range before copying.
@@ -413,7 +679,11 @@ pub fn mq_unlink(name_ptr: *const u8) -> u64 {
         Err(e) => return e as u64,
     };
 
-    match MQ_NAMESPACE.lock().remove(&name) {
+    let process = match CURRENT_PROCESS.lock().clone() {
+        Some(p) => p,
+        None => return Errno::ESRCH as u64,
+    };
+    match ipc_namespace(&process).lock().mqueues.remove(&name) {
         Some(_) => 0,
         None => Errno::ENOENT as u64,
     }

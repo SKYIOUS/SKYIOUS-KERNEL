@@ -275,8 +275,23 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             }
             bytes as u64
         }
-        // A queue descriptor is used with mq_send/mq_receive, never read(2).
-        Some(FileDescriptor::Mqueue(_)) => errno::Errno::EINVAL as u64,
+        // Linux exposes `read(2)` on a queue descriptor (and its /dev/mqueue
+        // file): the status line, with the file position per description.
+        Some(FileDescriptor::Mqueue(ref obj)) => {
+            if !obj.can_read() {
+                return errno::Errno::EBADF as u64;
+            }
+            let bytes = obj.read_line(count);
+            if bytes.is_empty() {
+                return 0;
+            }
+            // SAFETY: `buf` is the caller's userspace buffer; `copy_to_user`
+            // validates the range and turns a fault into `Err`.
+            if unsafe { user_access::copy_to_user(buf, &bytes) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            bytes.len() as u64
+        }
         None => errno::Errno::EBADF as u64,
     }
 }

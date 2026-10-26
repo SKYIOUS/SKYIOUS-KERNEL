@@ -2,10 +2,63 @@
 
 use crate::sync::IrqSafeMutex as Mutex;
 use crate::syscalls::errno::Errno;
-use alloc::collections::VecDeque;
+use crate::syscalls::posix_timers::SIGEV_SIGNAL;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 const MQ_PRIO_MAX: u32 = 32768;
+
+/// Per-message kernel overhead Linux charges to RLIMIT_MSGQUEUE
+/// (`struct msg_msg` plus one `posix_msg_tree_node`).
+const MQ_MSG_OVERHEAD: u64 = 96;
+
+/// A registered `mq_notify(2)` request. One-shot: removed when it fires.
+#[derive(Clone, Copy)]
+pub struct MqNotify {
+    pub owner_pid: u64,
+    pub signo: u32,
+    pub kind: i32,
+}
+
+lazy_static::lazy_static! {
+    /// Bytes charged per uid against RLIMIT_MSGQUEUE.
+    static ref MQ_BYTES: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
+}
+
+/// Worst-case bytes Linux charges a queue at creation time.
+pub fn message_bytes(attr: &MqAttr) -> Result<u64, Errno> {
+    let maxmsg = attr.mq_maxmsg as u64;
+    let payload = maxmsg
+        .checked_mul(attr.mq_msgsize as u64)
+        .ok_or(Errno::EOVERFLOW)?;
+    let overhead = maxmsg
+        .checked_mul(MQ_MSG_OVERHEAD)
+        .ok_or(Errno::EOVERFLOW)?;
+    payload.checked_add(overhead).ok_or(Errno::EOVERFLOW)
+}
+
+/// Reserve `bytes` against `uid`'s RLIMIT_MSGQUEUE budget.
+pub fn charge_msgbytes(uid: u32, bytes: u64, limit: u64) -> Result<(), Errno> {
+    let mut map = MQ_BYTES.lock();
+    let used = map.get(&uid).copied().unwrap_or(0);
+    let total = used.checked_add(bytes).ok_or(Errno::EOVERFLOW)?;
+    if total > limit {
+        return Err(Errno::EMFILE);
+    }
+    map.insert(uid, total);
+    Ok(())
+}
+
+fn release_msgbytes(uid: u32, bytes: u64) {
+    let mut map = MQ_BYTES.lock();
+    if let Some(used) = map.get_mut(&uid) {
+        *used = used.saturating_sub(bytes);
+        if *used == 0 {
+            map.remove(&uid);
+        }
+    }
+}
 
 /// A single message in the queue.
 #[derive(Clone)]
@@ -46,6 +99,8 @@ pub struct MqQueue {
     max_msgs: usize,
     /// Maximum size of a single message.
     max_msg_size: usize,
+    /// One-shot `mq_notify(2)` registration.
+    notify: Option<MqNotify>,
 }
 
 impl MqQueue {
@@ -55,6 +110,7 @@ impl MqQueue {
             msgs: VecDeque::new(),
             max_msgs: attr.mq_maxmsg as usize,
             max_msg_size: attr.mq_msgsize as usize,
+            notify: None,
         }
     }
 
@@ -87,7 +143,9 @@ impl MqQueue {
 
     /// Send a message to the queue.
     /// `EAGAIN` means the queue is full; the caller decides whether to block.
-    pub fn send(&mut self, data: &[u8], prio: u32) -> Result<(), Errno> {
+    /// Returns the notification to deliver when this send filled an empty
+    /// queue, matching `__do_notify` (only the empty → non-empty edge fires).
+    pub fn send(&mut self, data: &[u8], prio: u32) -> Result<Option<MqNotify>, Errno> {
         if prio >= MQ_PRIO_MAX {
             return Err(Errno::EINVAL);
         }
@@ -108,7 +166,11 @@ impl MqQueue {
             .position(|m| m.prio < prio)
             .unwrap_or(self.msgs.len());
         self.msgs.insert(pos, msg);
-        Ok(())
+        Ok(if self.msgs.len() == 1 {
+            self.notify.take()
+        } else {
+            None
+        })
     }
 
     /// Receive a message from the queue.
@@ -136,17 +198,64 @@ impl MqQueue {
     pub fn max_msgs(&self) -> usize {
         self.max_msgs
     }
+
+    /// Total bytes of queued message payloads (the `QSIZE` field).
+    pub fn qsize(&self) -> usize {
+        self.msgs.iter().map(|m| m.data.len()).sum()
+    }
+
+    /// Register a one-shot notification. Linux returns EBUSY while any
+    /// registration is live, including the caller's own.
+    pub fn register_notify(&mut self, notify: MqNotify) -> Result<(), Errno> {
+        if self.notify.is_some() {
+            return Err(Errno::EBUSY);
+        }
+        self.notify = Some(notify);
+        Ok(())
+    }
+
+    /// Drop the registration if `pid` owns it; a NULL `mq_notify` by any
+    /// other process is silently ignored, as on Linux.
+    pub fn clear_notify(&mut self, pid: u64) {
+        if self.notify.map_or(false, |n| n.owner_pid == pid) {
+            self.notify = None;
+        }
+    }
+
+    /// The `read(2)` line Linux reports for a queue descriptor.
+    pub fn describe_line(&self) -> String {
+        let (kind, signo, pid) = match self.notify {
+            Some(n) => (
+                n.kind,
+                if n.kind == SIGEV_SIGNAL { n.signo } else { 0 },
+                n.owner_pid,
+            ),
+            None => (0, 0, 0),
+        };
+        alloc::format!(
+            "QSIZE:{:<10} NOTIFY:{:<5} SIGNO:{:<5} NOTIFY_PID:{:<6}\n",
+            self.qsize(),
+            kind,
+            signo,
+            pid
+        )
+    }
 }
 
 /// Thread-safe message queue wrapper.
 pub struct MqQueueHandle {
     inner: Mutex<MqQueue>,
+    /// Uid charged for this queue and the bytes charged, released on drop.
+    owner_uid: u32,
+    charge: u64,
 }
 
 impl MqQueueHandle {
-    pub fn new(attr: MqAttr) -> Self {
+    pub fn new(attr: MqAttr, owner_uid: u32, charge: u64) -> Self {
         MqQueueHandle {
             inner: Mutex::new(MqQueue::new(attr)),
+            owner_uid,
+            charge,
         }
     }
 
@@ -166,7 +275,7 @@ impl MqQueueHandle {
         self.inner.lock().len()
     }
 
-    pub fn send(&self, data: &[u8], prio: u32) -> Result<(), Errno> {
+    pub fn send(&self, data: &[u8], prio: u32) -> Result<Option<MqNotify>, Errno> {
         self.inner.lock().send(data, prio)
     }
 
@@ -180,6 +289,26 @@ impl MqQueueHandle {
 
     pub fn max_msgs(&self) -> usize {
         self.inner.lock().max_msgs()
+    }
+
+    pub fn register_notify(&self, notify: MqNotify) -> Result<(), Errno> {
+        self.inner.lock().register_notify(notify)
+    }
+
+    pub fn clear_notify(&self, pid: u64) {
+        self.inner.lock().clear_notify(pid)
+    }
+
+    pub fn describe_line(&self) -> String {
+        self.inner.lock().describe_line()
+    }
+}
+
+impl Drop for MqQueueHandle {
+    fn drop(&mut self) {
+        if self.charge > 0 {
+            release_msgbytes(self.owner_uid, self.charge);
+        }
     }
 }
 
@@ -199,9 +328,9 @@ mod tests {
     #[test]
     fn test_queue_priority_order() {
         let mut q = MqQueue::new(MqAttr::default_attrs());
-        q.send(&[1], 1).unwrap();
-        q.send(&[2], 5).unwrap();
-        q.send(&[3], 3).unwrap();
+        let _ = q.send(&[1], 1).unwrap();
+        let _ = q.send(&[2], 5).unwrap();
+        let _ = q.send(&[3], 3).unwrap();
 
         let mut buf = [0u8; 10];
         let (len, prio) = q.receive(&mut buf).unwrap();
@@ -227,8 +356,8 @@ mod tests {
             ..MqAttr::default_attrs()
         };
         let mut q = MqQueue::new(attr);
-        q.send(&[1], 1).unwrap();
-        q.send(&[2], 1).unwrap();
+        let _ = q.send(&[1], 1).unwrap();
+        let _ = q.send(&[2], 1).unwrap();
         assert!(q.is_full());
         assert_eq!(q.send(&[3], 1).unwrap_err(), Errno::EAGAIN);
     }
@@ -242,7 +371,7 @@ mod tests {
         };
         let mut q = MqQueue::new(attr);
         assert_eq!(q.send(&[0u8; 11], 1).unwrap_err(), Errno::EMSGSIZE);
-        q.send(&[1, 2, 3], 1).unwrap();
+        let _ = q.send(&[1, 2, 3], 1).unwrap();
         let mut short = [0u8; 2];
         assert_eq!(q.receive(&mut short).unwrap_err(), Errno::EMSGSIZE);
         assert_eq!(q.len(), 1);

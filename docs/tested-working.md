@@ -1,29 +1,42 @@
 # Tested & Working — Vahi Kernel / SkyOS
 
-Living status document. Last updated: 2026-10-26 (session: mqueue rewrite verified; 223/223).
+Living status document. Last updated: 2026-10-26 (session: mqueue gap closure verified; 228/228).
 Every claim here was reproduced on this machine; re-verify after any change.
 
-## Verified this session (2026-10-26, mqueue ABI repair + initramfs check)
+## Verified this session (2026-10-26, mqueue gap closure + initramfs check)
 
 - **mqueue:** lives in `kernel/src/ipc/mqueue/` (`mod.rs` syscalls, `queue.rs`
   core, `object.rs` per-open description). Queue descriptors are real fds
   (`FileDescriptor::Mqueue`, installed by `mq_open`, resolved by
   `mq_send`/`mq_receive`/`mq_getsetattr`), so `close`/`dup`/`fstat`/`poll`/
   `select`/`epoll` work on them. Syscall numbers are Linux x86_64
-  240/241/242/243/245; names use the libc ABI form without the leading slash
+  240/241/242/243/244/245; names use the libc ABI form without the leading slash
   (`EACCES` for empty, `.`, `..`, or a slash; `ENAMETOOLONG` over 255 bytes);
   `O_NONBLOCK` is per open file description, shared by `dup`/`fork`, and
   `fcntl(F_GETFL/F_SETFL)` reads and changes it; descriptors are always
   close-on-exec; `mq_unlink` removes only the name, so open descriptors keep
-  working; error precedence follows `ipc/mqueue.c`. 13 contract tests in
-  `kernel/src/tests/mqueue_contract.rs` cover the round trip,
+  working; error precedence follows `ipc/mqueue.c`. `mq_timedsend`/
+  `mq_timedreceive` treat the timeout as an absolute `CLOCK_REALTIME` deadline
+  and return `ETIMEDOUT` when it expires; `mq_notify` supports `SIGEV_NONE`/
+  `SIGEV_SIGNAL` (one-shot, only on the empty -> non-empty edge, `EBUSY` while
+  a registration exists, cleared by the owner's close; `SIGEV_THREAD` is
+  `ENOSYS` because the netlink transport is absent); `read(2)` on a queue fd
+  returns Linux's `QSIZE:/NOTIFY:/SIGNO:/NOTIFY_PID:` status line at a
+  per-description position; creation charges
+  `mq_maxmsg*mq_msgsize + mq_maxmsg*96` against the per-uid
+  `RLIMIT_MSGQUEUE` (`EMFILE` over the limit, released when the queue dies);
+  queue names live in the process's IPC namespace, so `unshare(CLONE_NEWIPC)`
+  starts empty while already-open descriptors keep working. 18 contract tests
+  in `kernel/src/tests/mqueue_contract.rs` (core fd/ABI) and
+  `kernel/src/tests/mqueue_semantics.rs` (notify, deadlines, read line,
+  rlimit, namespaces) cover the round trip,
   `O_EXCL`/`ENOENT`, bad fd, `EMSGSIZE`, `EFAULT` on name/message/priority
-  pointers, creation attributes and limits, get/setattr, the fcntl bridge and
-  close-on-exec. Not implemented: `mq_notify` (244) and a non-NULL timeout in
-  `mq_timedsend`/`mq_timedreceive` return `ENOSYS`; `read(2)` on a queue fd is
-  `EINVAL` (Linux returns the `QSIZE:` line); there is no per-uid
-  `RLIMIT_MSGQUEUE` accounting, and the queue namespace is global rather than
-  per IPC namespace.
+  pointers, creation attributes and limits, get/setattr, the fcntl bridge,
+  close-on-exec, notification delivery and validation, timeout validation and
+  expiry, the `read(2)` line, `RLIMIT_MSGQUEUE` accounting and namespace
+  isolation. Blocking waits poll at the timer tick (<=10 ms) because the
+  scheduler has no wait-queue primitive; this is a documented ceiling, not
+  event-driven wake.
 - **FD-15:** `contract:sendmsg_recvmsg_split_into_iovecs` still pins the
   `sys_recvmsg` `msg_flags` fix (`offset_of!(msghdr, msg_flags)`), now run
   once instead of twice.
@@ -32,20 +45,19 @@ Every claim here was reproduced on this machine; re-verify after any change.
   `[BOOT] initrd from Limine modules` + `[TARFS] parsed 300 entries` on a
   boot with `--initrd kernel/initrd.tar`. The added `vfs/mount.rs` helper and
   `tests/initramfs_tests.rs` duplicated that path and were removed.
-- Suite is **223/223, 0 failed**. Gates run this session (this tree):
+- Suite is **228/228, 0 failed**. Gates run this session (this tree):
   `cargo build --release --target x86_64-unknown-none --features self_test`
   -> success; `cargo clippy --release --target x86_64-unknown-none --features
   self_test -- -D warnings` -> clean; `cargo fmt --all -- --check` -> exit 0;
   `scripts/check_repo_policy.py --self-test` -> pass. Limine image via
   `builder/build_limine_image.py --initrd kernel/initrd.tar`;
-  `tests/run_qemu_tests.py --qemu-extra "-vga none -accel tcg,tb-size=256"`
-  (the `tb-size` cap works around a too-small host paging file):
-  - release+self_test **PASS 223/223** at `-smp 1` (10.5s), `-smp 2` (15.5s),
-    and `-smp 2 -cpu qemu64,-smep` (15.0s).
-  - `audit_small` profile **PASS 223/223** (23.6s).
+  `tests/run_qemu_tests.py --expect-count 228 --qemu-extra "-vga none"`:
+  - release+self_test **PASS 228/228** at `-smp 1` (12.1s) and
+    `-smp 2 -cpu qemu64,-smep` (16.6s).
+  - `audit_small` profile **PASS 228/228** (22.1s).
 - `docs/architecture/issues.md` FD-14 updated to the new implementation path
   and evidence; CI/nightly expect-count and the selftest count in README,
-  CONTEXT.md, and CONTRIBUTING.md are now 223.
+  CONTEXT.md, and CONTRIBUTING.md are now 228.
 
 ## Verified this session (2026-10-23)
 

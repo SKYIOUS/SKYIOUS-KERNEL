@@ -14,7 +14,7 @@ Execution plans: `docs/architecture/implementation-plan-1-deletion-campaign.md` 
 ## Verification (local, Windows)
 - `cargo build` in `kernel/` (nightly via rust-toolchain.toml; add `C:\Users\nanda\.cargo\bin` to PATH in shells).
 - Bootimage: `cargo build --features self_test -Zbuild-std=core,alloc --target x86_64-unknown-none` in `kernel/`, then `cargo run --quiet` in `builder/`.
-- QEMU gate: `qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=target\x86_64-vahi\debug\bootimage-vahi_kernel.bin -m 512M -smp N -nographic -serial file:<log> -no-reboot`; expect `TAP version 13` + `# 223/223 passed, 0 failed` at smp 1 and 2.
+- QEMU gate: `qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=target\x86_64-vahi\debug\bootimage-vahi_kernel.bin -m 512M -smp N -nographic -serial file:<log> -no-reboot`; expect `TAP version 13` + `# 228/228 passed, 0 failed` at smp 1 and 2.
 - Clippy `-D warnings` has pre-existing errors in arch/drivers/task/vfs — don't add new ones in touched files.
 - `kernel/src/drivers/serial.rs` has an uncommitted pre-existing TX-timeout change — not ours, keep.
 

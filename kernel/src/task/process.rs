@@ -471,9 +471,13 @@ impl Process {
                 session: id,
                 is_group_leader: true,
             }),
-            limits: crate::sync::IrqSafeMutex::new(ResourceLimits {
-                rlim_cur: [i64::MAX; 16],
-                rlim_max: [i64::MAX; 16],
+            limits: crate::sync::IrqSafeMutex::new({
+                // Linux default RLIMIT_MSGQUEUE (MQ_BYTES_MAX) at index 12.
+                let mut rlim_cur = [i64::MAX; 16];
+                let mut rlim_max = [i64::MAX; 16];
+                rlim_cur[12] = 819_200;
+                rlim_max[12] = 819_200;
+                ResourceLimits { rlim_cur, rlim_max }
             }),
             altstack: crate::sync::IrqSafeMutex::new(stack_t {
                 ss_sp: core::ptr::null_mut(),

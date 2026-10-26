@@ -152,7 +152,7 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image tests/t00_selftest.bin \
             --ovmf "$OVMF" \
-            --expect-count 223 \
+            --expect-count 228 \
             --smp 2 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
@@ -233,7 +233,7 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image tests/t00_audit.bin \
             --ovmf "$OVMF" \
-            --expect-count 223 \
+            --expect-count 228 \
             --timeout 2400 \
             --qemu-extra "-vga none" \
             --serial tests/t00_audit_serial.log \

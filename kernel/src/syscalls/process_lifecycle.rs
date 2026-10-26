@@ -201,6 +201,10 @@ pub fn process_close_all_fds(proc: &crate::task::process::Process) {
             FileDescriptor::InotifyFd { instance_key, .. } => {
                 super::inotify::inotify_close(instance_key);
             }
+            FileDescriptor::Mqueue(obj) => {
+                // process exit closes every descriptor: same flush behaviour.
+                obj.queue().clear_notify(proc.id);
+            }
             FileDescriptor::EventFd(data) => {
                 crate::task::scheduler::wake_pipe(data.lock().key);
             }

@@ -6,10 +6,12 @@
 
 > **Correction (2026-10-26):** the mqueue rows below (236–241) are stale and
 > their numbers are off by four. POSIX message queues dispatch at Linux x86_64
-> 240/241/242/243/245 — `mq_open`, `mq_unlink`, `mq_timedsend`,
-> `mq_timedreceive` and `mq_getsetattr` are implemented over a real fd;
-> `mq_notify` (244) returns `ENOSYS`. See `docs/tested-working.md` and FD-14 in
-> `docs/architecture/issues.md`.
+> 240/241/242/243/244/245 — `mq_open`, `mq_unlink`, `mq_timedsend`,
+> `mq_timedreceive`, `mq_notify` and `mq_getsetattr` are implemented over a
+> real fd, including absolute `CLOCK_REALTIME` deadlines, `SIGEV_NONE`/
+> `SIGEV_SIGNAL` notification, `read(2)` status lines, per-uid
+> `RLIMIT_MSGQUEUE` accounting and per-IPC-namespace names. See
+> `docs/tested-working.md` and FD-14 in `docs/architecture/issues.md`.
 
 ---
 

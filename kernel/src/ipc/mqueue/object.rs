@@ -2,7 +2,8 @@
 
 use crate::ipc::mqueue::queue::{MqAttr, MqQueueHandle};
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicI32, Ordering};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 const O_NONBLOCK: i32 = 0x800;
 
@@ -14,6 +15,9 @@ const O_NONBLOCK: i32 = 0x800;
 pub struct MqObject {
     queue: Arc<MqQueueHandle>,
     flags: AtomicI32,
+    /// `read(2)` position; shared by dup, independent per `mq_open`, as the
+    /// file position is per open file description.
+    pos: AtomicU64,
     read: bool,
     write: bool,
     mode: u32,
@@ -32,6 +36,7 @@ impl MqObject {
         MqObject {
             queue,
             flags: AtomicI32::new(oflag & O_NONBLOCK),
+            pos: AtomicU64::new(0),
             read,
             write,
             mode,
@@ -79,5 +84,18 @@ impl MqObject {
 
     pub fn gid(&self) -> u32 {
         self.gid
+    }
+
+    /// Next `count` bytes of the status line `read(2)` reports, advancing the
+    /// file position. Empty at EOF, matching `simple_read_from_buffer`.
+    pub fn read_line(&self, count: usize) -> Vec<u8> {
+        let line = self.queue.describe_line().into_bytes();
+        let pos = self.pos.load(Ordering::Acquire) as usize;
+        if pos >= line.len() {
+            return Vec::new();
+        }
+        let end = core::cmp::min(line.len(), pos.saturating_add(count));
+        self.pos.store(end as u64, Ordering::Release);
+        line[pos..end].to_vec()
     }
 }

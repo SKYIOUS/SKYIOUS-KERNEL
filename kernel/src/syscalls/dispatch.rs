@@ -1351,6 +1351,12 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     sys_handler!(
         t,
         args,
+        numbers::SYS_MQ_NOTIFY,
+        mqueue::mq_notify(args.a1 as i32, args.a2 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
         numbers::SYS_MQ_GETSETATTR,
         mqueue::mq_getsetattr(args.a1 as i32, args.a2 as *const u8, args.a3 as *mut u8)
     );

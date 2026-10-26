@@ -253,7 +253,7 @@ pub const SYS_MQ_OPEN: u64 = 240;
 pub const SYS_MQ_UNLINK: u64 = 241;
 pub const SYS_MQ_TIMEDSEND: u64 = 242;
 pub const SYS_MQ_TIMEDRECEIVE: u64 = 243;
-// 244 mq_notify: unimplemented, dispatch falls through to ENOSYS.
+pub const SYS_MQ_NOTIFY: u64 = 244;
 pub const SYS_MQ_GETSETATTR: u64 = 245;
 
 // inotify syscalls
