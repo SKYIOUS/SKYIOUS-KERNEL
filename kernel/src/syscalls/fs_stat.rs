@@ -7,6 +7,10 @@ use super::*;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use crate::vfs::{Stat, VFS};
 
+/// `st_size` Linux reports for a message-queue inode (FILENT_SIZE in
+/// `ipc/mqueue.c`); the number is the size of one mqueue dirent, not data.
+const MQUEUE_ST_SIZE: i64 = 80;
+
 // ─── stat / fstat / lstat / fstatat / statfs ──────────────────────
 
 pub fn sys_stat(path_ptr: *const u8, stat_buf: *mut Stat) -> u64 {
@@ -126,6 +130,21 @@ pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
                 )
                 .is_err()
             } {
+                return errno::Errno::EFAULT as u64;
+            }
+            0
+        }
+        Some(FileDescriptor::Mqueue(ref obj)) => {
+            let stat = Stat {
+                st_mode: crate::vfs::S_IFREG | obj.mode(),
+                st_uid: obj.uid(),
+                st_gid: obj.gid(),
+                st_size: MQUEUE_ST_SIZE,
+                ..Stat::default()
+            };
+            // SAFETY: `stat_buf` is a userspace pointer; the callee validates
+            // `size_of::<Stat>()` bytes before writing.
+            if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err() {
                 return errno::Errno::EFAULT as u64;
             }
             0
@@ -283,6 +302,22 @@ pub fn sys_fstatat(
                     )
                 }
                 .is_err()
+                {
+                    return errno::Errno::EFAULT as u64;
+                }
+                return 0;
+            }
+            Some(FileDescriptor::Mqueue(obj)) => {
+                let stat = crate::vfs::Stat {
+                    st_mode: crate::vfs::S_IFREG | obj.mode(),
+                    st_uid: obj.uid(),
+                    st_gid: obj.gid(),
+                    st_size: MQUEUE_ST_SIZE,
+                    ..crate::vfs::Stat::default()
+                };
+                // SAFETY: `stat_buf` is a userspace pointer; the callee
+                // validates `size_of::<Stat>()` bytes before writing.
+                if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err()
                 {
                     return errno::Errno::EFAULT as u64;
                 }

@@ -275,6 +275,8 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             }
             bytes as u64
         }
+        // A queue descriptor is used with mq_send/mq_receive, never read(2).
+        Some(FileDescriptor::Mqueue(_)) => errno::Errno::EINVAL as u64,
         None => errno::Errno::EBADF as u64,
     }
 }

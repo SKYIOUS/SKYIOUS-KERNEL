@@ -1321,36 +1321,38 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     sys_handler!(
         t,
         args,
-        numbers::SYS_MQ_CLOSE,
-        mqueue::mq_close(args.a1 as i32)
+        numbers::SYS_MQ_UNLINK,
+        mqueue::mq_unlink(args.a1 as *const u8)
     );
     sys_handler!(
         t,
         args,
         numbers::SYS_MQ_TIMEDSEND,
-        mqueue::mq_send(
+        mqueue::mq_timedsend(
             args.a1 as i32,
             args.a2 as *const u8,
             args.a3 as usize,
-            args.a4 as u32
+            args.a4,
+            args.a5 as *const u8
         )
     );
     sys_handler!(
         t,
         args,
         numbers::SYS_MQ_TIMEDRECEIVE,
-        mqueue::mq_receive(
+        mqueue::mq_timedreceive(
             args.a1 as i32,
             args.a2 as *mut u8,
             args.a3 as usize,
             args.a4 as *mut u32,
+            args.a5 as *const u8,
         )
     );
     sys_handler!(
         t,
         args,
-        numbers::SYS_MQ_UNLINK,
-        mqueue::mq_unlink(args.a1 as *const u8)
+        numbers::SYS_MQ_GETSETATTR,
+        mqueue::mq_getsetattr(args.a1 as i32, args.a2 as *const u8, args.a3 as *mut u8)
     );
     sys_handler!(
         t,

@@ -1,28 +1,43 @@
-//! Kernel object integration for message queues.
+//! Open file description for a POSIX message queue.
 
 use crate::ipc::mqueue::queue::{MqAttr, MqQueueHandle};
-use crate::objects::TYPE_MQUEUE;
-use crate::sync::IrqSafeMutex as Mutex;
 use alloc::sync::Arc;
-use vahi_objects::{security::SecurityDescriptor, KernelObject, ObjectHeader, StatLike};
+use core::sync::atomic::{AtomicI32, Ordering};
 
-/// Kernel object representing a POSIX message queue.
+const O_NONBLOCK: i32 = 0x800;
+
+/// One open file description: the named queue plus per-open state.
+///
+/// O_NONBLOCK lives here, not in the queue, so `mq_setattr` on one descriptor
+/// does not affect other descriptors (dup shares it, a fresh `mq_open` does
+/// not), matching Linux.
 pub struct MqObject {
-    header: ObjectHeader,
-    name: Mutex<Option<alloc::string::String>>,
-    queue: MqQueueHandle,
+    queue: Arc<MqQueueHandle>,
+    flags: AtomicI32,
+    read: bool,
+    write: bool,
+    mode: u32,
+    uid: u32,
+    gid: u32,
 }
 
 impl MqObject {
-    /// Create a new message queue kernel object.
-    pub fn new(name: alloc::string::String, attr: Option<MqAttr>, flags: i32) -> Arc<Self> {
-        let sec = SecurityDescriptor::default();
-        let header = ObjectHeader::new(TYPE_MQUEUE, sec);
-        Arc::new(MqObject {
-            header,
-            name: Mutex::new(Some(name)),
-            queue: MqQueueHandle::new(attr, flags),
-        })
+    /// Create a description for `oflag` on an existing queue.
+    pub fn new(queue: Arc<MqQueueHandle>, oflag: i32, mode: u32, uid: u32, gid: u32) -> Self {
+        let (read, write) = match oflag & 3 {
+            0 => (true, false),
+            1 => (false, true),
+            _ => (true, true),
+        };
+        MqObject {
+            queue,
+            flags: AtomicI32::new(oflag & O_NONBLOCK),
+            read,
+            write,
+            mode,
+            uid,
+            gid,
+        }
     }
 
     /// Get the underlying queue handle.
@@ -30,63 +45,39 @@ impl MqObject {
         &self.queue
     }
 
-    /// Get the queue name.
-    pub fn name(&self) -> Option<alloc::string::String> {
-        self.name.lock().clone()
-    }
-}
-
-impl KernelObject for MqObject {
-    fn header(&self) -> &ObjectHeader {
-        &self.header
+    /// Current O_NONBLOCK flag of this description.
+    pub fn flags(&self) -> i32 {
+        self.flags.load(Ordering::Acquire)
     }
 
-    fn type_name(&self) -> &'static str {
-        "MqQueue"
+    /// Replace the O_NONBLOCK flag of this description.
+    pub fn set_flags(&self, flags: i32) {
+        self.flags.store(flags, Ordering::Release);
     }
 
-    fn query_name(&self) -> Option<alloc::string::String> {
-        self.name.lock().clone()
+    pub fn can_read(&self) -> bool {
+        self.read
     }
 
-    fn set_name(&self, name: &str) {
-        *self.name.lock() = Some(alloc::string::String::from(name));
+    pub fn can_write(&self) -> bool {
+        self.write
     }
 
-    fn stat(&self) -> Result<StatLike, ()> {
-        let attr = self.queue.get_attr();
-        Ok(StatLike {
-            ino: 0,
-            mode: 0o100600,
-            nlink: 1,
-            uid: 0,
-            gid: 0,
-            size: attr.mq_curmsgs as u64 * attr.mq_msgsize as u64,
-            blocks: 0,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mq_object_creation() {
-        let obj = MqObject::new("/test_mq".into(), None, 0);
-        assert_eq!(obj.type_id(), TYPE_MQUEUE);
-        assert_eq!(obj.query_name(), Some("/test_mq".into()));
-        assert_eq!(obj.type_name(), "MqQueue");
+    /// Attributes as seen through this description.
+    pub fn get_attr(&self) -> MqAttr {
+        self.queue.get_attr(self.flags())
     }
 
-    #[test]
-    fn test_mq_object_queue_ops() {
-        let obj = MqObject::new("/test_mq".into(), None, 0);
-        obj.queue().send(vec![1, 2, 3], 5).unwrap();
-        let mut buf = [0u8; 10];
-        let (len, prio) = obj.queue().receive(&mut buf).unwrap();
-        assert_eq!(prio, 5);
-        assert_eq!(len, 3);
-        assert_eq!(&buf[..len], &[1, 2, 3]);
+    /// Permission bits of the queue, without the file type.
+    pub fn mode(&self) -> u32 {
+        self.mode
+    }
+
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    pub fn gid(&self) -> u32 {
+        self.gid
     }
 }

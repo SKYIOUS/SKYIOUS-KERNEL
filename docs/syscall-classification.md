@@ -4,6 +4,13 @@
 **Total dispatched:** ~130 syscalls in dispatch table
 **Honest functional count:** ~40 fully functional
 
+> **Correction (2026-10-26):** the mqueue rows below (236–241) are stale and
+> their numbers are off by four. POSIX message queues dispatch at Linux x86_64
+> 240/241/242/243/245 — `mq_open`, `mq_unlink`, `mq_timedsend`,
+> `mq_timedreceive` and `mq_getsetattr` are implemented over a real fd;
+> `mq_notify` (244) returns `ENOSYS`. See `docs/tested-working.md` and FD-14 in
+> `docs/architecture/issues.md`.
+
 ---
 
 ## Classification Legend

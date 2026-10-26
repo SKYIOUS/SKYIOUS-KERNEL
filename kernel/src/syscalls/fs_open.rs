@@ -374,6 +374,16 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
                 0
             }),
             F_GETFL => {
+                // A queue descriptor keeps its access mode and O_NONBLOCK in
+                // the open file description, not in fd_flags.
+                if let Some(Some(FileDescriptor::Mqueue(obj))) = fd_table.get(fd as usize) {
+                    let accmode = match (obj.can_read(), obj.can_write()) {
+                        (true, false) => 0,
+                        (false, true) => 1,
+                        _ => 2,
+                    };
+                    return (accmode | obj.flags()) as u64;
+                }
                 let flags = p.files.lock().fd_flags.clone();
                 if (fd as usize) < flags.len() {
                     flags[fd as usize]
@@ -381,7 +391,7 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
                     0
                 }
             }
-            F_SETFL => p.with_fd_table(|_, fd_flags| {
+            F_SETFL => p.with_fd_table(|fd_table, fd_flags| {
                 if fd as usize >= fd_flags.len() {
                     fd_flags.resize(fd as usize + 1, 0);
                 }
@@ -389,6 +399,9 @@ pub fn sys_fcntl(fd: u64, cmd: i32, arg: u64) -> u64 {
                 // a descriptor flag owned by F_SETFD).
                 fd_flags[fd as usize] =
                     (fd_flags[fd as usize] & (0x3 | 0x80000)) | (arg & 0xFFFF & !0x3);
+                if let Some(Some(FileDescriptor::Mqueue(obj))) = fd_table.get(fd as usize) {
+                    obj.set_flags(arg as i32 & 0x800);
+                }
                 0
             }),
             _ => errno::Errno::EINVAL as u64,

@@ -3,16 +3,27 @@
 Living status document. Last updated: 2026-10-26 (session: mqueue rewrite verified; 223/223).
 Every claim here was reproduced on this machine; re-verify after any change.
 
-## Verified this session (2026-10-26, mqueue rewrite + initramfs check)
+## Verified this session (2026-10-26, mqueue ABI repair + initramfs check)
 
-- **mqueue:** the subsystem moved from `kernel/src/syscalls/mqueue.rs` to
-  `kernel/src/ipc/mqueue/` (`mod.rs` syscalls, `queue.rs` core, `object.rs`
-  kernel-object wrapper). Errno encoding, `mq_setattr` returning the previous
-  attributes, `O_NONBLOCK`-only queue flags, and `prio_ptr` via `copy_to_user`
-  are fixed. 13 contract tests in `kernel/src/tests/mqueue_contract.rs` cover
-  the open/close/unlink round-trip, `O_EXCL`/`ENOENT`, bad fd, `EMSGSIZE`,
-  `EFAULT` on name/message/priority pointers, `mq_open` attributes, and
-  get/setattr. `with_user_page` and its helpers live in that module now.
+- **mqueue:** lives in `kernel/src/ipc/mqueue/` (`mod.rs` syscalls, `queue.rs`
+  core, `object.rs` per-open description). Queue descriptors are real fds
+  (`FileDescriptor::Mqueue`, installed by `mq_open`, resolved by
+  `mq_send`/`mq_receive`/`mq_getsetattr`), so `close`/`dup`/`fstat`/`poll`/
+  `select`/`epoll` work on them. Syscall numbers are Linux x86_64
+  240/241/242/243/245; names use the libc ABI form without the leading slash
+  (`EACCES` for empty, `.`, `..`, or a slash; `ENAMETOOLONG` over 255 bytes);
+  `O_NONBLOCK` is per open file description, shared by `dup`/`fork`, and
+  `fcntl(F_GETFL/F_SETFL)` reads and changes it; descriptors are always
+  close-on-exec; `mq_unlink` removes only the name, so open descriptors keep
+  working; error precedence follows `ipc/mqueue.c`. 13 contract tests in
+  `kernel/src/tests/mqueue_contract.rs` cover the round trip,
+  `O_EXCL`/`ENOENT`, bad fd, `EMSGSIZE`, `EFAULT` on name/message/priority
+  pointers, creation attributes and limits, get/setattr, the fcntl bridge and
+  close-on-exec. Not implemented: `mq_notify` (244) and a non-NULL timeout in
+  `mq_timedsend`/`mq_timedreceive` return `ENOSYS`; `read(2)` on a queue fd is
+  `EINVAL` (Linux returns the `QSIZE:` line); there is no per-uid
+  `RLIMIT_MSGQUEUE` accounting, and the queue namespace is global rather than
+  per IPC namespace.
 - **FD-15:** `contract:sendmsg_recvmsg_split_into_iovecs` still pins the
   `sys_recvmsg` `msg_flags` fix (`offset_of!(msghdr, msg_flags)`), now run
   once instead of twice.
@@ -27,10 +38,11 @@ Every claim here was reproduced on this machine; re-verify after any change.
   self_test -- -D warnings` -> clean; `cargo fmt --all -- --check` -> exit 0;
   `scripts/check_repo_policy.py --self-test` -> pass. Limine image via
   `builder/build_limine_image.py --initrd kernel/initrd.tar`;
-  `tests/run_qemu_tests.py --qemu-extra "-vga none"`:
-  - release+self_test **PASS 223/223** at `-smp 1` (11.0s) and `-smp 2`
-    (14.5s, `-cpu qemu64,-smep`).
-  - `audit_small` profile **PASS 223/223** (24.1s).
+  `tests/run_qemu_tests.py --qemu-extra "-vga none -accel tcg,tb-size=256"`
+  (the `tb-size` cap works around a too-small host paging file):
+  - release+self_test **PASS 223/223** at `-smp 1` (10.5s), `-smp 2` (15.5s),
+    and `-smp 2 -cpu qemu64,-smep` (15.0s).
+  - `audit_small` profile **PASS 223/223** (23.6s).
 - `docs/architecture/issues.md` FD-14 updated to the new implementation path
   and evidence; CI/nightly expect-count and the selftest count in README,
   CONTEXT.md, and CONTRIBUTING.md are now 223.

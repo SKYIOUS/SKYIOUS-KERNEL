@@ -19,6 +19,7 @@ pub const CAP_NET_ADMIN: u64 = 1 << 12;
 pub const CAP_NET_RAW: u64 = 1 << 13;
 pub const CAP_SYS_ADMIN: u64 = 1 << 21;
 pub const CAP_SYS_BOOT: u64 = 1 << 22;
+pub const CAP_SYS_RESOURCE: u64 = 1 << 24;
 
 // *at constants
 pub const AT_FDCWD: i64 = -100;

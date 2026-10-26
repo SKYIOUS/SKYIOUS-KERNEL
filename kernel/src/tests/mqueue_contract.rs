@@ -2,6 +2,7 @@
 use crate::memory::buddy::BuddyFrameAllocator;
 use crate::memory::paging::AddressSpace;
 use crate::selftest;
+use crate::syscalls::fs_open::sys_close;
 use crate::task::process::{Process, CURRENT_PROCESS};
 use alloc::sync::Arc;
 
@@ -81,27 +82,36 @@ pub fn with_user_page<T>(f: impl FnOnce(u64) -> T) -> Result<T, &'static str> {
 }
 
 pub fn test_mq_open_installs_fd_and_round_trips() -> Result<(), &'static str> {
-    use crate::ipc::mqueue::{mq_close, mq_open, mq_receive, mq_send, mq_unlink};
+    use crate::ipc::mqueue::queue::MqAttr;
+    use crate::ipc::mqueue::{mq_getsetattr, mq_open, mq_receive, mq_send, mq_unlink};
     use crate::syscalls::errno::Errno;
+    use crate::syscalls::fs_open::{sys_dup, sys_fcntl};
 
     with_user_page(|base| {
         const NAME: u64 = 0;
         const MSG: u64 = 64;
         const OUT: u64 = 128;
+        const ATTR: u64 = 256;
+        const O_RDONLY: i32 = 0;
         const O_RDWR: i32 = 2;
         const O_CREAT: i32 = 0x40;
+        const F_GETFD: i32 = 1;
 
-        user_write(base + NAME, b"/selftest_mq\0")?;
+        user_write(base + NAME, b"selftest_mq\0")?;
         user_write(base + MSG, b"hello")?;
 
         let fd = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             core::ptr::null_mut(),
         );
         if (fd as i64) < 0 {
             return Err("mq_open failed");
+        }
+        // mq_overview(7): a queue descriptor is always close-on-exec.
+        if sys_fcntl(fd, F_GETFD, 0) != 1 {
+            return Err("mq_open did not set FD_CLOEXEC");
         }
 
         if mq_send(fd as i32, (base + MSG) as *const u8, 5, 5) != 0 {
@@ -124,19 +134,85 @@ pub fn test_mq_open_installs_fd_and_round_trips() -> Result<(), &'static str> {
             return Err("mq_receive payload mismatch");
         }
 
-        if mq_close(fd as i32) != 0 {
-            return Err("mq_close failed");
+        // A queue descriptor is an fd: dup(2) works and shares the queue.
+        let dup_fd = sys_dup(fd);
+        if (dup_fd as i64) < 0 {
+            return Err("dup of a queue descriptor failed");
         }
-        if mq_send(fd as i32, (base + MSG) as *const u8, 5, 5) != Errno::EBADF as u64 {
-            return Err("mq_send after mq_close did not return EBADF");
+        if mq_send(dup_fd as i32, (base + MSG) as *const u8, 5, 5) != 0 {
+            return Err("mq_send on the dup'd descriptor failed");
+        }
+        if mq_receive(
+            fd as i32,
+            (base + OUT) as *mut u8,
+            8192,
+            core::ptr::null_mut(),
+        ) != 5
+        {
+            return Err("descripors do not share the queue");
+        }
+        if sys_close(dup_fd) != 0 {
+            return Err("close of the dup'd descriptor failed");
         }
 
+        // Unlinking drops the name, not the descriptor.
         if mq_unlink((base + NAME) as *const u8) != 0 {
             return Err("mq_unlink failed");
         }
-        let reopened = mq_open((base + NAME) as *const u8, O_RDWR, 0, core::ptr::null_mut());
-        if reopened != Errno::ENOENT as u64 {
+        if mq_send(fd as i32, (base + MSG) as *const u8, 5, 5) != 0 {
+            return Err("mq_send after mq_unlink failed");
+        }
+        if mq_receive(
+            fd as i32,
+            (base + OUT) as *mut u8,
+            8192,
+            core::ptr::null_mut(),
+        ) != 5
+        {
+            return Err("mq_receive after mq_unlink failed");
+        }
+
+        // The name is gone, so O_CREAT builds a new, empty queue.
+        let fresh = mq_open(
+            (base + NAME) as *const u8,
+            O_CREAT | O_RDWR,
+            0o600,
+            core::ptr::null_mut(),
+        );
+        if (fresh as i64) < 0 {
+            return Err("mq_open with O_CREAT after unlink failed");
+        }
+        if mq_getsetattr(fresh as i32, core::ptr::null(), (base + ATTR) as *mut u8) != 0 {
+            return Err("mq_getsetattr failed");
+        }
+        let mut attr = MqAttr::default();
+        user_read_struct(base + ATTR, &mut attr)?;
+        if attr.mq_curmsgs != 0 {
+            return Err("the recreated queue is not empty");
+        }
+        if sys_close(fresh) != 0 {
+            return Err("close of the fresh descriptor failed");
+        }
+        if mq_unlink((base + NAME) as *const u8) != 0 {
+            return Err("second mq_unlink failed");
+        }
+
+        // With the name gone and no O_CREAT, the open must fail.
+        if mq_open(
+            (base + NAME) as *const u8,
+            O_RDONLY,
+            0,
+            core::ptr::null_mut(),
+        ) != Errno::ENOENT as u64
+        {
             return Err("mq_open of an unlinked queue did not return ENOENT");
+        }
+
+        if sys_close(fd) != 0 {
+            return Err("close failed");
+        }
+        if mq_send(fd as i32, (base + MSG) as *const u8, 5, 5) != Errno::EBADF as u64 {
+            return Err("mq_send after close did not return EBADF");
         }
         Ok(())
     })?
@@ -144,7 +220,7 @@ pub fn test_mq_open_installs_fd_and_round_trips() -> Result<(), &'static str> {
 
 /// Test mq_open with O_CREAT|O_EXCL returns EEXIST when queue exists.
 pub fn test_mq_open_excl_existing() -> Result<(), &'static str> {
-    use crate::ipc::mqueue::{mq_close, mq_open, mq_unlink};
+    use crate::ipc::mqueue::{mq_open, mq_unlink};
     use crate::syscalls::errno::Errno;
 
     with_user_page(|base| {
@@ -153,13 +229,13 @@ pub fn test_mq_open_excl_existing() -> Result<(), &'static str> {
         const O_CREAT: i32 = 0x40;
         const O_EXCL: i32 = 0x80;
 
-        user_write(base + NAME, b"/test_excl\0")?;
+        user_write(base + NAME, b"test_excl\0")?;
 
         // First open succeeds
         let fd1 = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             core::ptr::null_mut(),
         );
         if (fd1 as i64) < 0 {
@@ -177,19 +253,36 @@ pub fn test_mq_open_excl_existing() -> Result<(), &'static str> {
             return Err("mq_open with O_EXCL on existing queue did not return EEXIST");
         }
 
-        let rc = mq_close(fd1 as i32);
-        if rc != 0 {
-            return Err("mq_close failed");
+        if sys_close(fd1) != 0 {
+            return Err("close failed");
         }
         let rc = mq_unlink((base + NAME) as *const u8);
         if rc != 0 {
             return Err("mq_unlink failed");
         }
+
+        // The name is free again: O_EXCL must now create.
+        let fd3 = mq_open(
+            (base + NAME) as *const u8,
+            O_CREAT | O_EXCL | O_RDWR,
+            0o600,
+            core::ptr::null_mut(),
+        );
+        if (fd3 as i64) < 0 {
+            return Err("mq_open with O_EXCL after unlink did not create");
+        }
+        if sys_close(fd3) != 0 {
+            return Err("close of the recreated queue failed");
+        }
+        if mq_unlink((base + NAME) as *const u8) != 0 {
+            return Err("second mq_unlink failed");
+        }
         Ok(())
     })?
 }
 
-/// Test mq_open without O_CREAT on missing queue returns ENOENT.
+/// Test mq_open without O_CREAT on missing queue returns ENOENT, and that
+/// malformed names are rejected as Linux documents.
 pub fn test_mq_open_missing_no_creat() -> Result<(), &'static str> {
     use crate::ipc::mqueue::mq_open;
     use crate::syscalls::errno::Errno;
@@ -197,12 +290,78 @@ pub fn test_mq_open_missing_no_creat() -> Result<(), &'static str> {
     with_user_page(|base| {
         const NAME: u64 = 0;
         const O_RDWR: i32 = 2;
+        const O_CREAT: i32 = 0x40;
 
-        user_write(base + NAME, b"/nonexistent_mq\0")?;
+        user_write(base + NAME, b"nonexistent_mq\0")?;
 
         let fd = mq_open((base + NAME) as *const u8, O_RDWR, 0, core::ptr::null_mut());
         if fd != Errno::ENOENT as u64 {
             return Err("mq_open of missing queue without O_CREAT did not return ENOENT");
+        }
+
+        // The syscall ABI takes the name without the leading slash, because
+        // glibc/musl strip the POSIX `/` before entering the kernel. Linux's
+        // lookup_one_len rejects an empty name, `.`, `..` and any slash with
+        // EACCES.
+        user_write(base + NAME, b"\0")?;
+        if mq_open((base + NAME) as *const u8, O_RDWR, 0, core::ptr::null_mut())
+            != Errno::EACCES as u64
+        {
+            return Err("mq_open of an empty name did not return EACCES");
+        }
+        for bad in [
+            &b".\0"[..],
+            &b"..\0"[..],
+            &b"/leading\0"[..],
+            &b"two/slashes\0"[..],
+        ] {
+            user_write(base + NAME, bad)?;
+            if mq_open((base + NAME) as *const u8, O_RDWR, 0, core::ptr::null_mut())
+                != Errno::EACCES as u64
+            {
+                return Err("mq_open accepted a name Linux rejects with EACCES");
+            }
+        }
+
+        // 256 name bytes exceed NAME_MAX and must not alias a shorter name.
+        let long = [b'a'; 257];
+        user_write(base + NAME, &long)?;
+        if mq_open((base + NAME) as *const u8, O_RDWR, 0, core::ptr::null_mut())
+            != Errno::ENAMETOOLONG as u64
+        {
+            return Err("mq_open with an overlong name did not return ENAMETOOLONG");
+        }
+
+        // 255 bytes is the largest accepted name, and it is usable.
+        let mut max = [b'b'; 256];
+        max[255] = 0;
+        user_write(base + NAME, &max)?;
+        let fd = mq_open(
+            (base + NAME) as *const u8,
+            O_CREAT | O_RDWR,
+            0o600,
+            core::ptr::null_mut(),
+        );
+        if (fd as i64) < 0 {
+            return Err("mq_open rejected a NAME_MAX-length name");
+        }
+        if crate::ipc::mqueue::mq_unlink((base + NAME) as *const u8) != 0 {
+            return Err("mq_unlink of a NAME_MAX-length name failed");
+        }
+        if sys_close(fd) != 0 {
+            return Err("close of the NAME_MAX-length queue failed");
+        }
+
+        // (oflag & O_ACCMODE) == 3 is not a valid access mode.
+        user_write(base + NAME, b"bad_accmode\0")?;
+        if mq_open(
+            (base + NAME) as *const u8,
+            O_CREAT | 3,
+            0o600,
+            core::ptr::null_mut(),
+        ) != Errno::EINVAL as u64
+        {
+            return Err("mq_open with access mode 3 did not return EINVAL");
         }
         Ok(())
     })?
@@ -240,24 +399,28 @@ pub fn test_mq_receive_bad_fd() -> Result<(), &'static str> {
     })?
 }
 
-/// Test mq_send with message too large returns EMSGSIZE.
+/// Test mq_send with message too large returns EMSGSIZE, and that the open
+/// direction is enforced.
 pub fn test_mq_send_msgsize() -> Result<(), &'static str> {
-    use crate::ipc::mqueue::{mq_close, mq_open, mq_send, mq_unlink};
+    use crate::ipc::mqueue::{mq_open, mq_send, mq_unlink};
     use crate::syscalls::errno::Errno;
 
     with_user_page(|base| {
         const NAME: u64 = 0;
         const MSG: u64 = 64;
+        const OUT: u64 = 128;
+        const O_RDONLY: i32 = 0;
+        const O_WRONLY: i32 = 1;
         const O_RDWR: i32 = 2;
         const O_CREAT: i32 = 0x40;
 
-        user_write(base + NAME, b"/test_msgsize\0")?;
+        user_write(base + NAME, b"test_msgsize\0")?;
         user_write(base + MSG, b"hello")?;
 
         let fd = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             core::ptr::null_mut(),
         );
         if (fd as i64) < 0 {
@@ -270,9 +433,45 @@ pub fn test_mq_send_msgsize() -> Result<(), &'static str> {
             return Err("mq_send with oversized message did not return EMSGSIZE");
         }
 
-        let rc = mq_close(fd as i32);
-        if rc != 0 {
-            return Err("mq_close failed");
+        // A descriptor opened O_RDONLY cannot send: EBADF, not EACCES.
+        let ro = mq_open(
+            (base + NAME) as *const u8,
+            O_RDONLY,
+            0,
+            core::ptr::null_mut(),
+        );
+        if (ro as i64) < 0 {
+            return Err("read-only open failed");
+        }
+        if mq_send(ro as i32, (base + MSG) as *const u8, 5, 5) != Errno::EBADF as u64 {
+            return Err("mq_send on a read-only descriptor did not return EBADF");
+        }
+
+        // ...and a write-only descriptor cannot receive.
+        let wo = mq_open(
+            (base + NAME) as *const u8,
+            O_WRONLY,
+            0,
+            core::ptr::null_mut(),
+        );
+        if (wo as i64) < 0 {
+            return Err("write-only open failed");
+        }
+        if crate::ipc::mqueue::mq_receive(
+            wo as i32,
+            (base + OUT) as *mut u8,
+            8192,
+            core::ptr::null_mut(),
+        ) != Errno::EBADF as u64
+        {
+            return Err("mq_receive on a write-only descriptor did not return EBADF");
+        }
+        if sys_close(ro) != 0 || sys_close(wo) != 0 {
+            return Err("closing the extra descriptors failed");
+        }
+
+        if sys_close(fd) != 0 {
+            return Err("close failed");
         }
         let rc = mq_unlink((base + NAME) as *const u8);
         if rc != 0 {
@@ -284,7 +483,7 @@ pub fn test_mq_send_msgsize() -> Result<(), &'static str> {
 
 /// Test mq_receive with buffer too small returns EMSGSIZE.
 pub fn test_mq_receive_msgsize() -> Result<(), &'static str> {
-    use crate::ipc::mqueue::{mq_close, mq_open, mq_receive, mq_send, mq_unlink};
+    use crate::ipc::mqueue::{mq_open, mq_receive, mq_send, mq_unlink};
     use crate::syscalls::errno::Errno;
 
     with_user_page(|base| {
@@ -294,13 +493,13 @@ pub fn test_mq_receive_msgsize() -> Result<(), &'static str> {
         const O_RDWR: i32 = 2;
         const O_CREAT: i32 = 0x40;
 
-        user_write(base + NAME, b"/test_rx_msgsize\0")?;
+        user_write(base + NAME, b"test_rx_msgsize\0")?;
         user_write(base + MSG, b"hello world")?;
 
         let fd = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             core::ptr::null_mut(),
         );
         if (fd as i64) < 0 {
@@ -318,9 +517,19 @@ pub fn test_mq_receive_msgsize() -> Result<(), &'static str> {
             return Err("mq_receive with small buffer did not return EMSGSIZE");
         }
 
-        let rc = mq_close(fd as i32);
-        if rc != 0 {
-            return Err("mq_close failed");
+        // The rejected receive must not consume the message.
+        if mq_receive(
+            fd as i32,
+            (base + OUT) as *mut u8,
+            8192,
+            core::ptr::null_mut(),
+        ) != 11
+        {
+            return Err("mq_receive after EMSGSIZE lost the message");
+        }
+
+        if sys_close(fd) != 0 {
+            return Err("close failed");
         }
         let rc = mq_unlink((base + NAME) as *const u8);
         if rc != 0 {
@@ -351,7 +560,7 @@ pub fn test_mq_open_bad_name_ptr() -> Result<(), &'static str> {
 
 /// Test mq_send with invalid msg_ptr returns EFAULT.
 pub fn test_mq_send_bad_msg_ptr() -> Result<(), &'static str> {
-    use crate::ipc::mqueue::{mq_close, mq_open, mq_send, mq_unlink};
+    use crate::ipc::mqueue::{mq_open, mq_send, mq_unlink};
     use crate::syscalls::errno::Errno;
 
     with_user_page(|base| {
@@ -359,12 +568,12 @@ pub fn test_mq_send_bad_msg_ptr() -> Result<(), &'static str> {
         const O_RDWR: i32 = 2;
         const O_CREAT: i32 = 0x40;
 
-        user_write(base + NAME, b"/test_send_fault\0")?;
+        user_write(base + NAME, b"test_send_fault\0")?;
 
         let fd = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             core::ptr::null_mut(),
         );
         if (fd as i64) < 0 {
@@ -384,9 +593,8 @@ pub fn test_mq_send_bad_msg_ptr() -> Result<(), &'static str> {
             return Err("mq_send with kernel address did not return EFAULT");
         }
 
-        let rc = mq_close(fd as i32);
-        if rc != 0 {
-            return Err("mq_close failed");
+        if sys_close(fd) != 0 {
+            return Err("close failed");
         }
         let rc = mq_unlink((base + NAME) as *const u8);
         if rc != 0 {
@@ -398,7 +606,7 @@ pub fn test_mq_send_bad_msg_ptr() -> Result<(), &'static str> {
 
 /// Test mq_receive with invalid msg_ptr returns EFAULT.
 pub fn test_mq_receive_bad_msg_ptr() -> Result<(), &'static str> {
-    use crate::ipc::mqueue::{mq_close, mq_open, mq_receive, mq_send, mq_unlink};
+    use crate::ipc::mqueue::{mq_open, mq_receive, mq_send, mq_unlink};
     use crate::syscalls::errno::Errno;
 
     with_user_page(|base| {
@@ -407,13 +615,13 @@ pub fn test_mq_receive_bad_msg_ptr() -> Result<(), &'static str> {
         const O_RDWR: i32 = 2;
         const O_CREAT: i32 = 0x40;
 
-        user_write(base + NAME, b"/test_rx_fault\0")?;
+        user_write(base + NAME, b"test_rx_fault\0")?;
         user_write(base + MSG, b"hello")?;
 
         let fd = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             core::ptr::null_mut(),
         );
         if (fd as i64) < 0 {
@@ -448,9 +656,8 @@ pub fn test_mq_receive_bad_msg_ptr() -> Result<(), &'static str> {
             return Err("mq_receive with kernel address did not return EFAULT");
         }
 
-        let rc = mq_close(fd as i32);
-        if rc != 0 {
-            return Err("mq_close failed");
+        if sys_close(fd) != 0 {
+            return Err("close failed");
         }
         let rc = mq_unlink((base + NAME) as *const u8);
         if rc != 0 {
@@ -462,7 +669,7 @@ pub fn test_mq_receive_bad_msg_ptr() -> Result<(), &'static str> {
 
 /// Test mq_receive with invalid prio_ptr returns EFAULT.
 pub fn test_mq_receive_bad_prio_ptr() -> Result<(), &'static str> {
-    use crate::ipc::mqueue::{mq_close, mq_open, mq_receive, mq_send, mq_unlink};
+    use crate::ipc::mqueue::{mq_open, mq_receive, mq_send, mq_unlink};
     use crate::syscalls::errno::Errno;
 
     with_user_page(|base| {
@@ -472,13 +679,13 @@ pub fn test_mq_receive_bad_prio_ptr() -> Result<(), &'static str> {
         const O_RDWR: i32 = 2;
         const O_CREAT: i32 = 0x40;
 
-        user_write(base + NAME, b"/test_prio_fault\0")?;
+        user_write(base + NAME, b"test_prio_fault\0")?;
         user_write(base + MSG, b"hello")?;
 
         let fd = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             core::ptr::null_mut(),
         );
         if (fd as i64) < 0 {
@@ -497,9 +704,8 @@ pub fn test_mq_receive_bad_prio_ptr() -> Result<(), &'static str> {
             return Err("mq_receive with kernel prio_ptr did not return EFAULT");
         }
 
-        let rc = mq_close(fd as i32);
-        if rc != 0 {
-            return Err("mq_close failed");
+        if sys_close(fd) != 0 {
+            return Err("close failed");
         }
         let rc = mq_unlink((base + NAME) as *const u8);
         if rc != 0 {
@@ -509,10 +715,12 @@ pub fn test_mq_receive_bad_prio_ptr() -> Result<(), &'static str> {
     })?
 }
 
-/// Test mq_open with mq_attr on O_CREAT respects attributes.
+/// Test mq_open with mq_attr on O_CREAT respects attributes and rejects
+/// attributes outside the limits.
 pub fn test_mq_open_with_attr() -> Result<(), &'static str> {
     use crate::ipc::mqueue::queue::MqAttr;
-    use crate::ipc::mqueue::{mq_close, mq_getattr, mq_open, mq_unlink};
+    use crate::ipc::mqueue::{mq_getsetattr, mq_open, mq_unlink};
+    use crate::syscalls::errno::Errno;
 
     with_user_page(|base| {
         const NAME: u64 = 0;
@@ -521,7 +729,42 @@ pub fn test_mq_open_with_attr() -> Result<(), &'static str> {
         const O_RDWR: i32 = 2;
         const O_CREAT: i32 = 0x40;
 
-        user_write(base + NAME, b"/test_attr\0")?;
+        user_write(base + NAME, b"test_attr\0")?;
+
+        // Zero limits, and limits above the hard caps, are EINVAL.
+        for bad in [
+            MqAttr {
+                mq_maxmsg: 0,
+                mq_msgsize: 4096,
+                ..MqAttr::default_attrs()
+            },
+            MqAttr {
+                mq_maxmsg: 10,
+                mq_msgsize: 0,
+                ..MqAttr::default_attrs()
+            },
+            MqAttr {
+                mq_maxmsg: 65537,
+                mq_msgsize: 4096,
+                ..MqAttr::default_attrs()
+            },
+            MqAttr {
+                mq_maxmsg: 10,
+                mq_msgsize: 16 * 1024 * 1024 + 1,
+                ..MqAttr::default_attrs()
+            },
+        ] {
+            user_write_struct(base + ATTR, &bad)?;
+            if mq_open(
+                (base + NAME) as *const u8,
+                O_CREAT | O_RDWR,
+                0o600,
+                (base + ATTR) as *mut u8,
+            ) != Errno::EINVAL as u64
+            {
+                return Err("mq_open accepted an out-of-range mq_attr");
+            }
+        }
 
         // Write custom mq_attr
         let attr = MqAttr {
@@ -536,7 +779,7 @@ pub fn test_mq_open_with_attr() -> Result<(), &'static str> {
         let fd = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             (base + ATTR) as *mut u8,
         );
         if (fd as i64) < 0 {
@@ -544,9 +787,9 @@ pub fn test_mq_open_with_attr() -> Result<(), &'static str> {
         }
 
         // Get attributes back
-        let rc = mq_getattr(fd as i32, (base + OUT_ATTR) as *mut u8);
+        let rc = mq_getsetattr(fd as i32, core::ptr::null(), (base + OUT_ATTR) as *mut u8);
         if rc != 0 {
-            return Err("mq_getattr failed");
+            return Err("mq_getsetattr failed");
         }
 
         let mut got_attr = MqAttr::default();
@@ -559,9 +802,8 @@ pub fn test_mq_open_with_attr() -> Result<(), &'static str> {
             return Err("mq_msgsize not respected");
         }
 
-        let rc = mq_close(fd as i32);
-        if rc != 0 {
-            return Err("mq_close failed");
+        if sys_close(fd) != 0 {
+            return Err("close failed");
         }
         let rc = mq_unlink((base + NAME) as *const u8);
         if rc != 0 {
@@ -571,34 +813,47 @@ pub fn test_mq_open_with_attr() -> Result<(), &'static str> {
     })?
 }
 
-/// Test mq_getsetattr round-trip.
+/// Test mq_getsetattr round-trip, including per-description O_NONBLOCK.
 pub fn test_mq_getsetattr() -> Result<(), &'static str> {
     use crate::ipc::mqueue::queue::MqAttr;
-    use crate::ipc::mqueue::{mq_close, mq_getattr, mq_open, mq_setattr, mq_unlink};
+    use crate::ipc::mqueue::{mq_getsetattr, mq_open, mq_receive, mq_unlink};
+    use crate::syscalls::errno::Errno;
 
     with_user_page(|base| {
         const NAME: u64 = 0;
         const ATTR: u64 = 64;
         const OUT_ATTR: u64 = 128;
+        const OUT: u64 = 256;
+        const O_RDONLY: i32 = 0;
         const O_RDWR: i32 = 2;
         const O_CREAT: i32 = 0x40;
 
-        user_write(base + NAME, b"/test_setattr\0")?;
+        user_write(base + NAME, b"test_setattr\0")?;
 
         let fd = mq_open(
             (base + NAME) as *const u8,
             O_CREAT | O_RDWR,
-            0,
+            0o600,
             core::ptr::null_mut(),
         );
         if (fd as i64) < 0 {
             return Err("mq_open failed");
         }
+        // A second descriptor on the same queue, blocking by default.
+        let other = mq_open(
+            (base + NAME) as *const u8,
+            O_RDONLY,
+            0,
+            core::ptr::null_mut(),
+        );
+        if (other as i64) < 0 {
+            return Err("second mq_open failed");
+        }
 
         // Get initial attributes
-        let rc = mq_getattr(fd as i32, (base + OUT_ATTR) as *mut u8);
+        let rc = mq_getsetattr(fd as i32, core::ptr::null(), (base + OUT_ATTR) as *mut u8);
         if rc != 0 {
-            return Err("mq_getattr failed");
+            return Err("mq_getsetattr failed");
         }
 
         // Set new flags (O_NONBLOCK)
@@ -611,7 +866,7 @@ pub fn test_mq_getsetattr() -> Result<(), &'static str> {
         };
         user_write_struct(base + ATTR, &new_attr)?;
 
-        let rc = mq_setattr(
+        let rc = mq_getsetattr(
             fd as i32,
             (base + ATTR) as *const u8,
             (base + OUT_ATTR) as *mut u8,
@@ -628,7 +883,7 @@ pub fn test_mq_getsetattr() -> Result<(), &'static str> {
         }
 
         // The new flags are observable through mq_getattr.
-        let rc = mq_getattr(fd as i32, (base + OUT_ATTR) as *mut u8);
+        let rc = mq_getsetattr(fd as i32, core::ptr::null(), (base + OUT_ATTR) as *mut u8);
         if rc != 0 {
             return Err("mq_getattr after mq_setattr failed");
         }
@@ -638,9 +893,61 @@ pub fn test_mq_getsetattr() -> Result<(), &'static str> {
             return Err("mq_setattr did not change flags");
         }
 
-        let rc = mq_close(fd as i32);
+        // fcntl(2) observes and changes the same file status flags, as on
+        // Linux where mq_setattr is F_SETFL on the descriptor.
+        use crate::syscalls::fs_open::sys_fcntl;
+        const F_GETFL: i32 = 3;
+        const F_SETFL: i32 = 4;
+        if sys_fcntl(fd, F_GETFL, 0) & 0x800 == 0 {
+            return Err("F_GETFL did not report O_NONBLOCK set by mq_setattr");
+        }
+        if sys_fcntl(fd, F_SETFL, 0) != 0 || sys_fcntl(fd, F_GETFL, 0) & 0x800 != 0 {
+            return Err("F_SETFL could not clear O_NONBLOCK on a queue descriptor");
+        }
+        if sys_fcntl(fd, F_SETFL, 0x800) != 0 {
+            return Err("F_SETFL could not restore O_NONBLOCK");
+        }
+
+        // O_NONBLOCK belongs to one description: the other one is unchanged.
+        let rc = mq_getsetattr(
+            other as i32,
+            core::ptr::null(),
+            (base + OUT_ATTR) as *mut u8,
+        );
         if rc != 0 {
-            return Err("mq_close failed");
+            return Err("mq_getattr on the second descriptor failed");
+        }
+        user_read_struct(base + OUT_ATTR, &mut got_attr)?;
+        if got_attr.mq_flags != 0 {
+            return Err("O_NONBLOCK leaked to another descriptor");
+        }
+
+        // O_NONBLOCK is per description, so an empty queue returns EAGAIN
+        // instead of blocking.
+        if mq_receive(
+            fd as i32,
+            (base + OUT) as *mut u8,
+            8192,
+            core::ptr::null_mut(),
+        ) != Errno::EAGAIN as u64
+        {
+            return Err("non-blocking receive on an empty queue did not return EAGAIN");
+        }
+
+        // Only O_NONBLOCK may be set through mq_setattr.
+        let bad_attr = MqAttr {
+            mq_flags: 0x1000,
+            ..MqAttr::default_attrs()
+        };
+        user_write_struct(base + ATTR, &bad_attr)?;
+        if mq_getsetattr(fd as i32, (base + ATTR) as *const u8, core::ptr::null_mut())
+            != Errno::EINVAL as u64
+        {
+            return Err("mq_setattr accepted an unknown flag");
+        }
+
+        if sys_close(fd) != 0 || sys_close(other) != 0 {
+            return Err("close failed");
         }
         let rc = mq_unlink((base + NAME) as *const u8);
         if rc != 0 {

@@ -1,10 +1,10 @@
 //! Message queue core data structure.
 
 use crate::sync::IrqSafeMutex as Mutex;
+use crate::syscalls::errno::Errno;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-const O_NONBLOCK: i32 = 0x800;
 const MQ_PRIO_MAX: u32 = 32768;
 
 /// A single message in the queue.
@@ -38,7 +38,7 @@ impl MqAttr {
     }
 }
 
-/// Message queue state.
+/// Message queue state, shared by every descriptor open on the name.
 pub struct MqQueue {
     /// Messages sorted by priority (highest first).
     msgs: VecDeque<MqMsg>,
@@ -46,42 +46,28 @@ pub struct MqQueue {
     max_msgs: usize,
     /// Maximum size of a single message.
     max_msg_size: usize,
-    /// Whether the queue has been unlinked.
-    deleted: bool,
-    /// Open file description flags (O_NONBLOCK, O_CLOEXEC).
-    flags: i32,
 }
 
 impl MqQueue {
     /// Create a new message queue with the given attributes.
-    pub fn new(attr: Option<MqAttr>, flags: i32) -> Self {
-        let attr = attr.unwrap_or_else(MqAttr::default_attrs);
+    pub fn new(attr: MqAttr) -> Self {
         MqQueue {
             msgs: VecDeque::new(),
             max_msgs: attr.mq_maxmsg as usize,
             max_msg_size: attr.mq_msgsize as usize,
-            deleted: false,
-            flags,
         }
     }
 
-    /// Get current queue attributes.
-    pub fn get_attr(&self) -> MqAttr {
+    /// Get current queue attributes. `mq_flags` belong to the open file
+    /// description, not the queue, so the caller supplies them.
+    pub fn get_attr(&self, flags: i32) -> MqAttr {
         MqAttr {
-            mq_flags: self.flags as i64,
+            mq_flags: flags as i64,
             mq_maxmsg: self.max_msgs as i64,
             mq_msgsize: self.max_msg_size as i64,
             mq_curmsgs: self.msgs.len() as i64,
             __reserved: [0; 4],
         }
-    }
-
-    /// Set queue attributes (only mq_flags can be changed).
-    /// Returns the attributes that were in effect before the call (POSIX).
-    pub fn set_attr(&mut self, attr: &MqAttr) -> MqAttr {
-        let old = self.get_attr();
-        self.flags = attr.mq_flags as i32;
-        old
     }
 
     /// Check if queue is full.
@@ -99,39 +85,23 @@ impl MqQueue {
         self.msgs.len()
     }
 
-    /// Mark queue as deleted.
-    pub fn mark_deleted(&mut self) {
-        self.deleted = true;
-    }
-
-    /// Check if queue is deleted.
-    pub fn is_deleted(&self) -> bool {
-        self.deleted
-    }
-
-    /// Get the flags.
-    pub fn flags(&self) -> i32 {
-        self.flags
-    }
-
     /// Send a message to the queue.
-    /// Returns Err(()) if queue is full and O_NONBLOCK is set.
-    pub fn send(&mut self, data: Vec<u8>, prio: u32) -> Result<(), ()> {
+    /// `EAGAIN` means the queue is full; the caller decides whether to block.
+    pub fn send(&mut self, data: &[u8], prio: u32) -> Result<(), Errno> {
         if prio >= MQ_PRIO_MAX {
-            return Err(());
+            return Err(Errno::EINVAL);
         }
         if data.len() > self.max_msg_size {
-            return Err(());
+            return Err(Errno::EMSGSIZE);
         }
         if self.is_full() {
-            if (self.flags & O_NONBLOCK) != 0 {
-                return Err(());
-            }
-            // Blocking send: caller must handle retry
-            return Err(());
+            return Err(Errno::EAGAIN);
         }
-        let msg = MqMsg { data, prio };
-        // Insert in priority order (highest priority first)
+        let msg = MqMsg {
+            data: data.to_vec(),
+            prio,
+        };
+        // Insert in priority order (highest priority first).
         let pos = self
             .msgs
             .iter()
@@ -142,23 +112,17 @@ impl MqQueue {
     }
 
     /// Receive a message from the queue.
-    /// Returns the message data and priority, or Err(()) if empty and O_NONBLOCK.
-    pub fn receive(&mut self, buf: &mut [u8]) -> Result<(usize, u32), ()> {
-        if self.is_empty() {
-            if (self.flags & O_NONBLOCK) != 0 {
-                return Err(());
-            }
-            // Blocking receive: caller must handle retry
-            return Err(());
-        }
-        let msg = match self.msgs.pop_front() {
-            Some(m) => m,
-            // Unreachable after the `is_empty` check; no panic on the syscall path.
-            None => return Err(()),
+    /// `EAGAIN` means the queue is empty; the caller decides whether to block.
+    /// The message stays queued if `buf` cannot hold it.
+    pub fn receive(&mut self, buf: &mut [u8]) -> Result<(usize, u32), Errno> {
+        let queued_len = match self.msgs.front() {
+            Some(m) => m.data.len(),
+            None => return Err(Errno::EAGAIN),
         };
-        if buf.len() < msg.data.len() {
-            return Err(());
+        if queued_len > buf.len() {
+            return Err(Errno::EMSGSIZE);
         }
+        let msg = self.msgs.pop_front().ok_or(Errno::EAGAIN)?;
         buf[..msg.data.len()].copy_from_slice(&msg.data);
         Ok((msg.data.len(), msg.prio))
     }
@@ -180,18 +144,14 @@ pub struct MqQueueHandle {
 }
 
 impl MqQueueHandle {
-    pub fn new(attr: Option<MqAttr>, flags: i32) -> Self {
+    pub fn new(attr: MqAttr) -> Self {
         MqQueueHandle {
-            inner: Mutex::new(MqQueue::new(attr, flags)),
+            inner: Mutex::new(MqQueue::new(attr)),
         }
     }
 
-    pub fn get_attr(&self) -> MqAttr {
-        self.inner.lock().get_attr()
-    }
-
-    pub fn set_attr(&self, attr: &MqAttr) -> MqAttr {
-        self.inner.lock().set_attr(attr)
+    pub fn get_attr(&self, flags: i32) -> MqAttr {
+        self.inner.lock().get_attr(flags)
     }
 
     pub fn is_full(&self) -> bool {
@@ -206,23 +166,11 @@ impl MqQueueHandle {
         self.inner.lock().len()
     }
 
-    pub fn mark_deleted(&self) {
-        self.inner.lock().mark_deleted();
-    }
-
-    pub fn is_deleted(&self) -> bool {
-        self.inner.lock().is_deleted()
-    }
-
-    pub fn flags(&self) -> i32 {
-        self.inner.lock().flags()
-    }
-
-    pub fn send(&self, data: Vec<u8>, prio: u32) -> Result<(), ()> {
+    pub fn send(&self, data: &[u8], prio: u32) -> Result<(), Errno> {
         self.inner.lock().send(data, prio)
     }
 
-    pub fn receive(&self, buf: &mut [u8]) -> Result<(usize, u32), ()> {
+    pub fn receive(&self, buf: &mut [u8]) -> Result<(usize, u32), Errno> {
         self.inner.lock().receive(buf)
     }
 
@@ -241,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_queue_basic() {
-        let q = MqQueue::new(None, 0);
+        let q = MqQueue::new(MqAttr::default_attrs());
         assert_eq!(q.max_msgs(), 10);
         assert_eq!(q.max_msg_size(), 8192);
         assert!(q.is_empty());
@@ -250,10 +198,10 @@ mod tests {
 
     #[test]
     fn test_queue_priority_order() {
-        let mut q = MqQueue::new(None, 0);
-        q.send(vec![1], 1).unwrap();
-        q.send(vec![2], 5).unwrap();
-        q.send(vec![3], 3).unwrap();
+        let mut q = MqQueue::new(MqAttr::default_attrs());
+        q.send(&[1], 1).unwrap();
+        q.send(&[2], 5).unwrap();
+        q.send(&[3], 3).unwrap();
 
         let mut buf = [0u8; 10];
         let (len, prio) = q.receive(&mut buf).unwrap();
@@ -267,6 +215,8 @@ mod tests {
         let (len, prio) = q.receive(&mut buf).unwrap();
         assert_eq!(prio, 1);
         assert_eq!(&buf[..len], &[1]);
+
+        assert_eq!(q.receive(&mut buf).unwrap_err(), Errno::EAGAIN);
     }
 
     #[test]
@@ -276,25 +226,27 @@ mod tests {
             mq_msgsize: 10,
             ..MqAttr::default_attrs()
         };
-        let mut q = MqQueue::new(Some(attr), 0);
-        q.send(vec![1], 1).unwrap();
-        q.send(vec![2], 1).unwrap();
+        let mut q = MqQueue::new(attr);
+        q.send(&[1], 1).unwrap();
+        q.send(&[2], 1).unwrap();
         assert!(q.is_full());
-        assert!(q.send(vec![3], 1).is_err());
+        assert_eq!(q.send(&[3], 1).unwrap_err(), Errno::EAGAIN);
     }
 
     #[test]
-    fn test_queue_nonblock() {
+    fn test_queue_rejects_oversize_and_keeps_message() {
         let attr = MqAttr {
             mq_maxmsg: 1,
             mq_msgsize: 10,
             ..MqAttr::default_attrs()
         };
-        let mut q = MqQueue::new(Some(attr), O_NONBLOCK);
-        q.send(vec![1], 1).unwrap();
-        assert!(q.send(vec![2], 1).is_err());
+        let mut q = MqQueue::new(attr);
+        assert_eq!(q.send(&[0u8; 11], 1).unwrap_err(), Errno::EMSGSIZE);
+        q.send(&[1, 2, 3], 1).unwrap();
+        let mut short = [0u8; 2];
+        assert_eq!(q.receive(&mut short).unwrap_err(), Errno::EMSGSIZE);
+        assert_eq!(q.len(), 1);
         let mut buf = [0u8; 10];
-        q.receive(&mut buf).unwrap();
-        assert!(q.receive(&mut buf).is_err());
+        assert_eq!(q.receive(&mut buf).unwrap(), (3, 1));
     }
 }

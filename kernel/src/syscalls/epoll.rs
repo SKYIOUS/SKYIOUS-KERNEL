@@ -302,6 +302,15 @@ fn poll_readiness(
                         revents |= EPOLLIN | EPOLLRDNORM;
                     }
                 }
+                FileDescriptor::Mqueue(obj) => {
+                    let attr = obj.get_attr();
+                    if (entry.events & EPOLLIN) != 0 && attr.mq_curmsgs > 0 {
+                        revents |= EPOLLIN | EPOLLRDNORM;
+                    }
+                    if (entry.events & EPOLLOUT) != 0 && attr.mq_curmsgs < attr.mq_maxmsg {
+                        revents |= EPOLLOUT | EPOLLWRNORM;
+                    }
+                }
                 _ => {
                     if (entry.events & EPOLLIN) != 0 {
                         revents |= EPOLLIN | EPOLLRDNORM;

@@ -59,6 +59,7 @@ pub enum Errno {
     EOWNERDEAD = -130,
     ENOTRECOVERABLE = -131,
     EMSGSIZE = -90,
+    ENAMETOOLONG = -36,
 }
 
 impl Errno {

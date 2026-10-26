@@ -104,6 +104,7 @@ pub enum FileDescriptor {
         instance_key: u64,
     },
     IoUringFd(alloc::sync::Arc<crate::sync::IrqSafeMutex<dyn core::any::Any + Send + Sync>>),
+    Mqueue(alloc::sync::Arc<crate::ipc::mqueue::object::MqObject>),
 }
 
 impl Clone for FileDescriptor {
@@ -130,6 +131,7 @@ impl Clone for FileDescriptor {
                 instance_key: *instance_key,
             },
             FileDescriptor::IoUringFd(d) => FileDescriptor::IoUringFd(d.clone()),
+            FileDescriptor::Mqueue(obj) => FileDescriptor::Mqueue(obj.clone()),
         }
     }
 }

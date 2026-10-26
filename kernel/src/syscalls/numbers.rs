@@ -248,12 +248,13 @@ pub const SYS_CGROUP_MKDIR: u64 = 461;
 pub const SYS_CGROUP_WRITE: u64 = 462;
 pub const SYS_CGROUP_READ: u64 = 463;
 
-// POSIX message queues
+// POSIX message queues (Linux x86_64)
 pub const SYS_MQ_OPEN: u64 = 240;
-pub const SYS_MQ_CLOSE: u64 = 241;
+pub const SYS_MQ_UNLINK: u64 = 241;
 pub const SYS_MQ_TIMEDSEND: u64 = 242;
 pub const SYS_MQ_TIMEDRECEIVE: u64 = 243;
-pub const SYS_MQ_UNLINK: u64 = 244;
+// 244 mq_notify: unimplemented, dispatch falls through to ENOSYS.
+pub const SYS_MQ_GETSETATTR: u64 = 245;
 
 // inotify syscalls
 pub const SYS_INOTIFY_INIT: u64 = 467;
