@@ -1,4 +1,3 @@
-//! Re-exports the `vahi-ipc` crate so existing `crate::ipc::` imports continue
-//! to work during the incremental extraction.
+//! IPC module: message queues and other inter-process communication.
 
-pub use vahi_ipc::*;
+pub mod mqueue;

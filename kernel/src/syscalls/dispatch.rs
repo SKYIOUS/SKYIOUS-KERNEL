@@ -5,6 +5,7 @@ use super::*;
 use super::{cgroup, landlock, namespaces, prctl, seccomp};
 use super::{fs, gui, misc, net, process};
 use crate::gdt;
+use crate::ipc::mqueue;
 use crate::syscalls::user_access;
 use x86_64::registers::model_specific::{LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;

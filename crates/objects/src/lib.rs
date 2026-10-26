@@ -58,6 +58,7 @@ pub const TYPE_MUTEX: ObjectTypeId = ObjectTypeId(11);
 pub const TYPE_SEMAPHORE: ObjectTypeId = ObjectTypeId(12);
 pub const TYPE_TIMER: ObjectTypeId = ObjectTypeId(13);
 pub const TYPE_EVENT: ObjectTypeId = ObjectTypeId(14);
+pub const TYPE_MQUEUE: ObjectTypeId = ObjectTypeId(15);
 
 impl ObjectTypeId {
     /// Get the human-readable name for this object type.
@@ -78,6 +79,7 @@ impl ObjectTypeId {
             12 => "Semaphore",
             13 => "Timer",
             14 => "Event",
+            15 => "MQueue",
             _ => "Unknown",
         }
     }

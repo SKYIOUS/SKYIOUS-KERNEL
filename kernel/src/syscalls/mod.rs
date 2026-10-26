@@ -10,7 +10,6 @@ pub mod inotify;
 pub mod io_uring;
 pub mod landlock;
 pub mod mmsg;
-pub mod mqueue;
 pub mod namespaces;
 pub mod numbers;
 pub mod posix_timers;

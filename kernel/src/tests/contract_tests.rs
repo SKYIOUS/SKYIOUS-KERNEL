@@ -20,6 +20,11 @@ use crate::task::process::{
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
+// Shared userspace-page helpers live with the mqueue contracts; reuse them here.
+use crate::tests::mqueue_contract::{
+    user_read, user_read_struct, user_write, user_write_struct, with_user_page,
+};
+
 fn make_proc() -> Result<Arc<Process>, &'static str> {
     let mut fa = BuddyFrameAllocator;
     let aspace = AddressSpace::new(&mut fa).ok_or("AddressSpace::new failed")?;
@@ -678,6 +683,94 @@ fn test_socketpair_validates_domain_and_type() -> Result<(), &'static str> {
     out
 }
 
+fn test_sendmsg_recvmsg_split_into_iovecs() -> Result<(), &'static str> {
+    use crate::syscalls::net_helpers::{iovec, msghdr};
+    use crate::syscalls::net_options::{sys_recvmsg, sys_sendmsg};
+    use crate::syscalls::net_socket::sys_socketpair;
+
+    with_user_page(|base| {
+        const SV: u64 = 0;
+        const HDR_SEND: u64 = 32;
+        const IOV_SEND: u64 = 128;
+        const HDR_RECV: u64 = 192;
+        const IOV_RECV: u64 = 288;
+        const DATA: u64 = 352;
+        const OUT_A: u64 = 384;
+        const OUT_B: u64 = 400;
+
+        let rc = sys_socketpair(1, 1, 0, (base + SV) as *mut i32);
+        if rc != 0 {
+            return Err("socketpair failed");
+        }
+        let mut sv = [0i32; 2];
+        // SAFETY: `SV..SV+8` is inside the mapped page at `base`.
+        unsafe {
+            user_read(
+                base + SV,
+                core::slice::from_raw_parts_mut(sv.as_mut_ptr() as *mut u8, 8),
+            )?
+        };
+        let (send_fd, recv_fd) = (sv[0] as i64, sv[1] as i64);
+
+        let send_iov = iovec {
+            iov_base: (base + DATA) as *mut u8,
+            iov_len: 5,
+        };
+        let send_hdr = msghdr {
+            msg_iov: (base + IOV_SEND) as *const iovec,
+            msg_iovlen: 1,
+            ..msghdr::default()
+        };
+        user_write(base + DATA, b"hello")?;
+        user_write_struct(base + IOV_SEND, &send_iov)?;
+        user_write_struct(base + HDR_SEND, &send_hdr)?;
+
+        let sent = sys_sendmsg(send_fd, (base + HDR_SEND) as *const msghdr, 0);
+        if sent != 5 {
+            return Err("sendmsg returned the wrong length");
+        }
+
+        let recv_iovs = [
+            iovec {
+                iov_base: (base + OUT_A) as *mut u8,
+                iov_len: 2,
+            },
+            iovec {
+                iov_base: (base + OUT_B) as *mut u8,
+                iov_len: 16,
+            },
+        ];
+        let mut recv_hdr = msghdr {
+            msg_iov: (base + IOV_RECV) as *const iovec,
+            msg_iovlen: 2,
+            ..msghdr::default()
+        };
+        for (i, iov) in recv_iovs.iter().enumerate() {
+            user_write_struct(base + IOV_RECV + (i as u64) * 16, iov)?;
+        }
+        user_write_struct(base + HDR_RECV, &recv_hdr)?;
+
+        let received = sys_recvmsg(recv_fd, (base + HDR_RECV) as *mut msghdr, 0);
+        if received != 5 {
+            return Err("recvmsg returned the wrong length");
+        }
+
+        let mut out_a = [0u8; 2];
+        let mut out_b = [0u8; 3];
+        user_read(base + OUT_A, &mut out_a)?;
+        user_read(base + OUT_B, &mut out_b)?;
+        if &out_a != b"he" || &out_b != b"llo" {
+            return Err("recvmsg did not split the payload across iovecs");
+        }
+
+        user_read_struct(base + HDR_RECV, &mut recv_hdr)?;
+        if recv_hdr.msg_iovlen != 2 {
+            return Err("recvmsg overwrote msg_iovlen instead of msg_flags");
+        }
+        Ok(())
+    })?
+}
+
 pub fn register() {
     selftest::register("contract:exit_code_encoding", test_exit_code_encoding);
     selftest::register("contract:signalfd_mask_matrix", test_signalfd_mask_matrix);
@@ -725,5 +818,9 @@ pub fn register() {
     selftest::register(
         "contract:socketpair_validates_domain_and_type",
         test_socketpair_validates_domain_and_type,
+    );
+    selftest::register(
+        "contract:sendmsg_recvmsg_split_into_iovecs",
+        test_sendmsg_recvmsg_split_into_iovecs,
     );
 }
