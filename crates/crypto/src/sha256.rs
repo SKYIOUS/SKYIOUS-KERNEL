@@ -244,3 +244,138 @@ pub fn pbkdf2(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) {
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Reference vectors from FIPS 180-4 and RFC 4231
+
+    #[test]
+    fn sha256_empty() {
+        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let mut out = [0u8; 32];
+        sha256(b"", &mut out);
+        let expected = [
+            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+            0x78, 0x52, 0xb8, 0x55,
+        ];
+        assert_eq!(out, expected, "SHA-256 empty string");
+    }
+
+    #[test]
+    fn sha256_abc() {
+        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        let mut out = [0u8; 32];
+        sha256(b"abc", &mut out);
+        let expected = [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ];
+        assert_eq!(out, expected, "SHA-256('abc')");
+    }
+
+    #[test]
+    fn sha256_56bytes() {
+        // SHA-256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+        let input = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        assert_eq!(input.len(), 56, "test input must be 56 bytes");
+        let mut out = [0u8; 32];
+        sha256(input, &mut out);
+        let expected = [
+            0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8, 0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e,
+            0x60, 0x39, 0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67, 0xf6, 0xec, 0xed, 0xd4,
+            0x19, 0xdb, 0x06, 0xc1,
+        ];
+        assert_eq!(
+            out, expected,
+            "SHA-256 56-byte input (cross-block boundary)"
+        );
+    }
+
+    #[test]
+    fn sha256_long() {
+        // SHA-256 of two concatenated 56-byte strings = 112 bytes
+        let input = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        let mut doubled = alloc::vec![0u8; 112];
+        doubled[..56].copy_from_slice(input);
+        doubled[56..].copy_from_slice(input);
+        let mut out = [0u8; 32];
+        sha256(&doubled, &mut out);
+        let expected = [
+            0x59, 0xf1, 0x09, 0xd9, 0x53, 0x3b, 0x2b, 0x70, 0xe7, 0xc3, 0xb8, 0x14, 0xa2, 0xbd,
+            0x21, 0x8f, 0x78, 0xea, 0x5d, 0x37, 0x14, 0x45, 0x5b, 0xc6, 0x79, 0x87, 0xcf, 0x0d,
+            0x66, 0x43, 0x99, 0xcf,
+        ];
+        assert_eq!(out, expected, "SHA-256 112-byte input");
+    }
+
+    #[test]
+    fn hmac_sha256_rfc4231_test_case_1() {
+        // RFC 4231 Test Case 1
+        let key = [0x0b; 20];
+        let data = b"Hi There";
+        let mut out = [0u8; 32];
+        hmac_sha256(&key, data, &mut out);
+        let expected = [
+            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b,
+            0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c,
+            0x2e, 0x32, 0xcf, 0xf7,
+        ];
+        assert_eq!(out, expected, "HMAC-SHA256 RFC 4231 Test Case 1");
+    }
+
+    #[test]
+    fn hmac_sha256_empty_key() {
+        // HMAC-SHA256 with empty key and empty message
+        let mut out = [0u8; 32];
+        hmac_sha256(b"", b"", &mut out);
+        // Just verify it doesn't panic and produces a valid digest
+        assert_ne!(
+            out, [0u8; 32],
+            "HMAC with empty inputs should not be all zeros"
+        );
+    }
+
+    #[test]
+    fn pbkdf2_basic() {
+        // PBKDF2-HMAC-SHA256 with known parameters
+        let password = b"password";
+        let salt = b"salt";
+        let iterations = 1;
+        let mut out = [0u8; 32];
+        pbkdf2(password, salt, iterations, &mut out);
+        // Verify it produces a non-zero result
+        assert_ne!(out, [0u8; 32], "PBKDF2 should produce non-zero output");
+        // Verify deterministic
+        let mut out2 = [0u8; 32];
+        pbkdf2(password, salt, iterations, &mut out2);
+        assert_eq!(out, out2, "PBKDF2 should be deterministic");
+    }
+
+    #[test]
+    fn pbkdf2_different_iterations() {
+        let password = b"test";
+        let salt = b"salt";
+        let mut out1 = [0u8; 32];
+        let mut out2 = [0u8; 32];
+        pbkdf2(password, salt, 1, &mut out1);
+        pbkdf2(password, salt, 1000, &mut out2);
+        assert_ne!(
+            out1, out2,
+            "Different iterations should produce different output"
+        );
+    }
+
+    #[test]
+    fn sha256_deterministic() {
+        let data = b"deterministic test input";
+        let mut out1 = [0u8; 32];
+        let mut out2 = [0u8; 32];
+        sha256(data, &mut out1);
+        sha256(data, &mut out2);
+        assert_eq!(out1, out2, "SHA-256 must be deterministic");
+    }
+}
