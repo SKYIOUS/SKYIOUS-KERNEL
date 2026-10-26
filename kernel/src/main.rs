@@ -157,10 +157,12 @@ pub mod compositor;
 pub mod coverage;
 pub mod crypto;
 pub mod debug;
-pub mod drivers;
 pub mod ebpf;
 pub mod elf_dyn;
 pub mod emulation;
+pub mod drivers {
+    pub use vahi_drivers::*;
+}
 #[cfg(not(target_arch = "aarch64"))]
 mod gdt;
 pub mod gui;
@@ -184,9 +186,15 @@ pub(crate) use kaslr::{init_kaslr, KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLID
 // ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
 mod keyboard;
-pub mod limine;
-mod memory;
-mod net;
+pub mod limine {
+    pub use vahi_limine::*;
+}
+pub mod memory {
+    pub use vahi_memory::*;
+}
+pub mod net {
+    pub use vahi_net::*;
+}
 // ponytail: F2.2 — object/types surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
 pub mod objects;
@@ -219,7 +227,9 @@ mod tty;
 pub use vahi_verified as verified;
 // ponytail: F2.2 — vfs pseudo-fs (procfs/epoll/inotify) surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
-pub mod vfs;
+pub mod vfs {
+    pub use vahi_vfs::*;
+}
 #[cfg(not(target_arch = "aarch64"))]
 // ponytail: F2.2 — legacy VGA text-mode Color variants unused under Limine framebuffer; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
