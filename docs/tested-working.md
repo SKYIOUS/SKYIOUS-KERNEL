@@ -1,33 +1,41 @@
 # Tested & Working — Vahi Kernel / SkyOS
 
-Living status document. Last updated: 2026-10-23 (session: two new contract tests reach 209/209).
+Living status document. Last updated: 2026-10-26 (session: mqueue rewrite verified; 223/223).
 Every claim here was reproduced on this machine; re-verify after any change.
 
-## Verified this session (2026-10-23)
+## Verified this session (2026-10-26, mqueue rewrite + initramfs check)
 
-- Suite grew 207 → 209. The two added contract tests target the syscall-hygiene
-  fixes and are written to what the selftest environment can actually observe
-  (it maps no userspace pages, see `kernel/src/tests/abi_args.rs`):
-  `contract:memfd_create_rejects_non_user_name` (a kernel-space or null name
-  must be EFAULT with no fd leaked) and
-  `contract:socketpair_validates_domain_and_type` (bad domain/type rejected
-  before anything is installed).
-- The earlier draft of these tests asserted the syscall *success* path with
-  kernel pointers (`String::as_ptr`, a stack `sv`). Both handlers validate
-  through `copy_from_user`/`copy_to_user`, so those calls returned EFAULT and
-  the tests failed 207/209 — the assertions were unobservable, not the handlers.
-  They were rewritten rather than faked. The socketpair install/rollback
-  contract stays owned by `userptr:socketpair_rolls_back_on_bad_user_buffer`.
-- Gate, exact commands (all run this session, this tree):
-  `cargo build --release --target x86_64-unknown-none --features
-  "self_test,smp,net,ext4,iommu"` → exit 0;
-  `cargo clippy --release --target x86_64-unknown-none --features
-  "self_test,smp,net,ext4,iommu" -- -D warnings` → clean;
-  `cargo fmt --all -- --check` → exit 0; Limine image via
-  `builder/build_limine_image.py`, then `tests/run_qemu_tests.py
-  --expect-count 209 --qemu-extra "-vga none"`:
-  release+self_test **PASS 209/209, 0 failed** at `-smp 1` (10.5s) and `-smp 2`
-  (11.6s, `-cpu qemu64,-smep`); `audit_small` profile **PASS 209/209** (23.8s).
+- **mqueue:** the subsystem moved from `kernel/src/syscalls/mqueue.rs` to
+  `kernel/src/ipc/mqueue/` (`mod.rs` syscalls, `queue.rs` core, `object.rs`
+  kernel-object wrapper). Errno encoding, `mq_setattr` returning the previous
+  attributes, `O_NONBLOCK`-only queue flags, and `prio_ptr` via `copy_to_user`
+  are fixed. 13 contract tests in `kernel/src/tests/mqueue_contract.rs` cover
+  the open/close/unlink round-trip, `O_EXCL`/`ENOENT`, bad fd, `EMSGSIZE`,
+  `EFAULT` on name/message/priority pointers, `mq_open` attributes, and
+  get/setattr. `with_user_page` and its helpers live in that module now.
+- **FD-15:** `contract:sendmsg_recvmsg_split_into_iovecs` still pins the
+  `sys_recvmsg` `msg_flags` fix (`offset_of!(msghdr, msg_flags)`), now run
+  once instead of twice.
+- **Initramfs:** `vfs::init()` already mounts the Limine initrd as `/`
+  (`crates/vfs/src/defs.rs`, `RAMDISK`), verified by
+  `[BOOT] initrd from Limine modules` + `[TARFS] parsed 300 entries` on a
+  boot with `--initrd kernel/initrd.tar`. The added `vfs/mount.rs` helper and
+  `tests/initramfs_tests.rs` duplicated that path and were removed.
+- Suite is **223/223, 0 failed**. Gates run this session (this tree):
+  `cargo build --release --target x86_64-unknown-none --features self_test`
+  -> success; `cargo clippy --release --target x86_64-unknown-none --features
+  self_test -- -D warnings` -> clean; `cargo fmt --all -- --check` -> exit 0;
+  `scripts/check_repo_policy.py --self-test` -> pass. Limine image via
+  `builder/build_limine_image.py --initrd kernel/initrd.tar`;
+  `tests/run_qemu_tests.py --qemu-extra "-vga none"`:
+  - release+self_test **PASS 223/223** at `-smp 1` (11.0s) and `-smp 2`
+    (14.5s, `-cpu qemu64,-smep`).
+  - `audit_small` profile **PASS 223/223** (24.1s).
+- `docs/architecture/issues.md` FD-14 updated to the new implementation path
+  and evidence; CI/nightly expect-count and the selftest count in README,
+  CONTEXT.md, and CONTRIBUTING.md are now 223.
+
+## Verified this session (2026-10-23)
 
 ## Verified this session (2026-10-21)
 
