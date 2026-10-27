@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 use crate::{FileSystem, VfsNode};
 use vahi_drivers::block::BlockDevice;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 use types::{Inode, S_IFMT};
 

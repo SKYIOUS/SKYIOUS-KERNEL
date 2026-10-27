@@ -36,7 +36,7 @@ pub mod security;
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 // ─── Object Type IDs ────────────────────────────────────────────────────────
 

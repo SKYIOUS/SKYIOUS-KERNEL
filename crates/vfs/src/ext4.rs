@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use vahi_drivers::block::BlockDevice;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 const EXT4_SUPER_MAGIC: u16 = 0xEF53;
 const EXT4_EXTENT_MAGIC: u16 = 0xF30A;

@@ -8,6 +8,7 @@
 #   make kernel-debug Build kernel only (debug)
 #   make image       Create disk image only (kernel must be built)
 #   make clean       Remove build artifacts
+#   make verify      Run local gates (fmt, policy, build, clippy, QEMU)
 #   make help        Show this help
 
 KERNEL_DIR  := kernel
@@ -16,7 +17,7 @@ PROFILE     := release
 CARGO_FLAGS := --release --target x86_64-unknown-none
 IMAGE       := bootimage-vahi_kernel.bin
 
-.PHONY: boot run run-debug kernel kernel-debug image clean help
+.PHONY: boot run run-debug kernel kernel-debug image clean verify help
 
 # Default target
 all: boot
@@ -47,13 +48,22 @@ kernel-debug:
 # Create disk image only
 image:
 	python3 $(BUILDER_DIR)/build_limine_image.py \
-		--kernel $(KERNEL_DIR)/target/x86_64-unknown-none/$(PROFILE)/vahi_kernel \
+		--kernel target/x86_64-unknown-none/$(PROFILE)/vahi_kernel \
+		--initrd kernel/initrd.tar \
 		--output $(IMAGE)
 
 # Clean build artifacts
 clean:
 	cd $(KERNEL_DIR) && cargo clean
 	rm -f $(IMAGE)
+
+# Run local gates (fmt, policy, build, clippy, QEMU)
+verify:
+ifeq ($(OS),Windows_NT)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
+else
+	pwsh -NoProfile -File scripts/verify.ps1
+endif
 
 # Show help
 help:
@@ -66,3 +76,4 @@ help:
 	@echo "  make kernel-debug Build kernel only (debug)"
 	@echo "  make image       Create disk image only"
 	@echo "  make clean       Remove build artifacts"
+	@echo "  make verify      Run local gates (fmt, policy, build, clippy, QEMU)"

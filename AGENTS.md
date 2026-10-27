@@ -209,7 +209,8 @@ crates/                                              # Extracted crates (19 tota
 - **Clippy**: `cd kernel && cargo clippy --release --target x86_64-unknown-none -- -D warnings`
 - **Format**: `cargo fmt --all -- --check`
 - **Host checks**: `cargo test --workspace --exclude vahi_kernel --all-features --locked` and `cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features --locked -- -D warnings`
-- **Policy gate**: `python scripts/check_repo_policy.py --self-test` then `python scripts/check_repo_policy.py --diff-base origin/master`
+- **Policy gate**: `python scripts/check_repo_policy.py --self-test`, then `--worktree` before committing or `--diff-base origin/master` for committed branch state
+- **Local gate set**: `scripts/verify.ps1` (or `make verify`) — fmt, policy, build, clippy, QEMU
 - **Rustdoc**: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude vahi_kernel --no-deps --locked`
 - **Commits**: conventional prefixes (`feat:`/`fix:`/`docs:`/`refactor:`/`chore:`),
   atomic per concern, subject ≤72 chars; docs invalidated by a change ship in

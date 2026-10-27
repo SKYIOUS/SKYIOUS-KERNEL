@@ -2,7 +2,7 @@
 //!
 //! Set once during boot, read by drivers and scheduler for configuration.
 
-use vahi_sync::IrqSafeMutex as Mutex;
+use crate::sync::IrqSafeMutex as Mutex;
 
 /// Supported CPU architectures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

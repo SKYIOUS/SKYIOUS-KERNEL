@@ -4,7 +4,7 @@
 // buffer full) before reading data. IRQ handlers drain the buffer in a
 // loop until empty. All ports are fixed x86 PS/2 hardware addresses.
 use core::sync::atomic::{AtomicU64, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::instructions::port::Port;
 
 static PS2_LOCK: Mutex<()> = Mutex::new(());

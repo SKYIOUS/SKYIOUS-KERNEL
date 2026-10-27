@@ -2,7 +2,7 @@ use crate::{FileSystem, Stat, VfsNode};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 pub struct Tmpfs {
     root: Arc<TmpNode>,

@@ -5,6 +5,6 @@ edition = "2021"
 description = "Inter-process communication for the Vahi kernel"
 
 [dependencies]
-vahi-sync = { path = "../sync" }
+vahi-hal = { path = "../hal" }
 vahi-types = { path = "../types" }
 spin = "0.9.8"

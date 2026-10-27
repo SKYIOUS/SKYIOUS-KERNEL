@@ -6,7 +6,7 @@
 // the control request and the device maps it into its display pipeline.
 use alloc::boxed::Box;
 use alloc::vec;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::instructions::port::Port;
 use x86_64::VirtAddr;
 

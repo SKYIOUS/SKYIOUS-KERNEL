@@ -1,4 +1,4 @@
-//! IRQ-safe spin mutex for `#![no_std]` kernels.
+//! IRQ-safe spin mutex for `` kernels.
 //!
 //! Interrupts are disabled while the lock is held, preventing the timer IRQ
 //! from preempting a thread mid-critical-section and stranding the lock.
@@ -22,8 +22,6 @@
 //!
 //! Guards must not be held across blocking operations (sleep/wait):
 //! the CPU would sit with IF=0 and no tick could ever wake the sleeper.
-
-#![no_std]
 
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
@@ -195,6 +193,13 @@ fn this_cpu() -> u16 {
     // The provider is set by the kernel during early boot to use the
     // GS-based per-CPU data which is much faster than CPUID.
     unsafe {
+        // SAFETY: CPU_ID_PROVIDER is a static Option<fn() -> u16> that is
+        // only written once during kernel initialization (via
+        // set_cpu_id_provider) and never modified afterwards. Reading it
+        // without synchronization is safe because it's written before any
+        // CPU other than the BSP starts executing, and the write happens
+        // before the provider is ever read (the provider is only used after
+        // initialization completes).
         if let Some(f) = CPU_ID_PROVIDER {
             return f();
         }
@@ -385,7 +390,7 @@ fn restore_interrupts(rflags: u64) {
 #[inline(always)]
 fn restore_interrupts(_rflags: u64) {}
 
-// ── Tests ────────────────────────────────────────────────────────────────────
+// ── Tests ───────────────────────────────────────────────────────────────────
 //
 // Unit tests for the no_std wrapper logic. The inline-asm helpers
 // (save_and_disable_interrupts / restore_interrupts) are mocked on

@@ -22,7 +22,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 /// I/O priority classes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

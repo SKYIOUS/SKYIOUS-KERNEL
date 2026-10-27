@@ -2,7 +2,7 @@ use crate::block::{register_block_device, BlockDevice, BlockDeviceError};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use vahi_hal::dma::{DmaBuf, PooledDma};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use volatile::Volatile;
 
 /// NVMe register layout (BAR0/1 MMIO)

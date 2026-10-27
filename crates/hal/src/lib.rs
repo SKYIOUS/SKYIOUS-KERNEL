@@ -11,6 +11,7 @@
 //! | `platform` | Platform info: arch, CPU count, frequency, RAM size |
 //! | `timer` | TSC-based microsecond clock: `current_time_us()` |
 //! | `dma` | DMA buffer allocation: `DmaBuf` (physical-contiguous), `PooledDma` (per-device pool) |
+//! | `sync` | IRQ-safe spin mutex: `IrqSafeMutex` |
 //!
 //! ## Clocks
 //!
@@ -31,4 +32,5 @@ extern crate alloc;
 pub mod dma;
 pub mod irq;
 pub mod platform;
+pub mod sync;
 pub mod timer;

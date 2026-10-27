@@ -2,7 +2,7 @@
 name = "vahi-hal"
 version = "0.3.0"
 edition = "2021"
-description = "Hardware abstraction layer for the Vahi kernel (IRQ, platform, timer)"
+description = "Hardware abstraction layer for the Vahi kernel (IRQ, platform, timer, sync)"
 
 [dependencies]
-vahi-sync = { path = "../sync" }
+spin = "0.9.8"

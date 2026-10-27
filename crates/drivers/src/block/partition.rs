@@ -1,7 +1,7 @@
 use crate::block::{BlockDevice, BlockDeviceError};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]

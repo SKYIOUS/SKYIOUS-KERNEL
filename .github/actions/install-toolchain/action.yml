@@ -1,0 +1,33 @@
+name: "Install pinned Rust toolchain"
+description: "Installs the nightly toolchain pinned in rust-toolchain.toml with required components and targets"
+inputs:
+  target:
+    description: "Target to add (e.g., x86_64-unknown-none)"
+    required: true
+    default: "x86_64-unknown-none"
+  components:
+    description: "Comma-separated components to install"
+    required: false
+    default: "rust-src,llvm-tools-preview,clippy,rustfmt"
+runs:
+  using: "composite"
+  steps:
+    - name: Read pinned toolchain
+      id: toolchain
+      run: |
+        # Extract channel from rust-toolchain.toml
+        if [[ -f rust-toolchain.toml ]]; then
+          CHANNEL=$(grep '^channel' rust-toolchain.toml | cut -d'"' -f2)
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+        else
+          echo "channel=nightly-2026-08-14" >> "$GITHUB_OUTPUT"
+        fi
+      shell: bash
+
+    - name: Install toolchain
+      run: |
+        rustup set profile minimal
+        rustup toolchain install "${{ steps.toolchain.outputs.channel }}" --component ${{ inputs.components }}
+        rustup target add ${{ inputs.target }} --toolchain "${{ steps.toolchain.outputs.channel }}"
+        # Do NOT run 'rustup override set' — let rust-toolchain.toml govern the default
+      shell: bash

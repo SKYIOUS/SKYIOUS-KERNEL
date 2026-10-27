@@ -1,6 +1,6 @@
 # Tested & Working — Vahi Kernel / SkyOS
 
-Living status document. Last updated: 2026-10-26 (session: mqueue gap closure verified; 228/228).
+Living status document. Last updated: 2026-10-26 (session: mqueue gap closure verified; count in `tests/selftest_count.txt`).
 Every claim here was reproduced on this machine; re-verify after any change.
 
 ## Verified this session (2026-10-26, mqueue gap closure + initramfs check)
@@ -45,19 +45,26 @@ Every claim here was reproduced on this machine; re-verify after any change.
   `[BOOT] initrd from Limine modules` + `[TARFS] parsed 300 entries` on a
   boot with `--initrd kernel/initrd.tar`. The added `vfs/mount.rs` helper and
   `tests/initramfs_tests.rs` duplicated that path and were removed.
-- Suite is **228/228, 0 failed**. Gates run this session (this tree):
+- Suite is **all-green, 0 failed** (canonical count: `tests/selftest_count.txt`). Gates run this session (this tree):
   `cargo build --release --target x86_64-unknown-none --features self_test`
   -> success; `cargo clippy --release --target x86_64-unknown-none --features
   self_test -- -D warnings` -> clean; `cargo fmt --all -- --check` -> exit 0;
   `scripts/check_repo_policy.py --self-test` -> pass. Limine image via
   `builder/build_limine_image.py --initrd kernel/initrd.tar`;
-  `tests/run_qemu_tests.py --expect-count 228 --qemu-extra "-vga none"`:
+  `tests/run_qemu_tests.py --expect-count auto --qemu-extra "-vga none"`:
   - release+self_test **PASS 228/228** at `-smp 1` (12.1s) and
     `-smp 2 -cpu qemu64,-smep` (16.6s).
   - `audit_small` profile **PASS 228/228** (22.1s).
 - `docs/architecture/issues.md` FD-14 updated to the new implementation path
-  and evidence; CI/nightly expect-count and the selftest count in README,
-  CONTEXT.md, and CONTRIBUTING.md are now 228.
+  and evidence; CI/nightly use `--expect-count auto`, and README, CONTEXT.md,
+  CONTRIBUTING.md and this file read the count from
+  `tests/selftest_count.txt`.
+- **Verification tooling:** the root `rust-toolchain.toml` pins
+  `nightly-2026-08-14`, and `scripts/verify.ps1` ran every gate end-to-end on
+  this tree: fmt, policy self-test/worktree, release+self_test build and
+  clippy, then QEMU at SMP 1, SMP 2 and `audit_small` — all PASS. The policy
+  gate also rejects deliberate untracked and modified-file violations under
+  `--worktree`.
 
 ## Verified this session (2026-10-23)
 

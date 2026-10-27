@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use fatfs::{Read, Seek, SeekFrom, Write};
 use vahi_drivers::block::BlockDevice;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 // We need to implement fatfs traits for our block device
 

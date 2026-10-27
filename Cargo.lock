@@ -721,7 +721,7 @@ version = "0.3.0"
 dependencies = [
  "pic8259",
  "spin",
- "vahi-sync",
+ "vahi-hal",
  "vahi-types",
  "volatile 0.2.7",
  "x86_64",
@@ -732,7 +732,7 @@ name = "vahi-arch"
 version = "0.3.0"
 dependencies = [
  "spin",
- "vahi-sync",
+ "vahi-hal",
 ]
 
 [[package]]
@@ -758,7 +758,6 @@ dependencies = [
  "vahi-limine",
  "vahi-memory",
  "vahi-pci",
- "vahi-sync",
  "vahi-syscalls",
  "vahi-types",
  "volatile 0.2.7",
@@ -766,17 +765,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "vahi-gdt"
-version = "0.3.0"
-dependencies = [
- "spin",
-]
-
-[[package]]
 name = "vahi-hal"
 version = "0.3.0"
 dependencies = [
- "vahi-sync",
+ "spin",
 ]
 
 [[package]]
@@ -784,7 +776,7 @@ name = "vahi-ipc"
 version = "0.3.0"
 dependencies = [
  "spin",
- "vahi-sync",
+ "vahi-hal",
  "vahi-types",
 ]
 
@@ -803,8 +795,8 @@ dependencies = [
  "lazy_static",
  "linked_list_allocator",
  "spin",
+ "vahi-hal",
  "vahi-limine",
- "vahi-sync",
  "x86_64",
 ]
 
@@ -817,7 +809,7 @@ dependencies = [
  "smoltcp",
  "spin",
  "vahi-drivers",
- "vahi-sync",
+ "vahi-hal",
  "vahi-syscalls",
  "vahi-types",
 ]
@@ -827,7 +819,7 @@ name = "vahi-objects"
 version = "0.3.0"
 dependencies = [
  "spin",
- "vahi-sync",
+ "vahi-hal",
 ]
 
 [[package]]
@@ -837,13 +829,6 @@ dependencies = [
  "spin",
  "vahi-apic",
  "x86_64",
-]
-
-[[package]]
-name = "vahi-sync"
-version = "0.3.0"
-dependencies = [
- "spin",
 ]
 
 [[package]]
@@ -862,7 +847,7 @@ dependencies = [
  "crossbeam-queue",
  "lazy_static",
  "spin",
- "vahi-sync",
+ "vahi-hal",
  "vahi-types",
 ]
 
@@ -877,7 +862,7 @@ dependencies = [
 name = "vahi-verified"
 version = "0.3.0"
 dependencies = [
- "vahi-sync",
+ "vahi-hal",
 ]
 
 [[package]]
@@ -895,7 +880,6 @@ dependencies = [
  "vahi-memory",
  "vahi-net",
  "vahi-objects",
- "vahi-sync",
  "vahi-syscalls",
  "vahi-types",
  "vahi-verified",
@@ -930,7 +914,6 @@ dependencies = [
  "vahi-net",
  "vahi-objects",
  "vahi-pci",
- "vahi-sync",
  "vahi-syscalls",
  "vahi-task",
  "vahi-types",

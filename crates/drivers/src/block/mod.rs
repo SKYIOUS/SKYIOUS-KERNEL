@@ -12,7 +12,7 @@ pub mod scheduler;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 lazy_static! {
     pub static ref BLOCK_DEVICES: Mutex<Vec<Arc<Mutex<dyn BlockDevice>>>> = Mutex::new(Vec::new());

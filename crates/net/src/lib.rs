@@ -87,7 +87,7 @@ pub fn get_ticks() -> u64 {
 
 // In test mode on non-no_std targets, use spin::Mutex to avoid IrqSafeMutex's cli/sti.
 #[cfg(not(all(test, not(target_os = "none"))))]
-pub(crate) type NetMutex<T> = vahi_sync::IrqSafeMutex<T>;
+pub(crate) type NetMutex<T> = vahi_hal::sync::IrqSafeMutex<T>;
 #[cfg(all(test, not(target_os = "none")))]
 pub(crate) type NetMutex<T> = spin::Mutex<T>;
 

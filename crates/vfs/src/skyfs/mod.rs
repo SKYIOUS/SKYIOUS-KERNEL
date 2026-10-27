@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use vahi_drivers::block::BlockDevice;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 pub const BLOCK_SIZE: usize = 4096;
 pub const SECTOR_SIZE: usize = 512;
@@ -77,7 +77,7 @@ pub struct DirEntry {
 pub struct SkyFS {
     pub device: Arc<Mutex<dyn BlockDevice>>,
     pub sb: Superblock,
-    pub journal: vahi_sync::IrqSafeMutex<journal::Journal>,
+    pub journal: vahi_hal::sync::IrqSafeMutex<journal::Journal>,
 }
 
 impl SkyFS {
@@ -249,7 +249,7 @@ impl SkyFS {
 
         let fs = Arc::new(Mutex::new(SkyFS {
             device,
-            journal: vahi_sync::IrqSafeMutex::new(journal::Journal::new(j_start, j_blocks)),
+            journal: vahi_hal::sync::IrqSafeMutex::new(journal::Journal::new(j_start, j_blocks)),
             sb: Superblock {
                 magic: sb.magic,
                 version: sb.version,

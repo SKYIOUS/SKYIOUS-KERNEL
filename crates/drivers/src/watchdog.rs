@@ -1,6 +1,6 @@
 use crate::println;
 use crate::serial_write;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 const WATCHDOG_TIMEOUT_TICKS: u64 = 500; // ~5 seconds at 100Hz
 

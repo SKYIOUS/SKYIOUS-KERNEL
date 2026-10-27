@@ -77,7 +77,7 @@ Before merging any change:
 4. `cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features -- -D warnings` — lints
 5. `python scripts/check_repo_policy.py --diff-base origin/master` — AGENTS.md policy
 6. QEMU boot test — boots to login prompt
-7. Selftests — all pass (228/228)
+7. Selftests — all pass (count pinned in `tests/selftest_count.txt`)
 8. Interface docs — updated if public API changed
 9. Invariant docs — updated if invariants changed
 10. CI `Quality Gates` workflow must be green

@@ -1,0 +1,28 @@
+name: "Setup QEMU and OVMF"
+description: "Installs QEMU and finds OVMF firmware for UEFI boot"
+inputs:
+  qemu-packages:
+    description: "Packages to install"
+    required: false
+    default: "qemu-system-x86 ovmf"
+runs:
+  using: "composite"
+  steps:
+    - name: Install QEMU + OVMF
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq ${{ inputs.qemu-packages }}
+        OVMF=""
+        for candidate in /usr/share/OVMF/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd \
+                         /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF.fd; do
+          if [ -f "$candidate" ]; then
+            OVMF="$candidate"
+            break
+          fi
+        done
+        if [ -z "$OVMF" ]; then
+          echo "OVMF firmware not found (checked /usr/share/OVMF/OVMF.fd, /usr/share/OVMF/OVMF_CODE.fd, /usr/share/OVMF/OVMF_CODE_4M.fd, /usr/share/ovmf/OVMF.fd)"
+          exit 1
+        fi
+        echo "OVMF=$OVMF" >> "$GITHUB_ENV"
+      shell: bash

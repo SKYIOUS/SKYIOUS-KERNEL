@@ -3,7 +3,7 @@ use super::{SkyFS, BLOCK_SIZE};
 use alloc::sync::Arc;
 use alloc::vec;
 use vahi_drivers::block::BlockDevice;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 pub fn allocate_block_inner(fs: &Arc<Mutex<SkyFS>>, dev: &mut dyn BlockDevice) -> Result<u64, ()> {
     let sb = &fs.lock().sb;

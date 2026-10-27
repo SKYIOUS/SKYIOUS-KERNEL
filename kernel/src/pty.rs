@@ -3,8 +3,8 @@ pub use vahi_task::pty::*;
 
 use crate::objects::{KernelObject, ObjectHeader, ObjectTypeId};
 use alloc::sync::Arc;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use vahi_objects::security::SecurityDescriptor;
-use vahi_sync::IrqSafeMutex as Mutex;
 
 pub struct PtyMasterObject {
     pub header: ObjectHeader,
