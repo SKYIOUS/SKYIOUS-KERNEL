@@ -1028,7 +1028,7 @@ pub fn sys_mremap(
             return old_address;
         }
         if !may_move {
-            return errno::Errno::EAGAIN as u64;
+            return errno::Errno::ENOMEM as u64;
         }
     }
 
@@ -1189,6 +1189,8 @@ pub fn sys_mincore(addr: u64, len: usize, vec: *mut u8) -> u64 {
 
     // SAFETY: the syscall runs on the caller's own address space, so its PML4
     // is the active one; translate_page only reads it.
+    // ponytail: residency = present-bit only; no accessed/dirty tracking from page cache.
+    // upgrade when page cache tracks accessed/dirty for accurate residency.
     if let Some(mapper) = unsafe { process.address_space.mapper() } {
         for (i, slot) in result.iter_mut().enumerate() {
             let page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(
