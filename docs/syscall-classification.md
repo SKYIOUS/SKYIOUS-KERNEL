@@ -52,9 +52,9 @@
 | 20 | pipe | [F] | Works |
 | 21 | select | [L] | Basic implementation |
 | 22 | sched_yield | [F] | Works |
-| 23 | mremap | [U] | Not implemented |
-| 24 | msync | [U] | Not implemented |
-| 25 | mincore | [U] | Not implemented |
+| 23 | mremap | [L] | Shrink/expand/move via VMA + page migration; exact-start whole-VMA only |
+| 24 | msync | [L] | VMA-validated; EOPNOTSUPP for MAP_SHARED file-backed (no write-back cache) |
+| 25 | mincore | [L] | One byte per page; ENOMEM if the range is not VMA-covered |
 | 26 | madvise | [S] | Returns 0 (no-op) |
 | 27 | shmget | [L] | Basic implementation |
 | 28 | shmat | [L] | Basic implementation |
@@ -85,7 +85,7 @@
 | 53 | getsockopt | [L] | Limited options |
 | 54 | clone | [L] | CoW only. CLONE_VM not shared. |
 | 55 | fork | [F] | Works (via clone) |
-| 56 | vfork | [U] | Not implemented |
+| 56 | vfork | [L] | Implemented as fork; no parent suspension or address-space sharing |
 | 57 | execve | [F] | Works. fd inheritance. |
 | 58 | exit | [F] | Works |
 | 59 | wait4 | [F] | Works |
@@ -328,15 +328,15 @@
 | Category | Count | Percentage |
 |----------|-------|------------|
 | **[F] Fully functional** | ~40 | ~30% |
-| **[L] Functional with limitations** | ~30 | ~23% |
+| **[L] Functional with limitations** | ~34 | ~26% |
 | **[E] Experimental** | ~10 | ~8% |
 | **[S] Stub** | ~15 | ~12% |
-| **[U] Unsupported** | ~35 | ~27% |
+| **[U] Unsupported** | ~31 | ~24% |
 | **Total** | ~130 | 100% |
 
 ### Honest Assessment
 
-The kernel claims 187 syscalls. The dispatch table has ~130 entries. Of those, approximately 40 are fully functional, 30 work with limitations, and the rest are stubs or unsupported.
+The kernel claims 187 syscalls. The dispatch table has ~130 entries. Of those, approximately 40 are fully functional, 34 work with limitations, and the rest are stubs or unsupported.
 
 The most critical gap is the absence of:
 - Memory-mapped files (mmap with file backing)
