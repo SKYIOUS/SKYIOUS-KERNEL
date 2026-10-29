@@ -1,9 +1,12 @@
 use super::errno;
 use super::helpers::*;
 use super::numbers;
+#[cfg(feature = "hypervisor")]
+use super::vm;
 use super::*;
 use super::{cgroup, landlock, namespaces, prctl, seccomp};
-use super::{fs, gui, misc, net, process, vm};
+use super::{fs, gui, misc, net, process};
+#[cfg(feature = "ash")]
 use crate::ash::syscalls;
 use crate::gdt;
 use crate::ipc::mqueue;
@@ -1531,71 +1534,76 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
         numbers::SYS_MKFS,
         fs::sys_mkfs(args.a1 as *const u8, args.a2)
     );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_ASH_REGISTER,
-        syscalls::sys_ash_register(args.a1 as *const u8, args.a2 as usize, args.a3)
-    );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_ASH_UNREGISTER,
-        syscalls::sys_ash_unregister(args.a1)
-    );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_ASH_STATS,
-        syscalls::sys_ash_stats(args.a1, args.a2 as *mut crate::ash::AshStats)
-    );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_ASH_CONTROL,
-        syscalls::sys_ash_control(args.a1)
-    );
-    // Hypervisor syscalls
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_VM_CREATE,
-        vm::sys_vm_create(args.a1 as *const u8, args.a2)
-    );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_VM_DESTROY,
-        vm::sys_vm_destroy(args.a1)
-    );
-    sys_handler!(t, args, numbers::SYS_VM_START, vm::sys_vm_start(args.a1));
-    sys_handler!(t, args, numbers::SYS_VM_STOP, vm::sys_vm_stop(args.a1));
-    sys_handler!(t, args, numbers::SYS_VM_PAUSE, vm::sys_vm_pause(args.a1));
-    sys_handler!(t, args, numbers::SYS_VM_RESUME, vm::sys_vm_resume(args.a1));
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_VM_LOAD_KERNEL,
-        vm::sys_vm_load_kernel(args.a1, args.a2 as *const u8)
-    );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_VM_GET_INFO,
-        vm::sys_vm_get_info(args.a1, args.a2 as *mut u8, args.a3 as usize)
-    );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_VM_SET_MEMORY,
-        vm::sys_vm_set_memory(args.a1, args.a2, args.a3)
-    );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_VM_INJECT_IRQ,
-        vm::sys_vm_inject_irq(args.a1, args.a2 as u8)
-    );
+    #[cfg(feature = "ash")]
+    {
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_ASH_REGISTER,
+            syscalls::sys_ash_register(args.a1 as *const u8, args.a2 as usize, args.a3)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_ASH_UNREGISTER,
+            syscalls::sys_ash_unregister(args.a1)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_ASH_STATS,
+            syscalls::sys_ash_stats(args.a1, args.a2 as *mut crate::ash::AshStats)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_ASH_CONTROL,
+            syscalls::sys_ash_control(args.a1)
+        );
+    }
+    #[cfg(feature = "hypervisor")]
+    {
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_CREATE,
+            vm::sys_vm_create(args.a1 as *const u8, args.a2)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_DESTROY,
+            vm::sys_vm_destroy(args.a1)
+        );
+        sys_handler!(t, args, numbers::SYS_VM_START, vm::sys_vm_start(args.a1));
+        sys_handler!(t, args, numbers::SYS_VM_STOP, vm::sys_vm_stop(args.a1));
+        sys_handler!(t, args, numbers::SYS_VM_PAUSE, vm::sys_vm_pause(args.a1));
+        sys_handler!(t, args, numbers::SYS_VM_RESUME, vm::sys_vm_resume(args.a1));
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_LOAD_KERNEL,
+            vm::sys_vm_load_kernel(args.a1, args.a2 as *const u8)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_GET_INFO,
+            vm::sys_vm_get_info(args.a1, args.a2 as *mut u8, args.a3 as usize)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_SET_MEMORY,
+            vm::sys_vm_set_memory(args.a1, args.a2, args.a3)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_INJECT_IRQ,
+            vm::sys_vm_inject_irq(args.a1, args.a2 as u8)
+        );
+    }
     t
 }
 
