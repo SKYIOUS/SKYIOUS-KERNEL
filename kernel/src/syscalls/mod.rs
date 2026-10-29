@@ -44,6 +44,7 @@ pub mod helpers;
 pub use helpers::*;
 pub mod ptrace;
 
+#[allow(unused_imports)]
 pub use fs::*;
 pub use net::*;
 pub use signal::*;
