@@ -30,6 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
         with:
           target: x86_64-unknown-none
           components: rustfmt
@@ -43,6 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
@@ -68,6 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
@@ -94,6 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
@@ -123,6 +127,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
@@ -170,6 +175,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
@@ -224,6 +230,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
@@ -274,6 +281,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
         with:
           target: x86_64-unknown-none
           components: rust-src,llvm-tools-preview,clippy,rustfmt
