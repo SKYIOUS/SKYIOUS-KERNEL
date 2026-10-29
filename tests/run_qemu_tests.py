@@ -296,7 +296,7 @@ def main() -> int:
     if expect_count == "auto":
         count_path = os.path.join(root, "tests", "selftest_count.txt")
         try:
-            with open(count_path, encoding="utf-8") as handle:
+            with open(count_path, encoding="utf-8-sig") as handle:
                 expect_count = int(handle.read().strip())
         except (OSError, ValueError) as exc:
             print(f"INFRASTRUCTURE_ERROR: cannot read test count from {count_path}: {exc}")
