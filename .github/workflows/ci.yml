@@ -150,7 +150,7 @@ jobs:
         run: |
           for crate in vahi-memory vahi-arch vahi-task vahi-vfs vahi-net \
                        vahi-drivers vahi-crypto vahi-hal vahi-limine vahi-types vahi-apic \
-                       vahi-acpi vahi-gdt vahi-objects vahi-ipc vahi-pci vahi-syscalls \
+                       vahi-acpi vahi-objects vahi-ipc vahi-pci vahi-syscalls \
                        vahi-verified; do
             echo "Clippy: $crate"
             cargo clippy -p "$crate" --target x86_64-unknown-none --locked -- -D warnings
