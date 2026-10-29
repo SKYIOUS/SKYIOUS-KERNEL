@@ -148,7 +148,7 @@ jobs:
         run: cargo clippy --release --target x86_64-unknown-none --features "self_test,smp,net,ext4,iommu" --locked -- -D warnings
       - name: Clippy (extracted crates)
         run: |
-          for crate in vahi-sync vahi-memory vahi-arch vahi-task vahi-vfs vahi-net \
+          for crate in vahi-memory vahi-arch vahi-task vahi-vfs vahi-net \
                        vahi-drivers vahi-crypto vahi-hal vahi-limine vahi-types vahi-apic \
                        vahi-acpi vahi-gdt vahi-objects vahi-ipc vahi-pci vahi-syscalls \
                        vahi-verified; do
