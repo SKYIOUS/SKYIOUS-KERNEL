@@ -181,7 +181,7 @@ pub fn open_file(path: &str, flags: i32, mode: u32) -> u64 {
 }
 
 pub fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -189,7 +189,7 @@ pub fn sys_open(path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
 }
 
 pub fn sys_openat(dirfd: i64, path_ptr: *const u8, flags: i32, mode: u32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -500,7 +500,7 @@ pub fn sys_pipe(fds_ptr: *mut u32) -> u64 {
 // ─── access / faccessat ───────────────────────────────────────────
 
 pub fn sys_access(path_ptr: *const u8, mode: i32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -520,10 +520,11 @@ pub fn sys_access(path_ptr: *const u8, mode: i32) -> u64 {
 }
 
 pub fn sys_faccessat(dirfd: i64, pathname_ptr: *const u8, mode: i32, flags: i32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let path_str =
+        match unsafe { user_access::read_user_string(pathname_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
@@ -593,7 +594,7 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> u64 {
 }
 
 pub fn sys_chdir(path_ptr: *const u8) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };

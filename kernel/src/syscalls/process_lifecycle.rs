@@ -1060,7 +1060,7 @@ pub fn sys_execve(
     use crate::syscalls::user_access;
 
     // 1. Copy path, argv, and envp from user space
-    let path = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };

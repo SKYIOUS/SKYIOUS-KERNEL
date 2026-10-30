@@ -41,6 +41,10 @@ pub struct StatFs {
     pub f_ffree: u64,
 }
 
+/// Maximum length of a filesystem path (POSIX PATH_MAX).
+/// Used for userspace string copy limits in path-accepting syscalls.
+pub const PATH_MAX: usize = 4096;
+
 const _MAX_CPUS: usize = 16;
 pub const _S_IFMT: u32 = 0o170000;
 pub const S_IFDIR: u32 = 0o040000;

@@ -340,20 +340,17 @@ pub fn cgroup_read(path: &str, controller: &str) -> Result<String, errno::Errno>
 // ─── Syscall wrappers (handle copy_from_user / copy_to_user) ──────
 
 fn read_user_string(ptr: *const u8, max: usize) -> Result<String, errno::Errno> {
-    let mut buf = [0u8; 256];
-    let copy_len = core::cmp::min(max, 255);
-    if unsafe { crate::syscalls::user_access::copy_from_user(&mut buf[..copy_len], ptr) }.is_err() {
-        return Err(errno::Errno::EFAULT);
+    // Use centralized user_access::read_user_string for consistent SMAP/fixup handling
+    // and proper null-termination enforcement.
+    match unsafe { crate::syscalls::user_access::read_user_string(ptr, max) } {
+        Ok(s) => Ok(s),
+        Err(()) => Err(errno::Errno::EFAULT),
     }
-    let trimmed = core::str::from_utf8(&buf)
-        .unwrap_or("")
-        .trim_matches(|c| c == '\0');
-    Ok(alloc::string::String::from(trimmed))
 }
 
 /// sys_cgroup_mkdir — handle copy_from_user and delegate
 pub fn sys_cgroup_mkdir(path_ptr: *const u8) -> u64 {
-    let path = match read_user_string(path_ptr, 256) {
+    let path = match read_user_string(path_ptr, crate::vfs::PATH_MAX) {
         Ok(s) => s,
         Err(e) => return e as u64,
     };
@@ -365,7 +362,7 @@ pub fn sys_cgroup_mkdir(path_ptr: *const u8) -> u64 {
 
 /// sys_cgroup_write — handle copy_from_user for path, controller, value
 pub fn sys_cgroup_write(path_ptr: *const u8, ctrl_ptr: *const u8, val_ptr: *const u8) -> u64 {
-    let path = match read_user_string(path_ptr, 256) {
+    let path = match read_user_string(path_ptr, crate::vfs::PATH_MAX) {
         Ok(s) => s,
         Err(e) => return e as u64,
     };
@@ -385,7 +382,7 @@ pub fn sys_cgroup_write(path_ptr: *const u8, ctrl_ptr: *const u8, val_ptr: *cons
 
 /// sys_cgroup_read — handle copy_from_user for path, controller, copy_to_user for result
 pub fn sys_cgroup_read(path_ptr: *const u8, ctrl_ptr: *const u8, out_ptr: *mut u8) -> u64 {
-    let path = match read_user_string(path_ptr, 256) {
+    let path = match read_user_string(path_ptr, crate::vfs::PATH_MAX) {
         Ok(s) => s,
         Err(e) => return e as u64,
     };
