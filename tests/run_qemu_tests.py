@@ -15,12 +15,20 @@ by kernel/src/selftest.rs, classifies the result, and exits:
     6  INFRASTRUCTURE_ERROR - missing image/binary or broken runner inputs
 
 Success is never inferred from the QEMU process exiting; the kernel must emit
-an explicit TAP summary, and the isa-debug-exit device turns a completed suite
-into an explicit QEMU exit status (0x10 -> exit 15) as a second signal.
+an explicit TAP summary. The isa-debug-exit device maps the value V written to
+port 0xf4 to process exit status (V << 1) | 1, so 0x10 -> 33 (suite complete),
+0x11 -> 35 (panic) and 0x30 -> 97 (suite timeout). TAP remains authoritative
+for PASS/FAIL; exit codes only classify completion, panic and timeout.
+
+With --boot-only, PASS requires the final init marker "[BOOT] init complete"
+(plus --expect-ap when set); any panic marker before it fails the run. With
+--expect-count N, the TAP plan and summary must both report exactly N tests;
+--expect-count auto reads the canonical N from tests/selftest_count.txt.
 
 Usage:
     python tests/run_qemu_tests.py --image bootimage-vahi_kernel.bin
     python tests/run_qemu_tests.py --image tests/t00_selftest.bin --timeout 900
+    python tests/run_qemu_tests.py --image tests/t00_selftest.bin --expect-count auto
 
 Windows note: serial goes to a file (-serial file:...) because QEMU's Windows
 stdio is not a byte pipe; that keeps capture identical across hosts.
@@ -51,16 +59,18 @@ LABEL = {
     INFRA_ERROR: "INFRASTRUCTURE_ERROR",
 }
 
-# isa-debug-exit: QEMU exits with (value & 0x7f) - 1. See kernel/src/selftest.rs
-# for the kernel-side constants these encode.
-QEMU_EXIT_PASS = 0x10 - 1    # 15: suite completed (verdict comes from TAP)
-QEMU_EXIT_PANIC = 0x11 - 1   # 16: panic handler fired
+# isa-debug-exit: QEMU exits with (value << 1) | 1. See kernel/src/selftest.rs
+# for the kernel-side values these encode.
+QEMU_EXIT_PASS = (0x10 << 1) | 1      # 33: suite completed (verdict comes from TAP)
+QEMU_EXIT_PANIC = (0x11 << 1) | 1     # 35: panic handler fired
+QEMU_EXIT_TIMEOUT = (0x30 << 1) | 1   # 97: run_all() guard timed out
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TAP_PLAN_RE = re.compile(r"^1\.\.(\d+)")
 TAP_OK_RE = re.compile(r"^(ok|not ok) (\d+) - (\S+)(?:\s*#\s*(.*))?$")
 TAP_SUMMARY_RE = re.compile(r"^# (\d+)/(\d+) passed, (\d+) failed")
 BOOT_MARKERS = ("[SELFTEST] T-00 test mode active", "limine:")
+BOOT_COMPLETE_MARKER = "[BOOT] init complete"
 
 
 def strip_ansi(data: bytes) -> str:
@@ -91,7 +101,8 @@ def find_ovmf(root: str, explicit: str | None) -> str:
 
 def run(image: str, qemu: str, ovmf: str, timeout_s: int, smp: int,
         mem: str, log_path: str, serial_path: str, boot_wait_s: int,
-        boot_only: bool, expect_ap: int, qemu_extra: list[str]) -> tuple[int, str]:
+        boot_only: bool, expect_ap: int, expect_count: int | None,
+        qemu_extra: list[str]) -> tuple[int, str]:
     """Boot the image, stream serial to disk, classify the outcome.
 
     Returns (classification, human-readable detail)."""
@@ -135,29 +146,6 @@ def run(image: str, qemu: str, ovmf: str, timeout_s: int, smp: int,
                 text = strip_ansi(raw)
                 if not saw_boot and any(m in text for m in BOOT_MARKERS):
                     saw_boot = True
-                if boot_only and "[BOOT] VFS init" in text:
-                    # Normal-boot check: VFS init is deep boot progress that
-                    # requires memory, heap, graphics, GDT/IDT, APIC, PCI and
-                    # devices to have survived — a strict regression signal.
-                    if expect_ap > 0:
-                        # K-02 SMP regression: additionally require that the
-                        # requested number of application processors reported
-                        # ``[AP] count incremented`` before VFS init. If an AP
-                        # triple-faults, the BSP dies with it, so absence of
-                        # AP markers on an -smp N+1 boot is the failure signal.
-                        aps = text.count("[AP] count incremented")
-                        if aps < expect_ap:
-                            proc.kill()
-                            return BOOT_FAILURE, (
-                                f"SMP regression: only {aps}/{expect_ap} APs "
-                                "reported '[AP] count incremented' before "
-                                "[BOOT] VFS init")
-                        proc.kill()
-                        return PASS, (
-                            f"SMP boot verified: {aps}/{expect_ap} AP(s) up + "
-                            "[BOOT] VFS init reached")
-                    proc.kill()
-                    return PASS, "boot progress verified: [BOOT] VFS init reached"
                 lines = text.splitlines()
                 for line in lines:
                     if TAP_PLAN_RE.match(line):
@@ -178,12 +166,52 @@ def run(image: str, qemu: str, ovmf: str, timeout_s: int, smp: int,
                 if panic and summary is None:
                     # Panic marker present without a completed summary.
                     code = PANIC
-                    detail = "kernel panic marker observed before suite summary"
+                    detail = (
+                        f"kernel panic marker observed before {BOOT_COMPLETE_MARKER}"
+                        if boot_only
+                        else "kernel panic marker observed before suite summary"
+                    )
                     if failed_lines:
                         detail += "; failing tests: " + "; ".join(failed_lines[:5])
                     return code, detail
+                if boot_only and BOOT_COMPLETE_MARKER in text:
+                    # Printed at the end of the last boot::init phase, after
+                    # memory, devices, VFS, networking and security are up.
+                    if exited and proc.returncode == QEMU_EXIT_PANIC:
+                        return PANIC, (
+                            "QEMU panic exit code (isa-debug-exit 0x11) despite "
+                            f"{BOOT_COMPLETE_MARKER}")
+                    if exited and proc.returncode == QEMU_EXIT_TIMEOUT:
+                        return TIMEOUT, (
+                            "QEMU timeout exit code (isa-debug-exit 0x30) despite "
+                            f"{BOOT_COMPLETE_MARKER}")
+                    aps = text.count("[AP] count incremented")
+                    if expect_ap > 0 and aps < expect_ap:
+                        # K-02 SMP regression: require the requested number of
+                        # application processors before init completion. If an
+                        # AP triple-faults, the BSP dies with it, so a missing
+                        # marker on an -smp N+1 boot is the failure signal.
+                        proc.kill()
+                        return BOOT_FAILURE, (
+                            f"SMP regression: only {aps}/{expect_ap} APs "
+                            "reported '[AP] count incremented' before "
+                            f"{BOOT_COMPLETE_MARKER}")
+                    proc.kill()
+                    detail = f"boot verified: {BOOT_COMPLETE_MARKER} reached"
+                    if expect_ap > 0:
+                        detail += f"; {aps}/{expect_ap} AP(s) up"
+                    return PASS, detail
                 if summary is not None:
                     total, passed, failed = summary
+                    if expect_count is not None:
+                        if total != expect_count:
+                            return FAIL, (
+                                f"expected {expect_count} tests, TAP summary "
+                                f"reports {total}")
+                        if tap_total != expect_count:
+                            return FAIL, (
+                                f"expected {expect_count} tests, TAP plan "
+                                f"reports {tap_total}")
                     if failed == 0 and passed == total and total > 0 and tap_total == total:
                         return PASS, f"TAP summary: {passed}/{total} passed, 0 failed"
                     detail = f"TAP summary: {passed}/{total} passed, {failed} failed"
@@ -192,6 +220,10 @@ def run(image: str, qemu: str, ovmf: str, timeout_s: int, smp: int,
                     return FAIL, detail
                 if exited:
                     rc = proc.returncode
+                    if rc == QEMU_EXIT_TIMEOUT:
+                        return TIMEOUT, (
+                            "QEMU timeout exit code (isa-debug-exit 0x30) "
+                            "before a TAP verdict")
                     if rc == QEMU_EXIT_PASS:
                         return UNEXPECTED_EXIT, (
                             "QEMU signalled suite completion (isa-debug-exit 0x10) "
@@ -200,6 +232,9 @@ def run(image: str, qemu: str, ovmf: str, timeout_s: int, smp: int,
                         return PANIC, "QEMU panic exit code (isa-debug-exit 0x11)"
                     if not saw_boot:
                         return BOOT_FAILURE, f"QEMU exited rc={rc} before any boot output"
+                    if boot_only:
+                        return BOOT_FAILURE, (
+                            f"QEMU exited rc={rc} before {BOOT_COMPLETE_MARKER}")
                     return UNEXPECTED_EXIT, (
                         f"QEMU exited rc={rc} mid-suite "
                         f"(plan={tap_total}, summary not reached)")
@@ -212,7 +247,9 @@ def run(image: str, qemu: str, ovmf: str, timeout_s: int, smp: int,
                 if now > deadline:
                     proc.kill()
                     detail = f"no verdict within {timeout_s}s"
-                    if tap_total is not None:
+                    if boot_only:
+                        detail += f" ({BOOT_COMPLETE_MARKER} not observed)"
+                    elif tap_total is not None:
                         done = len([ln for ln in lines if TAP_OK_RE.match(ln)])
                         detail += f" (plan={tap_total}, observed={done} results)"
                     return TIMEOUT, detail
@@ -240,11 +277,14 @@ def main() -> int:
     ap.add_argument("--log", default=None, help="where to write the runner log")
     ap.add_argument("--serial", default=None, help="serial capture file (default: temp)")
     ap.add_argument("--boot-only", action="store_true",
-                    help="normal-boot regression check: PASS when deep boot "
-                         "progress is reached; no self_test/TAP expected")
+                    help="normal-boot regression check: PASS only after "
+                         "'[BOOT] init complete'; any panic before it fails")
     ap.add_argument("--expect-ap", type=int, default=0,
                     help="with --boot-only: require N '[AP] count incremented' "
                          "markers (SMP regression, K-02)")
+    ap.add_argument("--expect-count", default=None,
+                    help="require exactly N TAP tests (plan and summary), or "
+                         "'auto' to read tests/selftest_count.txt; a mismatch is FAIL")
     ap.add_argument("--qemu-extra", default="",
                     help="extra QEMU arguments as one quoted string "
                          "(e.g. \"-vga none\")")
@@ -252,6 +292,21 @@ def main() -> int:
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     image = args.image if os.path.isabs(args.image) else os.path.join(os.getcwd(), args.image)
+    expect_count = args.expect_count
+    if expect_count == "auto":
+        count_path = os.path.join(root, "tests", "selftest_count.txt")
+        try:
+            with open(count_path, encoding="utf-8-sig") as handle:
+                expect_count = int(handle.read().strip())
+        except (OSError, ValueError) as exc:
+            print(f"INFRASTRUCTURE_ERROR: cannot read test count from {count_path}: {exc}")
+            return INFRA_ERROR
+    elif expect_count is not None:
+        try:
+            expect_count = int(expect_count)
+        except ValueError:
+            print(f"INFRASTRUCTURE_ERROR: --expect-count must be an integer or 'auto': {expect_count}")
+            return INFRA_ERROR
     qemu = find_qemu(args.qemu)
     if not qemu:
         print("INFRASTRUCTURE_ERROR: qemu-system-x86_64 not found (use --qemu)")
@@ -292,7 +347,8 @@ def main() -> int:
     try:
         code, detail = run(image, qemu, ovmf, args.timeout, args.smp, args.mem,
                            log_path, serial_path, args.boot_wait, args.boot_only,
-                           args.expect_ap, shlex.split(args.qemu_extra))
+                           args.expect_ap, expect_count,
+                           shlex.split(args.qemu_extra))
     except OSError as exc:
         code, detail = INFRA_ERROR, f"runner I/O failure: {exc}"
 

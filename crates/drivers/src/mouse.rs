@@ -7,7 +7,7 @@
 //! Supports IntelliMouse/scroll wheel via 4-byte packets.
 
 use core::sync::atomic::{AtomicI8, AtomicIsize, AtomicU64, AtomicU8, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::instructions::port::Port;
 
 /// Counts how many times the mouse IRQ handler fires. Diagnostic — read from GUI task.

@@ -463,7 +463,7 @@ pub fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
         }
         // 0x010B = SET_WALLPAPER: arg = path string pointer
         0x010B => {
-            let path = match unsafe { user_access::read_user_string(arg, 256) } {
+            let path = match unsafe { user_access::read_user_string(arg, crate::vfs::PATH_MAX) } {
                 Ok(s) => s,
                 Err(_) => return errno::Errno::EFAULT as u64,
             };
@@ -477,35 +477,55 @@ pub fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
 }
 
 pub fn sys_openpty() -> u64 {
+    let proc = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ENOTTY as u64,
+    };
     let (idx, pair) = match crate::pty::alloc_pty() {
         Some(p) => p,
         None => return errno::Errno::ENFILE as u64,
     };
-    let proc_lock = CURRENT_PROCESS.lock();
-    if let Some(ref proc) = *proc_lock {
-        let mut ft = proc.files.lock().fd_table.clone();
-        let m = ft.iter().position(|f| f.is_none()).unwrap_or(ft.len());
+    let slots = proc.with_fd_table(|fd_table, _| {
+        let m = fd_table
+            .iter()
+            .position(|f| f.is_none())
+            .unwrap_or(fd_table.len());
         if m >= 256 {
-            return errno::Errno::ENFILE as u64;
+            return None;
         }
-        if m == ft.len() {
-            ft.push(None);
+        let mut s = None;
+        for (i, slot) in fd_table.iter().enumerate() {
+            if i != m && slot.is_none() {
+                s = Some(i);
+                break;
+            }
         }
-        ft[m] = Some(FileDescriptor::PtyMaster {
+        let s = s.unwrap_or_else(|| {
+            if m == fd_table.len() {
+                m + 1
+            } else {
+                fd_table.len()
+            }
+        });
+        if s >= 256 {
+            return None;
+        }
+        let end = core::cmp::max(m, s) + 1;
+        if fd_table.len() < end {
+            fd_table.resize(end, None);
+        }
+        fd_table[m] = Some(FileDescriptor::PtyMaster {
             _idx: idx,
             pair: pair.clone(),
         });
-        let s = ft.iter().position(|f| f.is_none()).unwrap_or(ft.len());
-        if s >= 256 {
-            ft[m] = None;
-            return errno::Errno::ENFILE as u64;
+        fd_table[s] = Some(FileDescriptor::PtySlave { _idx: idx, pair });
+        Some((m, s))
+    });
+    match slots {
+        Some((m, s)) => (m as u64) | ((s as u64) << 16),
+        None => {
+            crate::pty::free_pty(idx);
+            errno::Errno::ENFILE as u64
         }
-        if s == ft.len() {
-            ft.push(None);
-        }
-        ft[s] = Some(FileDescriptor::PtySlave { _idx: idx, pair });
-        (m as u64) | ((s as u64) << 16)
-    } else {
-        errno::Errno::ENOTTY as u64
     }
 }

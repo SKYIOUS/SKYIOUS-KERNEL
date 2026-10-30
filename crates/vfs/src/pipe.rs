@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 /// Generates a unique key for each Pipe instance for wake-on-write matching.
 static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);

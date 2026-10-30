@@ -552,8 +552,6 @@ pub(crate) fn route_outgoing(s: &mut PerCpuScheduler, mut switching: Box<Thread>
             crate::syscalls::process_lifecycle::process_close_all_fds(proc);
             // Detach shared memory segments
             crate::syscalls::shm::shm_detach_all(proc);
-            // Clean up POSIX message queue descriptors
-            crate::syscalls::mqueue::mq_close_all(proc.id);
             // Destroy isolate if present (it calls address_space.destroy internally)
             if let Some(ref isolate) = proc.isolate {
                 isolate.destroy();

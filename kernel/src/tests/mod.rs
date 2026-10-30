@@ -22,6 +22,8 @@ pub mod kaslr_mapping;
 pub mod kaslr_relocation;
 pub mod kernel_stress;
 pub mod memory_tests;
+pub mod mqueue_contract;
+pub mod mqueue_semantics;
 pub mod new_features;
 pub mod panic_path_tests;
 pub mod pata_read_test;
@@ -68,6 +70,8 @@ pub fn register_all() {
     harness_tests::register();
     benchmarks::register();
     contract_tests::register();
+    mqueue_contract::register();
+    mqueue_semantics::register();
     panic_path_tests::register();
     #[cfg(not(target_arch = "aarch64"))]
     sync_tests::register();

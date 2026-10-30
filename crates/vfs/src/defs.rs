@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use vahi_drivers::block::BlockDevice;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 pub trait FileSystem: Send + Sync {
     fn root(&self) -> Result<Arc<dyn VfsNode>, ()>;
@@ -40,6 +40,10 @@ pub struct StatFs {
     pub f_files: u64,
     pub f_ffree: u64,
 }
+
+/// Maximum length of a filesystem path (POSIX PATH_MAX).
+/// Used for userspace string copy limits in path-accepting syscalls.
+pub const PATH_MAX: usize = 4096;
 
 const _MAX_CPUS: usize = 16;
 pub const _S_IFMT: u32 = 0o170000;
@@ -364,11 +368,12 @@ impl VfsManager {
 }
 
 /// Boot device selection: None = initrd, Some(n) = block device index
-pub static BOOT_DEVICE: vahi_sync::IrqSafeMutex<Option<usize>> = vahi_sync::IrqSafeMutex::new(None);
+pub static BOOT_DEVICE: vahi_hal::sync::IrqSafeMutex<Option<usize>> =
+    vahi_hal::sync::IrqSafeMutex::new(None);
 
 /// Ramdisk (initrd) provided by bootloader. Set before vfs::init() is called.
-pub static RAMDISK: vahi_sync::IrqSafeMutex<Option<&'static [u8]>> =
-    vahi_sync::IrqSafeMutex::new(None);
+pub static RAMDISK: vahi_hal::sync::IrqSafeMutex<Option<&'static [u8]>> =
+    vahi_hal::sync::IrqSafeMutex::new(None);
 
 /// Set the boot device by index into BLOCK_DEVICES.
 pub fn set_boot_device(index: usize) {
@@ -458,7 +463,7 @@ pub fn init() {
             if let Some(dev) = devices.first() {
                 let partitions = vahi_drivers::block::partition::parse_partitions(dev);
                 if let Some(part) = partitions.first() {
-                    let part_dev = Arc::new(vahi_sync::IrqSafeMutex::new(
+                    let part_dev = Arc::new(vahi_hal::sync::IrqSafeMutex::new(
                         vahi_drivers::block::partition::PartitionDevice::new(
                             dev.clone(),
                             part.lba_start,
@@ -585,7 +590,7 @@ pub fn init() {
             let part_name = alloc::format!("{}{}", dev_name, part.index);
 
             // Register partition as a block device
-            let part_dev = Arc::new(vahi_sync::IrqSafeMutex::new(
+            let part_dev = Arc::new(vahi_hal::sync::IrqSafeMutex::new(
                 vahi_drivers::block::partition::PartitionDevice::new(
                     dev.clone(),
                     part.lba_start,

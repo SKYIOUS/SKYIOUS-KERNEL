@@ -683,30 +683,43 @@ pub(crate) fn write_sockaddr(
     if addr_ptr.is_null() || addrlen_ptr.is_null() {
         return;
     }
-    match ep.addr {
+    let mut cap_buf = [0u8; 4];
+    // SAFETY: addrlen_ptr is non-null; copy_from_user validates that it is a
+    // readable userspace address before touching it.
+    if unsafe { super::user_access::copy_from_user(&mut cap_buf, addrlen_ptr as *const u8) }
+        .is_err()
+    {
+        return;
+    }
+    let capacity = u32::from_ne_bytes(cap_buf) as usize;
+
+    let mut sockaddr = [0u8; 28];
+    let addr_len = match ep.addr {
         smoltcp::wire::IpAddress::Ipv4(ipv4) => {
-            let mut sockaddr = [0u8; 16];
             sockaddr[..2].copy_from_slice(&AF_INET.to_ne_bytes());
             sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
             sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
-            let addr_len: u32 = 16;
-            let _ = unsafe { super::user_access::copy_to_user(addr_ptr, &sockaddr) };
-            let _ = unsafe {
-                super::user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes())
-            };
+            16usize
         }
         smoltcp::wire::IpAddress::Ipv6(ipv6) => {
-            let mut sockaddr = [0u8; 28];
             sockaddr[..2].copy_from_slice(&AF_INET6.to_ne_bytes());
             sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
             sockaddr[8..24].copy_from_slice(ipv6.as_bytes());
-            let addr_len: u32 = 28;
-            let _ = unsafe { super::user_access::copy_to_user(addr_ptr, &sockaddr) };
-            let _ = unsafe {
-                super::user_access::copy_to_user(addrlen_ptr as *mut u8, &addr_len.to_ne_bytes())
-            };
+            28usize
         }
+    };
+
+    let copy_len = core::cmp::min(capacity, addr_len);
+    if copy_len > 0 {
+        // SAFETY: addr_ptr is non-null and was validated by copy_to_user as a
+        // writable userspace range of copy_len bytes.
+        let _ = unsafe { super::user_access::copy_to_user(addr_ptr, &sockaddr[..copy_len]) };
     }
+    // POSIX: *addrlen receives the full address length even when the caller's
+    // buffer is too small.
+    let _ = unsafe {
+        super::user_access::copy_to_user(addrlen_ptr as *mut u8, &(addr_len as u32).to_ne_bytes())
+    };
 }
 
 #[cfg(test)]

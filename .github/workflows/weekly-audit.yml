@@ -1,0 +1,41 @@
+name: Weekly Dependency Audit
+
+# Runs weekly to check for vulnerable dependencies. Separate from nightly
+# to avoid slowing down daily runs.
+
+on:
+  schedule:
+    - cron: "0 6 * * 0"  # Sundays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-toolchain
+        id: install-toolchain
+        with:
+          components: rust-src,llvm-tools-preview,clippy,rustfmt
+      - name: Cache cargo + cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('Cargo.lock') }}
+      - name: Install cargo-audit
+        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+      # The root workspace lock covers kernel, builder and every extracted
+      # crate. Vulnerabilities fail the job; this step has no fallback.
+      - name: Audit workspace dependencies
+        run: cargo audit

@@ -197,6 +197,14 @@ pub fn sys_madvise(_addr: u64, _len: u64, _advice: u64) -> u64 {
 ///
 /// Creates a pipe pair. Like pipe() but with flags (O_CLOEXEC, O_NONBLOCK).
 pub fn sys_pipe2(fds_ptr: *mut u32, flags: i32) -> u64 {
+    const O_CLOEXEC: i32 = 0x80000;
+    const O_NONBLOCK: i32 = 0x800;
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    // Mask before widening: a negative i32 must not sign-extend into fd_flags.
+    let flags = (flags as u32) as u64;
+
     let proc_lock = CURRENT_PROCESS.lock();
     let proc = match proc_lock.as_ref() {
         Some(p) => p.clone(),
@@ -204,54 +212,27 @@ pub fn sys_pipe2(fds_ptr: *mut u32, flags: i32) -> u64 {
     };
     drop(proc_lock);
 
-    // Create the pipe pair using the existing pipe mechanism
     let (reader, writer) = crate::vfs::pipe::Pipe::new();
+    // O_CLOEXEC and the rest of the open flags land in fd_flags under the
+    // same lock that installs the pair.
+    let (r_fd, w_fd) = crate::syscalls::fs_open::install_pipe(&proc, reader, writer, flags);
 
-    // Use the same handle-based approach as sys_pipe
-    let r_fd = {
-        let obj = crate::vfs::VfsObject::new(reader, crate::objects::TYPE_FILE)
-            as Arc<dyn crate::objects::KernelObject>;
-        match proc.new_handle(obj, crate::objects::security::ACCESS_READ, 0) {
-            Ok(fd) => fd,
-            Err(_) => return errno::Errno::EACCES as u64,
-        }
-    };
-    let w_fd = {
-        let obj = crate::vfs::VfsObject::new(writer, crate::objects::TYPE_FILE)
-            as Arc<dyn crate::objects::KernelObject>;
-        match proc.new_handle(obj, crate::objects::security::ACCESS_WRITE, 1) {
-            Ok(fd) => fd,
-            Err(_) => {
-                proc.close_handle(r_fd);
-                return errno::Errno::EACCES as u64;
-            }
-        }
-    };
-
-    // Apply flags (O_CLOEXEC)
-    if (flags & 0x80000) != 0 {
-        let mut fd_flags = proc.files.lock().fd_flags.clone();
-        if fd_flags.len() <= r_fd as usize {
-            fd_flags.resize(r_fd as usize + 1, 0);
-        }
-        if fd_flags.len() <= w_fd as usize {
-            fd_flags.resize(w_fd as usize + 1, 0);
-        }
-        fd_flags[r_fd as usize] |= 0x80000;
-        fd_flags[w_fd as usize] |= 0x80000;
-    }
-
-    // Write FDs to user
-    let r = r_fd as u32;
-    let w = w_fd as u32;
-    let fds = [r, w];
+    let fds = [r_fd as u32, w_fd as u32];
+    // SAFETY: `fds` is a live two-element local array and the slice covers
+    // exactly its bytes.
     let bytes = unsafe {
         core::slice::from_raw_parts(&fds as *const _ as *const u8, core::mem::size_of_val(&fds))
     };
-    unsafe {
-        if crate::syscalls::user_access::copy_to_user(fds_ptr as *mut u8, bytes).is_err() {
-            return errno::Errno::EFAULT as u64;
-        }
+    // SAFETY: copy_to_user validates `fds_ptr` against the user range and
+    // handles faults; the install is rolled back on failure.
+    if unsafe { crate::syscalls::user_access::copy_to_user(fds_ptr as *mut u8, bytes) }.is_err() {
+        proc.with_fd_table(|fd_table, fd_flags| {
+            fd_table[r_fd as usize] = None;
+            fd_flags[r_fd as usize] = 0;
+            fd_table[w_fd as usize] = None;
+            fd_flags[w_fd as usize] = 0;
+        });
+        return errno::Errno::EFAULT as u64;
     }
 
     0
@@ -261,7 +242,12 @@ pub fn sys_pipe2(fds_ptr: *mut u32, flags: i32) -> u64 {
 ///
 /// Like dup2 but with flags (O_CLOEXEC, O_NONBLOCK).
 pub fn sys_dup3(old_fd: u64, new_fd: u64, flags: i32) -> u64 {
+    const O_CLOEXEC: i32 = 0x80000;
     if old_fd == new_fd {
+        return errno::Errno::EINVAL as u64;
+    }
+    // Linux dup3 accepts only O_CLOEXEC.
+    if flags & !O_CLOEXEC != 0 {
         return errno::Errno::EINVAL as u64;
     }
 
@@ -286,13 +272,14 @@ pub fn sys_dup3(old_fd: u64, new_fd: u64, flags: i32) -> u64 {
         return result;
     }
 
-    // Apply flags
-    if (flags & 0x80000) != 0 {
-        let mut fd_flags = proc.files.lock().fd_flags.clone();
-        if fd_flags.len() <= new_fd as usize {
-            fd_flags.resize(new_fd as usize + 1, 0);
-        }
-        fd_flags[new_fd as usize] |= 0x80000;
+    // Apply flags to the live table; sys_dup2 just resized it for new_fd.
+    if flags & O_CLOEXEC != 0 {
+        proc.with_fd_table(|_, fd_flags| {
+            if fd_flags.len() <= new_fd as usize {
+                fd_flags.resize(new_fd as usize + 1, 0);
+            }
+            fd_flags[new_fd as usize] |= O_CLOEXEC as u64;
+        });
     }
 
     new_fd
@@ -375,5 +362,3 @@ pub fn sys_pwrite64(fd: u64, buf_ptr: *const u8, count: usize, _offset: u64) -> 
         _ => errno::Errno::EINVAL as u64,
     }
 }
-
-use alloc::sync::Arc;

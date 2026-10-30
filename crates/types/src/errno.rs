@@ -12,6 +12,7 @@ pub enum Errno {
     EPERM = -1,
     ENOENT = -2,
     ENFILE = -23, /* File table overflow */
+    EMFILE = -24, /* Per-process file limit / RLIMIT_MSGQUEUE exceeded */
     ESRCH = -3,
     EINTR = -4,
     EIO = -5,
@@ -59,6 +60,9 @@ pub enum Errno {
     EOWNERDEAD = -130,
     ENOTRECOVERABLE = -131,
     EMSGSIZE = -90,
+    ENAMETOOLONG = -36,
+    EOVERFLOW = -75,
+    ETIMEDOUT = -110,
 }
 
 impl Errno {

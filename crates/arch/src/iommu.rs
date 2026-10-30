@@ -6,7 +6,7 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 /// IOMMU operations trait.
 ///

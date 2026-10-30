@@ -1,7 +1,7 @@
 extern crate alloc;
 use super::{SkyFS, SkyfsInode, BLOCK_SIZE, INODE_SIZE};
 use alloc::sync::Arc;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 pub fn alloc_inode_inner(fs: &Arc<Mutex<SkyFS>>) -> Result<u64, ()> {
     let binding = fs.lock();

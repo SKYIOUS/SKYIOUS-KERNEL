@@ -5,7 +5,7 @@ edition = "2021"
 description = "x86_64 APIC (Local APIC + I/O APIC + MSI) for the Vahi kernel"
 
 [dependencies]
-vahi-sync = { path = "../sync" }
+vahi-hal = { path = "../hal" }
 vahi-types = { path = "../types" }
 x86_64 = { version = "0.14", default-features = false, features = ["instructions"] }
 volatile = "0.2.6"

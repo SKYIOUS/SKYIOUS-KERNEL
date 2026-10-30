@@ -8,6 +8,8 @@ pub const SYS_LSEEK: u64 = 8;
 pub const SYS_MMAP: u64 = 9;
 pub const SYS_MPROTECT: u64 = 10;
 pub const SYS_MUNMAP: u64 = 11;
+pub const SYS_MSYNC: u64 = 26;
+pub const SYS_MINCORE: u64 = 27;
 pub const SYS_BRK: u64 = 12;
 pub const SYS_CLONE: u64 = 56;
 pub const SYS_FORK: u64 = 57;
@@ -27,6 +29,14 @@ pub const SYS_FCNTL: u64 = 72;
 pub const SYS_PIPE: u64 = 22;
 pub const SYS_UNAME: u64 = 63;
 
+// Missing core syscalls (Linux x86_64 numbers)
+pub const SYS_FSYNC: u64 = 74;
+pub const SYS_FDATASYNC: u64 = 75;
+pub const SYS_GETDENTS: u64 = 78;
+pub const SYS_VFORK: u64 = 58;
+pub const SYS_SHUTDOWN: u64 = 48;
+pub const SYS_SOCKETPAIR: u64 = 53;
+
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 pub const SYS_SENDTO: u64 = 44;
@@ -35,7 +45,6 @@ pub const SYS_BIND: u64 = 49;
 pub const SYS_LISTEN: u64 = 50;
 pub const SYS_ACCEPT: u64 = 43;
 pub const SYS_SETSOCKOPT: u64 = 54;
-pub const SYS_SOCKETPAIR: u64 = 53;
 pub const SYS_GETSOCKOPT: u64 = 55;
 pub const SYS_SENDMSG: u64 = 46;
 pub const SYS_RECVMSG: u64 = 47;
@@ -64,6 +73,7 @@ pub const SYS_SCHED_SETAFFINITY: u64 = 203;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
 pub const SYS_SYSINFO: u64 = 205; // moved from 203 to make room for affinity syscalls
 pub const SYS_SCHED_YIELD: u64 = 24;
+pub const SYS_MREMAP: u64 = 25;
 pub const SYS_SCHED_SETATTR: u64 = 144;
 pub const SYS_SCHED_GETATTR: u64 = 145;
 pub const SYS_GETDENTS64: u64 = 217;
@@ -248,12 +258,13 @@ pub const SYS_CGROUP_MKDIR: u64 = 461;
 pub const SYS_CGROUP_WRITE: u64 = 462;
 pub const SYS_CGROUP_READ: u64 = 463;
 
-// POSIX message queues
+// POSIX message queues (Linux x86_64)
 pub const SYS_MQ_OPEN: u64 = 240;
-pub const SYS_MQ_CLOSE: u64 = 241;
+pub const SYS_MQ_UNLINK: u64 = 241;
 pub const SYS_MQ_TIMEDSEND: u64 = 242;
 pub const SYS_MQ_TIMEDRECEIVE: u64 = 243;
-pub const SYS_MQ_UNLINK: u64 = 244;
+pub const SYS_MQ_NOTIFY: u64 = 244;
+pub const SYS_MQ_GETSETATTR: u64 = 245;
 
 // inotify syscalls
 pub const SYS_INOTIFY_INIT: u64 = 467;

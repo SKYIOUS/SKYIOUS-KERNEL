@@ -1,6 +1,6 @@
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::{
-    structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
+    structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB},
     PhysAddr, VirtAddr,
 };
 
@@ -236,6 +236,15 @@ pub struct BuddyFrameAllocator;
 unsafe impl FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         BUDDY_ALLOCATOR.lock().allocate_frame()
+    }
+}
+
+impl FrameDeallocator<Size4KiB> for BuddyFrameAllocator {
+    // SAFETY: `frame` must have come from this allocator; freeing a foreign
+    // frame corrupts the buddy free lists. Callers only pass frames returned
+    // by `allocate_frame` (see `AddressSpace::map_user_page`).
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame) {
+        BUDDY_ALLOCATOR.lock().deallocate_frame(frame)
     }
 }
 

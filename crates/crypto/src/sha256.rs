@@ -133,7 +133,7 @@ pub fn sha256(data: &[u8], out: &mut [u8]) {
     block.fill(0);
     block[..remaining].copy_from_slice(&data[complete_blocks * BLOCK_SIZE..]);
 
-    // Append0x80 bit
+    // Append 0x80 bit
     block[remaining] = 0x80;
 
     // If the length (8 bytes) doesn't fit in this block, process it first

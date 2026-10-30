@@ -46,13 +46,13 @@ a TAP bail-out:
 ### 2. QEMU exit mechanism: isa-debug-exit at port 0xf4
 The runner attaches `-device isa-debug-exit,iobase=0xf4,iosize=0x04`; the
 kernel writes an exit code to port 0xf4, so QEMU terminates with
-`(code & 0x7f) - 1`:
+`(code << 1) | 1` (value written to port 0xf4 shifted left 1, LSB set):
 
 | Kernel constant (`selftest.rs`) | Port value | QEMU exit | Meaning |
 |---|---|---|---|
-| `QEMU_EXIT_PASS_BASE`  | 0x10 | 15 | suite completed, verdict from TAP |
-| `QEMU_EXIT_PANIC_BASE` | 0x11 | 16 | panic handler fired |
-| `QEMU_EXIT_TIMEOUT_BASE` (reserved) | 0x30 | 47 | kernel-side guard timeout |
+| `QEMU_EXIT_PASS_BASE`  | 0x10 | 33 | suite completed, verdict from TAP |
+| `QEMU_EXIT_PANIC_BASE` | 0x11 | 35 | panic handler fired |
+| `QEMU_EXIT_TIMEOUT_BASE` (reserved) | 0x30 | 97 | kernel-side guard timeout |
 
 Exit codes are a *second* signal only: the authoritative verdict is the TAP
 summary parsed from serial. A run whose QEMU process exits is never treated

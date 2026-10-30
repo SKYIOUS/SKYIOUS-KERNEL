@@ -1,5 +1,5 @@
 use crate::buddy::BuddyFrameAllocator;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
 };

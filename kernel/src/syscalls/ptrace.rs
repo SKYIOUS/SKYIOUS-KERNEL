@@ -132,6 +132,22 @@ fn find_process(pid: u64) -> Option<alloc::sync::Arc<crate::task::process::Proce
     table.get(&pid).cloned()
 }
 
+/// Resolve `target_pid` and enforce that the caller is its tracer.
+///
+/// Every request that reads or changes target state routes through here so
+/// the authorization check cannot be forgotten by a new handler. The check
+/// runs before the caller mutates any target state.
+fn find_traced_target(
+    current: &crate::task::process::Process,
+    target_pid: u64,
+) -> Result<alloc::sync::Arc<crate::task::process::Process>, u64> {
+    let target = find_process(target_pid).ok_or(errno::Errno::ESRCH as u64)?;
+    if target.security.lock().ptrace.tracer_pid != current.id {
+        return Err(errno::Errno::EPERM as u64);
+    }
+    Ok(target)
+}
+
 // ─── ptrace() syscall ─────────────────────────────────────────────
 pub fn sys_ptrace(request: u64, pid: u64, addr: u64, data: u64) -> u64 {
     let current_lock = CURRENT_PROCESS.lock();
@@ -145,14 +161,14 @@ pub fn sys_ptrace(request: u64, pid: u64, addr: u64, data: u64) -> u64 {
         PTRACE_TRACEME => do_traceme(&current),
         PTRACE_ATTACH => do_attach(&current, pid),
         PTRACE_DETACH => do_detach(&current, pid),
-        PTRACE_PEEKTEXT | PTRACE_PEEKDATA => do_peekdata(pid, addr as *mut u64),
-        PTRACE_POKETEXT | PTRACE_POKEDATA => do_pokedata(pid, addr, data),
-        PTRACE_GETREGS => do_getregs(pid, data as *mut PtraceRegs),
-        PTRACE_SETREGS => do_setregs(pid, data as *const PtraceRegs),
-        PTRACE_CONT => do_cont(pid),
-        PTRACE_SINGLESTEP => do_singlestep(pid),
-        PTRACE_SYSCALL => do_syscall_trace(pid),
-        PTRACE_KILL => do_kill(pid),
+        PTRACE_PEEKTEXT | PTRACE_PEEKDATA => do_peekdata(&current, pid, addr),
+        PTRACE_POKETEXT | PTRACE_POKEDATA => do_pokedata(&current, pid, addr, data),
+        PTRACE_GETREGS => do_getregs(&current, pid, data as *mut PtraceRegs),
+        PTRACE_SETREGS => do_setregs(&current, pid, data as *const PtraceRegs),
+        PTRACE_CONT => do_cont(&current, pid),
+        PTRACE_SINGLESTEP => do_singlestep(&current, pid),
+        PTRACE_SYSCALL => do_syscall_trace(&current, pid),
+        PTRACE_KILL => do_kill(&current, pid),
         _ => {
             crate::serial_write("[PTRACE] Unknown request=");
             crate::serial_write(&alloc::format!("{}\n", request));
@@ -228,69 +244,177 @@ fn do_attach(current: &crate::task::process::Process, target_pid: u64) -> u64 {
 
 // ─── PTRACE_DETACH ────────────────────────────────────────────────
 fn do_detach(current: &crate::task::process::Process, target_pid: u64) -> u64 {
-    let target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
+    let target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
-    {
-        let mut sec = target.security.lock();
-        if sec.ptrace.tracer_pid != current.id {
-            return errno::Errno::EPERM as u64;
-        }
-        sec.ptrace.tracer_pid = 0;
-        sec.ptrace.flags = 0;
-        sec.ptrace.stop_reason = None;
-    }
+    let mut sec = target.security.lock();
+    sec.ptrace.tracer_pid = 0;
+    sec.ptrace.flags = 0;
+    sec.ptrace.stop_reason = None;
 
     0
 }
 
 // ─── PTRACE_PEEKDATA / PTRACE_PEEKTEXT ────────────────────────────
-fn do_peekdata(target_pid: u64, user_addr: *mut u64) -> u64 {
-    let _target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
-    };
 
-    if user_addr.is_null() {
-        return errno::Errno::EFAULT as u64;
+/// Resolve one virtual address through the tracee's own page tables and
+/// return `(physical address, leaf flags, mapped frame size)`.
+fn target_mapping(
+    target: &crate::task::process::Process,
+    va: u64,
+) -> Result<(u64, x86_64::structures::paging::PageTableFlags, u64), ()> {
+    use x86_64::structures::paging::mapper::TranslateResult;
+    use x86_64::structures::paging::Translate;
+    // SAFETY: `mapper` only wraps the target's PML4 through the HHDM, and the
+    // cloned process Arc keeps that frame allocated for this walk. The walk
+    // is read-only (`Translate`); the translated leaf and frame stay valid
+    // only while the target does not unmap them (see `target_user_copy`).
+    let mapper = unsafe { target.address_space.mapper() }.ok_or(())?;
+    match mapper.translate(x86_64::VirtAddr::new(va)) {
+        TranslateResult::Mapped {
+            frame,
+            offset,
+            flags,
+        } => Ok((frame.start_address().as_u64() + offset, flags, frame.size())),
+        _ => Err(()),
+    }
+}
+
+/// Copy bytes into or out of the tracee's user memory.
+///
+/// The previous implementation translated through the *active* page tables
+/// (the tracer's) and fell back to a raw dereference, so a foreign tracee read
+/// the tracer's mappings and a kernel address became an arbitrary physical
+/// read/write. Only present, user-accessible leaves in the target address
+/// space are accepted here.
+///
+/// ponytail: the scheduler has no stopped/traced thread state, so a running
+/// tracee can unmap or free the page between `target_mapping` and the copy
+/// below, letting this access land in a reclaimed frame. Ceiling: there is no
+/// reliable "tracee is stopped" query to gate on, and a flag alone would not
+/// stop the tracee. Upgrade path: park tracees in a `ThreadStatus::Stopped`
+/// on attach/syscall stops and require that state here.
+fn target_user_copy(
+    target: &crate::task::process::Process,
+    addr: u64,
+    buf: &mut [u8],
+    write: bool,
+) -> Result<(), ()> {
+    use x86_64::structures::paging::{Page, PageTableFlags};
+
+    if buf.is_empty() || !user_access::validate_ptr(addr as *const u8, buf.len()) {
+        return Err(());
     }
 
-    let virt = x86_64::VirtAddr::new(user_addr as u64);
-    if let Some(phys) = crate::memory::virt_to_phys(virt) {
-        let ptr = (crate::memory::physical_memory_offset() + phys.as_u64()) as *const u64;
-        unsafe { core::ptr::read_volatile(ptr) }
-    } else {
-        unsafe { core::ptr::read_volatile(user_addr) }
+    let phys_offset = crate::memory::physical_memory_offset();
+    let mut done = 0usize;
+    while done < buf.len() {
+        let va = addr + done as u64;
+        let (mut phys, flags, frame_size) = target_mapping(target, va)?;
+        if !flags.contains(PageTableFlags::PRESENT)
+            || !flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        {
+            return Err(());
+        }
+
+        if write && frame_size == 4096 && (flags.bits() & (1 << 9)) != 0 {
+            // SAFETY: this is a mapped 4 KiB user page in the target address
+            // space; handle_cow only touches this address space's tables and
+            // its frame. The frame-size check keeps huge-page PAT bit 9 out
+            // of the 4 KiB COW walk.
+            let resolved = unsafe {
+                target
+                    .address_space
+                    .handle_cow(Page::containing_address(x86_64::VirtAddr::new(va)))
+            };
+            if resolved != Some(true) {
+                return Err(());
+            }
+            phys = target_mapping(target, va)?.0;
+        }
+
+        let chunk = core::cmp::min(4096 - (va & 0xFFF) as usize, buf.len() - done);
+        // SAFETY: `phys` is the translation of a present leaf mapping in the
+        // target's tables and the physical-memory offset maps RAM. `chunk`
+        // stays within the current 4 KiB-aligned run (a huge frame is larger),
+        // and `buf` has `buf.len() - done >= chunk` bytes left.
+        unsafe {
+            let page = (phys_offset + phys) as *mut u8;
+            if write {
+                core::ptr::copy_nonoverlapping(buf.as_ptr().add(done), page, chunk);
+            } else {
+                core::ptr::copy_nonoverlapping(
+                    page as *const u8,
+                    buf.as_mut_ptr().add(done),
+                    chunk,
+                );
+            }
+        }
+        done += chunk;
+    }
+    Ok(())
+}
+
+fn target_read_word(target: &crate::task::process::Process, addr: u64) -> Result<u64, ()> {
+    let mut buf = [0u8; core::mem::size_of::<u64>()];
+    target_user_copy(target, addr, &mut buf, false)?;
+    Ok(u64::from_ne_bytes(buf))
+}
+
+fn target_write_word(
+    target: &crate::task::process::Process,
+    addr: u64,
+    value: u64,
+) -> Result<(), ()> {
+    target_user_copy(target, addr, &mut value.to_ne_bytes(), true)
+}
+
+fn do_peekdata(current: &crate::task::process::Process, target_pid: u64, addr: u64) -> u64 {
+    let target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+
+    match target_read_word(&target, addr) {
+        Ok(value) => value,
+        Err(()) => errno::Errno::EFAULT as u64,
     }
 }
 
 // ─── PTRACE_POKEDATA / PTRACE_POKETEXT ────────────────────────────
-fn do_pokedata(target_pid: u64, addr: u64, value: u64) -> u64 {
-    let _target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
+fn do_pokedata(
+    current: &crate::task::process::Process,
+    target_pid: u64,
+    addr: u64,
+    value: u64,
+) -> u64 {
+    let target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
-    let phys = match crate::memory::virt_to_phys(x86_64::VirtAddr::new(addr)) {
-        Some(p) => p.as_u64(),
-        None => return errno::Errno::EFAULT as u64,
-    };
-    unsafe {
-        let ptr = (crate::memory::physical_memory_offset() + phys) as *mut u64;
-        core::ptr::write_volatile(ptr, value);
+    match target_write_word(&target, addr, value) {
+        Ok(()) => 0,
+        Err(()) => errno::Errno::EFAULT as u64,
     }
-    0
 }
 
 // ─── PTRACE_GETREGS ───────────────────────────────────────────────
-fn do_getregs(target_pid: u64, user_regs: *mut PtraceRegs) -> u64 {
-    let _target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
+fn do_getregs(
+    current: &crate::task::process::Process,
+    target_pid: u64,
+    user_regs: *mut PtraceRegs,
+) -> u64 {
+    let _target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
+    // ponytail: returns zeroed regs; real impl needs to read target's
+    // saved thread context from scheduler. Ceiling: no thread context
+    // access from ptrace. Upgrade path: expose Thread::saved_regs.
     // Build a zeroed register set — in a real implementation we'd read
     // from the target's saved kernel frame on the scheduler runqueue.
     let regs = PtraceRegs {
@@ -340,12 +464,19 @@ fn do_getregs(target_pid: u64, user_regs: *mut PtraceRegs) -> u64 {
 }
 
 // ─── PTRACE_SETREGS ───────────────────────────────────────────────
-fn do_setregs(target_pid: u64, user_regs: *const PtraceRegs) -> u64 {
-    let _target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
+fn do_setregs(
+    current: &crate::task::process::Process,
+    target_pid: u64,
+    user_regs: *const PtraceRegs,
+) -> u64 {
+    let _target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
+    // ponytail: reads user regs but does not apply them to target.
+    // Ceiling: no thread context write from ptrace. Upgrade path:
+    // expose Thread::saved_regs write.
     let mut regs = PtraceRegs::default();
     if unsafe {
         user_access::copy_from_user(
@@ -367,10 +498,10 @@ fn do_setregs(target_pid: u64, user_regs: *const PtraceRegs) -> u64 {
 }
 
 // ─── PTRACE_CONT ──────────────────────────────────────────────────
-fn do_cont(target_pid: u64) -> u64 {
-    let target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
+fn do_cont(current: &crate::task::process::Process, target_pid: u64) -> u64 {
+    let target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
     let mut sec = target.security.lock();
@@ -381,10 +512,10 @@ fn do_cont(target_pid: u64) -> u64 {
 }
 
 // ─── PTRACE_SINGLESTEP ───────────────────────────────────────────
-fn do_singlestep(target_pid: u64) -> u64 {
-    let target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
+fn do_singlestep(current: &crate::task::process::Process, target_pid: u64) -> u64 {
+    let target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
     {
@@ -398,10 +529,10 @@ fn do_singlestep(target_pid: u64) -> u64 {
 }
 
 // ─── PTRACE_SYSCALL ───────────────────────────────────────────────
-fn do_syscall_trace(target_pid: u64) -> u64 {
-    let target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
+fn do_syscall_trace(current: &crate::task::process::Process, target_pid: u64) -> u64 {
+    let target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
     let mut sec = target.security.lock();
@@ -412,10 +543,10 @@ fn do_syscall_trace(target_pid: u64) -> u64 {
 }
 
 // ─── PTRACE_KILL ──────────────────────────────────────────────────
-fn do_kill(target_pid: u64) -> u64 {
-    let target = match find_process(target_pid) {
-        Some(p) => p,
-        None => return errno::Errno::ESRCH as u64,
+fn do_kill(current: &crate::task::process::Process, target_pid: u64) -> u64 {
+    let target = match find_traced_target(current, target_pid) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
     // Clear ptrace state

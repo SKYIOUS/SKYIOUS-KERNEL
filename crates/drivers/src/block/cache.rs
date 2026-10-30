@@ -2,7 +2,7 @@ use super::{BlockDevice, BlockDeviceError};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 const CACHE_SIZE: usize = 256;
 const SECTOR_SIZE: usize = 512;

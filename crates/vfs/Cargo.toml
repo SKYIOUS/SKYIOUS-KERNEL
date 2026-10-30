@@ -4,8 +4,7 @@ version = "0.3.0"
 edition = "2021"
 description = "Virtual filesystem layer for the Vahi kernel"
 
- [dependencies]
-vahi-sync = { path = "../sync" }
+[dependencies]
 vahi-memory = { path = "../memory" }
 vahi-drivers = { path = "../drivers" }
 vahi-syscalls = { path = "../syscalls" }

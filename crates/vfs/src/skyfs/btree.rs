@@ -2,7 +2,7 @@ extern crate alloc;
 use super::{Extent, SkyFS, BLOCK_SIZE};
 use alloc::sync::Arc;
 use vahi_drivers::block::BlockDevice;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 const BTREE_ORDER: usize = 16;
 const KEY_MAX: usize = BTREE_ORDER - 1;

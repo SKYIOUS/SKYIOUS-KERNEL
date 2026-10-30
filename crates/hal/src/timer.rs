@@ -4,9 +4,9 @@
 //! syscalls. The TSC (Time Stamp Counter) is the default timer
 //! on x86_64; other architectures can register alternative timers.
 
+use crate::sync::IrqSafeMutex as Mutex;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
 
 /// High-resolution timer source.
 ///

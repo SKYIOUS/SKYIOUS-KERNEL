@@ -3,9 +3,11 @@
 //! Implements PID, Mount, Network, IPC, UTS, and User namespaces.
 //! Provides unshare(), setns(), and clone() with CLONE_NEW* flags.
 
+use crate::ipc::mqueue::MqEntry;
 use crate::sync::IrqSafeMutex as Mutex;
 use crate::syscalls::errno;
 use crate::task::process::CURRENT_PROCESS;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -116,6 +118,8 @@ pub struct IpcNamespace {
     pub shm_ids: Vec<u64>,
     pub sem_ids: Vec<u64>,
     pub msg_ids: Vec<u64>,
+    /// POSIX message queues owned by this namespace, keyed by name.
+    pub mqueues: BTreeMap<String, MqEntry>,
 }
 
 /// User namespace data
@@ -170,6 +174,7 @@ impl Default for NamespaceSet {
                 shm_ids: Vec::new(),
                 sem_ids: Vec::new(),
                 msg_ids: Vec::new(),
+                mqueues: BTreeMap::new(),
             })),
             uts_ns: Arc::new(Mutex::new(UtsNamespace::default())),
             user_ns: Arc::new(Mutex::new(UserNamespace {
@@ -219,6 +224,7 @@ impl NamespaceSet {
                     shm_ids: Vec::new(),
                     sem_ids: Vec::new(),
                     msg_ids: Vec::new(),
+                    mqueues: BTreeMap::new(),
                 }))
             } else {
                 self.ipc_ns.clone()
@@ -325,6 +331,7 @@ pub fn sys_unshare(flags: u64) -> u64 {
                 shm_ids: Vec::new(),
                 sem_ids: Vec::new(),
                 msg_ids: Vec::new(),
+                mqueues: BTreeMap::new(),
             };
         }
         if flags & CLONE_NEWUTS != 0 {

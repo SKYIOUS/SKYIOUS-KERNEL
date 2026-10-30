@@ -357,7 +357,8 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                             )
                         };
                     }
-                    let flags_ptr = (msg as usize + 24) as *mut i32;
+                    let flags_ptr =
+                        (msg as usize + core::mem::offset_of!(msghdr, msg_flags)) as *mut i32;
                     let _ = unsafe {
                         user_access::copy_to_user(flags_ptr as *mut u8, &0i32.to_ne_bytes())
                     };

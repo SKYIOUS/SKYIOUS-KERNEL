@@ -6,7 +6,6 @@ version = "0.3.0"
 edition = "2021"
 
 [dependencies]
-vahi-sync = { path = "../crates/sync" }
 vahi-memory = { path = "../crates/memory" }
 vahi-crypto = { path = "../crates/crypto" }
 vahi-hal = { path = "../crates/hal" }
@@ -15,7 +14,6 @@ vahi-ipc = { path = "../crates/ipc" }
 vahi-pci = { path = "../crates/pci" }
 vahi-syscalls = { path = "../crates/syscalls" }
 vahi-vfs = { path = "../crates/vfs" }
-vahi-apic = { path = "../crates/apic" }
 vahi-drivers = { path = "../crates/drivers" }
 vahi-task = { path = "../crates/task" }
 vahi-objects = { path = "../crates/objects" }
@@ -40,6 +38,7 @@ limine = "0.6.5"
 
 # x86_64-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]
+vahi-apic = { path = "../crates/apic" }
 x86_64 = { version = "0.14.2", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
 pic8259 = "0.10.1"
 pc-keyboard = "0.5.1"
@@ -73,5 +72,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 rustflags = ["-Z", "stack-protector=strong", "-C", "force-frame-pointers=yes", "--emit-relocs"]
-
-

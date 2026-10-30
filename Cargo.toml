@@ -5,7 +5,6 @@ resolver = "2"
 members = [
     "kernel",
     "builder",
-    "crates/sync",
     "crates/memory",
     "crates/arch",
     "crates/task",
@@ -18,7 +17,6 @@ members = [
     "crates/types",
     "crates/apic",
     "crates/acpi",
-    "crates/gdt",
     "crates/objects",
     "crates/ipc",
     "crates/pci",
@@ -29,7 +27,6 @@ members = [
 # builder is std-only (Python build scripts). Build explicitly with: cargo build -p builder
 default-members = [
     "kernel",
-    "crates/sync",
     "crates/memory",
     "crates/arch",
     "crates/task",
@@ -42,7 +39,6 @@ default-members = [
     "crates/types",
     "crates/apic",
     "crates/acpi",
-    "crates/gdt",
     "crates/objects",
     "crates/ipc",
     "crates/pci",
@@ -75,6 +71,10 @@ panic = "abort"
 inherits = "dev"
 overflow-checks = true
 debug-assertions = true
+# One-shot gates: incremental state only adds disk churn, and reusing it
+# across profile changes has produced stale-artifact failures here. Variants
+# inherit this.
+incremental = false
 
 # Isolation variants: same as `audit` with one knob off, so a boot failure can
 # be attributed to a specific check rather than to "checked arithmetic" in
@@ -97,7 +97,7 @@ opt-level = "z"
 [profile.release]
 opt-level = "z"
 lto = false
-codegen-units = 1
+codegen-units = 16
 panic = "abort"
 rustflags = ["-Z", "stack-protector=strong"]
 

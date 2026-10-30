@@ -4,7 +4,7 @@ use core::fmt;
 use core::sync::atomic::Ordering;
 use font8x8::UnicodeFonts;
 use font8x8::BASIC_FONTS;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 const SCROLLBACK_LINES: usize = 2048;
 const TAB_STOP: usize = 8;

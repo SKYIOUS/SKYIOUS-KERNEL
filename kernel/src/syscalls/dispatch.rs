@@ -1,10 +1,15 @@
 use super::errno;
 use super::helpers::*;
 use super::numbers;
+#[cfg(feature = "hypervisor")]
+use super::vm;
 use super::*;
 use super::{cgroup, landlock, namespaces, prctl, seccomp};
 use super::{fs, gui, misc, net, process};
+#[cfg(feature = "ash")]
+use crate::ash::syscalls;
 use crate::gdt;
+use crate::ipc::mqueue;
 use crate::syscalls::user_access;
 use x86_64::registers::model_specific::{LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
@@ -131,7 +136,7 @@ pub fn init_gs_base(cpu_id: usize) {
     // disabled (rdmsr/cpuid are), unique per CPU (initial APIC id / stored
     // cpu_id), and no panic or allocation (none present).
     unsafe {
-        vahi_sync::set_cpu_id_provider(current_cpu_id);
+        vahi_hal::sync::set_cpu_id_provider(current_cpu_id);
     }
 }
 
@@ -194,6 +199,43 @@ fn futex_entry(args: &SyscallArgs) -> u64 {
         args.a4 as u32,
         args.a5 as *mut u32,
         val3,
+    )
+}
+
+/// Read the sixth syscall argument from the saved register frame. Internal
+/// callers of `syscall_handler` pass a null frame; they have no sixth argument.
+pub(crate) fn syscall_arg6(regs: *mut u64) -> u64 {
+    if regs.is_null() {
+        return 0;
+    }
+    #[cfg(target_arch = "x86_64")]
+    const INDEX: usize = 6; // r9
+    #[cfg(target_arch = "aarch64")]
+    const INDEX: usize = 5; // x5
+                            // SAFETY: syscall entry saves at least the six argument registers before
+                            // dispatch; INDEX addresses the sixth one for the active architecture.
+    unsafe { *regs.add(INDEX) }
+}
+
+fn sendto_entry(args: &SyscallArgs) -> u64 {
+    net::sys_sendto(
+        args.a1,
+        args.a2 as *const u8,
+        args.a3,
+        args.a4,
+        args.a5 as *const u8,
+        syscall_arg6(args.regs),
+    )
+}
+
+fn recvfrom_entry(args: &SyscallArgs) -> u64 {
+    net::sys_recvfrom(
+        args.a1,
+        args.a2 as *mut u8,
+        args.a3,
+        args.a4,
+        args.a5 as *mut u8,
+        syscall_arg6(args.regs) as *mut u32,
     )
 }
 
@@ -266,6 +308,30 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
         fs::sys_munmap(args.a1, args.a2)
     );
     sys_handler!(t, args, numbers::SYS_BRK, fs::sys_brk(args.a1));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MREMAP,
+        fs::sys_mremap(
+            args.a1,
+            args.a2 as usize,
+            args.a3 as usize,
+            args.a4 as i32,
+            args.a5
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MSYNC,
+        fs::sys_msync(args.a1, args.a2 as usize, args.a3 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MINCORE,
+        fs::sys_mincore(args.a1, args.a2 as usize, args.a3 as *mut u8)
+    );
     sys_handler!(
         t,
         args,
@@ -352,27 +418,11 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     sys_handler!(
         t,
         args,
-        numbers::SYS_SENDTO,
-        net::sys_sendto(
-            args.a1,
-            args.a2 as *const u8,
-            args.a3,
-            args.a4 as *const u8,
-            args.a5
-        )
+        numbers::SYS_ACCEPT4,
+        net::sys_accept4(args.a1, args.a2 as *mut u8, args.a3 as *mut u32, args.a4)
     );
-    sys_handler!(
-        t,
-        args,
-        numbers::SYS_RECVFROM,
-        net::sys_recvfrom(
-            args.a1,
-            args.a2 as *mut u8,
-            args.a3,
-            args.a4 as *mut u8,
-            args.a5 as *mut u32,
-        )
-    );
+    sys_handler!(t, args, numbers::SYS_SENDTO, sendto_entry(args));
+    sys_handler!(t, args, numbers::SYS_RECVFROM, recvfrom_entry(args));
     sys_handler!(
         t,
         args,
@@ -447,8 +497,8 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
             args.a1,
             args.a2,
             args.a3 as *mut u32,
-            args.a4,
-            args.a5 as *mut u32,
+            args.a4 as *mut u32,
+            args.a5,
             args.regs
         )
     );
@@ -493,6 +543,21 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
         args,
         numbers::SYS_FCNTL,
         fs::sys_fcntl(args.a1, args.a2 as i32, args.a3)
+    );
+    sys_handler!(t, args, numbers::SYS_FSYNC, fs::sys_fsync(args.a1));
+    sys_handler!(t, args, numbers::SYS_FDATASYNC, fs::sys_fdatasync(args.a1));
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_GETDENTS,
+        fs::sys_getdents(args.a1, args.a2 as *mut u8, args.a3 as usize)
+    );
+    sys_handler!(t, args, numbers::SYS_VFORK, fs::sys_vfork());
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_SHUTDOWN,
+        fs::sys_shutdown(args.a1, args.a2 as i32)
     );
     sys_handler!(
         t,
@@ -1181,6 +1246,29 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     sys_handler!(
         t,
         args,
+        numbers::SYS_EPOLL_CREATE1_NATIVE,
+        epoll::sys_epoll_create1_native(args.a1 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EPOLL_CTL_NATIVE,
+        epoll::sys_epoll_ctl_native(
+            args.a1,
+            args.a2 as i32,
+            args.a3 as i32,
+            args.a4 as *const u8
+        )
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_EPOLL_WAIT_NATIVE,
+        epoll::sys_epoll_wait_native(args.a1, args.a2 as *mut u8, args.a3 as i32, args.a4 as i32)
+    );
+    sys_handler!(
+        t,
+        args,
         numbers::SYS_READV,
         compat::sys_readv(args.a1, args.a2 as *const u8, args.a3 as i64)
     );
@@ -1299,36 +1387,44 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     sys_handler!(
         t,
         args,
-        numbers::SYS_MQ_CLOSE,
-        mqueue::mq_close(args.a1 as i32)
+        numbers::SYS_MQ_UNLINK,
+        mqueue::mq_unlink(args.a1 as *const u8)
     );
     sys_handler!(
         t,
         args,
         numbers::SYS_MQ_TIMEDSEND,
-        mqueue::mq_send(
+        mqueue::mq_timedsend(
             args.a1 as i32,
             args.a2 as *const u8,
             args.a3 as usize,
-            args.a4 as u32
+            args.a4,
+            args.a5 as *const u8
         )
     );
     sys_handler!(
         t,
         args,
         numbers::SYS_MQ_TIMEDRECEIVE,
-        mqueue::mq_receive(
+        mqueue::mq_timedreceive(
             args.a1 as i32,
             args.a2 as *mut u8,
             args.a3 as usize,
             args.a4 as *mut u32,
+            args.a5 as *const u8,
         )
     );
     sys_handler!(
         t,
         args,
-        numbers::SYS_MQ_UNLINK,
-        mqueue::mq_unlink(args.a1 as *const u8)
+        numbers::SYS_MQ_NOTIFY,
+        mqueue::mq_notify(args.a1 as i32, args.a2 as *const u8)
+    );
+    sys_handler!(
+        t,
+        args,
+        numbers::SYS_MQ_GETSETATTR,
+        mqueue::mq_getsetattr(args.a1 as i32, args.a2 as *const u8, args.a3 as *mut u8)
     );
     sys_handler!(
         t,
@@ -1438,6 +1534,76 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
         numbers::SYS_MKFS,
         fs::sys_mkfs(args.a1 as *const u8, args.a2)
     );
+    #[cfg(feature = "ash")]
+    {
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_ASH_REGISTER,
+            syscalls::sys_ash_register(args.a1 as *const u8, args.a2 as usize, args.a3)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_ASH_UNREGISTER,
+            syscalls::sys_ash_unregister(args.a1)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_ASH_STATS,
+            syscalls::sys_ash_stats(args.a1, args.a2 as *mut crate::ash::AshStats)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_ASH_CONTROL,
+            syscalls::sys_ash_control(args.a1)
+        );
+    }
+    #[cfg(feature = "hypervisor")]
+    {
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_CREATE,
+            vm::sys_vm_create(args.a1 as *const u8, args.a2)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_DESTROY,
+            vm::sys_vm_destroy(args.a1)
+        );
+        sys_handler!(t, args, numbers::SYS_VM_START, vm::sys_vm_start(args.a1));
+        sys_handler!(t, args, numbers::SYS_VM_STOP, vm::sys_vm_stop(args.a1));
+        sys_handler!(t, args, numbers::SYS_VM_PAUSE, vm::sys_vm_pause(args.a1));
+        sys_handler!(t, args, numbers::SYS_VM_RESUME, vm::sys_vm_resume(args.a1));
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_LOAD_KERNEL,
+            vm::sys_vm_load_kernel(args.a1, args.a2 as *const u8)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_GET_INFO,
+            vm::sys_vm_get_info(args.a1, args.a2 as *mut u8, args.a3 as usize)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_SET_MEMORY,
+            vm::sys_vm_set_memory(args.a1, args.a2, args.a3)
+        );
+        sys_handler!(
+            t,
+            args,
+            numbers::SYS_VM_INJECT_IRQ,
+            vm::sys_vm_inject_irq(args.a1, args.a2 as u8)
+        );
+    }
     t
 }
 
@@ -1468,6 +1634,21 @@ pub extern "sysv64" fn syscall_handler(
     do_syscall(n, arg1, arg2, arg3, arg4, arg5, regs_ptr)
 }
 
+#[cfg(feature = "ash")]
+fn ash_syscall_denied(n: u64, arg1: u64, arg2: u64, arg3: u64) -> Option<u64> {
+    match crate::ash::hooks::syscall::hook_syscall_entry(n, arg1, arg2, arg3) {
+        crate::ash::AshResult::Drop | crate::ash::AshResult::Handled => {
+            Some(errno::Errno::EPERM as u64)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "ash"))]
+fn ash_syscall_denied(_n: u64, _arg1: u64, _arg2: u64, _arg3: u64) -> Option<u64> {
+    None
+}
+
 pub fn do_syscall(
     n: u64,
     arg1: u64,
@@ -1477,20 +1658,48 @@ pub fn do_syscall(
     arg5: u64,
     regs_ptr: *mut u64,
 ) -> u64 {
-    #[cfg(feature = "ash")]
-    {
-        match crate::ash::hooks::syscall::hook_syscall_entry(n, arg1, arg2, arg3) {
-            crate::ash::AshResult::Drop | crate::ash::AshResult::Handled => {
-                return errno::Errno::EPERM as u64;
-            }
-            _ => {}
-        }
+    if let Some(denied) = ash_syscall_denied(n, arg1, arg2, arg3) {
+        return denied;
     }
+    let seccomp_denial =
+        seccomp::check_syscall(n, &[arg1, arg2, arg3, arg4, arg5, syscall_arg6(regs_ptr)]);
+    do_syscall_body(n, arg1, arg2, arg3, arg4, arg5, regs_ptr, seccomp_denial)
+}
 
-    if !seccomp::check_syscall(n, &[arg1, arg2, arg3, arg4, arg5, 0]) {
-        return errno::Errno::EPERM as u64;
+/// Dispatch a syscall whose seccomp filter the caller already evaluated. Linux
+/// emulation filters the original Linux number; re-filtering the mapped Vahi
+/// number here would apply the wrong rule and run the filter twice.
+pub(crate) fn do_syscall_unchecked(
+    n: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    regs_ptr: *mut u64,
+) -> u64 {
+    if let Some(denied) = ash_syscall_denied(n, arg1, arg2, arg3) {
+        return denied;
     }
+    do_syscall_body(n, arg1, arg2, arg3, arg4, arg5, regs_ptr, None)
+}
 
+/// Complete a syscall denied by seccomp without executing it. It still runs
+/// the shared return path so `SECCOMP_RET_TRAP` keeps delivering SIGSYS.
+pub(crate) fn do_syscall_denied(n: u64, denial: u64, regs_ptr: *mut u64) -> u64 {
+    do_syscall_body(n, 0, 0, 0, 0, 0, regs_ptr, Some(denial))
+}
+
+fn do_syscall_body(
+    n: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    regs_ptr: *mut u64,
+    seccomp_denial: Option<u64>,
+) -> u64 {
     let args = SyscallArgs {
         n,
         a1: arg1,
@@ -1501,7 +1710,9 @@ pub fn do_syscall(
         regs: regs_ptr,
     };
 
-    let result = if (n as usize) < TABLE_SIZE {
+    let result = if let Some(err) = seccomp_denial {
+        err
+    } else if (n as usize) < TABLE_SIZE {
         match SYSCALL_TABLE[n as usize] {
             Some(handler) => handler(&args),
             None => {

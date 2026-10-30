@@ -286,6 +286,7 @@ fn read_proc_fd(pid: u64, fd: usize) -> String {
                     FileDescriptor::TimerFd(..) => String::from("timerfd"),
                     FileDescriptor::InotifyFd { .. } => String::from("inotify"),
                     FileDescriptor::IoUringFd(..) => String::from("io_uring"),
+                    FileDescriptor::Mqueue(..) => String::from("mqueue"),
                 }
             } else {
                 String::new()
