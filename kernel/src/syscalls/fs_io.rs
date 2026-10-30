@@ -1,12 +1,20 @@
-//! Core I/O syscalls: read, write, lseek, brk, mmap, munmap, mprotect,
-//! ioctl, getdents64, fallocate, sendfile.
-//! Extracted from fs.rs to keep each module under 1k lines.
-
 use super::errno;
 use super::*;
+use crate::syscalls::process_lifecycle::sys_fork;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use crate::vfs::VFS;
 use x86_64::structures::paging::PageTableFlags;
+
+// ── msync / mremap / mincore constants ─────────────────────────────────
+
+// msync flags
+const MS_ASYNC: i32 = 1;
+const MS_SYNC: i32 = 2;
+const MS_INVALIDATE: i32 = 4;
+
+// mremap flags
+const MREMAP_MAYMOVE: i32 = 1;
+const MREMAP_FIXED: i32 = 2;
 
 // ─── ioctl helper structs (must be at module level, not inside match) ─
 
@@ -274,6 +282,23 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
                 return errno::Errno::EFAULT as u64;
             }
             bytes as u64
+        }
+        // Linux exposes `read(2)` on a queue descriptor (and its /dev/mqueue
+        // file): the status line, with the file position per description.
+        Some(FileDescriptor::Mqueue(ref obj)) => {
+            if !obj.can_read() {
+                return errno::Errno::EBADF as u64;
+            }
+            let bytes = obj.read_line(count);
+            if bytes.is_empty() {
+                return 0;
+            }
+            // SAFETY: `buf` is the caller's userspace buffer; `copy_to_user`
+            // validates the range and turns a fault into `Err`.
+            if unsafe { user_access::copy_to_user(buf, &bytes) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            bytes.len() as u64
         }
         None => errno::Errno::EBADF as u64,
     }
@@ -841,4 +866,367 @@ pub fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: *mut u64, count: u64) -
         }
         _ => errno::Errno::EBADF as u64,
     }
+}
+
+// ─── fsync / fdatasync ──────────────────────────────────────────────
+
+pub fn sys_fsync(_fd: u64) -> u64 {
+    errno::Errno::ENOSYS as u64
+}
+
+pub fn sys_fdatasync(_fd: u64) -> u64 {
+    errno::Errno::ENOSYS as u64
+}
+
+// ─── getdents ────────────────────────────────────────────────────────
+
+pub fn sys_getdents(_fd: u64, _buf: *mut u8, _count: usize) -> u64 {
+    errno::Errno::ENOSYS as u64
+}
+
+// ─── msync ─────────────────────────────────────────────────────────────
+/// msync(addr, len, flags) → 0 on success
+///
+/// Synchronizes a mapped region to backing storage.
+/// flags: MS_ASYNC (1), MS_SYNC (2), MS_INVALIDATE (4)
+pub fn sys_msync(addr: u64, len: usize, flags: i32) -> u64 {
+    let page_size: u64 = 4096;
+    // Linux has no zero-length check: an empty range is simply a no-op.
+    if len == 0 {
+        return 0;
+    }
+    if addr & (page_size - 1) != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    // MS_ASYNC and MS_SYNC together are contradictory; Linux rejects the pair.
+    let contradictory = (flags & MS_ASYNC) != 0 && (flags & MS_SYNC) != 0;
+    if (flags & !(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) != 0 || contradictory {
+        return errno::Errno::EINVAL as u64;
+    }
+
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    let end = addr + len as u64;
+    let mem = process.memory.lock();
+    let mut page = addr;
+    while page < end {
+        let vma = match mem.vmas.iter().find(|v| page >= v.start && page < v.end) {
+            Some(v) => v,
+            // Linux msync: a hole in the range is ENOMEM.
+            None => return errno::Errno::ENOMEM as u64,
+        };
+        if vma.is_shared && vma.file_handle.is_some() {
+            // ponytail: no page cache and no dirty-page write-back exist — sys_mmap
+            // never loads file contents, so there is nothing to flush. Upgrade when
+            // file-backed mmap gains a page cache with dirty tracking.
+            return errno::Errno::EOPNOTSUPP as u64;
+        }
+        // Anonymous/private pages are already in the page tables; MS_ASYNC,
+        // MS_SYNC and MS_INVALIDATE are satisfied by skipping to the VMA end.
+        page = vma.end;
+    }
+
+    0
+}
+
+// ─── mremap ────────────────────────────────────────────────────────────
+/// mremap(old_address, old_size, new_size, flags, new_address) → new_address
+///
+/// Expands, shrinks, or moves a virtual memory region.
+/// flags: MREMAP_MAYMOVE (1), MREMAP_FIXED (2)
+pub fn sys_mremap(
+    old_address: u64,
+    old_size: usize,
+    new_size: usize,
+    flags: i32,
+    new_address: u64,
+) -> u64 {
+    let page_size: u64 = 4096;
+    let max_addr: u64 = 0x0000_7000_0000_0000;
+
+    if old_address & (page_size - 1) != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    let page_mask = (page_size - 1) as usize;
+    if old_size == 0 || old_size & page_mask != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    if new_size == 0 || new_size & page_mask != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    if (flags & !(MREMAP_MAYMOVE | MREMAP_FIXED)) != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    let may_move = (flags & MREMAP_MAYMOVE) != 0;
+    let fixed = (flags & MREMAP_FIXED) != 0;
+    if fixed && !may_move {
+        return errno::Errno::EINVAL as u64;
+    }
+
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    // shortcut: only an exact-start, whole-VMA remap is supported; a partial
+    // range would need VMA splitting. Upgrade when a caller needs it.
+    let vma = {
+        let mem = process.memory.lock();
+        match mem.vmas.iter().find(|v| v.start == old_address) {
+            Some(v) if v.end - v.start == old_size as u64 => v.clone(),
+            Some(_) => return errno::Errno::EINVAL as u64,
+            None => return errno::Errno::EFAULT as u64,
+        }
+    };
+    let old_end = old_address + old_size as u64;
+    let new_end = old_address + new_size as u64;
+
+    if new_size == old_size && !fixed {
+        return old_address;
+    }
+
+    if new_size < old_size {
+        // SAFETY: the syscall runs on the caller's own address space, so its
+        // PML4 is the active one and mapper() may mutate it.
+        if let Some(mut mapper) = unsafe { process.address_space.mapper() } {
+            let mut page_addr = new_end;
+            while page_addr < old_end {
+                let page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(page_addr));
+                if let Ok((frame, flush)) = mapper.unmap(page) {
+                    flush.flush();
+                    // Refcounted release: a COW-shared frame stays alive for the
+                    // other address space, and hits 0 -> deferred free otherwise.
+                    crate::memory::frame_info::decrement(frame.start_address());
+                }
+                page_addr += page_size;
+            }
+        }
+        let mut mem = process.memory.lock();
+        if let Some(v) = mem.vmas.iter_mut().find(|v| v.start == old_address) {
+            v.end = new_end;
+        }
+        return old_address;
+    }
+
+    if new_size > old_size {
+        let mut mem = process.memory.lock();
+        let mut blocked = new_end > max_addr;
+        for v in mem.vmas.iter() {
+            if v.start < new_end && v.end > old_end {
+                blocked = true;
+            }
+        }
+        if !blocked {
+            if let Some(v) = mem.vmas.iter_mut().find(|v| v.start == old_address) {
+                v.end = new_end;
+            }
+            // Pages past old_end stay unmapped; the page fault path maps them
+            // from the VMA on first touch.
+            return old_address;
+        }
+        if !may_move {
+            return errno::Errno::ENOMEM as u64;
+        }
+    }
+
+    let dest = {
+        let mem = process.memory.lock();
+        if fixed {
+            if new_address & (page_size - 1) != 0 {
+                return errno::Errno::EINVAL as u64;
+            }
+            let dest_end = new_address + new_size as u64;
+            // The destination must be free, source VMA included: a partially
+            // overlapping move has no defined outcome.
+            let mut taken = false;
+            for v in mem.vmas.iter() {
+                if v.start < dest_end && v.end > new_address {
+                    taken = true;
+                    break;
+                }
+            }
+            if taken {
+                return errno::Errno::EINVAL as u64;
+            }
+            new_address
+        } else {
+            let hint = if new_address != 0 {
+                new_address
+            } else {
+                old_end
+            };
+            match crate::task::process::find_free_vma_region(
+                &mem.vmas,
+                hint,
+                new_size as u64,
+                max_addr,
+            ) {
+                Some(addr) => addr,
+                None => return errno::Errno::ENOMEM as u64,
+            }
+        }
+    };
+
+    let flags_with_present = vma.flags | PageTableFlags::PRESENT;
+    // SAFETY: the syscall runs on the caller's own address space, so its PML4
+    // is the active one and mapper() may mutate it.
+    let mut mapper = match unsafe { process.address_space.mapper() } {
+        Some(m) => m,
+        None => return errno::Errno::ENOMEM as u64,
+    };
+    let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
+    let mut page_addr = old_address;
+    while page_addr < old_end {
+        let src = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(page_addr));
+        let dst = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(
+            dest + (page_addr - old_address),
+        ));
+        if let Ok((frame, flush)) = mapper.unmap(src) {
+            flush.flush();
+            // SAFETY: map_to installs a fresh leaf entry for dst pointing at the
+            // frame just unmapped from src; page-table frames come from the
+            // buddy allocator.
+            match unsafe { mapper.map_to(dst, frame, flags_with_present, &mut frame_allocator) } {
+                Ok(flush) => flush.flush(),
+                Err(_) => {
+                    // SAFETY: restoring the frame that was just unmapped from src
+                    // into the entry it came from; src is inside the source VMA.
+                    match unsafe {
+                        mapper.map_to(src, frame, flags_with_present, &mut frame_allocator)
+                    } {
+                        Ok(flush) => flush.flush(),
+                        // Second failure: the page is lost, so release the frame.
+                        Err(_) => {
+                            crate::memory::frame_info::decrement(frame.start_address());
+                        }
+                    }
+                    // Roll back the pages moved so far, then report the failure.
+                    let mut done = old_address;
+                    while done < page_addr {
+                        let s = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(done));
+                        let d = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(
+                            dest + (done - old_address),
+                        ));
+                        if let Ok((moved, flush)) = mapper.unmap(d) {
+                            flush.flush();
+                            // SAFETY: restoring the mapping that was moved away.
+                            if let Ok(flush) = unsafe {
+                                mapper.map_to(s, moved, flags_with_present, &mut frame_allocator)
+                            } {
+                                flush.flush();
+                            }
+                        }
+                        done += page_size;
+                    }
+                    return errno::Errno::ENOMEM as u64;
+                }
+            }
+        }
+        page_addr += page_size;
+    }
+
+    {
+        let mut mem = process.memory.lock();
+        mem.vmas.retain(|v| v.start != old_address);
+        crate::task::process::Process::insert_vma_locked(
+            &mut mem.vmas,
+            crate::task::process::Vma {
+                start: dest,
+                end: dest + new_size as u64,
+                flags: vma.flags,
+                _name: vma._name,
+                file_handle: vma.file_handle,
+                file_offset: vma.file_offset,
+                is_shared: vma.is_shared,
+                shm_id: vma.shm_id,
+            },
+        );
+    }
+
+    dest
+}
+
+pub fn sys_mincore(addr: u64, len: usize, vec: *mut u8) -> u64 {
+    let page_size: u64 = 4096;
+
+    // Validate address range and alignment
+    // Linux has no zero-length check: pages = 0, so nothing is reported.
+    if len == 0 {
+        return 0;
+    }
+    if addr & (page_size - 1) != 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    if vec.is_null() {
+        return errno::Errno::EFAULT as u64;
+    }
+
+    let process = match get_current_process() {
+        Some(p) => p,
+        None => return errno::Errno::ESRCH as u64,
+    };
+
+    let end = addr + len as u64;
+    let page_count = (len + page_size as usize - 1) / page_size as usize;
+    // Linux mincore reports ONE BYTE PER PAGE, not a bit vector: a bit vector
+    // makes glibc/musl read residency flags out of the wrong byte.
+    let mut result = alloc::vec![0u8; page_count];
+
+    // A hole inside the range is ENOMEM, checked before touching the tables.
+    {
+        let mem = process.memory.lock();
+        let mut page = addr;
+        while page < end {
+            match mem.vmas.iter().find(|v| page >= v.start && page < v.end) {
+                Some(v) => page = v.end,
+                None => return errno::Errno::ENOMEM as u64,
+            }
+        }
+    }
+
+    // SAFETY: the syscall runs on the caller's own address space, so its PML4
+    // is the active one; translate_page only reads it.
+    // ponytail: residency = present-bit only; no accessed/dirty tracking from page cache.
+    // upgrade when page cache tracks accessed/dirty for accurate residency.
+    if let Some(mapper) = unsafe { process.address_space.mapper() } {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let page = Page::<Size4KiB>::containing_address(x86_64::VirtAddr::new(
+                addr + i as u64 * page_size,
+            ));
+            if mapper.translate_page(page).is_ok() {
+                *slot = 1;
+            }
+        }
+    }
+
+    // SAFETY: `vec` is non-null and copy_to_user validates the userspace range.
+    unsafe {
+        if crate::syscalls::user_access::copy_to_user(vec, &result).is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    0
+}
+
+// ── vfork ───────────────────────────────────────────────────────────
+
+/// vfork() → child PID in the parent, 0 in the child.
+///
+/// This is a plain fork: the child gets its own COW address space and the
+/// parent keeps running.
+/// ponytail: no address-space sharing and no parent suspension; upgrade when a
+/// caller depends on vfork's no-copy/blocked-parent guarantee — the usual
+/// immediate exec-then-wait idiom is already correct under a plain fork.
+pub fn sys_vfork() -> u64 {
+    sys_fork(core::ptr::null_mut())
+}
+
+// ── shutdown ────────────────────────────────────────────────────────
+
+pub fn sys_shutdown(_fd: u64, _how: i32) -> u64 {
+    errno::Errno::ENOSYS as u64
 }

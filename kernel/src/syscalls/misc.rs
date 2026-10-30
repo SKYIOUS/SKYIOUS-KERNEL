@@ -321,6 +321,7 @@ pub fn sys_select(
                     FileDescriptor::InotifyFd { instance_key, .. } => {
                         crate::syscalls::inotify::inotify_has_events(*instance_key)
                     }
+                    FileDescriptor::Mqueue(obj) => !obj.queue().is_empty(),
                 },
                 None => false,
             };
@@ -568,6 +569,15 @@ pub fn sys_poll(fds: *const u8, nfds: usize, timeout_ms: i32) -> u64 {
                         && crate::syscalls::inotify::inotify_has_events(*instance_key)
                     {
                         *revents |= POLLIN;
+                    }
+                }
+                Some(FileDescriptor::Mqueue(obj)) => {
+                    let attr = obj.get_attr();
+                    if *events & POLLIN != 0 && attr.mq_curmsgs > 0 {
+                        *revents |= POLLIN;
+                    }
+                    if *events & POLLOUT != 0 && attr.mq_curmsgs < attr.mq_maxmsg {
+                        *revents |= POLLOUT;
                     }
                 }
                 None => {

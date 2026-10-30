@@ -5,7 +5,7 @@ edition = "2021"
 description = "Memory management for the Vahi kernel (buddy allocator, slab, paging, CoW)"
 
 [dependencies]
-vahi-sync = { path = "../sync" }
+vahi-hal = { path = "../hal" }
 vahi-limine = { path = "../limine" }
 spin = "0.9.8"
 linked_list_allocator = "0.10.5"

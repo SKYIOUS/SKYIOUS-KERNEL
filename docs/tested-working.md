@@ -1,7 +1,72 @@
 # Tested & Working — Vahi Kernel / SkyOS
 
-Living status document. Last updated: 2026-10-21 (session: CI rigor rewrite + GitHub Pages CI reports + full local gate verification).
+Living status document. Last updated: 2026-10-26 (session: mqueue gap closure verified; count in `tests/selftest_count.txt`).
 Every claim here was reproduced on this machine; re-verify after any change.
+
+## Verified this session (2026-10-26, mqueue gap closure + initramfs check)
+
+- **mqueue:** lives in `kernel/src/ipc/mqueue/` (`mod.rs` syscalls, `queue.rs`
+  core, `object.rs` per-open description). Queue descriptors are real fds
+  (`FileDescriptor::Mqueue`, installed by `mq_open`, resolved by
+  `mq_send`/`mq_receive`/`mq_getsetattr`), so `close`/`dup`/`fstat`/`poll`/
+  `select`/`epoll` work on them. Syscall numbers are Linux x86_64
+  240/241/242/243/244/245; names use the libc ABI form without the leading slash
+  (`EACCES` for empty, `.`, `..`, or a slash; `ENAMETOOLONG` over 255 bytes);
+  `O_NONBLOCK` is per open file description, shared by `dup`/`fork`, and
+  `fcntl(F_GETFL/F_SETFL)` reads and changes it; descriptors are always
+  close-on-exec; `mq_unlink` removes only the name, so open descriptors keep
+  working; error precedence follows `ipc/mqueue.c`. `mq_timedsend`/
+  `mq_timedreceive` treat the timeout as an absolute `CLOCK_REALTIME` deadline
+  and return `ETIMEDOUT` when it expires; `mq_notify` supports `SIGEV_NONE`/
+  `SIGEV_SIGNAL` (one-shot, only on the empty -> non-empty edge, `EBUSY` while
+  a registration exists, cleared by the owner's close; `SIGEV_THREAD` is
+  `ENOSYS` because the netlink transport is absent); `read(2)` on a queue fd
+  returns Linux's `QSIZE:/NOTIFY:/SIGNO:/NOTIFY_PID:` status line at a
+  per-description position; creation charges
+  `mq_maxmsg*mq_msgsize + mq_maxmsg*96` against the per-uid
+  `RLIMIT_MSGQUEUE` (`EMFILE` over the limit, released when the queue dies);
+  queue names live in the process's IPC namespace, so `unshare(CLONE_NEWIPC)`
+  starts empty while already-open descriptors keep working. 18 contract tests
+  in `kernel/src/tests/mqueue_contract.rs` (core fd/ABI) and
+  `kernel/src/tests/mqueue_semantics.rs` (notify, deadlines, read line,
+  rlimit, namespaces) cover the round trip,
+  `O_EXCL`/`ENOENT`, bad fd, `EMSGSIZE`, `EFAULT` on name/message/priority
+  pointers, creation attributes and limits, get/setattr, the fcntl bridge,
+  close-on-exec, notification delivery and validation, timeout validation and
+  expiry, the `read(2)` line, `RLIMIT_MSGQUEUE` accounting and namespace
+  isolation. Blocking waits poll at the timer tick (<=10 ms) because the
+  scheduler has no wait-queue primitive; this is a documented ceiling, not
+  event-driven wake.
+- **FD-15:** `contract:sendmsg_recvmsg_split_into_iovecs` still pins the
+  `sys_recvmsg` `msg_flags` fix (`offset_of!(msghdr, msg_flags)`), now run
+  once instead of twice.
+- **Initramfs:** `vfs::init()` already mounts the Limine initrd as `/`
+  (`crates/vfs/src/defs.rs`, `RAMDISK`), verified by
+  `[BOOT] initrd from Limine modules` + `[TARFS] parsed 300 entries` on a
+  boot with `--initrd kernel/initrd.tar`. The added `vfs/mount.rs` helper and
+  `tests/initramfs_tests.rs` duplicated that path and were removed.
+- Suite is **all-green, 0 failed** (canonical count: `tests/selftest_count.txt`). Gates run this session (this tree):
+  `cargo build --release --target x86_64-unknown-none --features self_test`
+  -> success; `cargo clippy --release --target x86_64-unknown-none --features
+  self_test -- -D warnings` -> clean; `cargo fmt --all -- --check` -> exit 0;
+  `scripts/check_repo_policy.py --self-test` -> pass. Limine image via
+  `builder/build_limine_image.py --initrd kernel/initrd.tar`;
+  `tests/run_qemu_tests.py --expect-count auto --qemu-extra "-vga none"`:
+  - release+self_test **PASS 228/228** at `-smp 1` (12.1s) and
+    `-smp 2 -cpu qemu64,-smep` (16.6s).
+  - `audit_small` profile **PASS 228/228** (22.1s).
+- `docs/architecture/issues.md` FD-14 updated to the new implementation path
+  and evidence; CI/nightly use `--expect-count auto`, and README, CONTEXT.md,
+  CONTRIBUTING.md and this file read the count from
+  `tests/selftest_count.txt`.
+- **Verification tooling:** the root `rust-toolchain.toml` pins
+  `nightly-2026-08-14`, and `scripts/verify.ps1` ran every gate end-to-end on
+  this tree: fmt, policy self-test/worktree, release+self_test build and
+  clippy, then QEMU at SMP 1, SMP 2 and `audit_small` — all PASS. The policy
+  gate also rejects deliberate untracked and modified-file violations under
+  `--worktree`.
+
+## Verified this session (2026-10-23)
 
 ## Verified this session (2026-10-21)
 
@@ -9,8 +74,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
   `ci.yml` 7 gate jobs, `quality.yml` 5 gate jobs (repo policy, workflow/script
   lint, rustdoc, secrets, dependency audit), `nightly.yml` 6 extended gates,
   `t00-demo.yml` 3 harness demos; `build-kernel.yml` deleted (dead `main`
-  trigger, FB-004 path). All workflow YAML parse-validated with PyYAML and
-  actionlint.
+  trigger, FB-004 path). All workflow YAML parse-validated with actionlint.
 - Host gates, exact commands (all run this session, this tree):
   `cargo test --workspace --exclude vahi_kernel --all-features --locked` →
   exit 0; `cargo clippy --workspace --exclude vahi_kernel --all-targets
@@ -21,9 +85,9 @@ Every claim here was reproduced on this machine; re-verify after any change.
   no-features / all-features / release+self_test / 19-crate loop → all exit 0
   with `-D warnings`.
 - QEMU gates (QEMU 10.2.50, OVMF.fd, `-vga none`): T-00 suite on the
-  release+self_test Limine image → **PASS 197/197, 0 failed** at `-smp 1`
+  release+self_test Limine image → **PASS 207/207, 0 failed** at `-smp 1`
   (10.6s) and `-smp 2` (13.6s); `audit_small` profile suite → **PASS
-  197/197** (21.1s); production image `--boot-only` → PASS at `-smp 1` (7.5s),
+  207/207** (21.1s); production image `--boot-only` → PASS at `-smp 1` (7.5s),
   and `-smp 2 --expect-ap 1` → PASS (12.0s, 1/1 AP up, VFS init reached); 25
   alternating boots → 25/25 PASS (K-02 flake not reproduced). Memory leak
   audit: PASS (no leak detected).
@@ -41,7 +105,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
   after the `xmas-elf 0.9.1 → 0.10.0` upgrade (RUSTSEC-2025-0018, issues.md
   V-1); 3 non-failing warnings remain (unmaintained `atomic-polyfill`,
   unmaintained `proc-macro-error2`, yanked `spin`). The kernel was rebuilt and
-  T-00 re-run at `-smp 1` and `-smp 2` after the bump (197/197 both).
+  T-00 re-run at `-smp 1` and `-smp 2` after the bump (207/207 both).
 
 ## Verified this session (2026-09-23)
 
@@ -74,9 +138,9 @@ Every claim here was reproduced on this machine; re-verify after any change.
 - New subsystems confirmed: hypervisor (16 files), ebpf (7), gui (15), compositor (8), crypto (3), objects (12), ash (8)
 - 18 extracted crates: sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci
 - Feature flags: default = smp,net,ext4,iommu; all-features = smp,net,ext4,uhci,ash,hypervisor,verification,gpu
-- CI (rewritten 2026-10-21): 7 PR jobs in `ci.yml` (format, host tests, host clippy, kernel build matrix, kernel clippy, QEMU self-test, QEMU boot regression); `quality.yml` adds 5 gates (AGENTS.md policy, actionlint/ShellCheck/PowerShell parse, rustdoc `-D warnings`, gitleaks, `cargo audit`); `nightly.yml` adds cross-arch, SMP 2, audit-profile, boot-stress and `cargo audit`; `t00-demo.yml` proves harness FAIL/PANIC/TIMEOUT detection on demand; `ci-pages.yml` renders run/job/artifact/TAP data to GitHub Pages `/ci/` after every watched workflow on `master`
+- CI (rewritten 2026-10-21): 7 PR jobs in `ci.yml` (format, host tests, host clippy, kernel build matrix, kernel clippy, QEMU self-test, QEMU boot regression); `quality.yml` adds 5 gates (AGENTS.md policy, actionlint/ShellCheck/PowerShell parse, rustdoc `-D warnings`, gitleaks, `cargo audit`); `nightly.yml` adds cross-arch, SMP 2, audit-profile, boot-stress and `cargo audit`; `t00-demo.yml` proves harness FAIL/PANIC/TIMEOUT detection on demand; `ci-pages.yml` renders run/job/artifact/TAP data (plus a whole-report ZIP download) to GitHub Pages `/ci/` after every watched workflow on `master`
 - Build: `cargo build` in kernel/ → 0 errors; `cargo clippy -- -D warnings` → clean
-- QEMU boot: TAP version 13, 197/197 passed, 0 failed at smp 1 and 2 (2026-10-21; earlier sessions: 134/134, 146/146)
+- QEMU boot: TAP version 13, 207/207 passed, 0 failed at smp 1 and 2 (2026-10-21; earlier sessions: 134/134, 146/146)
 
 ## Verified this session (2026-09-05)
 

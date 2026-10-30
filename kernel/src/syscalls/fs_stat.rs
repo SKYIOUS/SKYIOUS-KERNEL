@@ -7,10 +7,14 @@ use super::*;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 use crate::vfs::{Stat, VFS};
 
+/// `st_size` Linux reports for a message-queue inode (FILENT_SIZE in
+/// `ipc/mqueue.c`); the number is the size of one mqueue dirent, not data.
+const MQUEUE_ST_SIZE: i64 = 80;
+
 // ─── stat / fstat / lstat / fstatat / statfs ──────────────────────
 
 pub fn sys_stat(path_ptr: *const u8, stat_buf: *mut Stat) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -36,7 +40,7 @@ pub fn sys_stat(path_ptr: *const u8, stat_buf: *mut Stat) -> u64 {
 }
 
 pub fn sys_statfs(path_ptr: *const u8, statfs_buf: *mut u8) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -130,12 +134,27 @@ pub fn sys_fstat(fd: u64, stat_buf: *mut Stat) -> u64 {
             }
             0
         }
+        Some(FileDescriptor::Mqueue(ref obj)) => {
+            let stat = Stat {
+                st_mode: crate::vfs::S_IFREG | obj.mode(),
+                st_uid: obj.uid(),
+                st_gid: obj.gid(),
+                st_size: MQUEUE_ST_SIZE,
+                ..Stat::default()
+            };
+            // SAFETY: `stat_buf` is a userspace pointer; the callee validates
+            // `size_of::<Stat>()` bytes before writing.
+            if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err() {
+                return errno::Errno::EFAULT as u64;
+            }
+            0
+        }
         None => errno::Errno::EBADF as u64,
     }
 }
 
 pub fn sys_lstat(path_ptr: *const u8, stat_buf: *mut Stat) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -166,16 +185,17 @@ pub fn sys_fstatat(
     stat_buf: *mut crate::vfs::Stat,
     flags: i32,
 ) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => {
-            if (flags & AT_EMPTY_PATH) != 0 && pathname_ptr.is_null() {
-                alloc::string::String::new()
-            } else {
-                return errno::Errno::EFAULT as u64;
+    let path_str =
+        match unsafe { user_access::read_user_string(pathname_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => {
+                if (flags & AT_EMPTY_PATH) != 0 && pathname_ptr.is_null() {
+                    alloc::string::String::new()
+                } else {
+                    return errno::Errno::EFAULT as u64;
+                }
             }
-        }
-    };
+        };
     if (flags & AT_EMPTY_PATH) != 0 && path_str.is_empty() {
         let process = match get_current_process() {
             Some(p) => p,
@@ -288,6 +308,22 @@ pub fn sys_fstatat(
                 }
                 return 0;
             }
+            Some(FileDescriptor::Mqueue(obj)) => {
+                let stat = crate::vfs::Stat {
+                    st_mode: crate::vfs::S_IFREG | obj.mode(),
+                    st_uid: obj.uid(),
+                    st_gid: obj.gid(),
+                    st_size: MQUEUE_ST_SIZE,
+                    ..crate::vfs::Stat::default()
+                };
+                // SAFETY: `stat_buf` is a userspace pointer; the callee
+                // validates `size_of::<Stat>()` bytes before writing.
+                if unsafe { user_access::copy_struct_to_user(stat_buf as *mut u8, &stat) }.is_err()
+                {
+                    return errno::Errno::EFAULT as u64;
+                }
+                return 0;
+            }
             None => return errno::Errno::EBADF as u64,
         }
     }
@@ -340,7 +376,7 @@ pub fn sys_fstatat(
 // ─── chmod / fchmod / chown / fchown / umask ──────────────────────
 
 pub fn sys_chmod(path_ptr: *const u8, mode: u32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -387,7 +423,7 @@ pub fn sys_fchmod(fd: u64, mode: u32) -> u64 {
 }
 
 pub fn sys_chown(path_ptr: *const u8, uid: u32, gid: u32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -467,14 +503,15 @@ pub fn sys_umask(mask: u32) -> u64 {
 // ─── symlink / symlinkat / readlink / readlinkat ──────────────────
 
 pub fn sys_symlink(target: *const u8, linkpath: *const u8) -> u64 {
-    let target_str = match unsafe { user_access::read_user_string(target, 256) } {
+    let target_str = match unsafe { user_access::read_user_string(target, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
-    let linkpath_str = match unsafe { user_access::read_user_string(linkpath, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let linkpath_str =
+        match unsafe { user_access::read_user_string(linkpath, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let vfs = crate::vfs::VFS.lock();
     let (parent_path, name) = split_parent(&linkpath_str);
     if let Some(parent) = vfs.resolve_path(&parent_path) {
@@ -496,14 +533,16 @@ pub fn sys_symlink(target: *const u8, linkpath: *const u8) -> u64 {
 }
 
 pub fn sys_symlinkat(target_ptr: *const u8, newdirfd: i64, linkpath_ptr: *const u8) -> u64 {
-    let target_str = match unsafe { user_access::read_user_string(target_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
-    let linkpath_str = match unsafe { user_access::read_user_string(linkpath_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let target_str =
+        match unsafe { user_access::read_user_string(target_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
+    let linkpath_str =
+        match unsafe { user_access::read_user_string(linkpath_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
@@ -533,7 +572,7 @@ pub fn sys_symlinkat(target_ptr: *const u8, newdirfd: i64, linkpath_ptr: *const 
 }
 
 pub fn sys_readlink(pathname: *const u8, buf: *mut u8, bufsize: u64) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(pathname, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(pathname, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -555,10 +594,11 @@ pub fn sys_readlink(pathname: *const u8, buf: *mut u8, bufsize: u64) -> u64 {
 }
 
 pub fn sys_readlinkat(dirfd: i64, pathname_ptr: *const u8, buf: *mut u8, bufsize: u64) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let path_str =
+        match unsafe { user_access::read_user_string(pathname_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
@@ -587,14 +627,16 @@ pub fn sys_readlinkat(dirfd: i64, pathname_ptr: *const u8, buf: *mut u8, bufsize
 // ─── link / linkat / rename / renameat ────────────────────────────
 
 pub fn sys_link(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
-    let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
-    let new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let old_path =
+        match unsafe { user_access::read_user_string(old_path_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
+    let new_path =
+        match unsafe { user_access::read_user_string(new_path_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let vfs = VFS.lock();
     let old_node = match vfs.resolve_path(&old_path) {
         Some(n) => n,
@@ -626,14 +668,16 @@ pub fn sys_linkat(
     new_path_ptr: *const u8,
     _flags: i32,
 ) -> u64 {
-    let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
-    let new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let old_path =
+        match unsafe { user_access::read_user_string(old_path_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
+    let new_path =
+        match unsafe { user_access::read_user_string(new_path_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
@@ -671,14 +715,16 @@ pub fn sys_linkat(
 }
 
 pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> u64 {
-    let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
-    let new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let old_path =
+        match unsafe { user_access::read_user_string(old_path_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
+    let new_path =
+        match unsafe { user_access::read_user_string(new_path_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let vfs = VFS.lock();
     let source_node = match vfs.resolve_path(&old_path) {
         Some(n) => n,
@@ -753,14 +799,16 @@ pub fn sys_renameat(
     newdirfd: i64,
     new_path_ptr: *const u8,
 ) -> u64 {
-    let old_path = match unsafe { user_access::read_user_string(old_path_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
-    let new_path = match unsafe { user_access::read_user_string(new_path_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let old_path =
+        match unsafe { user_access::read_user_string(old_path_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
+    let new_path =
+        match unsafe { user_access::read_user_string(new_path_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let process = match get_current_process() {
         Some(p) => p,
         None => return errno::Errno::ESRCH as u64,
@@ -844,7 +892,7 @@ pub fn sys_renameat(
 // ─── mkdir / mkdirat / unlink / unlinkat ──────────────────────────
 
 pub fn sys_mkdir(path_ptr: *const u8, mode: u32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -891,7 +939,7 @@ pub fn sys_mkdir(path_ptr: *const u8, mode: u32) -> u64 {
 }
 
 pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, mode: u32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -944,7 +992,7 @@ pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, mode: u32) -> u64 {
 }
 
 pub fn sys_unlink(path_ptr: *const u8) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -974,7 +1022,7 @@ pub fn sys_unlink(path_ptr: *const u8) -> u64 {
 }
 
 pub fn sys_unlinkat(dirfd: i64, path_ptr: *const u8, flags: i32) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -1035,7 +1083,7 @@ pub fn sys_unlinkat(dirfd: i64, path_ptr: *const u8, flags: i32) -> u64 {
 // ─── truncate / ftruncate / utimensat ─────────────────────────────
 
 pub fn sys_truncate(path_ptr: *const u8, len: i64) -> u64 {
-    let path = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -1091,10 +1139,11 @@ pub fn sys_utimensat(
     _times_ptr: *const u8,
     _flags: i32,
 ) -> u64 {
-    let path_str = match unsafe { user_access::read_user_string(pathname_ptr, 256) } {
-        Ok(s) => s,
-        Err(_) => return errno::Errno::EFAULT as u64,
-    };
+    let path_str =
+        match unsafe { user_access::read_user_string(pathname_ptr, crate::vfs::PATH_MAX) } {
+            Ok(s) => s,
+            Err(_) => return errno::Errno::EFAULT as u64,
+        };
     let node = match VFS.lock().resolve_path(&path_str) {
         Some(n) => n,
         None => return errno::Errno::ENOENT as u64,

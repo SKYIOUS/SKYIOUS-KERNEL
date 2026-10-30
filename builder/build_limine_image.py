@@ -490,7 +490,7 @@ class GPTDiskImage:
 
     def write_protective_mbr(self):
         mbr = bytearray(SECTOR_SIZE)
-        mbr[446 + 4] = 0xEE  # type: GPT protective
+        mbr[446 + 4] = 0xEE  # partition type: GPT protective
         struct.pack_into('<I', mbr, 446 + 8, 1)
         struct.pack_into('<I', mbr, 446 + 12, self.total_sectors - 1)
         struct.pack_into('<H', mbr, 510, 0xAA55)

@@ -5,7 +5,7 @@ edition.workspace = true
 description = "Kernel object namespace, handles, and unified resource trait"
 
 [dependencies]
-vahi-sync = { path = "../sync" }
+vahi-hal = { path = "../hal" }
 spin = "0.9"
 
 [features]

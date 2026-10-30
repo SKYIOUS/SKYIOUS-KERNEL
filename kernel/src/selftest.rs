@@ -9,14 +9,15 @@ pub type TestFn = fn() -> Result<(), &'static str>;
 //   0x11 = kernel panic reported by the panic handler
 //   0x30 = run_all() exceeded its own guard timeout (host also enforces its
 //          own wall-clock TIMEOUT, so a hang here is caught twice)
-// Host runners must map QEMU exit `(code & 0x7f) - 1`: 0x0f = PASS_BASE,
-// 0x10 = PANIC_BASE, 0x2f = TIMEOUT_BASE.
+// QEMU maps the value V written to port 0xf4 to process exit status
+// `(V << 1) | 1`: 0x10 -> 33 (PASS_BASE), 0x11 -> 35 (PANIC_BASE),
+// 0x30 -> 97 (TIMEOUT_BASE).
 pub const QEMU_EXIT_PASS_BASE: u32 = 0x10;
 pub const QEMU_EXIT_PANIC_BASE: u32 = 0x11;
 pub const QEMU_EXIT_TIMEOUT_BASE: u32 = 0x30;
 
 /// Explicit QEMU exit via the isa-debug-exit device: writes `code` to port
-/// 0xf4, making QEMU terminate with exit status `(code & 0x7f) - 1`.
+/// 0xf4, making QEMU terminate with exit status `(code << 1) | 1`.
 /// No-op on aarch64 (the device is x86-only) and harmless on real hardware
 /// (no device at 0xf4; caller should still halt afterwards).
 pub fn qemu_exit(code: u32) {

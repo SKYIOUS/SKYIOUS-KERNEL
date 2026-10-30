@@ -4,8 +4,8 @@
 //! and global registration so drivers can route interrupts without
 //! depending on a specific hardware implementation.
 
+use crate::sync::IrqSafeMutex as Mutex;
 use alloc::sync::Arc;
-use vahi_sync::IrqSafeMutex as Mutex;
 
 /// Hardware IRQ vector number (0-255).
 pub type IrqVector = u8;

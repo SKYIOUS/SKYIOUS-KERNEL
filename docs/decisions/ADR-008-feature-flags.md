@@ -20,7 +20,7 @@ Use Cargo feature flags (compile-time) for all optional subsystems. No runtime c
 
 ```toml
 [features]
-default = ["smp", "net", "ext4"]
+default = ["smp", "net", "ext4", "iommu"]
 verification = []
 smp = []
 net = []
@@ -30,6 +30,7 @@ self_test = []
 ash = []
 gpu = []
 hypervisor = []
+iommu = []
 ```
 
 Each feature gate is checked with `#[cfg(feature = "...")]` in source code, applied at the module level or individual item level.
@@ -52,9 +53,9 @@ Each feature gate is checked with `#[cfg(feature = "...")]` in source code, appl
 - Rejected: Feature flags are sufficient for our subsystem-level gating
 
 ## Consequences
-- `default = ["smp", "net", "ext4"]` for general use
+- `default = ["smp", "net", "ext4", "iommu"]` for general use
 - `#[cfg(feature = "smp")]` prevents SMP code from being compiled when disabled
 - Features are additive — no feature interaction issues
 - Build combinations are tested in CI with `--no-default-features` and feature combinations
 - Zero runtime overhead for disabled features
-- Removed 2026-08-20: `ai_rule`, `ai_llm`, `objects_v2` (subsystems deleted); `gpu` temporarily excluded from the CI all-features list until compositor↔gpu wiring lands (plan A4)
+- Removed 2026-08-20: `ai_rule`, `ai_llm`, `objects_v2` (subsystems deleted); `gpu` is in CI all-features list; `iommu` added to default 2026-10-21

@@ -4,8 +4,8 @@
 Reads recent runs, jobs, artifacts and logs of the watched workflows through
 the `gh` CLI and renders a static site: site/index.html redirects to the
 report, site/ci/index.html holds run history, per-job results, artifact
-indexes, downloaded logs and TAP summaries. Only data from runs on the
-default branch is published (ci-pages.yml triggers on master only).
+indexes, downloaded logs and TAP summaries. Runs are filtered to the default
+branch (master), so pull-request data never reaches the published site.
 """
 
 import argparse
@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,7 @@ WORKFLOWS = (
     ("t00-demo", "t00-demo.yml"),
 )
 RUN_LIMIT = 10
+DEFAULT_BRANCH = "master"
 MAX_EMBED_BYTES = 20 * 1024 * 1024
 BAD_CONCLUSIONS = {"failure", "timed_out", "cancelled", "startup_failure", "action_required"}
 TAP_RE = re.compile(r"#\s*(\d+)/(\d+) passed(?:,\s*(\d+) failed)?")
@@ -59,6 +61,7 @@ def repo_slug():
 def fetch_runs(repo, workflow_file):
     return gh_json(
         "run", "list", "--repo", repo, "--workflow", workflow_file,
+        "--branch", DEFAULT_BRANCH,
         "--limit", str(RUN_LIMIT),
         "--json",
         "databaseId,displayTitle,event,headBranch,status,conclusion,createdAt,url,number",
@@ -260,6 +263,18 @@ def workflow_html(repo, slug, workflow_file, site_ci):
     return "\n".join(parts)
 
 
+def write_bundle(site_ci, target):
+    """Zip the whole report so the page can offer a single download."""
+    files = [
+        path for path in sorted(site_ci.rglob("*"))
+        if path.is_file() and path != target
+    ]
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for path in files:
+            bundle.write(path, path.relative_to(site_ci).as_posix())
+    return target
+
+
 def page(title, body):
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -305,6 +320,33 @@ def self_test():
         "steps": [{"number": 1, "name": "compile", "conclusion": "success", "status": "completed"}],
     }])
     assert 'class="bad"' in jobs and "compile" in jobs, "job and step rendering"
+    branch_calls = []
+    original_gh = gh
+
+    def fake_gh(*args):
+        branch_calls.append(args)
+        return "[]"
+
+    globals()["gh"] = fake_gh
+    try:
+        assert fetch_runs("owner/repo", "ci.yml") == []
+    finally:
+        globals()["gh"] = original_gh
+    branch_args = branch_calls[0]
+    assert "--branch" in branch_args, "run list must filter by branch"
+    assert branch_args[branch_args.index("--branch") + 1] == DEFAULT_BRANCH, (
+        "run list must filter to the default branch"
+    )
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "index.html").write_text("report", encoding="utf-8")
+        (root / "data").mkdir()
+        (root / "data" / "run.log").write_text("log", encoding="utf-8")
+        target = write_bundle(root, root / "ci-report.zip")
+        with zipfile.ZipFile(target) as bundle:
+            names = sorted(bundle.namelist())
+        assert names == ["data/run.log", "index.html"], names
     print("generate_ci_report self-test OK")
     return 0
 
@@ -331,6 +373,7 @@ def main():
         f"<p class='mute'>repo <a href='https://github.com/{esc(repo)}'>{esc(repo)}</a> "
         f"| generated {esc(generated)} | per-run data below and linked from each run page.</p>",
         f"<p>{nav}</p>",
+        '<p><a href="ci-report.zip">Download entire report (ZIP)</a></p>',
     ]
     for slug, workflow_file in WORKFLOWS:
         body.append(workflow_html(repo, slug, workflow_file, site_ci))
@@ -343,7 +386,8 @@ def main():
         ),
         encoding="utf-8",
     )
-    print(f"wrote {site_ci / 'index.html'}")
+    bundle = write_bundle(site_ci, site_ci / "ci-report.zip")
+    print(f"wrote {site_ci / 'index.html'} and {bundle}")
 
 
 if __name__ == "__main__":

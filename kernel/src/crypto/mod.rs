@@ -1,4 +1,4 @@
-//! Cryptographic primitives — re-exported from vahi-crypto crate.
+//! Cryptographic primitives – re-exported from vahi-crypto crate.
 
 pub use vahi_crypto::entropy;
 pub use vahi_crypto::sha256;

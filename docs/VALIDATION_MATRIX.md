@@ -49,12 +49,12 @@ Each extracted crate must build for the `x86_64-unknown-none` target:
 | vahi-types | `crates/types` | Shared types & trait interfaces | PASS (incl. tests) |
 | vahi-limine | `crates/limine` | Limine boot protocol | PASS |
 | vahi-crypto | `crates/crypto` | Cryptographic primitives | PASS |
-| vahi-acpi | `crates/acpi` | ACPI table parsing | PASS |
 | vahi-pci | `crates/pci` | PCI bus enumeration | PASS |
 | vahi-gdt | `crates/gdt` | GDT/IDT/TSS management | PASS |
 | vahi-ipc | `crates/ipc` | Inter-process communication | PASS |
+| vahi-apic | `crates/apic` | Local APIC, I/O APIC, MSI | PASS |
 
-**Note**: All crates build successfully for `x86_64-unknown-none`. The `vahi-types` test module failures (import scope inside the nested `mod tests`; exclusive `USER_ADDR_MAX` bound) were fixed 2026-10-21; `cargo test -p vahi-types` is 29/29 and CI runs it in the `host-tests` job.
+**Note**: All crates build successfully for `x86_64-unknown-none`. The `vahi-types` test module failures (import scope inside the nested `mod tests`; exclusive `USER_ADDR_MAX` bound) were fixed 2026-10-21; `cargo test -p vahi-types` is 29/29 and CI runs it in the `host-tests` job. `vahi-apic` is a required kernel dependency (kernel/Cargo.toml line 18); `vahi-acpi` and `vahi-gdt` are not direct kernel dependencies.
 
 ---
 

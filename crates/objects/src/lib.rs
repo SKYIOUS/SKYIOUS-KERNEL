@@ -36,7 +36,7 @@ pub mod security;
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 // ─── Object Type IDs ────────────────────────────────────────────────────────
 
@@ -58,6 +58,7 @@ pub const TYPE_MUTEX: ObjectTypeId = ObjectTypeId(11);
 pub const TYPE_SEMAPHORE: ObjectTypeId = ObjectTypeId(12);
 pub const TYPE_TIMER: ObjectTypeId = ObjectTypeId(13);
 pub const TYPE_EVENT: ObjectTypeId = ObjectTypeId(14);
+pub const TYPE_MQUEUE: ObjectTypeId = ObjectTypeId(15);
 
 impl ObjectTypeId {
     /// Get the human-readable name for this object type.
@@ -78,6 +79,7 @@ impl ObjectTypeId {
             12 => "Semaphore",
             13 => "Timer",
             14 => "Event",
+            15 => "MQueue",
             _ => "Unknown",
         }
     }
@@ -242,12 +244,13 @@ mod tests {
         assert_eq!(TYPE_SEMAPHORE.name(), "Semaphore");
         assert_eq!(TYPE_TIMER.name(), "Timer");
         assert_eq!(TYPE_EVENT.name(), "Event");
+        assert_eq!(TYPE_MQUEUE.name(), "MQueue");
     }
 
     #[test]
     fn object_type_id_unknown() {
         assert_eq!(ObjectTypeId(0).name(), "Unknown");
-        assert_eq!(ObjectTypeId(15).name(), "Unknown");
+        assert_eq!(ObjectTypeId(16).name(), "Unknown");
         assert_eq!(ObjectTypeId(99).name(), "Unknown");
         assert_eq!(ObjectTypeId(u16::MAX).name(), "Unknown");
     }

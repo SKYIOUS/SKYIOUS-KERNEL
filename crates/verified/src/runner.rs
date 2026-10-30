@@ -17,11 +17,11 @@
 //! ```
 
 use crate::{Invariant, VerificationFailure, VerificationReport};
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 
 /// Global verification runner instance.
 ///
-/// Guarded by `vahi_sync::IrqSafeMutex` for interrupt-safe access from scheduler
+/// Guarded by `vahi_hal::sync::IrqSafeMutex` for interrupt-safe access from scheduler
 /// checkpoints (which may fire from timer IRQ context).
 pub static VERIFICATION_RUNNER: Mutex<VerificationRunner> = Mutex::new(VerificationRunner::new());
 

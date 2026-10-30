@@ -57,13 +57,13 @@
 | Build | Debug + Release pass clean |
 | QEMU boot | Boots to login prompt. Fork/exec works. All 4 services start. |
 | Init process | **PID 1 launches**, forks 4 services, all exec successfully |
-| Source lines | ~82,266 across 344 files (kernel + 18 crates) |
+| Source lines | ~82,266 across 344 files (kernel + 19 crates) |
 | Working syscalls | ~40 fully functional (not 207 — see `docs/syscall-classification.md`) |
 | Working drivers | 7 (serial, PS/2 kbd/mouse, E1000, VirtIO-block, PC speaker, RTC) |
 | Supported filesystems | 2 (TarFS for initrd, DevFS for /dev) |
 | Real hardware | **Never tested** — QEMU only |
 | SMP | Claims support but global locks serialize everything |
-| Selftests | **197/197 pass** (eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
+| Selftests | **all pass** (count pinned in `tests/selftest_count.txt`; eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
 | Memory leak audit | **PASS** (no leak detected) |
 
 ### Benchmark Results (QEMU/TCG, 512M RAM, 2400 MHz TSC)
@@ -91,7 +91,7 @@
 
 | Metric | Value |
 |--------|-------|
-| Lines of Rust | ~82,266 across 344 files (kernel + 18 crates) |
+| Lines of Rust | ~82,266 across 344 files (kernel + 19 crates) |
 | Syscalls | ~40 fully functional, ~30 with limitations, ~60 stubs/unsupported (see `docs/syscall-classification.md`) |
 | Filesystems | 2 supported (TarFS, DevFS), 7 experimental/partial (SkyFS, ext2, ext4, FAT32, ramfs, ctlfs, FUSE) |
 | Drivers | 7 working (serial, PS/2, E1000, VirtIO-block, PC speaker, RTC), 12+ experimental/partial |
@@ -647,7 +647,7 @@ SKYIOUS KERNEL/
 │       ├── debug/                 # Debug module, symbol lookup
 │       ├── verified/              # Verified proofs (concurrency, journal, scheduler)
 │       └── tests/                 # Unit tests (self_test feature)
-├── crates/                        # 18 extracted crates
+├── crates/                        # 19 extracted crates
 │   ├── sync/                      # vahi-sync: IrqSafeMutex (90 lines)
 │   ├── memory/                    # vahi-memory: buddy, slab, paging, swap, frame_info
 │   ├── crypto/                    # vahi-crypto: SHA-256, HMAC, PBKDF2, entropy (308 lines)
@@ -657,7 +657,6 @@ SKYIOUS KERNEL/
 │   ├── types/                     # vahi-types: Shared types, Errno, credentials, VMA
 │   ├── arch/                      # vahi-arch: x86_64, aarch64, HAL
 │   ├── gdt/                       # vahi-gdt: GDT/IDT/TSS management
-│   ├── interrupts/                # vahi-interrupts: IRQ, page fault, exceptions
 │   ├── task/                      # vahi-task: process, thread, scheduler, OOM
 │   ├── syscalls/                  # vahi-syscalls: syscall numbers, dispatch, ptrace/seccomp/namespaces
 │   ├── vfs/                       # vahi-vfs: VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE
@@ -666,7 +665,8 @@ SKYIOUS KERNEL/
 │   ├── acpi/                      # vahi-acpi: ACPI tables, MADT, PRT
 │   ├── objects/                   # vahi-objects: KernelObject trait, handle table, security
 │   ├── ipc/                       # vahi-ipc: IPC primitives
-│   └── pci/                       # vahi-pci: PCI subsystem
+│   ├── pci/                       # vahi-pci: PCI subsystem
+│   └── verified/                  # vahi-verified: Verified proofs (concurrency, journal, scheduler, runner)
 ├── builder/                       # Bootimage builder crate
 │   └── src/main.rs                # Creates UEFI bootable disk image
 ├── SkyOS/                         # Initrd staging
@@ -751,7 +751,7 @@ docs/
 
 ### Self-Test Results
 
-**197/197 tests pass** — build with `self_test` feature and boot in QEMU:
+**All selftests pass** — the canonical count lives in `tests/selftest_count.txt`. Build with `self_test` and boot in QEMU:
 
 ```bash
 cd kernel
@@ -806,8 +806,9 @@ Jobs:
 # quality.yml adds: AGENTS.md policy gate (unsafe/SAFETY, no_std, TODOs, links, ADR/docs map),
 # actionlint + ShellCheck, rustdoc -D warnings, gitleaks secret scan, cargo audit
 # nightly.yml adds: cross-arch builds, SMP 2 suite, audit-profile suite, 25-boot stress, cargo audit
-# ci-pages.yml publishes the report site (run history, jobs, artifacts, TAP logs) to
-# GitHub Pages after every watched workflow on master: https://<owner>.github.io/<repo>/ci/
+# ci-pages.yml publishes the report site (run history, jobs, artifacts, TAP logs,
+# whole-report ZIP download) to GitHub Pages after every watched workflow on master:
+# https://<owner>.github.io/<repo>/ci/
 ```
 
 ---

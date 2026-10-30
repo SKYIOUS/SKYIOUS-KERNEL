@@ -73,6 +73,22 @@ pub fn sys_vm_stop(guest_id: u64) -> u64 {
 }
 
 #[cfg(feature = "hypervisor")]
+pub fn sys_vm_pause(guest_id: u64) -> u64 {
+    let mut hv_lock = crate::hypervisor::HYPERVISOR.lock();
+    let hv = match hv_lock.as_mut() {
+        Some(hv) => hv,
+        None => return errno::Errno::ENODEV as u64,
+    };
+    match hv.guests.get_mut(&guest_id) {
+        Some(guest) => {
+            guest.state = crate::hypervisor::VmState::Paused;
+            0
+        }
+        None => errno::Errno::ENOENT as u64,
+    }
+}
+
+#[cfg(feature = "hypervisor")]
 pub fn sys_vm_resume(guest_id: u64) -> u64 {
     let mut hv_lock = crate::hypervisor::HYPERVISOR.lock();
     let hv = match hv_lock.as_mut() {

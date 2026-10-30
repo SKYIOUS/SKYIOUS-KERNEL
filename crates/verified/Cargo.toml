@@ -5,7 +5,7 @@ edition.workspace = true
 description = "Formal verification infrastructure for the Vahi kernel"
 
 [dependencies]
-vahi-sync = { path = "../sync" }
+vahi-hal = { path = "../hal" }
 
 [features]
 default = ["verification"]

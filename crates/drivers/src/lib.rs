@@ -147,11 +147,12 @@ pub fn get_cpu_id() -> u32 {
 pub fn iommu_map(_bdf: u16, _virt: u64, _phys: u64, _len: u64, _flags: u32) {}
 
 /// Stub for kernel-local `this_cpu_sched`.
-pub fn this_cpu_sched(
-) -> &'static vahi_sync::IrqSafeMutex<Option<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>> {
-    static SCHED: vahi_sync::IrqSafeMutex<
+pub fn this_cpu_sched() -> &'static vahi_hal::sync::IrqSafeMutex<
+    Option<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>,
+> {
+    static SCHED: vahi_hal::sync::IrqSafeMutex<
         Option<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>,
-    > = vahi_sync::IrqSafeMutex::new(None);
+    > = vahi_hal::sync::IrqSafeMutex::new(None);
     &SCHED
 }
 

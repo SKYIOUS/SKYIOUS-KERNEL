@@ -19,6 +19,7 @@ pub const CAP_NET_ADMIN: u64 = 1 << 12;
 pub const CAP_NET_RAW: u64 = 1 << 13;
 pub const CAP_SYS_ADMIN: u64 = 1 << 21;
 pub const CAP_SYS_BOOT: u64 = 1 << 22;
+pub const CAP_SYS_RESOURCE: u64 = 1 << 24;
 
 // *at constants
 pub const AT_FDCWD: i64 = -100;
@@ -268,27 +269,29 @@ pub fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -
     // stdio fds 0-2 in fd_table, so without this the first open returned fd
     // 0 and read/write hit the tty instead of the opened file (e.g. the
     // /ctl/sys/mem/free read came back empty for exactly this reason).
-    let mut ft = process.files.lock().fd_table.clone();
-    let limit = core::cmp::max(ht.len(), ft.len());
-    let mut idx = 0usize;
-    while idx < limit && (ht.is_valid(idx as u64) || ft.get(idx).map_or(false, |s| s.is_some())) {
-        idx += 1;
-    }
-    ht.insert_at(idx as u64, obj, access, open_flags as u64);
-    if ft.len() <= idx {
-        ft.resize(idx + 1, None);
-    }
-    ft[idx] = Some(FileDescriptor::File {
-        node,
-        offset: crate::sync::IrqSafeMutex::new(0),
+    let idx = process.with_fd_table(|fd_table, fd_flags| {
+        let limit = core::cmp::max(ht.len(), fd_table.len());
+        let mut idx = 0usize;
+        while idx < limit
+            && (ht.is_valid(idx as u64) || fd_table.get(idx).map_or(false, |s| s.is_some()))
+        {
+            idx += 1;
+        }
+        if fd_table.len() <= idx {
+            fd_table.resize(idx + 1, None);
+        }
+        fd_table[idx] = Some(FileDescriptor::File {
+            node,
+            offset: crate::sync::IrqSafeMutex::new(0),
+        });
+        // Keep fd_flags in lockstep so read/write access-mode checks see the
+        // O_ACCMODE bits and O_CLOEXEC survives.
+        if fd_flags.len() <= idx {
+            fd_flags.resize(idx + 1, 0);
+        }
+        fd_flags[idx] = open_flags as u64;
+        idx
     });
-    // Keep fd_flags in lockstep so read/write access-mode checks see the
-    // O_ACCMODE bits; sys_openat ORs O_CLOEXEC in afterwards.
-    drop(ft);
-    let mut ffl = process.files.lock().fd_flags.clone();
-    if ffl.len() <= idx {
-        ffl.resize(idx + 1, 0);
-    }
-    ffl[idx] = open_flags as u64;
+    ht.insert_at(idx as u64, obj, access, open_flags as u64);
     idx as u64
 }

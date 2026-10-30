@@ -6,7 +6,7 @@
 // must clear before next command.
 use crate::block::{register_block_device, BlockDevice, BlockDeviceError};
 use alloc::sync::Arc;
-use vahi_sync::IrqSafeMutex as Mutex;
+use vahi_hal::sync::IrqSafeMutex as Mutex;
 use x86_64::instructions::port::Port;
 
 const DATA: u16 = 0x1F0;

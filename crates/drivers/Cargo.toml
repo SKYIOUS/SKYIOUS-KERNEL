@@ -6,7 +6,6 @@ description = "Device drivers for the Vahi kernel"
 
 [dependencies]
 vahi-types = { path = "../types" }
-vahi-sync = { path = "../sync" }
 vahi-memory = { path = "../memory" }
 vahi-hal = { path = "../hal" }
 vahi-pci = { path = "../pci" }

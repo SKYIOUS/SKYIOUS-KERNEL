@@ -138,6 +138,158 @@ fn test_symlinkat_handler_argument_order() -> Result<(), &'static str> {
 
 const KERNEL_RANGE_PTR: u64 = 0xFFFF_8000_0000_0000;
 
+/// `accept4(fd, addr, addrlen, flags)` has no fd work before flag validation,
+/// so the native dispatch row (Vahi 455) is observable without userspace
+/// pages: unknown flags must return EINVAL, not ENOSYS or EBADF.
+fn test_accept4_dispatch_rejects_unknown_flags() -> Result<(), &'static str> {
+    with_process_context(|| {
+        let mut regs = [0u64; 18];
+        let rc = crate::syscalls::do_syscall(
+            crate::syscalls::numbers::SYS_ACCEPT4,
+            0,
+            0,
+            0,
+            1, // neither SOCK_CLOEXEC nor SOCK_NONBLOCK
+            0,
+            regs.as_mut_ptr(),
+        );
+        if rc != Errno::EINVAL as u64 {
+            return Err("accept4 dispatch did not reject unknown flags");
+        }
+        Ok(())
+    })
+}
+
+/// Seccomp filters can address `seccomp_data.args[5]`, which is only reachable
+/// if dispatch forwards the real sixth argument (saved r9) instead of zero.
+/// The filter below returns `EACCES` only when arg6 equals MARKER, so a
+/// hardcoded-zero dispatch allows `getpid` and returns a PID instead.
+///
+/// The register frame index is x86_64-specific (`syscall_arg6` reads x5 on
+/// aarch64), so this contract is registered only on x86_64.
+#[cfg(target_arch = "x86_64")]
+fn test_seccomp_sees_sixth_argument() -> Result<(), &'static str> {
+    use crate::syscalls::seccomp::{
+        SeccompBpfInstruction, SeccompMode, SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO,
+    };
+    use crate::task::process::CURRENT_PROCESS;
+
+    const MARKER: u32 = 0xDEAD_BEEF;
+    // BPF: A = args[5] low word (offset 56); if A == MARKER return ERRNO(EACCES)
+    // else ALLOW.
+    const LD_W_ABS: u16 = 0x20;
+    const JEQ_K: u16 = 0x15;
+    const RET_K: u16 = 0x06;
+
+    with_process_context(|| {
+        let proc = match *CURRENT_PROCESS.lock() {
+            Some(ref p) => p.clone(),
+            None => return Err("no process context"),
+        };
+        {
+            let mut security = proc.security.lock();
+            security.seccomp.mode = SeccompMode::Filter;
+            security.seccomp.filter = alloc::vec![
+                SeccompBpfInstruction {
+                    code: LD_W_ABS,
+                    jt: 0,
+                    jf: 0,
+                    k: 56,
+                },
+                SeccompBpfInstruction {
+                    code: JEQ_K,
+                    jt: 0,
+                    jf: 1,
+                    k: MARKER,
+                },
+                SeccompBpfInstruction {
+                    code: RET_K,
+                    jt: 0,
+                    jf: 0,
+                    k: (SECCOMP_RET_ERRNO | 13) as u32,
+                },
+                SeccompBpfInstruction {
+                    code: RET_K,
+                    jt: 0,
+                    jf: 0,
+                    k: SECCOMP_RET_ALLOW as u32,
+                },
+            ];
+        }
+
+        let mut regs = [0u64; 18];
+        regs[6] = MARKER as u64;
+        let rc = crate::syscalls::do_syscall(
+            crate::syscalls::numbers::SYS_GETPID,
+            0,
+            0,
+            0,
+            0,
+            0,
+            regs.as_mut_ptr(),
+        );
+        if rc != Errno::EACCES as u64 {
+            return Err("seccomp filter did not observe arg6 from the saved regs");
+        }
+        Ok(())
+    })
+}
+
+/// `wait4` must copy the status through `copy_to_user`, not dereference the
+/// raw pointer. A kernel-stack address is writable by the old code (which would
+/// silently clobber it) but is rejected by the user-range check, so EFAULT and
+/// an untouched local are observable without mapping userspace pages.
+fn test_wait4_status_uses_user_copy() -> Result<(), &'static str> {
+    use crate::memory::buddy::BuddyFrameAllocator;
+    use crate::memory::paging::AddressSpace;
+    use crate::task::process::{Process, PROCESS_TABLE};
+    use core::sync::atomic::Ordering;
+
+    with_process_context(|| {
+        let parent = match crate::syscalls::get_current_process() {
+            Some(p) => p,
+            None => return Err("no current process"),
+        };
+        // wait4 resolves the parent through PROCESS_TABLE; the shared test
+        // context is not registered there when it comes from CURRENT_PROCESS.
+        let parent_was_registered = PROCESS_TABLE.lock().contains_key(&parent.id);
+        if !parent_was_registered {
+            PROCESS_TABLE.lock().insert(parent.id, parent.clone());
+        }
+        let Some(addr_space) = AddressSpace::new(&mut BuddyFrameAllocator) else {
+            if !parent_was_registered {
+                PROCESS_TABLE.lock().remove(&parent.id);
+            }
+            return Err("could not allocate child address space");
+        };
+        let child_pid = Process::next_id();
+        let child = alloc::sync::Arc::new(Process::new(child_pid, Some(parent.id), addr_space));
+        child.exit_code.store(7, Ordering::Relaxed);
+        PROCESS_TABLE.lock().insert(child_pid, child.clone());
+        parent.children.lock().push(child_pid);
+
+        let mut status = -1i32;
+        let rc = crate::syscalls::process_lifecycle::sys_wait4(
+            child_pid as i64,
+            &mut status as *mut i32,
+            1, // WNOHANG
+            core::ptr::null_mut(),
+        );
+
+        PROCESS_TABLE.lock().remove(&child_pid);
+        if !parent_was_registered {
+            PROCESS_TABLE.lock().remove(&parent.id);
+        }
+        parent.children.lock().retain(|&p| p != child_pid);
+        child.address_space.destroy();
+
+        if rc != Errno::EFAULT as u64 || status != -1 {
+            return Err("wait4 dereferenced the status pointer instead of copy_to_user");
+        }
+        Ok(())
+    })
+}
+
 pub fn register() {
     selftest::register(
         "abi:inotify_rm_watch_absent_is_einval",
@@ -146,5 +298,18 @@ pub fn register() {
     selftest::register(
         "abi:symlinkat_handler_argument_order",
         test_symlinkat_handler_argument_order,
+    );
+    selftest::register(
+        "abi:accept4_dispatch_rejects_unknown_flags",
+        test_accept4_dispatch_rejects_unknown_flags,
+    );
+    #[cfg(target_arch = "x86_64")]
+    selftest::register(
+        "abi:seccomp_sees_sixth_argument",
+        test_seccomp_sees_sixth_argument,
+    );
+    selftest::register(
+        "abi:wait4_status_uses_user_copy",
+        test_wait4_status_uses_user_copy,
     );
 }

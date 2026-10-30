@@ -302,6 +302,15 @@ fn poll_readiness(
                         revents |= EPOLLIN | EPOLLRDNORM;
                     }
                 }
+                FileDescriptor::Mqueue(obj) => {
+                    let attr = obj.get_attr();
+                    if (entry.events & EPOLLIN) != 0 && attr.mq_curmsgs > 0 {
+                        revents |= EPOLLIN | EPOLLRDNORM;
+                    }
+                    if (entry.events & EPOLLOUT) != 0 && attr.mq_curmsgs < attr.mq_maxmsg {
+                        revents |= EPOLLOUT | EPOLLWRNORM;
+                    }
+                }
                 _ => {
                     if (entry.events & EPOLLIN) != 0 {
                         revents |= EPOLLIN | EPOLLRDNORM;
@@ -487,4 +496,49 @@ pub fn sys_epoll_pwait(
     _sigmask_size: usize,
 ) -> u64 {
     sys_epoll_wait(epfd, events_ptr, maxevents, timeout_ms)
+}
+
+/// Native epoll variants (Vahi-specific) — identical to standard for now.
+/// Kept separate for future ABI divergence.
+pub fn sys_epoll_create1_native(flags: i32) -> u64 {
+    sys_epoll_create1(flags)
+}
+
+pub fn sys_epoll_ctl_native(epfd: u64, op: i32, fd: i32, event_ptr: *const u8) -> u64 {
+    sys_epoll_ctl(epfd, op, fd, event_ptr)
+}
+
+pub fn sys_epoll_wait_native(
+    epfd: u64,
+    events_ptr: *mut u8,
+    maxevents: i32,
+    timeout_ms: i32,
+) -> u64 {
+    sys_epoll_wait(epfd, events_ptr, maxevents, timeout_ms)
+}
+
+/// ppoll — poll with signal mask and timeout.
+/// For now, delegates to poll (signal mask not yet implemented).
+pub fn sys_ppoll(
+    _fds: *mut u8,
+    _nfds: u64,
+    _timeout_ptr: *const u8,
+    _sigmask_ptr: *const u8,
+) -> u64 {
+    // ponytail: signal mask handling not implemented, upgrade when signal FD support lands
+    errno::Errno::ENOSYS as u64
+}
+
+/// pselect6 — select with signal mask and timeout.
+/// For now, delegates to select (signal mask not yet implemented).
+pub fn sys_pselect6(
+    _nfds: i32,
+    _readfds: *mut u8,
+    _writefds: *mut u8,
+    _exceptfds: *mut u8,
+    _timeout_ptr: *const u8,
+    _sigmask_ptr: *const u8,
+) -> u64 {
+    // ponytail: signal mask handling not implemented, upgrade when signal FD support lands
+    errno::Errno::ENOSYS as u64
 }

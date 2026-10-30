@@ -1,5 +1,6 @@
 use crate::syscalls::errno;
 use crate::syscalls::numbers;
+use crate::syscalls::seccomp;
 use crate::syscalls::user_access;
 use crate::task::process::{EmulationMode, Process};
 
@@ -14,6 +15,24 @@ pub fn dispatch_linux_syscall(
     arg5: u64,
     regs: *mut u64,
 ) -> u64 {
+    // The filter is defined over Linux numbers and arguments as the process
+    // issued them. Check the original number once, before any special case or
+    // mapping; the mapped Vahi number below must never be filtered again.
+    let denial = seccomp::check_syscall(
+        n,
+        &[
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            arg5,
+            crate::syscalls::syscall_arg6(regs),
+        ],
+    );
+    if let Some(err) = denial {
+        return crate::syscalls::do_syscall_denied(n, err, regs);
+    }
+
     match n {
         13 => linux_rt_sigaction(arg1 as u64, arg2 as *const u8, arg3 as *mut u8, arg4 as u64),
         15 => linux_rt_sigreturn(regs),
@@ -22,19 +41,21 @@ pub fn dispatch_linux_syscall(
         158 => linux_arch_prctl(arg1 as u32, arg2 as u64),
         _ => {
             let vahi_n = map_linux_to_vahi(n);
-            crate::syscalls::do_syscall(vahi_n, arg1, arg2, arg3, arg4, arg5, regs)
+            crate::syscalls::do_syscall_unchecked(vahi_n, arg1, arg2, arg3, arg4, arg5, regs)
         }
     }
 }
 
 /// Linux `fork()` — implemented via clone with SIGCHLD.
+///
+/// Calls the handler directly: re-entering dispatch would run the seccomp
+/// filter a second time under the clone number instead of fork's.
 fn linux_fork(regs: *mut u64) -> u64 {
-    crate::syscalls::syscall_handler(
-        numbers::SYS_CLONE,
+    crate::syscalls::process_lifecycle::sys_clone(
         crate::syscalls::signal::Signal::SIGCHLD as u64,
         0,
-        0,
-        0,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
         0,
         regs,
     )
@@ -235,7 +256,7 @@ fn linux_rt_sigaction(_signum: u64, _act: *const u8, _oldact: *mut u8, _sigsetsi
 /// Linux `rt_sigreturn()` — returns from signal handler to interrupted context.
 /// Delegates to the Vahi native rt_sigreturn which restores saved context.
 fn linux_rt_sigreturn(regs_ptr: *mut u64) -> u64 {
-    crate::syscalls::do_syscall(numbers::SYS_RT_SIGRETURN, 0, 0, 0, 0, 0, regs_ptr)
+    crate::syscalls::do_syscall_unchecked(numbers::SYS_RT_SIGRETURN, 0, 0, 0, 0, 0, regs_ptr)
 }
 
 /// Map Linux x86_64 syscall number to Vahi syscall number.

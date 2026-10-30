@@ -213,6 +213,7 @@ pub unsafe fn copy_struct_to_user<T: Copy>(dst_ptr: *mut u8, src: &T) -> Result<
 }
 
 /// A wrapper for reading a string from userspace.
+/// Returns error if no null terminator is found within max_len.
 pub unsafe fn read_user_string(
     ptr: *const u8,
     max_len: usize,
@@ -230,7 +231,10 @@ pub unsafe fn read_user_string(
         return Err(());
     }
 
-    let actual_len = buf.iter().position(|&b| b == 0).unwrap_or(max_len);
+    let actual_len = match buf.iter().position(|&b| b == 0) {
+        Some(pos) => pos,
+        None => return Err(()), // No null terminator within max_len
+    };
     buf.truncate(actual_len);
     alloc::string::String::from_utf8(buf).map_err(|_| ())
 }
