@@ -17,13 +17,13 @@ pub fn sys_mount(
         audit_log("CAP_SYS_ADMIN", "mount DENIED");
         return errno::Errno::EPERM as u64;
     }
-    let mut src_buf = [0u8; 256];
-    let mut tgt_buf = [0u8; 256];
+    let mut src_buf = [0u8; crate::vfs::PATH_MAX];
+    let mut tgt_buf = [0u8; crate::vfs::PATH_MAX];
     let mut fs_buf = [0u8; 32];
-    if unsafe { user_access::copy_from_user(&mut src_buf[..255], source).is_err() } {
+    if unsafe { user_access::copy_from_user(&mut src_buf[..crate::vfs::PATH_MAX - 1], source).is_err() } {
         return errno::Errno::EFAULT as u64;
     }
-    if unsafe { user_access::copy_from_user(&mut tgt_buf[..255], target).is_err() } {
+    if unsafe { user_access::copy_from_user(&mut tgt_buf[..crate::vfs::PATH_MAX - 1], target).is_err() } {
         return errno::Errno::EFAULT as u64;
     }
     if unsafe { user_access::copy_from_user(&mut fs_buf[..31], fstype).is_err() } {
@@ -93,7 +93,7 @@ pub fn sys_umount2(target: *const u8, _flags: u64) -> u64 {
         audit_log("CAP_SYS_ADMIN", "umount DENIED");
         return errno::Errno::EPERM as u64;
     }
-    let path_str = match unsafe { user_access::read_user_string(target, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(target, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -108,7 +108,7 @@ pub fn sys_mkfs(fstype: *const u8, device: u64) -> u64 {
         audit_log("CAP_SYS_ADMIN", "mkfs DENIED");
         return errno::Errno::EPERM as u64;
     }
-    let fs_type = match unsafe { user_access::read_user_string(fstype, 32) } {
+    let fs_type = match unsafe { user_access::read_user_string(fstype, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -136,7 +136,7 @@ pub fn sys_swapon(path_ptr: *const u8, _swap_flags: i32) -> u64 {
         audit_log("CAP_SYS_ADMIN", "swapon DENIED");
         return errno::Errno::EPERM as u64;
     }
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };
@@ -204,7 +204,7 @@ pub fn sys_swapoff(path_ptr: *const u8) -> u64 {
         audit_log("CAP_SYS_ADMIN", "swapoff DENIED");
         return errno::Errno::EPERM as u64;
     }
-    let path_str = match unsafe { user_access::read_user_string(path_ptr, 256) } {
+    let path_str = match unsafe { user_access::read_user_string(path_ptr, crate::vfs::PATH_MAX) } {
         Ok(s) => s,
         Err(_) => return errno::Errno::EFAULT as u64,
     };

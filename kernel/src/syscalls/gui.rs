@@ -463,7 +463,7 @@ pub fn sys_drmctl(_fd: u64, request: u64, arg: *mut u8) -> u64 {
         }
         // 0x010B = SET_WALLPAPER: arg = path string pointer
         0x010B => {
-            let path = match unsafe { user_access::read_user_string(arg, 256) } {
+            let path = match unsafe { user_access::read_user_string(arg, crate::vfs::PATH_MAX) } {
                 Ok(s) => s,
                 Err(_) => return errno::Errno::EFAULT as u64,
             };
