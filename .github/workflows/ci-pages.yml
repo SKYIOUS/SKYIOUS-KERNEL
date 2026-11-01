@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Self-test generator
         run: python3 scripts/generate_ci_report.py --self-test
