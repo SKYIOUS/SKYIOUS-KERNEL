@@ -46,7 +46,7 @@ jobs:
         run: python3 scripts/generate_ci_report.py --output site
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
