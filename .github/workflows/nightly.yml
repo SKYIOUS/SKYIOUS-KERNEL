@@ -23,7 +23,7 @@ jobs:
       run:
         working-directory: kernel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/install-toolchain
         id: install-toolchain
         with:
@@ -52,7 +52,7 @@ jobs:
       run:
         working-directory: kernel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/install-toolchain
         id: install-toolchain
         with:
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/install-toolchain
         id: install-toolchain
         with:
@@ -147,7 +147,7 @@ jobs:
     timeout-minutes: 30
     needs: [build-kernel-nightly]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/install-toolchain
         id: install-toolchain
         with:
@@ -194,7 +194,7 @@ jobs:
     timeout-minutes: 30
     needs: [build-kernel-nightly]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/install-toolchain
         id: install-toolchain
         with:
@@ -240,7 +240,7 @@ jobs:
     timeout-minutes: 45
     needs: [build-kernel-nightly]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/install-toolchain
         id: install-toolchain
         with:
