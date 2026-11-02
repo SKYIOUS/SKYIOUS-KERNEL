@@ -25,3 +25,14 @@ pub async fn network_poll_task() {
         crate::task::YieldNow::new().await;
     }
 }
+
+/// Kernel thread that updates the cached RTC time once per second.
+/// Runs in process context (not IRQ) to allow CMOS I/O.
+pub extern "C" fn rtc_cache_update_task() -> ! {
+    loop {
+        crate::vdso::vdso_update_cached_rtc();
+        // Sleep for 1 second (100 ticks at 100 Hz)
+        let target = crate::interrupts::get_ticks() + 100;
+        crate::task::scheduler::sleep_until_tick(target);
+    }
+}

@@ -7,7 +7,12 @@ use core::sync::atomic::Ordering;
 
 /// Verify vDSO page is mapped at the expected virtual address.
 pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
-    let vdso = vdso_page().ok_or("vDSO page not initialized")?;
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    // SAFETY: vdso_page returns valid pointer if not null
+    let vdso = unsafe { &*vdso_ptr };
     
     // Verify the virtual address matches our constant
     let expected = vdso_virt_addr_for_cpu(crate::smp::get_cpu_id());
@@ -21,14 +26,14 @@ pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
         return Err("vDSO seq should be even (consistent) at start");
     }
     
-    // Verify TSC frequency is set
-    let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Relaxed);
+    // Verify TSC frequency is set (use SeqCst to ensure full synchronization with init)
+    let tsc_freq = vdso.tsc_freq_hz.load(Ordering::SeqCst);
     if tsc_freq == 0 {
         return Err("vDSO TSC frequency not initialized");
     }
     
-    // Verify cpu_id matches current CPU
-    let cpu_id = vdso.cpu_id.load(Ordering::Relaxed);
+    // Verify cpu_id matches current CPU (use SeqCst to synchronize with init)
+    let cpu_id = vdso.cpu_id.load(Ordering::SeqCst);
     if cpu_id != crate::smp::get_cpu_id() as u32 {
         return Err("vDSO cpu_id mismatch");
     }
@@ -39,10 +44,14 @@ pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
 /// Verify all per-CPU pages are initialized.
 pub fn test_vdso_all_cpus_mapped() -> Result<(), &'static str> {
     for cpu_id in 0..MAX_CPUS {
-        let vdso = crate::vdso::vdso_page_for_cpu(cpu_id)
-            .ok_or("vDSO page not initialized for CPU")?;
+        let vdso_ptr = crate::vdso::vdso_page_for_cpu(cpu_id);
+        if vdso_ptr.is_null() {
+            return Err("vDSO page not initialized for CPU");
+        }
+        // SAFETY: vdso_page_for_cpu returns valid pointer if not null
+        let vdso = unsafe { &*vdso_ptr };
         
-        if vdso.cpu_id.load(Ordering::Relaxed) != cpu_id as u32 {
+        if vdso.cpu_id.load(Ordering::SeqCst) != cpu_id as u32 {
             return Err("vDSO cpu_id mismatch for CPU");
         }
         
@@ -56,7 +65,12 @@ pub fn test_vdso_all_cpus_mapped() -> Result<(), &'static str> {
 
 /// Verify getpid fast path matches syscall fallback.
 pub fn test_vdso_getpid() -> Result<(), &'static str> {
-    let vdso = vdso_page().ok_or("vDSO page not initialized")?;
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    // SAFETY: vdso_page returns valid pointer if not null
+    let vdso = unsafe { &*vdso_ptr };
     
     // Read PID via vDSO fast path
     let mut seq = vdso.seq.load(Ordering::Acquire);
@@ -81,7 +95,12 @@ pub fn test_vdso_getpid() -> Result<(), &'static str> {
 
 /// Verify getcpu fast path returns valid CPU ID.
 pub fn test_vdso_getcpu() -> Result<(), &'static str> {
-    let vdso = vdso_page().ok_or("vDSO page not initialized")?;
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    // SAFETY: vdso_page returns valid pointer if not null
+    let vdso = unsafe { &*vdso_ptr };
     
     // Read CPU via vDSO fast path
     let mut seq = vdso.seq.load(Ordering::Acquire);
@@ -111,7 +130,12 @@ pub fn test_vdso_getcpu() -> Result<(), &'static str> {
 
 /// Verify clock_gettime fast path returns reasonable time.
 pub fn test_vdso_clock_gettime() -> Result<(), &'static str> {
-    let vdso = vdso_page().ok_or("vDSO page not initialized")?;
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    // SAFETY: vdso_page returns valid pointer if not null
+    let vdso = unsafe { &*vdso_ptr };
     
     // Read monotonic time via vDSO
     let mut seq = vdso.seq.load(Ordering::Acquire);
@@ -150,7 +174,12 @@ pub fn test_vdso_clock_gettime() -> Result<(), &'static str> {
 /// Verify time consistency across all CPU pages.
 pub fn test_vdso_time_consistent_across_cpus() -> Result<(), &'static str> {
     // Read time from current CPU page
-    let vdso = vdso_page().ok_or("vDSO page not initialized")?;
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    // SAFETY: vdso_page returns valid pointer if not null
+    let vdso = unsafe { &*vdso_ptr };
     let mut seq = vdso.seq.load(Ordering::Acquire);
     let (local_sec, local_nsec) = loop {
         let sec = vdso.monotonic_sec.load(Ordering::Relaxed) as i64;
@@ -168,8 +197,12 @@ pub fn test_vdso_time_consistent_across_cpus() -> Result<(), &'static str> {
         if cpu_id == crate::smp::get_cpu_id() {
             continue;
         }
-        let other_vdso = crate::vdso::vdso_page_for_cpu(cpu_id)
-            .ok_or("other CPU page not mapped")?;
+        let other_vdso_ptr = crate::vdso::vdso_page_for_cpu(cpu_id);
+        if other_vdso_ptr.is_null() {
+            return Err("other CPU page not mapped");
+        }
+        // SAFETY: vdso_page_for_cpu returns valid pointer if not null
+        let other_vdso = unsafe { &*other_vdso_ptr };
         
         let mut seq = other_vdso.seq.load(Ordering::Acquire);
         let (other_sec, other_nsec) = loop {
@@ -196,7 +229,12 @@ pub fn test_vdso_time_consistent_across_cpus() -> Result<(), &'static str> {
 /// Verify seqlock protects against torn reads (read during concurrent write).
 /// We verify that the seqlock read protocol correctly handles odd seq (writer in progress).
 pub fn test_vdso_seqlock_retry() -> Result<(), &'static str> {
-    let vdso = vdso_page().ok_or("vDSO page not initialized")?;
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    // SAFETY: vdso_page returns valid pointer if not null
+    let vdso = unsafe { &*vdso_ptr };
     
     // Verify initial state: seq is even (consistent)
     let seq = vdso.seq.load(Ordering::Acquire);

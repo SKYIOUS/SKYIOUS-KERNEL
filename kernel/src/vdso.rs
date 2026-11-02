@@ -8,8 +8,7 @@
 
 #![cfg(target_arch = "x86_64")]
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use vahi_hal::sync::IrqSafeMutex;
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicPtr, Ordering};
 use x86_64::structures::paging::{FrameAllocator, Size4KiB, PhysFrame, Mapper, Page, PageTableFlags, OffsetPageTable};
 use x86_64::VirtAddr;
 
@@ -67,7 +66,7 @@ pub struct VdsoData {
 // Compile-time size check
 const _: () = assert!(core::mem::size_of::<VdsoData>() == 4096);
 
-/// Per-CPU vDSO pages — kernel-accessible via HHDM.
+/// Per-CPU vDSO page info for kernel access via HHDM.
 /// Stores physical frame + userspace virtual address for each CPU.
 #[derive(Clone, Copy)]
 struct VdsoPageInfo {
@@ -75,9 +74,17 @@ struct VdsoPageInfo {
     user_vaddr: u64,
 }
 
-/// Per-CPU page info array — write-once after init. Protected by IrqSafeMutex
-/// for init; reads after init use lock() which is fast when uncontended.
-static VDSO_PAGES: IrqSafeMutex<[Option<VdsoPageInfo>; MAX_CPUS]> = IrqSafeMutex::new([const { None }; MAX_CPUS]);
+/// Per-CPU page info array — write-once after init, lock-free reads via AtomicPtr.
+/// Each entry is an AtomicPtr<VdsoPageInfo>, null = not initialized.
+static VDSO_PAGES: [AtomicPtr<VdsoPageInfo>; MAX_CPUS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_CPUS];
+
+/// Heap-allocated VdsoPageInfo storage (write-once). Direct array without Option to avoid pointer casting issues.
+static mut VDSO_PAGE_INFOS: [VdsoPageInfo; MAX_CPUS] = unsafe { 
+    [VdsoPageInfo { 
+        frame: PhysFrame::from_start_address_unchecked(x86_64::PhysAddr::new(0)), 
+        user_vaddr: 0 
+    }; MAX_CPUS] 
+};
 
 /// Create a kernel page table mapper for temporary mappings.
 fn kernel_mapper() -> Option<OffsetPageTable<'static>> {
@@ -129,29 +136,39 @@ pub fn init_vdso(frame_allocator: &mut impl FrameAllocator<Size4KiB>) {
             .expect("vDSO: failed to map page")
             .flush();
 
-        // Initialize the page via the temporary mapping
-        let vdso_ptr = user_vaddr as *mut VdsoData;
+        // Initialize the page via HHDM (same mapping used by readers) to ensure cache coherency
+        let phys_offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("HHDM offset not set");
+        let hhdm_vaddr = phys_offset + frame.start_address().as_u64();
+        let vdso_ptr = hhdm_vaddr as *mut VdsoData;
         unsafe { core::ptr::write_bytes(vdso_ptr, 0, 1) };
         let vdso = unsafe { &mut *vdso_ptr };
 
         // Initialize TSC calibration fields (read-only after boot)
-        vdso.tsc_freq_hz.store(tsc_freq, Ordering::Relaxed);
+        vdso.tsc_freq_hz.store(tsc_freq, Ordering::Release);
         vdso.tsc_mult = mult;
         vdso.tsc_shift = shift;
-        vdso.tsc_base.store(tsc_base, Ordering::Relaxed);
-        vdso.cpu_id.store(cpu_id as u32, Ordering::Relaxed);
+        vdso.tsc_base.store(tsc_base, Ordering::Release);
+        vdso.cpu_id.store(cpu_id as u32, Ordering::Release);
 
         // Initialize time fields from current tick counter and RTC
         let ticks = crate::interrupts::get_ticks();
         let total_ms = ticks * 10;
-        vdso.monotonic_sec.store((total_ms / 1000) as u64, Ordering::Relaxed);
-        vdso.monotonic_nsec.store(((total_ms % 1000) * 1_000_000) as u32, Ordering::Relaxed);
+        vdso.monotonic_sec.store((total_ms / 1000) as u64, Ordering::Release);
+        vdso.monotonic_nsec.store(((total_ms % 1000) * 1_000_000) as u32, Ordering::Release);
         let (rt_sec, rt_nsec) = crate::drivers::rtc::read_realtime();
-        vdso.realtime_sec.store(rt_sec as u64, Ordering::Relaxed);
-        vdso.realtime_nsec.store(rt_nsec as u32, Ordering::Relaxed);
+        vdso.realtime_sec.store(rt_sec as u64, Ordering::Release);
+        vdso.realtime_nsec.store(rt_nsec as u32, Ordering::Release);
 
-        // Store frame info for later process mapping and kernel access via HHDM
-        VDSO_PAGES.lock()[cpu_id] = Some(VdsoPageInfo { frame, user_vaddr });
+        // Ensure all initialization writes are visible before publishing the page pointer
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        // Store frame info in static array
+        let info = VdsoPageInfo { frame, user_vaddr };
+        unsafe {
+            VDSO_PAGE_INFOS[cpu_id] = info;
+            let ptr = &raw mut VDSO_PAGE_INFOS[cpu_id] as *mut VdsoPageInfo;
+            VDSO_PAGES[cpu_id].store(ptr, Ordering::Release);
+        }
 
         // Unmap from kernel space
         let (_, _flush) = mapper.unmap(page).expect("vDSO: failed to unmap");
@@ -175,9 +192,13 @@ pub fn vdso_map_into(
         | PageTableFlags::USER_ACCESSIBLE
         | PageTableFlags::NO_EXECUTE;
 
-    let pages = VDSO_PAGES.lock();
     for cpu_id in 0..MAX_CPUS {
-        let info = pages[cpu_id].as_ref().ok_or(())?;
+        let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+        if ptr.is_null() {
+            return Err(());
+        }
+        // SAFETY: ptr is valid after init
+        let info = unsafe { &*ptr };
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(info.user_vaddr));
 
         // SAFETY: frame was allocated by init_vdso and is valid.
@@ -191,29 +212,36 @@ pub fn vdso_map_into(
     Ok(())
 }
 
-/// Get reference to the current CPU's vDSO page (via HHDM for kernel access).
-/// Note: This is for IRQ-safe read-only access. The seqlock in VdsoData protects data consistency.
-#[inline]
-pub fn vdso_page() -> Option<&'static VdsoData> {
-    let cpu_id = crate::smp::get_cpu_id();
-    vdso_page_via_hhdm(cpu_id)
-}
-
-/// Get reference to a specific CPU's vDSO page (via HHDM for kernel access).
-/// Note: This is for IRQ-safe read-only access. The seqlock in VdsoData protects data consistency.
-pub fn vdso_page_for_cpu(cpu_id: usize) -> Option<&'static VdsoData> {
-    vdso_page_via_hhdm(cpu_id)
-}
-
-/// Internal: access vDSO page via HHDM (kernel direct map).
+/// Get pointer to the current CPU's vDSO page (via HHDM for kernel access).
 /// The seqlock in VdsoData protects data consistency for concurrent readers/writers.
-fn vdso_page_via_hhdm(cpu_id: usize) -> Option<&'static VdsoData> {
-    let pages = VDSO_PAGES.lock();
-    let info = pages[cpu_id].as_ref()?;
-    let phys_offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()?;
+/// Returns null if vDSO not initialized for this CPU.
+#[inline]
+pub fn vdso_page() -> *const VdsoData {
+    let cpu_id = crate::smp::get_cpu_id();
+    vdso_page_ptr(cpu_id)
+}
+
+/// Get pointer to a specific CPU's vDSO page (via HHDM for kernel access).
+/// The seqlock in VdsoData protects data consistency for concurrent readers/writers.
+/// Returns null if vDSO not initialized for this CPU.
+pub fn vdso_page_ptr(cpu_id: usize) -> *const VdsoData {
+    let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+    if ptr.is_null() {
+        return core::ptr::null();
+    }
+    let info = unsafe { &*ptr };
+    let phys_offset = match crate::memory::PHYSICAL_MEMORY_OFFSET.get() {
+        Some(offset) => *offset,
+        None => return core::ptr::null(),
+    };
     let hhdm_vaddr = phys_offset + info.frame.start_address().as_u64();
-    let ptr = hhdm_vaddr as u64 as *const VdsoData;
-    Some(unsafe { &*ptr })
+    hhdm_vaddr as *const VdsoData
+}
+
+/// Alias for vdso_page_ptr — kept for compatibility with tests.
+#[inline]
+pub fn vdso_page_for_cpu(cpu_id: usize) -> *const VdsoData {
+    vdso_page_ptr(cpu_id)
 }
 
 /// Compute TSC multiplier and shift for nanosecond conversion.
@@ -245,18 +273,27 @@ fn read_tsc() -> (u32, u32) {
 }
 
 /// Cached RTC time for vDSO updates (updated once per second to avoid CMOS I/O on every tick)
-static CACHED_RTC: IrqSafeMutex<Option<(u64, u32)>> = IrqSafeMutex::new(None);
+static CACHED_RTC: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
-/// Update cached RTC time (called once per second from timer tick or dedicated thread)
+/// Update cached RTC time (called from kernel thread/workqueue, NOT from IRQ).
+/// Does CMOS I/O — must NOT be called from interrupt context.
 pub fn vdso_update_cached_rtc() {
     let (sec, nsec) = crate::drivers::rtc::read_realtime();
-    *CACHED_RTC.lock() = Some((sec as u64, nsec as u32));
+    CACHED_RTC[0].store(sec as u64, Ordering::Release);
+    CACHED_RTC[1].store(nsec as u32 as u64, Ordering::Release);
 }
 
-/// Get cached RTC time (for vDSO updates).
-/// Returns None if cache not yet initialized.
-fn get_cached_rtc() -> Option<(u64, u32)> {
-    CACHED_RTC.lock().as_ref().copied()
+/// Get cached RTC time (for vDSO updates). Lock-free, IRQ-safe.
+fn get_cached_rtc() -> (u64, u32) {
+    let sec = CACHED_RTC[0].load(Ordering::Acquire);
+    let nsec = CACHED_RTC[1].load(Ordering::Acquire) as u32;
+    if sec == 0 && nsec == 0 {
+        // Cache not initialized — read RTC directly (slow, but rare)
+        let (sec, nsec) = crate::drivers::rtc::read_realtime();
+        (sec as u64, nsec as u32)
+    } else {
+        (sec, nsec)
+    }
 }
 
 /// Update vDSO time fields for the current CPU (called from timer interrupt, 100 Hz).
@@ -270,37 +307,34 @@ pub fn vdso_update_time() {
     let monotonic_nsec = ((total_ms % 1000) * 1_000_000) as u32;
 
     // Use cached RTC to avoid CMOS I/O on every tick
-    let (rt_sec, rt_nsec) = get_cached_rtc().unwrap_or_else(|| {
-        let (sec, nsec) = crate::drivers::rtc::read_realtime();
-        (sec as u64, nsec as u32)
-    });
+    let (rt_sec, rt_nsec) = get_cached_rtc();
 
     // Update ONLY the current CPU's page (timer interrupt runs on one CPU)
     let cpu_id = crate::smp::get_cpu_id();
-    let pages = VDSO_PAGES.lock();
-    let info = match pages[cpu_id].as_ref() {
-        Some(i) => i,
-        None => return,
-    };
-
+    let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+    if ptr.is_null() {
+        return;
+    }
+    let info = unsafe { &*ptr };
     let phys_offset = match crate::memory::PHYSICAL_MEMORY_OFFSET.get() {
         Some(offset) => *offset,
         None => return,
     };
     let hhdm_vaddr = phys_offset + info.frame.start_address().as_u64();
-    let vdso = unsafe { &*(hhdm_vaddr as u64 as *const VdsoData) };
+    let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
 
-    // Start write: increment seq to odd
-    let seq = vdso.seq.fetch_add(1, Ordering::Acquire) + 1;
+    // Start write: increment seq to odd (writer entering)
+    // Use AcqRel on fetch_add to order prior stores before the seq increment
+    let seq = vdso.seq.fetch_add(1, Ordering::AcqRel) + 1;
     debug_assert!(seq % 2 == 1, "vDSO seq should be odd during write");
 
-    // Update time fields
-    vdso.monotonic_sec.store(monotonic_sec, Ordering::Relaxed);
-    vdso.monotonic_nsec.store(monotonic_nsec, Ordering::Relaxed);
-    vdso.realtime_sec.store(rt_sec as u64, Ordering::Relaxed);
-    vdso.realtime_nsec.store(rt_nsec as u32, Ordering::Relaxed);
+    // Update time fields with Release ordering (visible before final seq store)
+    vdso.monotonic_sec.store(monotonic_sec, Ordering::Release);
+    vdso.monotonic_nsec.store(monotonic_nsec, Ordering::Release);
+    vdso.realtime_sec.store(rt_sec as u64, Ordering::Release);
+    vdso.realtime_nsec.store(rt_nsec as u32, Ordering::Release);
 
-    // End write: increment seq to even (release)
+    // End write: increment seq to even (writer done) with Release ordering
     vdso.seq.store(seq + 1, Ordering::Release);
 }
 
@@ -308,25 +342,27 @@ pub fn vdso_update_time() {
 pub fn vdso_update_pid_cpu(pid: u64, cpu_id: u32) {
     let cpu_idx = cpu_id as usize;
     
-    // No lock needed - VDSO_PAGES is write-once after init
-    let pages = VDSO_PAGES.lock();
-    let info = match pages[cpu_idx].as_ref() {
-        Some(i) => i,
-        None => return,
-    };
+    let ptr = VDSO_PAGES[cpu_idx].load(Ordering::Acquire);
+    if ptr.is_null() {
+        return;
+    }
+    let info = unsafe { &*ptr };
 
     let phys_offset = match crate::memory::PHYSICAL_MEMORY_OFFSET.get() {
         Some(offset) => *offset,
         None => return,
     };
     let hhdm_vaddr = phys_offset + info.frame.start_address().as_u64();
-    let vdso = unsafe { &*(hhdm_vaddr as u64 as *const VdsoData) };
+    let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
 
-    let seq = vdso.seq.fetch_add(1, Ordering::Acquire) + 1;
+    // Start write: increment seq to odd (writer entering)
+    let seq = vdso.seq.fetch_add(1, Ordering::AcqRel) + 1;
     debug_assert!(seq % 2 == 1);
 
-    vdso.pid.store(pid, Ordering::Relaxed);
-    vdso.cpu_id.store(cpu_id, Ordering::Relaxed);
+    // Update data fields with Release ordering
+    vdso.pid.store(pid, Ordering::Release);
+    vdso.cpu_id.store(cpu_id, Ordering::Release);
 
+    // End write: increment seq to even (writer done) with Release ordering
     vdso.seq.store(seq + 1, Ordering::Release);
 }

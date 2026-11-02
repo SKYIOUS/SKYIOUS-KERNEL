@@ -25,11 +25,6 @@ pub(super) extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: Inter
     // busy loop with IF=1 (timer still fires). Always enabled.
     soft_lockup_check(_stack_frame.instruction_pointer.as_u64());
 
-    // Update cached RTC once per second (every 100 ticks at 100 Hz)
-    if ticks.is_multiple_of(100) {
-        crate::vdso::vdso_update_cached_rtc();
-    }
-
     // Update vDSO time fields (monotonic, realtime)
     crate::vdso::vdso_update_time();
 

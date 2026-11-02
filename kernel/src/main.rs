@@ -469,6 +469,7 @@ pub extern "C" fn post_kaslr_continue() -> ! {
     task::scheduler::spawn(boot::tasks::run_async_tasks);
     task::scheduler::spawn(drivers::usb::usb_hid_poller);
     task::scheduler::spawn(boot::tasks::init_os_task);
+    task::scheduler::spawn(boot::tasks::rtc_cache_update_task);
 
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -586,6 +587,7 @@ fn goto_late_init() -> ! {
     task::scheduler::spawn(boot::tasks::run_async_tasks);
     task::scheduler::spawn(drivers::usb::usb_hid_poller);
     task::scheduler::spawn(boot::tasks::init_os_task);
+    task::scheduler::spawn(boot::tasks::rtc_cache_update_task);
 
     #[cfg(not(target_arch = "aarch64"))]
     {
