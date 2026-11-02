@@ -1049,16 +1049,22 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
 }
 
 pub fn sys_getpid() -> u64 {
-    // Fast path: read from vDSO if available
-    if let Some(vdso) = crate::vdso_page() {
-        let mut seq = vdso.seq.load(Ordering::Acquire);
-        loop {
-            let pid = vdso.pid.load(Ordering::Relaxed);
-            let seq2 = vdso.seq.load(Ordering::Acquire);
-            if seq == seq2 && seq % 2 == 0 {
-                return pid;
+    // Fast path: read from vDSO if available (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    {
+        let vdso_ptr = crate::vdso_page();
+        if !vdso_ptr.is_null() {
+            // SAFETY: vdso_page returns valid pointer if not null
+            let vdso = unsafe { &*vdso_ptr };
+            let mut seq = vdso.seq.load(Ordering::Acquire);
+            loop {
+                let pid = vdso.pid.load(Ordering::Relaxed);
+                let seq2 = vdso.seq.load(Ordering::Acquire);
+                if seq == seq2 && seq % 2 == 0 {
+                    return pid;
+                }
+                seq = seq2;
             }
-            seq = seq2;
         }
     }
     // Fallback: slow path
@@ -1069,21 +1075,33 @@ pub fn sys_getcpu(cpu: *mut u32, node: *mut u32) -> u64 {
     use crate::syscalls::user_access;
     let cpu_id = crate::smp::get_cpu_id() as u32;
 
-    // Fast path: read from vDSO if available
-    let cpu_val = if let Some(vdso) = crate::vdso_page() {
-        let mut seq = vdso.seq.load(Ordering::Acquire);
-        loop {
-            let cpu = vdso.cpu_id.load(Ordering::Relaxed);
-            let seq2 = vdso.seq.load(Ordering::Acquire);
-            if seq == seq2 && seq % 2 == 0 {
-                break cpu;
+    // Fast path: read from vDSO if available (x86_64 only)
+    let cpu_val = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let vdso_ptr = crate::vdso_page();
+            if !vdso_ptr.is_null() {
+                // SAFETY: vdso_page returns valid pointer if not null
+                let vdso = unsafe { &*vdso_ptr };
+                let mut seq = vdso.seq.load(Ordering::Acquire);
+                loop {
+                    let cpu = vdso.cpu_id.load(Ordering::Relaxed);
+                    let seq2 = vdso.seq.load(Ordering::Acquire);
+                    if seq == seq2 && seq % 2 == 0 {
+                        break cpu;
+                    } else {
+                        seq = seq2;
+                        continue;
+                    }
+                }
             } else {
-                seq = seq2;
-                continue;
+                cpu_id
             }
         }
-    } else {
-        cpu_id
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            cpu_id
+        }
     };
 
     // Write CPU to user pointer (Linux getcpu behavior)

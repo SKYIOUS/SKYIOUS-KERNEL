@@ -78,15 +78,12 @@ struct VdsoPageInfo {
 /// Each entry is an AtomicPtr<VdsoPageInfo>, null = not initialized.
 static VDSO_PAGES: [AtomicPtr<VdsoPageInfo>; MAX_CPUS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_CPUS];
 
-/// Heap-allocated VdsoPageInfo storage (write-once). Direct array without Option to avoid pointer casting issues.
-static mut VDSO_PAGE_INFOS: [VdsoPageInfo; MAX_CPUS] = unsafe { 
-    [VdsoPageInfo { 
-        frame: PhysFrame::from_start_address_unchecked(x86_64::PhysAddr::new(0)), 
-        user_vaddr: 0 
-    }; MAX_CPUS] 
-};
+/// Heap-allocated VdsoPageInfo storage (write-once). Uses MaybeUninit for safe initialization.
+static mut VDSO_PAGE_INFOS: [core::mem::MaybeUninit<VdsoPageInfo>; MAX_CPUS] = 
+    [core::mem::MaybeUninit::uninit(); MAX_CPUS];
 
 /// Create a kernel page table mapper for temporary mappings.
+#[allow(dead_code)]
 fn kernel_mapper() -> Option<OffsetPageTable<'static>> {
     use x86_64::registers::control::Cr3;
     use x86_64::VirtAddr;
@@ -127,15 +124,6 @@ pub fn init_vdso(frame_allocator: &mut impl FrameAllocator<Size4KiB>) {
 
         let user_vaddr = vdso_virt_addr_for_cpu(cpu_id);
 
-        // Map it temporarily in kernel space to initialize
-        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(user_vaddr));
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-
-        let mut mapper = kernel_mapper().expect("vDSO: kernel mapper not available");
-        unsafe { mapper.map_to(page, frame, flags, frame_allocator) }
-            .expect("vDSO: failed to map page")
-            .flush();
-
         // Initialize the page via HHDM (same mapping used by readers) to ensure cache coherency
         let phys_offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("HHDM offset not set");
         let hhdm_vaddr = phys_offset + frame.start_address().as_u64();
@@ -165,13 +153,16 @@ pub fn init_vdso(frame_allocator: &mut impl FrameAllocator<Size4KiB>) {
         // Store frame info in static array
         let info = VdsoPageInfo { frame, user_vaddr };
         unsafe {
-            VDSO_PAGE_INFOS[cpu_id] = info;
-            let ptr = &raw mut VDSO_PAGE_INFOS[cpu_id] as *mut VdsoPageInfo;
+            VDSO_PAGE_INFOS[cpu_id].write(info);
+            let ptr = VDSO_PAGE_INFOS[cpu_id].as_mut_ptr();
             VDSO_PAGES[cpu_id].store(ptr, Ordering::Release);
         }
 
-        // Unmap from kernel space
-        let (_, _flush) = mapper.unmap(page).expect("vDSO: failed to unmap");
+        // Initialize CACHED_RTC for the first CPU (only need to do this once)
+        if cpu_id == 0 {
+            CACHED_RTC[0].store(rt_sec as u64, Ordering::Release);
+            CACHED_RTC[1].store(rt_nsec as u64, Ordering::Release);
+        }
 
         crate::serial_write("[VDSO] CPU ");
         crate::serial_write_hex(cpu_id as u64);
@@ -254,6 +245,12 @@ fn compute_tsc_conversion(freq_hz: u64) -> (u32, u32) {
     let mut shift = 0u32;
     let mut mult = (NSEC_PER_SEC << shift) / freq_hz;
 
+    // Increase shift until mult >= 1 (handles freq > 1 GHz)
+    while mult == 0 && shift < 32 {
+        shift += 1;
+        mult = (NSEC_PER_SEC << shift) / freq_hz;
+    }
+
     // Increase shift until mult fits in u32
     while mult > u32::MAX as u64 && shift < 32 {
         shift += 1;
@@ -284,16 +281,11 @@ pub fn vdso_update_cached_rtc() {
 }
 
 /// Get cached RTC time (for vDSO updates). Lock-free, IRQ-safe.
+/// Returns (0, 0) if not yet initialized (before init_vdso runs).
 fn get_cached_rtc() -> (u64, u32) {
     let sec = CACHED_RTC[0].load(Ordering::Acquire);
     let nsec = CACHED_RTC[1].load(Ordering::Acquire) as u32;
-    if sec == 0 && nsec == 0 {
-        // Cache not initialized — read RTC directly (slow, but rare)
-        let (sec, nsec) = crate::drivers::rtc::read_realtime();
-        (sec as u64, nsec as u32)
-    } else {
-        (sec, nsec)
-    }
+    (sec, nsec)
 }
 
 /// Update vDSO time fields for the current CPU (called from timer interrupt, 100 Hz).

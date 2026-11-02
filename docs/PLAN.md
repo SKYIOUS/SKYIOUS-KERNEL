@@ -238,6 +238,7 @@ The plan has three tiers:
 | A1.3 | **RCU optimization**: Reduce grace-period overhead for read-heavy workloads |
 | A1.4 | **Scheduler EEVDF migration**: Replace stride with EEVDF for better latency fairness |
 | A1.5 | **Context switch optimization**: Minimize save/restore overhead |
+| A1.6 | **vDSO (Virtual Dynamic Shared Object)**: Map a read-only kernel data page into every userspace process. Kernel updates `clock_gettime` (CLOCK_MONOTONIC, CLOCK_REALTIME), `getpid`, `getcpu` data on timer tick. Userspace reads directly without syscall overhead. Target: 100× faster time/process queries. Requires: vDSO data struct, page mapping at process creation, timer tick update, fast-path syscall stubs. |
 
 ### Phase A2: Advanced Kernel Features
 

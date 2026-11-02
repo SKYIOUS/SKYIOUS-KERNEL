@@ -61,3 +61,9 @@ pub fn init(info: PlatformInfo) {
 pub fn get() -> PlatformInfo {
     *PLATFORM.lock()
 }
+
+/// Update the CPU frequency in the platform info.
+pub fn set_cpu_frequency(freq_hz: u64) {
+    let mut platform = PLATFORM.lock();
+    platform.cpu_freq_hz = freq_hz;
+}

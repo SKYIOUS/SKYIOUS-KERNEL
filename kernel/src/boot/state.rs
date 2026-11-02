@@ -128,13 +128,15 @@ fn state_create_address_space(
     session: &mut BootSession,
 ) -> Result<BootState, BootError> {
     use crate::memory::buddy::BuddyFrameAllocator;
+    #[cfg(target_arch = "x86_64")]
     use crate::vdso::vdso_map_into;
     let mut frame_allocator = BuddyFrameAllocator;
     let elf_data = ctx.elf_data.as_ref().ok_or(BootError::InitNotFound)?;
     let address_space = crate::memory::paging::AddressSpace::new(&mut frame_allocator)
         .ok_or(BootError::AddressSpaceCreationFailed)?;
     
-    // Map vDSO page into the address space
+    // Map vDSO page into the address space (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
     if let Some(mut mapper) = unsafe { address_space.mapper() } {
         let _ = vdso_map_into(&mut mapper, &mut frame_allocator);
     }

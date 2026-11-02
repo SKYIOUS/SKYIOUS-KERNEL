@@ -182,7 +182,9 @@ mod kaslr;
 #[allow(dead_code)]
 mod kaslr_reloc;
 pub(crate) use kaslr::{init_kaslr, KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLIDE};
+#[cfg(target_arch = "x86_64")]
 mod vdso;
+#[cfg(target_arch = "x86_64")]
 pub(crate) use vdso::{init_vdso, vdso_page, vdso_virt_addr, vdso_update_pid_cpu};
 #[cfg(not(target_arch = "aarch64"))]
 // ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
@@ -427,9 +429,12 @@ pub extern "C" fn post_kaslr_continue() -> ! {
     }
 
     // Initialize vDSO page (requires frame allocator ready AND timer calibrated)
-    serial_write("[BOOT] vDSO init...\n");
-    init_vdso(&mut crate::memory::buddy::BuddyFrameAllocator);
-    serial_write("[BOOT] vDSO initialized\n");
+    #[cfg(target_arch = "x86_64")]
+    {
+        serial_write("[BOOT] vDSO init...\n");
+        init_vdso(&mut crate::memory::buddy::BuddyFrameAllocator);
+        serial_write("[BOOT] vDSO initialized\n");
+    }
 
     boot::init::init_vfs_network();
 
@@ -567,29 +572,6 @@ fn goto_late_init() -> ! {
     task::scheduler::init();
 
     #[cfg(feature = "self_test")]
-    {
-        serial_write("[SELF-TEST] registering tests...\n");
-        tests::register_all();
-        serial_write("[SELF-TEST] running...\n");
-        coverage::init();
-        selftest::run_all();
-        serial_write(&alloc::format!(
-            "[COVERAGE] unique={}, total={}, ratio={:.4}\n",
-            coverage::unique_blocks(),
-            coverage::total_hits(),
-            coverage::coverage_ratio()
-        ));
-    }
-
-    serial_write("[BOOT] GUI init...\n");
-    gui::init();
-
-    task::scheduler::spawn(boot::tasks::run_async_tasks);
-    task::scheduler::spawn(drivers::usb::usb_hid_poller);
-    task::scheduler::spawn(boot::tasks::init_os_task);
-    task::scheduler::spawn(boot::tasks::rtc_cache_update_task);
-
-    #[cfg(not(target_arch = "aarch64"))]
     {
         x86_64::instructions::interrupts::enable();
     }

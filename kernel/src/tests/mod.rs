@@ -37,6 +37,8 @@ pub mod stress;
 #[cfg(not(target_arch = "aarch64"))]
 pub mod sync_tests;
 pub mod userptr_contract;
+#[cfg(target_arch = "x86_64")]
+pub mod vdso_tests;
 pub mod vfs_tests;
 
 /// Test function signature
@@ -78,6 +80,9 @@ pub fn register_all() {
     process_lifecycle_tests::register();
     userptr_contract::register();
     abi_args::register();
+    #[cfg(target_arch = "x86_64")]
+    vdso_tests::register();
+    vdso_tests::register();
     elf_dyn_bounds::register();
     kernel_stress::register();
     kaslr_mapping::register();

@@ -17,9 +17,13 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
 
-    // Fast path: try vDSO for CLOCK_MONOTONIC and CLOCK_REALTIME
+    // Fast path: try vDSO for CLOCK_MONOTONIC and CLOCK_REALTIME (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
     if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME) {
-        if let Some(vdso) = crate::vdso_page() {
+        let vdso_ptr = crate::vdso_page();
+        if !vdso_ptr.is_null() {
+            // SAFETY: vdso_page returns valid pointer if not null
+            let vdso = unsafe { &*vdso_ptr };
             let mut seq = vdso.seq.load(Ordering::Acquire);
             loop {
                 let (sec, nsec) = if clock_id == CLOCK_MONOTONIC {
