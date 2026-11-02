@@ -72,17 +72,6 @@ static const struct vdso_data *vdso_page_current(void) {
     return vdso_page_for_cpu(cpu);
 }
 
-/* Seqlock read helper */
-static inline int vdso_read_begin(const struct vdso_data *v, uint64_t *seq) {
-    *seq = __atomic_load_n(&v->seq, __ATOMIC_ACQUIRE);
-    return 0;
-}
-
-static inline int vdso_read_retry(const struct vdso_data *v, uint64_t seq) {
-    uint64_t seq2 = __atomic_load_n(&v->seq, __ATOMIC_ACQUIRE);
-    return (seq != seq2) || (seq & 1);
-}
-
 /* Read monotonic time from vDSO */
 int clock_gettime_monotonic_vdso(long *sec, long *nsec) {
     const struct vdso_data *vdso = vdso_page_current();

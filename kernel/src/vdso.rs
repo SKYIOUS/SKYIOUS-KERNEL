@@ -1,3 +1,13 @@
+//! vDSO (Virtual Dynamic Shared Object) — Kernel data page mapped into userspace.
+//!
+//! Provides lock-free access to time, PID, and CPU ID without syscalls.
+//! Updated by kernel on timer ticks and context switches; read by userspace via seqlock.
+//!
+//! Per-CPU pages: each CPU has its own vDSO page at VDSO_BASE + cpu_id * 4096
+//! to eliminate cache-line false sharing on timer tick updates.
+
+#![cfg(target_arch = "x86_64")]
+
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use vahi_hal::sync::IrqSafeMutex;
 use x86_64::structures::paging::{FrameAllocator, Size4KiB, PhysFrame, Mapper, Page, PageTableFlags, OffsetPageTable};
@@ -8,17 +18,7 @@ pub const MAX_CPUS: usize = crate::task::scheduler::MAX_CPUS;
 
 /// Base virtual address for vDSO pages in user space.
 /// Each CPU gets a page at VDSO_BASE + cpu_id * 4096.
-///
 /// x86_64: 256 KiB below USER_MMAP_TOP (0x0000_7FFF_FFFF_0000)
-/// aarch64: 256 KiB below USER_MMAP_TOP
-/// riscv64: 256 KiB below USER_MMAP_TOP
-#[cfg(target_arch = "x86_64")]
-pub const VDSO_BASE: u64 = 0x0000_7FFF_FFFC_0000;
-
-#[cfg(target_arch = "aarch64")]
-pub const VDSO_BASE: u64 = 0x0000_7FFF_FFFC_0000;
-
-#[cfg(target_arch = "riscv64")]
 pub const VDSO_BASE: u64 = 0x0000_7FFF_FFFC_0000;
 
 /// Virtual address of vDSO page for a specific CPU.
@@ -75,6 +75,8 @@ struct VdsoPageInfo {
     user_vaddr: u64,
 }
 
+/// Per-CPU page info array — write-once after init. Protected by IrqSafeMutex
+/// for init; reads after init use lock() which is fast when uncontended.
 static VDSO_PAGES: IrqSafeMutex<[Option<VdsoPageInfo>; MAX_CPUS]> = IrqSafeMutex::new([const { None }; MAX_CPUS]);
 
 /// Create a kernel page table mapper for temporary mappings.
@@ -173,8 +175,8 @@ pub fn vdso_map_into(
         | PageTableFlags::USER_ACCESSIBLE
         | PageTableFlags::NO_EXECUTE;
 
+    let pages = VDSO_PAGES.lock();
     for cpu_id in 0..MAX_CPUS {
-        let pages = VDSO_PAGES.lock();
         let info = pages[cpu_id].as_ref().ok_or(())?;
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(info.user_vaddr));
 
@@ -189,29 +191,8 @@ pub fn vdso_map_into(
     Ok(())
 }
 
-/// Execute a closure with access to a specific CPU's vDSO page (via HHDM for kernel access).
-/// The lock is held for the duration of the closure to prevent concurrent modification.
-#[allow(dead_code)]
-pub fn with_vdso_page<R>(cpu_id: usize, f: impl FnOnce(&VdsoData) -> R) -> Option<R> {
-    let pages = VDSO_PAGES.lock();
-    let info = pages[cpu_id].as_ref()?;
-    let phys_offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get()?;
-    let hhdm_vaddr = phys_offset + info.frame.start_address().as_u64();
-    let ptr = hhdm_vaddr as u64 as *const VdsoData;
-    // SAFETY: lock held, page is valid
-    Some(f(unsafe { &*ptr }))
-}
-
-/// Execute a closure with access to the current CPU's vDSO page (via HHDM for kernel access).
-/// The lock is held for the duration of the closure to prevent concurrent modification.
-#[allow(dead_code)]
-pub fn with_current_vdso_page<R>(f: impl FnOnce(&VdsoData) -> R) -> Option<R> {
-    let cpu_id = crate::smp::get_cpu_id();
-    with_vdso_page(cpu_id, f)
-}
-
 /// Get reference to the current CPU's vDSO page (via HHDM for kernel access).
-/// Note: This is for IRQ-safe read-only access; for mutation, use `with_current_vdso_page`.
+/// Note: This is for IRQ-safe read-only access. The seqlock in VdsoData protects data consistency.
 #[inline]
 pub fn vdso_page() -> Option<&'static VdsoData> {
     let cpu_id = crate::smp::get_cpu_id();
@@ -219,14 +200,13 @@ pub fn vdso_page() -> Option<&'static VdsoData> {
 }
 
 /// Get reference to a specific CPU's vDSO page (via HHDM for kernel access).
-/// Note: This is for IRQ-safe read-only access; for mutation, use `with_vdso_page`.
+/// Note: This is for IRQ-safe read-only access. The seqlock in VdsoData protects data consistency.
 pub fn vdso_page_for_cpu(cpu_id: usize) -> Option<&'static VdsoData> {
     vdso_page_via_hhdm(cpu_id)
 }
 
 /// Internal: access vDSO page via HHDM (kernel direct map).
-/// WARNING: This does not acquire the VDSO_PAGES lock. The caller must ensure
-/// the page is not being modified concurrently. For mutation, use `with_vdso_page`.
+/// The seqlock in VdsoData protects data consistency for concurrent readers/writers.
 fn vdso_page_via_hhdm(cpu_id: usize) -> Option<&'static VdsoData> {
     let pages = VDSO_PAGES.lock();
     let info = pages[cpu_id].as_ref()?;
@@ -256,18 +236,12 @@ fn compute_tsc_conversion(freq_hz: u64) -> (u32, u32) {
 }
 
 /// Read TSC (x86_64 only).
-#[cfg(target_arch = "x86_64")]
 fn read_tsc() -> (u32, u32) {
     let lo: u32;
     let hi: u32;
     // SAFETY: RDTSC is safe at any privilege level, no side effects.
     unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
     (lo, hi)
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn read_tsc() -> (u32, u32) {
-    (0, 0)
 }
 
 /// Cached RTC time for vDSO updates (updated once per second to avoid CMOS I/O on every tick)
@@ -285,7 +259,7 @@ fn get_cached_rtc() -> Option<(u64, u32)> {
     CACHED_RTC.lock().as_ref().copied()
 }
 
-/// Update vDSO time fields for all CPUs (called from timer interrupt, 100 Hz).
+/// Update vDSO time fields for the current CPU (called from timer interrupt, 100 Hz).
 ///
 /// Uses seqlock: odd seq = writing, even seq = consistent.
 /// Fields updated: monotonic_sec, monotonic_nsec, realtime_sec, realtime_nsec.
@@ -301,49 +275,41 @@ pub fn vdso_update_time() {
         (sec as u64, nsec as u32)
     });
 
-    // Update all CPU pages (each CPU updates its own page to avoid cache contention)
-    // Use try_lock to avoid deadlock in IRQ context
-    for cpu_id in 0..MAX_CPUS {
-        let pages = match VDSO_PAGES.try_lock() {
-            Some(p) => p,
-            None => continue, // skip if contended
-        };
-        let info = match pages[cpu_id].as_ref() {
-            Some(i) => i,
-            None => continue,
-        };
+    // Update ONLY the current CPU's page (timer interrupt runs on one CPU)
+    let cpu_id = crate::smp::get_cpu_id();
+    let pages = VDSO_PAGES.lock();
+    let info = match pages[cpu_id].as_ref() {
+        Some(i) => i,
+        None => return,
+    };
 
-        let phys_offset = match crate::memory::PHYSICAL_MEMORY_OFFSET.get() {
-            Some(offset) => *offset,
-            None => continue,
-        };
-        let hhdm_vaddr = phys_offset + info.frame.start_address().as_u64();
-        let vdso = unsafe { &*(hhdm_vaddr as u64 as *const VdsoData) };
+    let phys_offset = match crate::memory::PHYSICAL_MEMORY_OFFSET.get() {
+        Some(offset) => *offset,
+        None => return,
+    };
+    let hhdm_vaddr = phys_offset + info.frame.start_address().as_u64();
+    let vdso = unsafe { &*(hhdm_vaddr as u64 as *const VdsoData) };
 
-        // Start write: increment seq to odd
-        let seq = vdso.seq.fetch_add(1, Ordering::Acquire) + 1;
-        debug_assert!(seq % 2 == 1, "vDSO seq should be odd during write");
+    // Start write: increment seq to odd
+    let seq = vdso.seq.fetch_add(1, Ordering::Acquire) + 1;
+    debug_assert!(seq % 2 == 1, "vDSO seq should be odd during write");
 
-        // Update time fields
-        vdso.monotonic_sec.store(monotonic_sec, Ordering::Relaxed);
-        vdso.monotonic_nsec.store(monotonic_nsec, Ordering::Relaxed);
-        vdso.realtime_sec.store(rt_sec as u64, Ordering::Relaxed);
-        vdso.realtime_nsec.store(rt_nsec as u32, Ordering::Relaxed);
+    // Update time fields
+    vdso.monotonic_sec.store(monotonic_sec, Ordering::Relaxed);
+    vdso.monotonic_nsec.store(monotonic_nsec, Ordering::Relaxed);
+    vdso.realtime_sec.store(rt_sec as u64, Ordering::Relaxed);
+    vdso.realtime_nsec.store(rt_nsec as u32, Ordering::Relaxed);
 
-        // End write: increment seq to even (release)
-        vdso.seq.store(seq + 1, Ordering::Release);
-    }
+    // End write: increment seq to even (release)
+    vdso.seq.store(seq + 1, Ordering::Release);
 }
 
 /// Update vDSO PID and CPU ID for a specific CPU (called from context switch).
 pub fn vdso_update_pid_cpu(pid: u64, cpu_id: u32) {
     let cpu_idx = cpu_id as usize;
     
-    // Use try_lock to avoid deadlock in IRQ/preempt context
-    let pages = match VDSO_PAGES.try_lock() {
-        Some(p) => p,
-        None => return,
-    };
+    // No lock needed - VDSO_PAGES is write-once after init
+    let pages = VDSO_PAGES.lock();
     let info = match pages[cpu_idx].as_ref() {
         Some(i) => i,
         None => return,

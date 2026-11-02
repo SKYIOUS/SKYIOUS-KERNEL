@@ -29,6 +29,10 @@ pub trait Timer: Send + Sync {
 
     /// Calibrate the timer (measure actual frequency).
     fn calibrate(&self);
+
+    /// Downcast to Any for frequency access (vDSO).
+    /// Only implemented for concrete types (TscTimer).
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -95,6 +99,10 @@ impl Timer for TscTimer {
         1
     }
     fn calibrate(&self) {}
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 /// Global timer instance. Set once during boot.
@@ -108,4 +116,21 @@ pub fn register_timer(timer: Arc<dyn Timer>) {
 /// Get the current time in microseconds from the registered timer.
 pub fn current_time_us() -> u64 {
     CURRENT_TIMER.lock().as_ref().map_or(0, |t| t.ticks())
+}
+
+/// Get the TSC frequency in Hz (x86_64 only).
+/// Returns 0 if TSC timer not initialized or not on x86_64.
+#[cfg(target_arch = "x86_64")]
+pub fn get_tsc_frequency() -> u64 {
+    CURRENT_TIMER
+        .lock()
+        .as_ref()
+        .and_then(|t| t.as_any().downcast_ref::<TscTimer>())
+        .map(|tsc| tsc.tsc_freq.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn get_tsc_frequency() -> u64 {
+    0
 }
