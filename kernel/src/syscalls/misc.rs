@@ -4,6 +4,7 @@ use super::*;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 
 use crate::syscalls::user_access;
+use core::sync::atomic::Ordering;
 
 const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
@@ -15,6 +16,47 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     }
     const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
+
+    // Fast path: try vDSO for CLOCK_MONOTONIC and CLOCK_REALTIME
+    if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME) {
+        if let Some(vdso) = crate::vdso_page() {
+            let mut seq = vdso.seq.load(Ordering::Acquire);
+            loop {
+                let (sec, nsec) = if clock_id == CLOCK_MONOTONIC {
+                    (
+                        vdso.monotonic_sec.load(Ordering::Relaxed) as i64,
+                        vdso.monotonic_nsec.load(Ordering::Relaxed) as i64,
+                    )
+                } else {
+                    (
+                        vdso.realtime_sec.load(Ordering::Relaxed) as i64,
+                        vdso.realtime_nsec.load(Ordering::Relaxed) as i64,
+                    )
+                };
+                let seq2 = vdso.seq.load(Ordering::Acquire);
+                if seq == seq2 && seq % 2 == 0 {
+                    let ts = Timespec { tv_sec: sec, tv_nsec: nsec };
+                    if unsafe {
+                        user_access::copy_to_user(
+                            tp as *mut u8,
+                            core::slice::from_raw_parts(
+                                &ts as *const _ as *const u8,
+                                core::mem::size_of::<Timespec>(),
+                            ),
+                        )
+                    }
+                    .is_ok()
+                    {
+                        return 0;
+                    }
+                    return errno::Errno::EFAULT as u64;
+                }
+                seq = seq2;
+            }
+        }
+    }
+
+    // Fallback: slow path
     let ts = match clock_id {
         CLOCK_REALTIME => {
             let (sec, nsec) = crate::drivers::rtc::read_realtime();

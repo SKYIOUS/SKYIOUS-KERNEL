@@ -6,6 +6,7 @@ use super::*;
 use crate::task::process::FileDescriptor;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::Ordering;
 
 pub fn sys_getppid() -> u64 {
     get_current_process().map_or(0, |p| p.parent_id.unwrap_or(0))
@@ -1048,7 +1049,59 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
 }
 
 pub fn sys_getpid() -> u64 {
+    // Fast path: read from vDSO if available
+    if let Some(vdso) = crate::vdso_page() {
+        let mut seq = vdso.seq.load(Ordering::Acquire);
+        loop {
+            let pid = vdso.pid.load(Ordering::Relaxed);
+            let seq2 = vdso.seq.load(Ordering::Acquire);
+            if seq == seq2 && seq % 2 == 0 {
+                return pid;
+            }
+            seq = seq2;
+        }
+    }
+    // Fallback: slow path
     get_current_process().map_or(0, |p| p.id)
+}
+
+pub fn sys_getcpu(cpu: *mut u32, node: *mut u32) -> u64 {
+    use crate::syscalls::user_access;
+    let cpu_id = crate::smp::get_cpu_id() as u32;
+
+    // Fast path: read from vDSO if available
+    let cpu_val = if let Some(vdso) = crate::vdso_page() {
+        let mut seq = vdso.seq.load(Ordering::Acquire);
+        loop {
+            let cpu = vdso.cpu_id.load(Ordering::Relaxed);
+            let seq2 = vdso.seq.load(Ordering::Acquire);
+            if seq == seq2 && seq % 2 == 0 {
+                break cpu;
+            } else {
+                seq = seq2;
+                continue;
+            }
+        }
+    } else {
+        cpu_id
+    };
+
+    // Write CPU to user pointer (Linux getcpu behavior)
+    if !cpu.is_null() {
+        if unsafe { user_access::copy_to_user(cpu as *mut u8, &cpu_val.to_ne_bytes()) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    // Node is optional; write 0 if provided (we don't track NUMA nodes)
+    if !node.is_null() {
+        let node_val: u32 = 0;
+        if unsafe { user_access::copy_to_user(node as *mut u8, &node_val.to_ne_bytes()) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    0
 }
 
 pub fn sys_execve(
@@ -1196,9 +1249,15 @@ pub fn sys_execve(
 
     // 4. Load ELF into new AddressSpace
     use crate::memory::paging::AddressSpace;
+    use crate::vdso::vdso_map_into;
     let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
     let new_as =
         AddressSpace::new(&mut frame_allocator).expect("Failed to create new AddressSpace");
+
+    // Map vDSO page into the new address space
+    if let Some(mut mapper) = unsafe { new_as.mapper() } {
+        let _ = vdso_map_into(&mut mapper, &mut frame_allocator);
+    }
 
     let process = match crate::task::process::Process::load_elf(&elf_data, new_as) {
         Ok(p) => p,

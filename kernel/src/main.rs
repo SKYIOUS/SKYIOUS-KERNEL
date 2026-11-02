@@ -182,6 +182,8 @@ mod kaslr;
 #[allow(dead_code)]
 mod kaslr_reloc;
 pub(crate) use kaslr::{init_kaslr, KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLIDE};
+mod vdso;
+pub(crate) use vdso::{init_vdso, vdso_page, vdso_virt_addr, vdso_update_pid_cpu};
 #[cfg(not(target_arch = "aarch64"))]
 // ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
@@ -423,6 +425,12 @@ pub extern "C" fn post_kaslr_continue() -> ! {
     {
         serial_write("[BOOT] aarch64 platform init...\n");
     }
+
+    // Initialize vDSO page (requires frame allocator ready AND timer calibrated)
+    serial_write("[BOOT] vDSO init...\n");
+    init_vdso(&mut crate::memory::buddy::BuddyFrameAllocator);
+    serial_write("[BOOT] vDSO initialized\n");
+
     boot::init::init_vfs_network();
 
     serial_write("[BOOT] RTC init...\n");

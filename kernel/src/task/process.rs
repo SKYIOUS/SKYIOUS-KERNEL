@@ -1155,6 +1155,9 @@ impl Process {
                                         // AT_BASE (interpreter base, 0 for static)
         push_u64(7, &mut rsp)?; // type
         push_u64(0, &mut rsp)?; // value = no interpreter loaded yet
+        // AT_SYSINFO_EHDR (vDSO address) - Linux uses 33
+        push_u64(33, &mut rsp)?; // type = AT_SYSINFO_EHDR
+        push_u64(crate::vdso_virt_addr(), &mut rsp)?; // value = vDSO virtual address
                                 // AT_PHNUM / AT_PHENT / AT_PHDR
         push_u64(5, &mut rsp)?; // type = AT_PHNUM
         push_u64(phdr_count, &mut rsp)?;

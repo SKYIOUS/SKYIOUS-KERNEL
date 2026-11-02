@@ -134,6 +134,8 @@ impl PerCpuScheduler {
             crate::syscalls::get_per_cpu()
                 .current_process
                 .store(process.id, core::sync::atomic::Ordering::Relaxed);
+            // Update vDSO with current PID and CPU ID
+            crate::vdso_update_pid_cpu(process.id, crate::smp::get_cpu_id() as u32);
         }
 
         // Lazily allocate FPU state buffer for the incoming thread (x86_64 only)
