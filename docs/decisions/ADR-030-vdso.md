@@ -1,7 +1,7 @@
 # ADR-030: vDSO (Virtual Dynamic Shared Object) — Kernel Data Page in Userspace
 
 ## Status
-Proposed — not yet implemented
+Accepted — implemented 2026-10-31
 
 ## Date
 2026-10-30
@@ -44,9 +44,9 @@ pub struct VdsoData {
 Total: ~64 bytes (fits in one cache line pair). Rest of page reserved.
 
 ### 2. Mapping Strategy
-- **Virtual address**: Fixed per-arch address in user space (x86_64: `0x0000_7FFF_FFFC_0000` — 256 KiB below `USER_MMAP_TOP`; aarch64/riscv64: similar)
-- **Mapped at**: `Isolate::new()` (process creation) — one page, read-only, user-accessible
-- **Single global physical page**: All processes map the **same** physical frame (COW not needed — kernel-only writes)
+- **Virtual address**: Fixed per-arch address in user space (x86_64: `0x0000_7FFF_FFFC_0000` — 256 KiB below `USER_MMAP_TOP`; aarch64/riscv64: similar). Each CPU gets a page at `VDSO_BASE + cpu_id * 4096`.
+- **Mapped at**: `Isolate::new()` (process creation) — 8 pages (one per CPU), read-only, user-accessible
+- **Per-CPU physical pages**: Each CPU has its own physical frame (8 × 4 KiB total). All processes map the same set of 8 frames (COW not needed — kernel-only writes)
 - **Page table flags**: `PRESENT | USER_ACCESSIBLE | NO_EXECUTE` (read-only, no execute)
 
 ### 3. Update Mechanism
@@ -79,7 +79,7 @@ Fallback to slow path (current implementation) if vDSO unavailable or seq indica
 ### Negative
 - **Seqlock complexity**: Userspace must handle retry on concurrent update (rare)
 - **Cache coherency**: All CPUs write same cache line on tick — false sharing
-  - Mitigation: Per-CPU vDSO pages or batch updates (deferred to A1.6 follow-up)
+  - Mitigation: Implemented per-CPU vDSO pages (8 × 4 KiB) — each CPU updates its own page, eliminating false sharing
 - **Security**: Kernel data in userspace — read-only, no pointers, no secrets
 - **Architecture work**: x86_64 first; aarch64/riscv64 need separate mapping code
 
