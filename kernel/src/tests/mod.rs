@@ -82,7 +82,6 @@ pub fn register_all() {
     abi_args::register();
     #[cfg(target_arch = "x86_64")]
     vdso_tests::register();
-    vdso_tests::register();
     elf_dyn_bounds::register();
     kernel_stress::register();
     kaslr_mapping::register();

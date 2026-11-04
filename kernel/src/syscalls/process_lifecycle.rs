@@ -1089,10 +1089,8 @@ pub fn sys_getcpu(cpu: *mut u32, node: *mut u32) -> u64 {
                     let seq2 = vdso.seq.load(Ordering::Acquire);
                     if seq == seq2 && seq % 2 == 0 {
                         break cpu;
-                    } else {
-                        seq = seq2;
-                        continue;
                     }
+                    seq = seq2;
                 }
             } else {
                 cpu_id

@@ -54,13 +54,13 @@ pub struct VdsoData {
     pub realtime_nsec: AtomicU32,
     _pad2: [u32; 1],
     pub tsc_freq_hz: AtomicU64,
-    pub tsc_mult: u32,
-    pub tsc_shift: u32,
+    pub tsc_mult: u32,      // Read-only after init (init_vdso)
+    pub tsc_shift: u32,     // Read-only after init (init_vdso)
     pub tsc_base: AtomicU64,
     pub pid: AtomicU64,
     pub cpu_id: AtomicU32,
     _pad3: [u32; 1],
-    _reserved: [u64; 496], // Fill to 4096 bytes
+    _reserved: [u64; 502], // Fill to 4096 bytes exactly (80 + 502*8 = 4096)
 }
 
 // Compile-time size check
@@ -230,6 +230,7 @@ pub fn vdso_page_ptr(cpu_id: usize) -> *const VdsoData {
 }
 
 /// Alias for vdso_page_ptr — kept for compatibility with tests.
+#[cfg(feature = "self_test")]
 #[inline]
 pub fn vdso_page_for_cpu(cpu_id: usize) -> *const VdsoData {
     vdso_page_ptr(cpu_id)

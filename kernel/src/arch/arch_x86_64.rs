@@ -149,7 +149,8 @@ impl Arch for X86_64Arch {
                 (ecx16 as u64) * 1_000_000
             } else {
                 // Fallback for QEMU/TCG: use 2400 MHz as default
-                2_400_000_000
+                const DEFAULT_CPU_FREQ_HZ: u64 = 2_400_000_000;
+                DEFAULT_CPU_FREQ_HZ
             };
 
             (fpu, simd, freq)

@@ -571,10 +571,6 @@ fn goto_late_init() -> ! {
     crate::serial_write("[DEBUG] calling task::scheduler::init\n");
     task::scheduler::init();
 
-    #[cfg(feature = "self_test")]
-    {
-        x86_64::instructions::interrupts::enable();
-    }
     #[cfg(target_arch = "aarch64")]
     unsafe {
         core::arch::asm!("msr daifclr, #2");
