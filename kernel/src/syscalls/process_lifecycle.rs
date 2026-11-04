@@ -1058,7 +1058,7 @@ pub fn sys_getpid() -> u64 {
             let vdso = unsafe { &*vdso_ptr };
             let mut seq = vdso.seq.load(Ordering::Acquire);
             loop {
-                let pid = vdso.pid.load(Ordering::Relaxed);
+                let pid = vdso.pid.load(Ordering::Acquire);
                 let seq2 = vdso.seq.load(Ordering::Acquire);
                 if seq == seq2 && seq % 2 == 0 {
                     return pid;

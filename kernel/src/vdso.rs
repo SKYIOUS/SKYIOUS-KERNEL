@@ -317,8 +317,8 @@ pub fn vdso_update_time() {
     let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
 
     // Start write: increment seq to odd (writer entering)
-    // Use AcqRel on fetch_add to order prior stores before the seq increment
-    let seq = vdso.seq.fetch_add(1, Ordering::AcqRel) + 1;
+    // Use Acquire to order prior loads, then make seq odd
+    let seq = vdso.seq.fetch_add(1, Ordering::Acquire) + 1;
     debug_assert!(seq % 2 == 1, "vDSO seq should be odd during write");
 
     // Update time fields with Release ordering (visible before final seq store)
@@ -349,7 +349,7 @@ pub fn vdso_update_pid_cpu(pid: u64, cpu_id: u32) {
     let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
 
     // Start write: increment seq to odd (writer entering)
-    let seq = vdso.seq.fetch_add(1, Ordering::AcqRel) + 1;
+    let seq = vdso.seq.fetch_add(1, Ordering::Acquire) + 1;
     debug_assert!(seq % 2 == 1);
 
     // Update data fields with Release ordering
