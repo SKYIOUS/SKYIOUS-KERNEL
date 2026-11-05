@@ -11,7 +11,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// High-resolution timer source.
 ///
 /// Implement this trait for HPET, ACPI PM timer, ARM generic timer, etc.
-pub trait Timer: Send + Sync {
+/// The `'static` bound is required because `as_any()` returns `&dyn Any`,
+/// which requires the implementor to be `'static`.
+pub trait Timer: Send + Sync + 'static {
     /// Read the current time in microseconds.
     fn ticks(&self) -> u64;
 
@@ -32,7 +34,10 @@ pub trait Timer: Send + Sync {
 
     /// Downcast to Any for frequency access (vDSO).
     /// Only implemented for concrete types (TscTimer).
-    fn as_any(&self) -> &dyn core::any::Any;
+    /// Default implementation panics — override for concrete types that need it (e.g., TscTimer).
+    fn as_any(&self) -> &dyn core::any::Any {
+        panic!("as_any() not implemented for this timer type; only TscTimer supports downcasting")
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -66,6 +71,11 @@ impl TscTimer {
         unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
         self.tsc_start
             .store(((hi as u64) << 32) | lo as u64, Ordering::Relaxed);
+    }
+
+    /// Get the TSC frequency in Hz.
+    pub fn tsc_frequency(&self) -> u64 {
+        self.tsc_freq.load(Ordering::Relaxed)
     }
 }
 
@@ -126,7 +136,7 @@ pub fn get_tsc_frequency() -> u64 {
         .lock()
         .as_ref()
         .and_then(|t| t.as_any().downcast_ref::<TscTimer>())
-        .map(|tsc| tsc.tsc_freq.load(Ordering::Relaxed))
+        .map(|tsc| tsc.tsc_frequency())
         .unwrap_or(0)
 }
 
