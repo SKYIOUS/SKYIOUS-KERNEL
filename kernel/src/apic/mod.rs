@@ -421,15 +421,17 @@ fn route_gsi(gsi: u8, vector: u8, active_low: bool, level: bool) {
 // ---------------------------------------------------------------------------
 
 /// Calibrated bus frequency in Hz. Set by LAPIC timer initialization.
+/// 0 means not yet calibrated.
 static BUS_FREQUENCY_HZ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Get the calibrated bus frequency in Hz.
-/// Returns 0 if not yet calibrated.
-pub fn get_bus_frequency_hz() -> u64 {
-    BUS_FREQUENCY_HZ.load(core::sync::atomic::Ordering::Relaxed) as u64
+/// Returns `None` if not yet calibrated.
+pub fn get_bus_frequency_hz() -> Option<u32> {
+    let freq = BUS_FREQUENCY_HZ.load(core::sync::atomic::Ordering::Acquire);
+    if freq == 0 { None } else { Some(freq) }
 }
 
 /// Set the calibrated bus frequency in Hz (called by LAPIC timer init).
 pub(crate) fn set_bus_frequency_hz(freq_hz: u32) {
-    BUS_FREQUENCY_HZ.store(freq_hz, core::sync::atomic::Ordering::Relaxed);
+    BUS_FREQUENCY_HZ.store(freq_hz, core::sync::atomic::Ordering::Release);
 }

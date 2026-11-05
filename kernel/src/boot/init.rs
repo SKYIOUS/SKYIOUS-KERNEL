@@ -170,7 +170,7 @@ pub fn init_devices() {
     crate::apic::init();
     
     // Get CPU frequency from APIC calibration (now available after APIC init)
-    let cpu_freq = crate::apic::get_bus_frequency_hz();
+    let cpu_freq = crate::apic::get_bus_frequency_hz().unwrap_or(0);
     crate::serial_write("[BOOT] CPU frequency: ");
     crate::serial_write_hex(cpu_freq as u64);
     crate::serial_write(" Hz\n");
