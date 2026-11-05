@@ -1056,10 +1056,12 @@ pub fn sys_getpid() -> u64 {
         if !vdso_ptr.is_null() {
             // SAFETY: vdso_page returns valid pointer if not null
             let vdso = unsafe { &*vdso_ptr };
-            let mut seq = vdso.seq.load(Ordering::Acquire);
+            let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
             loop {
-                let pid = vdso.pid.load(Ordering::Acquire);
-                let seq2 = vdso.seq.load(Ordering::Acquire);
+                // Data field uses Relaxed: on x86_64 (TSO), loads don't reorder with loads.
+                // The pid_cpu_seq seqlock counter uses Acquire which synchronizes with writer's Release.
+                let pid = vdso.pid.load(Ordering::Relaxed);
+                let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
                 if seq == seq2 && seq % 2 == 0 {
                     return pid;
                 }
@@ -1083,10 +1085,12 @@ pub fn sys_getcpu(cpu: *mut u32, node: *mut u32) -> u64 {
             if !vdso_ptr.is_null() {
                 // SAFETY: vdso_page returns valid pointer if not null
                 let vdso = unsafe { &*vdso_ptr };
-                let mut seq = vdso.seq.load(Ordering::Acquire);
+                let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
                 loop {
+                    // Data field uses Relaxed: on x86_64 (TSO), loads don't reorder with loads.
+                    // The pid_cpu_seq seqlock counter uses Acquire which synchronizes with writer's Release.
                     let cpu = vdso.cpu_id.load(Ordering::Relaxed);
-                    let seq2 = vdso.seq.load(Ordering::Acquire);
+                    let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
                     if seq == seq2 && seq % 2 == 0 {
                         break cpu;
                     }
@@ -1272,7 +1276,9 @@ pub fn sys_execve(
 
     // Map vDSO page into the new address space
     if let Some(mut mapper) = unsafe { new_as.mapper() } {
-        let _ = vdso_map_into(&mut mapper, &mut frame_allocator);
+        if let Err(()) = vdso_map_into(&mut mapper, &mut frame_allocator) {
+            crate::serial_write("[EXEC] vDSO mapping failed\n");
+        }
     }
 
     let process = match crate::task::process::Process::load_elf(&elf_data, new_as) {

@@ -24,6 +24,7 @@ struct vdso_data {
     uint32_t tsc_mult;
     uint32_t tsc_shift;
     volatile uint64_t tsc_base;
+    volatile uint64_t pid_cpu_seq;
     volatile uint64_t pid;
     volatile uint32_t cpu_id;
     uint32_t _pad3;
@@ -42,6 +43,16 @@ static inline uint64_t vdso_read_begin(const struct vdso_data *v) {
 
 static inline int vdso_read_retry(const struct vdso_data *v, uint64_t seq) {
     uint64_t seq2 = __atomic_load_n(&v->seq, __ATOMIC_ACQUIRE);
+    return (seq != seq2) || (seq & 1);
+}
+
+/* Seqlock read for pid_cpu_seq: retry until consistent (even seq, no change during read) */
+static inline uint64_t vdso_read_begin_pid_cpu(const struct vdso_data *v) {
+    return __atomic_load_n(&v->pid_cpu_seq, __ATOMIC_ACQUIRE);
+}
+
+static inline int vdso_read_retry_pid_cpu(const struct vdso_data *v, uint64_t seq) {
+    uint64_t seq2 = __atomic_load_n(&v->pid_cpu_seq, __ATOMIC_ACQUIRE);
     return (seq != seq2) || (seq & 1);
 }
 
@@ -96,27 +107,27 @@ int clock_gettime_realtime_vdso(long *sec, long *nsec) {
     return 0;
 }
 
-/* Read PID from vDSO */
+/* Read PID from vDSO (uses pid_cpu_seq seqlock) */
 int getpid_vdso(void) {
     const struct vdso_data *vdso = vdso_page_current();
     uint64_t seq;
     uint64_t pid;
     do {
-        seq = vdso_read_begin(vdso);
+        seq = vdso_read_begin_pid_cpu(vdso);
         pid = __atomic_load_n(&vdso->pid, __ATOMIC_RELAXED);
-    } while (vdso_read_retry(vdso, seq));
+    } while (vdso_read_retry_pid_cpu(vdso, seq));
     return (int)pid;
 }
 
-/* Read CPU ID from vDSO */
+/* Read CPU ID from vDSO (uses pid_cpu_seq seqlock) */
 int getcpu_vdso(void) {
     const struct vdso_data *vdso = vdso_page_current();
     uint64_t seq;
     uint32_t cpu;
     do {
-        seq = vdso_read_begin(vdso);
+        seq = vdso_read_begin_pid_cpu(vdso);
         cpu = __atomic_load_n(&vdso->cpu_id, __ATOMIC_RELAXED);
-    } while (vdso_read_retry(vdso, seq));
+    } while (vdso_read_retry_pid_cpu(vdso, seq));
     return (int)cpu;
 }
 
@@ -150,18 +161,23 @@ void test_all_cpu_pages(void) {
     for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
         const struct vdso_data *vdso = vdso_page_for_cpu(cpu);
         
-        // Check cpu_id field
-        uint32_t page_cpu = __atomic_load_n(&vdso->cpu_id, __ATOMIC_RELAXED);
-        if (page_cpu != (uint32_t)cpu) {
-            printf("  CPU %d page: cpu_id=%u (expected %d) MISMATCH\n", cpu, page_cpu, cpu);
+        // Check cpu_id field (uses pid_cpu_seq)
+        uint64_t seq = vdso_read_begin_pid_cpu(vdso);
+        uint32_t page_cpu = __atomic_load_n(&vdso->cpu_id, __ATOMIC_ACQUIRE);
+        if (!vdso_read_retry_pid_cpu(vdso, seq)) {
+            if (page_cpu != (uint32_t)cpu) {
+                printf("  CPU %d page: cpu_id=%u (expected %d) MISMATCH\n", cpu, page_cpu, cpu);
+            } else {
+                printf("  CPU %d page: cpu_id=%u OK\n", cpu, page_cpu);
+            }
         } else {
-            printf("  CPU %d page: cpu_id=%u OK\n", cpu, page_cpu);
+            printf("  CPU %d page: cpu_id read retry\n", cpu);
         }
         
-        // Check time fields are readable
-        uint64_t seq = vdso_read_begin(vdso);
-        uint64_t sec = __atomic_load_n(&vdso->monotonic_sec, __ATOMIC_RELAXED);
-        uint32_t nsec = __atomic_load_n(&vdso->monotonic_nsec, __ATOMIC_RELAXED);
+        // Check time fields are readable (uses seq)
+        seq = vdso_read_begin(vdso);
+        uint64_t sec = __atomic_load_n(&vdso->monotonic_sec, __ATOMIC_ACQUIRE);
+        uint32_t nsec = __atomic_load_n(&vdso->monotonic_nsec, __ATOMIC_ACQUIRE);
         if (!vdso_read_retry(vdso, seq)) {
             printf("  CPU %d page: time=%lu.%09u\n", cpu, sec, nsec);
         } else {

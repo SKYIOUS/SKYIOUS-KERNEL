@@ -26,15 +26,18 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
             let vdso = unsafe { &*vdso_ptr };
             let mut seq = vdso.seq.load(Ordering::Acquire);
             loop {
+                // Data fields use Relaxed: on x86_64 (TSO), loads don't reorder with loads.
+                // The seqlock counter (seq) uses Acquire which synchronizes with the writer's Release.
+                // This matches Linux vDSO seqlock reader pattern.
                 let (sec, nsec) = if clock_id == CLOCK_MONOTONIC {
                     (
-                        vdso.monotonic_sec.load(Ordering::Acquire) as i64,
-                        vdso.monotonic_nsec.load(Ordering::Acquire) as i64,
+                        vdso.monotonic_sec.load(Ordering::Relaxed) as i64,
+                        vdso.monotonic_nsec.load(Ordering::Relaxed) as i64,
                     )
                 } else {
                     (
-                        vdso.realtime_sec.load(Ordering::Acquire) as i64,
-                        vdso.realtime_nsec.load(Ordering::Acquire) as i64,
+                        vdso.realtime_sec.load(Ordering::Relaxed) as i64,
+                        vdso.realtime_nsec.load(Ordering::Relaxed) as i64,
                     )
                 };
                 let seq2 = vdso.seq.load(Ordering::Acquire);

@@ -138,7 +138,8 @@ fn state_create_address_space(
     // Map vDSO page into the address space (x86_64 only)
     #[cfg(target_arch = "x86_64")]
     if let Some(mut mapper) = unsafe { address_space.mapper() } {
-        let _ = vdso_map_into(&mut mapper, &mut frame_allocator);
+        vdso_map_into(&mut mapper, &mut frame_allocator)
+            .map_err(|_| BootError::VdsoMappingFailed)?;
     }
     
     let mut process =

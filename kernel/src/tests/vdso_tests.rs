@@ -1,8 +1,8 @@
 //! vDSO (Virtual Dynamic Shared Object) self-tests.
 
-use crate::vdso::{vdso_page, vdso_virt_addr, vdso_virt_addr_for_cpu, MAX_CPUS};
 use crate::syscalls::process_lifecycle::sys_getpid;
-use crate::task::scheduler::MAX_CPUS as SCHED_MAX_CPUS;
+use crate::task::scheduler::MAX_CPUS;
+use crate::vdso::{vdso_page, vdso_virt_addr, vdso_virt_addr_for_cpu};
 use core::sync::atomic::Ordering;
 
 /// Verify vDSO page is mapped at the expected virtual address.
@@ -26,14 +26,14 @@ pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
         return Err("vDSO seq should be even (consistent) at start");
     }
     
-    // Verify TSC frequency is set (use SeqCst to ensure full synchronization with init)
-    let tsc_freq = vdso.tsc_freq_hz.load(Ordering::SeqCst);
+    // Verify TSC frequency is set (Acquire synchronizes with init's Release store)
+    let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
     if tsc_freq == 0 {
         return Err("vDSO TSC frequency not initialized");
     }
     
-    // Verify cpu_id matches current CPU (use SeqCst to synchronize with init)
-    let cpu_id = vdso.cpu_id.load(Ordering::SeqCst);
+    // Verify cpu_id matches current CPU (Acquire synchronizes with init's Release store)
+    let cpu_id = vdso.cpu_id.load(Ordering::Acquire);
     if cpu_id != crate::smp::get_cpu_id() as u32 {
         return Err("vDSO cpu_id mismatch");
     }
@@ -51,7 +51,7 @@ pub fn test_vdso_all_cpus_mapped() -> Result<(), &'static str> {
         // SAFETY: vdso_page_for_cpu returns valid pointer if not null
         let vdso = unsafe { &*vdso_ptr };
         
-        if vdso.cpu_id.load(Ordering::SeqCst) != cpu_id as u32 {
+        if vdso.cpu_id.load(Ordering::Acquire) != cpu_id as u32 {
             return Err("vDSO cpu_id mismatch for CPU");
         }
         
@@ -72,11 +72,11 @@ pub fn test_vdso_getpid() -> Result<(), &'static str> {
     // SAFETY: vdso_page returns valid pointer if not null
     let vdso = unsafe { &*vdso_ptr };
     
-    // Read PID via vDSO fast path
-    let mut seq = vdso.seq.load(Ordering::Acquire);
+    // Read PID via vDSO fast path (uses pid_cpu_seq seqlock)
+    let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
     let vdso_pid = loop {
         let pid = vdso.pid.load(Ordering::Relaxed);
-        let seq2 = vdso.seq.load(Ordering::Acquire);
+        let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
         if seq == seq2 && seq % 2 == 0 {
             break pid;
         }
@@ -102,11 +102,11 @@ pub fn test_vdso_getcpu() -> Result<(), &'static str> {
     // SAFETY: vdso_page returns valid pointer if not null
     let vdso = unsafe { &*vdso_ptr };
     
-    // Read CPU via vDSO fast path
-    let mut seq = vdso.seq.load(Ordering::Acquire);
+    // Read CPU via vDSO fast path (uses pid_cpu_seq seqlock)
+    let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
     let vdso_cpu = loop {
         let cpu = vdso.cpu_id.load(Ordering::Relaxed);
-        let seq2 = vdso.seq.load(Ordering::Acquire);
+        let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
         if seq == seq2 && seq % 2 == 0 {
             break cpu;
         }
@@ -114,7 +114,7 @@ pub fn test_vdso_getcpu() -> Result<(), &'static str> {
     };
     
     // CPU should be within valid range
-    let max_cpus = SCHED_MAX_CPUS as u32;
+    let max_cpus = MAX_CPUS as u32;
     if vdso_cpu >= max_cpus {
         return Err("vDSO CPU ID out of range");
     }
@@ -243,10 +243,10 @@ pub fn test_vdso_seqlock_retry() -> Result<(), &'static str> {
     }
     
     // Verify we can successfully read with seqlock (no concurrent writes happening)
-    let mut seq = vdso.seq.load(Ordering::Acquire);
+    let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
     let _pid = loop {
         let pid = vdso.pid.load(Ordering::Relaxed);
-        let seq2 = vdso.seq.load(Ordering::Acquire);
+        let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
         if seq == seq2 && seq % 2 == 0 {
             break pid;
         }
@@ -260,11 +260,12 @@ pub fn test_vdso_seqlock_retry() -> Result<(), &'static str> {
     // interfering with the timer tick on the same CPU, we instead
     // verify the read protocol logic directly:
     
+    // Test time fields with seq seqlock
     // 1. Read seq (acquire)
     let seq1 = vdso.seq.load(Ordering::Acquire);
     
-    // 2. Read data (pid in this case)
-    let _pid = vdso.pid.load(Ordering::Relaxed);
+    // 2. Read data (monotonic time in this case)
+    let _sec = vdso.monotonic_sec.load(Ordering::Relaxed);
     
     // 3. Read seq again (acquire)
     let seq2 = vdso.seq.load(Ordering::Acquire);
@@ -280,10 +281,23 @@ pub fn test_vdso_seqlock_retry() -> Result<(), &'static str> {
         // Consistent read - seq is even and unchanged
     }
     
-    // The above verifies the seqlock protocol logic is sound.
-    // In practice, the timer tick updates the vDSO page with proper
-    // seqlock writes (odd -> write -> even), and readers correctly
-    // retry on odd/inconsistent seq values.
+    // Test PID/CPU fields with pid_cpu_seq seqlock
+    let seq1 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+    let _pid = vdso.pid.load(Ordering::Relaxed);
+    let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+    
+    if seq1 != seq2 {
+        // Data changed during read - would retry
+    } else if seq1 % 2 != 0 {
+        // Writer in progress (odd seq) - would retry
+    } else {
+        // Consistent read
+    }
+    
+    // The above verifies the seqlock protocol logic is sound for both seqlocks.
+    // In practice, the timer tick updates time fields with seq seqlock,
+    // context switch updates PID/CPU with pid_cpu_seq seqlock,
+    // and readers correctly retry on odd/inconsistent seq values.
     
     Ok(())
 }
