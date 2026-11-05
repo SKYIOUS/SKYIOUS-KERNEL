@@ -33,10 +33,10 @@ pub trait Timer: Send + Sync + 'static {
     fn calibrate(&self);
 
     /// Downcast to Any for frequency access (vDSO).
-    /// Only implemented for concrete types (TscTimer).
-    /// Default implementation panics — override for concrete types that need it (e.g., TscTimer).
-    fn as_any(&self) -> &dyn core::any::Any {
-        panic!("as_any() not implemented for this timer type; only TscTimer supports downcasting")
+    /// Only implemented for concrete types that support downcasting (e.g., TscTimer).
+    /// Returns None if the timer type does not support downcasting.
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
     }
 }
 
@@ -96,6 +96,7 @@ impl Timer for TscTimer {
         let lo: u32;
         let hi: u32;
         // SAFETY: RDTSC reads the time stamp counter into EDX:EAX.
+        // Non-privileged instruction, safe from any privilege level.
         unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
         let now = ((hi as u64) << 32) | lo as u64;
         let start = self.tsc_start.load(Ordering::Relaxed);
@@ -110,8 +111,8 @@ impl Timer for TscTimer {
     }
     fn calibrate(&self) {}
 
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
     }
 }
 
@@ -135,7 +136,8 @@ pub fn get_tsc_frequency() -> u64 {
     CURRENT_TIMER
         .lock()
         .as_ref()
-        .and_then(|t| t.as_any().downcast_ref::<TscTimer>())
+        .and_then(|t| t.as_any())
+        .and_then(|a| a.downcast_ref::<TscTimer>())
         .map(|tsc| tsc.tsc_frequency())
         .unwrap_or(0)
 }

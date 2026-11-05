@@ -63,6 +63,9 @@ pub fn get() -> PlatformInfo {
 }
 
 /// Update the CPU frequency in the platform info.
+///
+/// This should be called after CPU frequency calibration (e.g., from TSC calibration)
+/// to keep the platform info in sync with the timer.
 pub fn set_cpu_frequency(freq_hz: u64) {
     let mut platform = PLATFORM.lock();
     platform.cpu_freq_hz = freq_hz;
