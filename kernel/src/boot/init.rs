@@ -140,8 +140,8 @@ pub fn init_architecture() {
     crate::serial_write("[BOOT] HAL init...\n");
     let platform_info = crate::arch::CurrentArch::probe_platform();
     crate::hal::platform::init(platform_info);
-    crate::arch::CurrentArch::init_hal_irq();
-    crate::arch::CurrentArch::init_hal_timer();
+    <crate::arch::CurrentArch as crate::arch::Arch>::init_hal_irq();
+    <crate::arch::CurrentArch as crate::arch::Arch>::init_hal_timer();
     crate::serial_write("[BOOT] HAL init done\n");
 
     crate::serial_write("[BOOT] frame tracker init...\n");
@@ -161,8 +161,7 @@ pub fn init_architecture() {
 /// # Safety
 /// Must be called after memory, heap, GDT, IDT, and HAL are initialized.
 #[cfg(not(target_arch = "aarch64"))]
-pub fn init_devices() {
-    use crate::arch::Arch;
+pub unsafe fn init_devices() {
     crate::serial_write("[BOOT] ACPI init...\n");
     crate::acpi::init(crate::limine::rsdp_addr());
     
@@ -174,10 +173,14 @@ pub fn init_devices() {
     crate::serial_write("[BOOT] CPU frequency: ");
     crate::serial_write_hex(cpu_freq as u64);
     crate::serial_write(" Hz\n");
+    
+    if cpu_freq == 0 {
+        crate::serial_write("[BOOT] WARNING: CPU frequency calibration failed, timing will be broken!\n");
+    }
     crate::hal::platform::set_cpu_frequency(cpu_freq as u64);
     
     // Re-initialize TSC timer now that platform info has CPU frequency
-    crate::arch::CurrentArch::init_hal_timer();
+    <crate::arch::CurrentArch as crate::arch::Arch>::init_hal_timer();
     #[cfg(feature = "self_test")]
     crate::tests::run_all();
     #[cfg(feature = "smp")]

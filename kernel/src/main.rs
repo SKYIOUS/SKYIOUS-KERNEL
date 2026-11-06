@@ -442,7 +442,9 @@ pub extern "C" fn post_kaslr_continue() -> ! {
     tests::init::test_memory_allocations();
 
     #[cfg(not(target_arch = "aarch64"))]
-    boot::init::init_devices();
+    unsafe {
+        boot::init::init_devices();
+    }
     #[cfg(target_arch = "aarch64")]
     {
         serial_write("[BOOT] aarch64 platform init...\n");

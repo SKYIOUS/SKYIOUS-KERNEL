@@ -63,7 +63,7 @@ impl TscTimer {
 
     /// Initialize the timer with the given CPU frequency.
     pub fn init(&self, cpu_freq_hz: u64) {
-        self.tsc_freq.store(cpu_freq_hz, Ordering::Relaxed);
+        self.set_frequency(cpu_freq_hz);
         let lo: u32;
         let hi: u32;
         // SAFETY: RDTSC reads the time stamp counter into EDX:EAX.
@@ -73,8 +73,16 @@ impl TscTimer {
             .store(((hi as u64) << 32) | lo as u64, Ordering::Relaxed);
     }
 
+    /// Update the TSC frequency without resetting the time base.
+    /// Useful when frequency is calibrated after initial registration.
+    pub fn set_frequency(&self, freq_hz: u64) {
+        // Relaxed is safe: paired with release store in init() via mutex synchronization.
+        self.tsc_freq.store(freq_hz, Ordering::Relaxed);
+    }
+
     /// Get the TSC frequency in Hz.
     pub fn tsc_frequency(&self) -> u64 {
+        // Relaxed is safe: paired with release store in init() via mutex synchronization.
         self.tsc_freq.load(Ordering::Relaxed)
     }
 }
@@ -100,6 +108,7 @@ impl Timer for TscTimer {
         unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
         let now = ((hi as u64) << 32) | lo as u64;
         let start = self.tsc_start.load(Ordering::Relaxed);
+        // freq >= 1_000_000 is guaranteed by the check above, so division is safe
         (now.wrapping_sub(start)) / (freq / 1_000_000)
     }
 
@@ -120,7 +129,7 @@ impl Timer for TscTimer {
 }
 
 /// Global timer instance. Set once during boot.
-static CURRENT_TIMER: Mutex<Option<Arc<dyn Timer>>> = Mutex::new(None);
+pub static CURRENT_TIMER: Mutex<Option<Arc<dyn Timer>>> = Mutex::new(None);
 
 /// Register the system's timer source.
 pub fn register_timer(timer: Arc<dyn Timer>) {

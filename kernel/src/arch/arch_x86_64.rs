@@ -181,11 +181,31 @@ impl Arch for X86_64Arch {
 
     fn init_hal_timer() {
         let pf = crate::hal::platform::get();
-        let tsc_timer = crate::hal::timer::TscTimer::new();
-        if pf.cpu_freq_hz > 0 {
-            tsc_timer.init(pf.cpu_freq_hz);
+        
+        // Check if timer already registered (via CURRENT_TIMER)
+        let timer_lock = crate::hal::timer::CURRENT_TIMER.lock();
+        if let Some(timer) = timer_lock.as_ref() {
+            // Timer exists - try to downcast and update frequency
+            if let Some(tsc) = timer.as_any().and_then(|a| a.downcast_ref::<crate::hal::timer::TscTimer>()) {
+                if pf.cpu_freq_hz > 0 {
+                    tsc.init(pf.cpu_freq_hz);
+                    crate::serial_write("[HAL] init_hal_timer: updated existing TSC timer frequency\n");
+                } else {
+                    crate::serial_write("[HAL] init_hal_timer: CPU frequency still unknown\n");
+                }
+                return;
+            }
         }
-        crate::hal::timer::register_timer(Arc::new(tsc_timer));
+        
+        // No existing timer - create new only if frequency is known
+        if pf.cpu_freq_hz > 0 {
+            let tsc_timer = crate::hal::timer::TscTimer::new();
+            tsc_timer.init(pf.cpu_freq_hz);
+            crate::serial_write("[HAL] init_hal_timer: registered new TSC timer with frequency\n");
+            crate::hal::timer::register_timer(Arc::new(tsc_timer));
+        } else {
+            crate::serial_write("[HAL] init_hal_timer: CPU frequency unknown, skipping registration\n");
+        }
     }
 }
 
