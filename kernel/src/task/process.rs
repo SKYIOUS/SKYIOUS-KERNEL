@@ -1156,6 +1156,9 @@ impl Process {
         push_u64(7, &mut rsp)?; // type
         push_u64(0, &mut rsp)?; // value = no interpreter loaded yet
         // AT_SYSINFO_EHDR (vDSO address) - Linux uses 33
+        // This kernel uses per-CPU vDSO pages at VDSO_BASE + cpu_id * 4096.
+        // AT_SYSINFO_EHDR points to VDSO_BASE (CPU 0's page). Userspace computes
+        // per-CPU page addresses as VDSO_BASE + cpu_id * 4096.
         push_u64(33, &mut rsp)?; // type = AT_SYSINFO_EHDR
         #[cfg(target_arch = "x86_64")]
         push_u64(crate::vdso::VDSO_BASE, &mut rsp)?; // value = vDSO base virtual address

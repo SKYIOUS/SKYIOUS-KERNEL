@@ -96,7 +96,8 @@ impl LocalApic {
         ));
 
         // Store calibrated frequency for platform info and vDSO
-        crate::apic::set_bus_frequency_hz(bus_freq);
+        // Only set on first calibration; ignore subsequent calibrations to avoid noise
+        let _ = crate::apic::set_bus_frequency_hz_once(bus_freq);
 
         count
     }

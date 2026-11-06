@@ -90,7 +90,7 @@ impl Default for TscTimer {
 impl Timer for TscTimer {
     fn ticks(&self) -> u64 {
         let freq = self.tsc_freq.load(Ordering::Relaxed);
-        if freq == 0 {
+        if freq < 1_000_000 {
             return 0;
         }
         let lo: u32;
@@ -109,10 +109,9 @@ impl Timer for TscTimer {
     fn resolution_ns(&self) -> u64 {
         1
     }
-    fn calibrate(&self) {}
-
-    fn as_any(&self) -> Option<&dyn core::any::Any> {
-        Some(self)
+    fn calibrate(&self) {
+        // TSC calibration is performed externally via APIC bus frequency measurement.
+        // The measured frequency is then passed to init() or set_cpu_frequency().
     }
 }
 

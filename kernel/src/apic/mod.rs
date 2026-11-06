@@ -432,6 +432,30 @@ pub fn get_bus_frequency_hz() -> Option<u32> {
 }
 
 /// Set the calibrated bus frequency in Hz (called by LAPIC timer init).
-pub(crate) fn set_bus_frequency_hz(freq_hz: u32) {
-    BUS_FREQUENCY_HZ.store(freq_hz, core::sync::atomic::Ordering::Release);
+/// Only sets the value if not already calibrated (first writer wins).
+/// Returns an error if freq_hz is 0 or unreasonably large.
+pub(crate) fn set_bus_frequency_hz(freq_hz: u32) -> Result<(), &'static str> {
+    if freq_hz == 0 {
+        return Err("bus frequency cannot be 0");
+    }
+    // Sanity check: bus frequency should be in a reasonable range (e.g., 100MHz - 5GHz)
+    if freq_hz < 100_000_000 || freq_hz > 4_000_000_000 {
+        return Err("bus frequency out of expected range");
+    }
+    BUS_FREQUENCY_HZ
+        .compare_exchange(
+            0,
+            freq_hz,
+            core::sync::atomic::Ordering::Release,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .ok();
+    Ok(())
+}
+
+/// Set the calibrated bus frequency in Hz (called by LAPIC timer init).
+/// Only sets the value if not already calibrated (first writer wins).
+/// Returns an error if freq_hz is 0 or unreasonably large.
+pub(crate) fn set_bus_frequency_hz_once(freq_hz: u32) -> Result<(), &'static str> {
+    set_bus_frequency_hz(freq_hz)
 }

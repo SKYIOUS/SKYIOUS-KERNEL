@@ -135,6 +135,7 @@ impl PerCpuScheduler {
                 .current_process
                 .store(process.id, core::sync::atomic::Ordering::Relaxed);
             // Update vDSO with current PID and CPU ID
+            #[cfg(target_arch = "x86_64")]
             crate::vdso_update_pid_cpu(process.id, crate::smp::get_cpu_id() as u32);
         }
 

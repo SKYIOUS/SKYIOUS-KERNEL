@@ -66,7 +66,11 @@ pub fn get() -> PlatformInfo {
 ///
 /// This should be called after CPU frequency calibration (e.g., from TSC calibration)
 /// to keep the platform info in sync with the timer.
+///
+/// # Panics
+/// Panics if `freq_hz` is less than 1 MHz, as this would break timer calculations.
 pub fn set_cpu_frequency(freq_hz: u64) {
+    assert!(freq_hz >= 1_000_000, "CPU frequency must be at least 1 MHz");
     let mut platform = PLATFORM.lock();
     platform.cpu_freq_hz = freq_hz;
 }
