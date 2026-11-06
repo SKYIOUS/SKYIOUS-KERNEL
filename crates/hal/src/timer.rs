@@ -113,6 +113,10 @@ impl Timer for TscTimer {
         // TSC calibration is performed externally via APIC bus frequency measurement.
         // The measured frequency is then passed to init() or set_cpu_frequency().
     }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
 }
 
 /// Global timer instance. Set once during boot.
