@@ -46,7 +46,16 @@ impl Arch for RiscV64Arch {
     }
 
     fn probe_platform() -> PlatformInfo {
-        unimplemented!("RISC-V not yet supported")
+        PlatformInfo {
+            arch: PlatformArch::RiscV64,
+            cpu_count: 1,
+            cpu_freq_hz: 0,
+            ram_size: 0,
+            has_fpu: false,
+            has_simd: false,
+            tsc_invariant: false,
+            boot_time_ticks: 0,
+        }
     }
 
     fn init_hal_irq() {

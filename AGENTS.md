@@ -49,21 +49,21 @@ invalidates a statement in these docs updates them in the same commit.
 
 ## Architecture summary
 Rust, `#![no_std]`, edition 2021, nightly. Monolithic kernel (ADR-001).
-- **x86_64**: Limine bootloader, UEFI, KASLR, SYSCALL/SYSRET, SMP via SIPI
-- **aarch64**: EL1/EL0, GICv2, PSCI CPU_ON
-- **riscv64**: RV64GC, SBI, PLIC
-- **Memory**: Buddy allocator, slab, page tables (COW via isolate VM), swap, frame tracking, stack allocator
+- **x86_64**: Limine bootloader, UEFI, KASLR (relocations broken, see issues.md A-6), SYSCALL/SYSRET, SMP via SIPI
+- **aarch64**: EL1/EL0, GICv2, PSCI CPU_ON — **build fails** (x86_64-only asm in vahi-sync, see issues.md P-1)
+- **riscv64**: RV64GC, SBI, PLIC — **not built in CI**, status unknown
+- **Memory**: Buddy allocator, slab, page tables (COW via isolate VM), swap (in-memory stub), frame tracking, stack allocator
 - **Scheduler**: Stride heap + SCHED_FIFO/SCHED_RR + CPU affinity + work stealing
-- **Filesystems**: SkyFS (journaling), ext2 (R+W), ext4 (R/O), FAT32, TarFS, ramfs/tmpfs, devfs, ctlfs, FUSE bridge
+- **Filesystems**: SkyFS (journaling, no crash testing), ext2 (R+W, dir traversal unbounded F-1), ext4 (R/O stub), FAT32 (via fatfs), TarFS, ramfs/tmpfs, devfs, ctlfs, FUSE bridge
 - **Networking**: smoltcp TCP/UDP, DHCP, DNS, Unix sockets, zero-copy, RSS, TSO, TCP Reno congestion control
-- **Security**: SMAP/SMEP/UMIP, KASLR, CFI, seccomp BPF, Landlock, capabilities, audit
-- **Hypervisor**: VMX/SVM, EPT/NPT, vCPU, 10+ VM syscalls
-- **eBPF**: Full VM, verifier, JIT (x86_64), 4 helpers, maps
-- **ASH**: Verifier, interpreter, manager, hooks (net, syscall), JIT via ebpf/jit.rs, W^X exec-memory allocator
-- **GUI**: Compositor at 30 FPS, window manager, terminal, splash, notifications, clipboard
-- **Drivers**: NVMe, E1000, xHCI, PS/2, VirtIO, HDA audio, VirtIO-GPU, AHCI, PATA
-- **IPC**: Pipes, sockets, eventfd, message queues, shared memory
-- **Async I/O**: io_uring, epoll, timerfd, signalfd
+- **Security**: SMAP/SMEP/UMIP (CR4 bits only), KASLR (obfuscation only, relocations never applied), CFI ("2 static targets" — not real CFI), seccomp BPF (verifier exists, no filter execution), Landlock (structures defined, no enforcement), capabilities (data structures exist, enforcement minimal), audit (serial output only)
+- **Hypervisor**: VMX/SVM structures, EPT/NPT, vCPU, 10+ VM syscall numbers — **stub, no real VMX/SVM execution**
+- **eBPF**: VM, verifier, JIT (x86_64), 4 helpers, maps — **partial, feature-gated**
+- **ASH**: Verifier, interpreter, manager, hooks (net, syscall), JIT via ebpf/jit.rs, W^X exec-memory allocator — **feature-gated, syscall handlers unreachable**
+- **GUI**: Compositor (10 dead fns including core entry points), window manager, terminal, splash, notifications, clipboard — **partial, not usable as desktop**
+- **Drivers**: NVMe (MSI broken A-3, queue bugs N-1/N-2), E1000 (IRQ path allocates in IRQ context E-1), xHCI (polled only, IMAN bug X-2), PS/2, VirtIO, HDA audio (untested), VirtIO-GPU (untested), AHCI (completion wait unbounded A-1, CTBA bug A-2), PATA
+- **IPC**: Pipes, sockets, eventfd, message queues (mqueue works), shared memory
+- **Async I/O**: io_uring (stub: setup allocates, enter/register return 0), epoll (basic), timerfd (basic), signalfd (basic)
 - **Crypto**: SHA-256, HMAC, PBKDF2, entropy (RDRAND+TSC)
 - **Objects**: KernelObject trait, handle table, security, namespace
 
@@ -71,17 +71,17 @@ Module map:
 ```
 kernel/src/
   arch/{arch_x86_64,arch_aarch64,arch_riscv64}.rs  # Architecture-specific code
-  apic/{mod,ioapic,lapic,msi,errata}.rs              # APIC subsystem
-  ash/{mod,manager,runtime,syscalls,verifier,hooks}  # ASH scripting engine
+  apic/{mod,ioapic,lapic,msi,errata}.rs              # APIC subsystem (kernel copy live, crate duplicate)
+  ash/{mod,manager,runtime,syscalls,verifier,hooks}  # ASH scripting engine (feature-gated)
   boot/{mod,init,logger,state,tasks}.rs              # Boot state machine
-  compositor/{mod,blend,blur,flush,scene,shadow,vsync}.rs  # GUI compositor
+  compositor/{mod,blend,blur,flush,scene,shadow,vsync}.rs  # GUI compositor (10 dead fns)
   crypto/{mod,entropy,sha256}.rs                     # Crypto primitives
   debug/{mod,symbols}.rs                             # Debug utilities
   drivers/{mod,storage,net,usb,graphics,audio,input}.rs  # Device drivers
-  ebpf/{mod,vm,verifier,jit,maps,helpers,tnum}.rs   # eBPF subsystem
+  ebpf/{mod,vm,verifier,jit,maps,helpers,tnum}.rs   # eBPF subsystem (feature-gated)
   gui/{mod,drawing,filemanager,input,menu,mouse,paint,shell,splash,surface,terminal,wallpaper,widgets,window,windows}.rs  # GUI stack
   hal/{mod,cpu,x86_64,aarch64,riscv64,dma,irq,mutex,platform,exec_mem}.rs  # HAL
-  hypervisor/{mod,vmx,svm,ept,memory,vcpu,sched,hypercalls,boot,devices}.rs  # Hypervisor
+  hypervisor/{mod,vmx,svm,ept,memory,vcpu,sched,hypercalls,boot,devices}.rs  # Hypervisor (feature-gated, stub)
   interrupts/{mod,irq,exceptions,page_fault,diag}.rs  # Interrupt handling
   ipc/mod.rs                                         # IPC primitives
   memory/mod.rs                                      # Memory management (buddy, slab, paging, swap)
@@ -90,31 +90,29 @@ kernel/src/
   pci/mod.rs                                         # PCI subsystem
   shell/{mod,commands}                               # Kernel shell
   sync/{mod,cfi,rcu}.rs                              # Sync primitives (IrqSafeMutex, CFI, RCU)
-  syscalls/{mod,dispatch,numbers,net_*,process_*,fs_*,ipc_*,...}.rs  # Syscall implementations
+  syscalls/{mod,dispatch,numbers,net_*,process_*,fs_*,ipc_*,...}.rs  # Syscall implementations (~130 dispatched)
   task/{mod,process,thread,oom,executor,keyboard,lock,scheduler/}  # Task management
-  tests/{mod,apic,benchmarks,contract,ebpf,ext2_fs,fuzzer,futex,harness,init,memory,new_features,panic_path,pata_read,process_lifecycle,scheduler,skyfs,stress,sync,vfs}.rs  # Test suite
-  verified/{mod,concurrency,journal,scheduler,runner}.rs  # Verified proofs
+  tests/{mod,apic,benchmarks,contract,ebpf,ext2_fs,fuzzer,harness,init,memory,new_features,panic_path,pata_read,process_lifecycle,scheduler,skyfs,stress,sync,vfs}.rs  # Test suite
+  verified/{mod,concurrency,journal,scheduler,runner}.rs  # Verified proofs (feature-gated)
   vfs/mod.rs                                         # VFS layer
-crates/                                              # Extracted crates (19 total)
-  sync/       vahi-sync       — IrqSafeMutex (90 lines)
-  memory/     vahi-memory     — buddy, slab, paging, swap, frame_info
-  crypto/     vahi-crypto     — SHA-256, HMAC, PBKDF2, entropy (308 lines)
-  hal/        vahi-hal        — DMA, IRQ controller, platform, timer
+crates/                                              # 17 workspace crates (gdt NOT in workspace, sync is kernel-internal)
+  memory/     vahi-memory     — frame_info only (buddy/slab/paging in kernel)
+  crypto/     vahi-crypto     — SHA-256, HMAC, PBKDF2, entropy (478 lines, 9 tests)
+  hal/        vahi-hal        — DMA, IRQ controller, platform, timer (256 lines)
   limine/     vahi-limine     — Limine boot protocol (140 lines)
-  apic/       vahi-apic       — Local APIC, I/O APIC, MSI (1072 lines)
-  types/      vahi-types      — Shared types, Errno, credentials, VMA
-  arch/       vahi-arch       — x86_64, aarch64, HAL
-  gdt/        vahi-gdt        — GDT/IDT/TSS management
-  task/       vahi-task       — process, thread, scheduler, OOM
-  syscalls/   vahi-syscalls   — syscall numbers, dispatch, ptrace/seccomp/namespaces
-  vfs/        vahi-vfs        — VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE
-  net/        vahi-net        — TCP Reno, UDP, DHCP, DNS, Unix sockets
-  drivers/    vahi-drivers    — NVMe, E1000, VirtIO, PS/2, xHCI, HDA, GPU
-  acpi/       vahi-acpi       — ACPI tables, MADT, PRT
-  objects/    vahi-objects    — KernelObject trait, handle table, security
-  ipc/        vahi-ipc        — IPC primitives
-  pci/        vahi-pci        — PCI subsystem
-  verified/   vahi-verified   — Verified proofs (concurrency, journal, scheduler, runner)
+  apic/       vahi-apic       — Local APIC, I/O APIC, MSI (865 lines, trait-based providers)
+  types/      vahi-types      — Shared types, Errno, credentials, VMA, trait interfaces (532 lines)
+  arch/       vahi-arch       — x86_64, aarch64, HAL (141 lines, scaffolded)
+  task/       vahi-task       — process, thread, scheduler, OOM (652+ lines, scaffolded)
+  syscalls/   vahi-syscalls   — syscall numbers, dispatch, ptrace/seccomp/namespaces (200+ lines, scaffolded)
+  vfs/        vahi-vfs        — VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE (6861 lines, scaffolded+code)
+  net/        vahi-net        — TCP Reno, UDP, DHCP, DNS, Unix sockets (500+ lines, scaffolded)
+  drivers/    vahi-drivers    — NVMe, E1000, VirtIO, PS/2, xHCI, HDA, GPU (600+ lines, scaffolded)
+  acpi/       vahi-acpi       — ACPI tables, MADT, PRT (220 lines, scaffolded)
+  objects/    vahi-objects    — KernelObject trait, handle table, security (660 lines, extracted)
+  ipc/        vahi-ipc        — IPC primitives (120 lines, scaffolded)
+  pci/        vahi-pci        — PCI subsystem (150 lines, scaffolded)
+  verified/   vahi-verified   — Verified proofs (feature-gated, optional dep)
 ```
 
 ## Operating protocol (how every task runs)
@@ -223,22 +221,22 @@ workspace root `Cargo.toml` owns `[profile.release]`; `kernel/Cargo.toml`'s own
 will be ignored"), so kernel-specific profile settings do not apply.
 
 ## Workspace structure
-- `Cargo.toml` (root) — workspace members: kernel, builder, 19 crates
+- `Cargo.toml` (root) — workspace members: kernel, builder, 19 crates (gdt NOT in workspace)
 - `kernel/` — the kernel (its own Cargo.toml, .cargo/config.toml, linker.ld)
-- `crates/` — 19 extracted crates (sync, memory, crypto, hal, limine, apic, types, arch, gdt, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci, verified)
+- `crates/` — 17 workspace crates (memory, crypto, hal, limine, apic, types, arch, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci, verified); gdt NOT in workspace; sync is kernel-internal
 - `builder/` — Python scripts for Limine-bootable GPT disk images
 - `scripts/` — build.sh, run_qemu.sh (and PowerShell equivalents)
 - `tests/` — QEMU test harness, boot stress, selftest gate
 - `docs/` — PLAN.md, ADRs, architecture reviews, interface contracts
 - `examples/` — example userspace programs
 
-## Session log (2026-09-21)
+## Session log (2026-11-07)
 Completed this session:
-- Full AGENTS.md inspection and update against actual codebase state
-- Identified 18 extracted crates, 216 kernel src files, 344 total Rust files (82,266 LOC)
-- Identified new subsystems: hypervisor (16 files), ebpf (7), gui (15), compositor (8), crypto (3), objects (12), ash (8)
-- Updated architecture summary, module map, commands, workspace structure
-- Updated feature flags: default = smp,net,ext4,iommu; added gpu, iommu, ash, hypervisor, verification
+- Massive docs cleanup: corrected contradictions, exaggerations, and inaccuracies across AGENTS.md, README.md, ROADMAP.md, MODULES.md, tested-working.md, CONTEXT.md, crates/README.md
+- Identified actual crate count: 17 workspace crates (+ gdt not in workspace, sync is kernel-internal), not 18 or 22
+- Corrected syscall count: ~225 syscall numbers defined, ~223 handlers, ~225 dispatch entries, ~40 fully functional
+- Corrected feature claims: KASLR relocations broken, SMP 4/8 hangs, hypervisor/ASH/io_uring/Compositor are stubs/partial
+- Updated architecture summary to reflect verified reality from issues.md and tested-working.md
 
 ## Conventions & gotchas
 - **Allocator**: `linked_list_allocator` crate, heap at fixed address. `alloc_error_handler` triggers OOM killer.

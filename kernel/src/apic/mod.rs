@@ -420,6 +420,11 @@ fn route_gsi(gsi: u8, vector: u8, active_low: bool, level: bool) {
 // Bus frequency (calibrated by LAPIC timer init)
 // ---------------------------------------------------------------------------
 
+/// Minimum reasonable bus frequency (100 MHz).
+const MIN_BUS_FREQUENCY_HZ: u32 = 100_000_000;
+/// Maximum reasonable bus frequency (4 GHz).
+const MAX_BUS_FREQUENCY_HZ: u32 = 4_000_000_000;
+
 /// Calibrated bus frequency in Hz. Set by LAPIC timer initialization.
 /// 0 means not yet calibrated.
 static BUS_FREQUENCY_HZ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -438,8 +443,8 @@ pub(crate) fn set_bus_frequency_hz(freq_hz: u32) -> Result<(), &'static str> {
     if freq_hz == 0 {
         return Err("bus frequency cannot be 0");
     }
-    // Sanity check: bus frequency should be in a reasonable range (e.g., 100MHz - 5GHz)
-    if freq_hz < 100_000_000 || freq_hz > 4_000_000_000 {
+    // Sanity check: bus frequency should be in a reasonable range
+    if freq_hz < MIN_BUS_FREQUENCY_HZ || freq_hz > MAX_BUS_FREQUENCY_HZ {
         return Err("bus frequency out of expected range");
     }
     BUS_FREQUENCY_HZ
@@ -451,11 +456,4 @@ pub(crate) fn set_bus_frequency_hz(freq_hz: u32) -> Result<(), &'static str> {
         )
         .ok();
     Ok(())
-}
-
-/// Set the calibrated bus frequency in Hz (called by LAPIC timer init).
-/// Only sets the value if not already calibrated (first writer wins).
-/// Returns an error if freq_hz is 0 or unreasonably large.
-pub(crate) fn set_bus_frequency_hz_once(freq_hz: u32) -> Result<(), &'static str> {
-    set_bus_frequency_hz(freq_hz)
 }

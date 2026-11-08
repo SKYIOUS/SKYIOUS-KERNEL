@@ -12,7 +12,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 ///
 /// Implement this trait for HPET, ACPI PM timer, ARM generic timer, etc.
 /// The `'static` bound is required because `as_any()` returns `&dyn Any`,
-/// which requires the implementor to be `'static`.
+/// which requires the implementor to be `'static`. This means timers cannot
+/// borrow non-'static data (e.g., references to platform resources with
+/// shorter lifetimes).
 pub trait Timer: Send + Sync + 'static {
     /// Read the current time in microseconds.
     fn ticks(&self) -> u64;
@@ -76,13 +78,14 @@ impl TscTimer {
     /// Update the TSC frequency without resetting the time base.
     /// Useful when frequency is calibrated after initial registration.
     pub fn set_frequency(&self, freq_hz: u64) {
-        // Relaxed is safe: paired with release store in init() via mutex synchronization.
+        // Relaxed is safe: synchronized via PLATFORM mutex in set_cpu_frequency()/platform::get().
+        // The caller must hold the platform lock or otherwise synchronize.
         self.tsc_freq.store(freq_hz, Ordering::Relaxed);
     }
 
     /// Get the TSC frequency in Hz.
     pub fn tsc_frequency(&self) -> u64 {
-        // Relaxed is safe: paired with release store in init() via mutex synchronization.
+        // Relaxed is safe: synchronized via PLATFORM mutex in set_cpu_frequency()/platform::get().
         self.tsc_freq.load(Ordering::Relaxed)
     }
 }
@@ -119,8 +122,10 @@ impl Timer for TscTimer {
         1
     }
     fn calibrate(&self) {
-        // TSC calibration is performed externally via APIC bus frequency measurement.
+        // TSC calibration is performed externally via APIC bus frequency measurement
+        // (see crate::apic::LapicTimer::calibrate_bus_frequency).
         // The measured frequency is then passed to init() or set_cpu_frequency().
+        // This method exists to satisfy the Timer trait but performs no action.
     }
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {
@@ -129,11 +134,17 @@ impl Timer for TscTimer {
 }
 
 /// Global timer instance. Set once during boot.
-pub static CURRENT_TIMER: Mutex<Option<Arc<dyn Timer>>> = Mutex::new(None);
+static CURRENT_TIMER: Mutex<Option<Arc<dyn Timer>>> = Mutex::new(None);
 
 /// Register the system's timer source.
 pub fn register_timer(timer: Arc<dyn Timer>) {
     *CURRENT_TIMER.lock() = Some(timer);
+}
+
+/// Get the current timer instance for advanced operations (e.g., frequency updates).
+/// Prefer `current_time_us()` for time readings.
+pub fn current_timer() -> Option<Arc<dyn Timer>> {
+    CURRENT_TIMER.lock().clone()
 }
 
 /// Get the current time in microseconds from the registered timer.

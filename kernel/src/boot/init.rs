@@ -176,8 +176,11 @@ pub unsafe fn init_devices() {
     
     if cpu_freq == 0 {
         crate::serial_write("[BOOT] WARNING: CPU frequency calibration failed, timing will be broken!\n");
+    } else if let Err(e) = crate::hal::platform::set_cpu_frequency(cpu_freq as u64) {
+        crate::serial_write("[BOOT] ERROR: Failed to set CPU frequency: ");
+        crate::serial_write(e);
+        crate::serial_write("\n");
     }
-    crate::hal::platform::set_cpu_frequency(cpu_freq as u64);
     
     // Re-initialize TSC timer now that platform info has CPU frequency
     <crate::arch::CurrentArch as crate::arch::Arch>::init_hal_timer();

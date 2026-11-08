@@ -185,7 +185,7 @@ pub(crate) use kaslr::{init_kaslr, KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLID
 #[cfg(target_arch = "x86_64")]
 mod vdso;
 #[cfg(target_arch = "x86_64")]
-pub(crate) use vdso::{init_vdso, vdso_page, vdso_update_pid_cpu};
+pub(crate) use vdso::{init_vdso, vdso_page, vdso_update_pid_cpu, vdso_read_tsc_time};
 #[cfg(not(target_arch = "aarch64"))]
 // ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]

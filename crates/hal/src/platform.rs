@@ -30,6 +30,8 @@ pub struct PlatformInfo {
     pub has_fpu: bool,
     /// Whether SIMD (SSE/AVX) is available.
     pub has_simd: bool,
+    /// Whether TSC is invariant (runs at constant rate across C-states).
+    pub tsc_invariant: bool,
     /// Boot time in timer ticks (for monotonic clock).
     pub boot_time_ticks: u64,
 }
@@ -44,6 +46,7 @@ impl PlatformInfo {
             ram_size: 0,
             has_fpu: false,
             has_simd: false,
+            tsc_invariant: false,
             boot_time_ticks: 0,
         }
     }
@@ -67,10 +70,12 @@ pub fn get() -> PlatformInfo {
 /// This should be called after CPU frequency calibration (e.g., from TSC calibration)
 /// to keep the platform info in sync with the timer.
 ///
-/// # Panics
-/// Panics if `freq_hz` is less than 1 MHz, as this would break timer calculations.
-pub fn set_cpu_frequency(freq_hz: u64) {
-    assert!(freq_hz >= 1_000_000, "CPU frequency must be at least 1 MHz");
+/// Returns an error if `freq_hz` is less than 1 MHz.
+pub fn set_cpu_frequency(freq_hz: u64) -> Result<(), &'static str> {
+    if freq_hz < 1_000_000 {
+        return Err("CPU frequency must be at least 1 MHz");
+    }
     let mut platform = PLATFORM.lock();
     platform.cpu_freq_hz = freq_hz;
+    Ok(())
 }

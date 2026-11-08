@@ -115,7 +115,7 @@ impl Arch for X86_64Arch {
         };
 
         // SAFETY: CPUID is always available on x86_64
-        let (has_fpu, has_simd, cpu_freq_hz) = unsafe {
+        let (has_fpu, has_simd, cpu_freq_hz, tsc_invariant) = unsafe {
             let mut eax1: u32;
             let mut edx1: u32;
             core::arch::asm!(
@@ -133,6 +133,26 @@ impl Arch for X86_64Arch {
 
             let fpu = (edx1 & 1) != 0;
             let simd = (edx1 & (1 << 26)) != 0;
+
+            // Check for invariant TSC (CPUID 0x80000007, EDX bit 8)
+            let mut tsc_invariant = false;
+            let edx80000007: u32;
+            core::arch::asm!(
+                "push rbx",
+                "mov eax, 0x80000007",
+                "cpuid",
+                "pop rbx",
+                out("edx") edx80000007,
+                out("eax") _,
+                out("ecx") _,
+                options(nostack, preserves_flags)
+            );
+            if edx80000007 & (1 << 8) != 0 {
+                tsc_invariant = true;
+                crate::serial_write("[ARCH] invariant TSC detected\n");
+            } else {
+                crate::serial_write("[ARCH] WARNING: non-invariant TSC, vDSO may drift across C-states\n");
+            }
 
             let freq = if eax1 >= 0x16 {
                 let mut ecx16: u32;
@@ -153,7 +173,7 @@ impl Arch for X86_64Arch {
                 DEFAULT_CPU_FREQ_HZ
             };
 
-            (fpu, simd, freq)
+            (fpu, simd, freq, tsc_invariant)
         };
 
         let boot_ticks = {
@@ -170,6 +190,7 @@ impl Arch for X86_64Arch {
             ram_size: 0,
             has_fpu,
             has_simd,
+            tsc_invariant,
             boot_time_ticks: boot_ticks,
         }
     }
@@ -182,9 +203,8 @@ impl Arch for X86_64Arch {
     fn init_hal_timer() {
         let pf = crate::hal::platform::get();
         
-        // Check if timer already registered (via CURRENT_TIMER)
-        let timer_lock = crate::hal::timer::CURRENT_TIMER.lock();
-        if let Some(timer) = timer_lock.as_ref() {
+        // Check if timer already registered
+        if let Some(timer) = crate::hal::timer::current_timer() {
             // Timer exists - try to downcast and update frequency
             if let Some(tsc) = timer.as_any().and_then(|a| a.downcast_ref::<crate::hal::timer::TscTimer>()) {
                 if pf.cpu_freq_hz > 0 {

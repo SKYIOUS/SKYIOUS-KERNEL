@@ -1,6 +1,6 @@
 # Vahi Kernel
 
-> A modern, monolithic Rust kernel â€” the core of **SARGA OS**.
+> A modern, monolithic Rust kernel — the core of **SARGA OS**.
 > Multi-architecture, feature-rich, and built for performance and safety.
 
 <div align="center">
@@ -62,7 +62,7 @@
 | Working drivers | 7 (serial, PS/2 kbd/mouse, E1000, VirtIO-block, PC speaker, RTC) |
 | Supported filesystems | 2 (TarFS for initrd, DevFS for /dev) |
 | Real hardware | **Never tested** — QEMU only |
-| SMP | Claims support but global locks serialize everything |
+| SMP | SMP-1/2 work; SMP-4 hangs after tests; SMP-8 hangs in early boot (see issues.md S-1, S-2) |
 | Selftests | **all pass** (count pinned in `tests/selftest_count.txt`; eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
 | Memory leak audit | **PASS** (no leak detected) |
 
@@ -70,21 +70,21 @@
 
 | Benchmark | Min | P50 | P99 | Max | Iterations |
 |-----------|-----|-----|-----|-----|:----------:|
-| Fork/Exec (CoW clone) | 623 µs | 682 µs | 1,146 µs | 1,193 µs | 100 |
-| Pipe Throughput (4 KiB) | — | **1.33 MB/s** | — | — | 1,000 |
-| Context Switch (yield) | 441 ns | 475 ns | 1,016 ns | 14,359 ns | 10,000 |
-| mmap/munmap Latency | 352 µs | 397 µs | 702 µs | 768 µs | 500 |
-| Syscall Round-Trip (getpid) | 591 ns | 633 ns | 1,358 ns | 39,325 ns | 10,000 |
-| Page Alloc/Free | 42 µs | 46 µs | 107 µs | 537 µs | 10,000 |
+| Fork/Exec (CoW clone) | 183–202 µs | 212–264 µs | 383–394 µs | 395–440 µs | 100 |
+| Pipe Throughput (4 KiB) | — | **826 µs / 4096 B** | — | — | 1,000 |
+| Context Switch (yield) | 116–158 ns | 158–183 ns | 241–250 ns | 27–49 µs | 10,000 |
+| mmap/munmap Latency | 94–100 µs | 132–144 µs | 215–242 µs | 270–360 µs | 500 |
+| Syscall Round-Trip (getpid) | 200–258 ns | 283–350 ns | 391–416 ns | 35–56 µs | 10,000 |
+| Page Alloc/Free | 17–18 µs | 24–35 µs | 52–137 µs | 0.3–2.2 ms | 10,000 |
 
-**Vahi** (Sanskrit: "the carrier") is a monolithic kernel written entirely in Rust. It powers **SARGA OS** â€” a modern operating system built from scratch with a focus on safety, performance, and extensibility.
+**Vahi** (Sanskrit: "the carrier") is a monolithic kernel written entirely in Rust. It powers **SARGA OS** — a modern operating system built from scratch with a focus on safety, performance, and extensibility.
 
 ### Design Philosophy
 
 - **Safety first**: Memory safety through Rust's ownership model, not garbage collection
 - **Monolithic but modular**: All core services in kernel space, clean internal abstractions
 - **POSIX-inspired**: Linux-compatible syscall numbering and ABI where practical
-- **Multi-architecture**: x86_64 primary, aarch64 in progress, RISC-V planned
+- **Multi-architecture**: x86_64 primary, aarch64 in progress (build fails), RISC-V planned
 - **Self-hosting**: Full userspace environment built alongside the kernel
 
 ### Key Numbers
@@ -92,22 +92,24 @@
 | Metric | Value |
 |--------|-------|
 | Lines of Rust | ~82,266 across 344 files (kernel + 19 crates) |
-| Syscalls | ~40 fully functional, ~30 with limitations, ~60 stubs/unsupported (see `docs/syscall-classification.md`) |
+| Syscalls | ~40 fully functional, ~34 with limitations, ~10 experimental, ~15 stubs, ~31 unsupported (see `docs/syscall-classification.md`) |
 | Filesystems | 2 supported (TarFS, DevFS), 7 experimental/partial (SkyFS, ext2, ext4, FAT32, ramfs, ctlfs, FUSE) |
 | Drivers | 7 working (serial, PS/2, E1000, VirtIO-block, PC speaker, RTC), 12+ experimental/partial |
-| Kernel threads | Preemptive 8-level scheduler + async executor |
-| Supported archs | x86_64 (QEMU only, never tested on real hardware), aarch64 (in progress) |
+| Kernel threads | Preemptive stride scheduler + async executor |
+| Supported archs | x86_64 (QEMU only, never tested on real hardware), aarch64 (build fails — x86_64-only asm in vahi-sync), riscv64 (not built in CI) |
 | Boot protocol | UEFI via Limine bootloader |
-| Crates | 18 extracted crates (sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci) |
+| Crates | 17 workspace crates (+ gdt not in workspace, sync is kernel-internal) |
+
+---
 
 ## How This Project Was Built
->
+
 > The vast majority of this codebase was generated with the assistance of AI (large language models).
-> This allowed a single developer to create a full monolithic kernel from scratch â€” something that
+> This allowed a single developer to create a full monolithic kernel from scratch — something that
 > would normally require a team of engineers over many years.
 >
 > **We are looking for human contributors.** If you understand Rust, operating systems, or any part
-> of this codebase â€” whether you wrote none of it or all of it â€” your help is needed and welcome.
+> of this codebase — whether you wrote none of it or all of it — your help is needed and welcome.
 > We are actively seeking people to:
 >
 > - Review the code for correctness, security, and performance
@@ -125,84 +127,86 @@
 ## Architecture
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚                     Vahi Kernel                              â”‚
-â”‚                                                              â”‚
-â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
-â”‚  â”‚                  Syscall Layer                        â”‚   â”‚
-â”‚  â”‚  187 syscalls: read/write/open/mmap/fork/execve/net/  â”‚   â”‚
-â”‚  â”‚  gui/clone/futex/io_uring/bpf/seccomp/landlock      â”‚   â”‚
-â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
-â”‚                                                              â”‚
-â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
-â”‚  â”‚  Scheduler â”‚ â”‚  Memory  â”‚ â”‚  VFS   â”‚ â”‚  Network       â”‚   â”‚
-â”‚  â”‚  Preemptiveâ”‚ â”‚  Buddy   â”‚ â”‚ 9 FS   â”‚ â”‚  smoltcp       â”‚   â”‚
-â”‚  â”‚  8 prio    â”‚ â”‚  Slab    â”‚ â”‚ mounts â”‚ â”‚  E1000/VirtIO  â”‚   â”‚
-â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
-â”‚                                                              â”‚
-â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
-â”‚  â”‚  Drivers   â”‚ â”‚  GUI     â”‚ â”‚ eBPF   â”‚ â”‚  Security      â”‚   â”‚
-â”‚  â”‚  27 devs   â”‚ â”‚Compositorâ”‚ â”‚ VM+Ver â”‚ â”‚  SMEP/UMIP/    â”‚   â”‚
-â”‚  â”‚  PCI/ACPI  â”‚ â”‚ 30 FPS   â”‚ â”‚ JIT+Mapâ”‚ â”‚  CFI/Caps     â”‚   â”‚
-â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
-â”‚                                                              â”‚
-â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”‚
-â”‚  â”‚              Arch Abstraction (Arch trait)             â”‚  â”‚
-â”‚  â”‚  x86_64 (SYSCALL/SYSRET, FSGSBASE)                     â”‚  â”‚
-â”‚  â”‚  aarch64 (SVC/ERET, TPIDR_EL0, GICv2/v3)               â”‚  â”‚
-â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+┌──────────────────────────────────────────────────────────────┐
+│                     Vahi Kernel                              │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │                  Syscall Layer                       │   │
+│  │  ~130 syscalls dispatched: read/write/open/mmap/     │   │
+│  │  fork/execve/net/gui/clone/futex/io_uring/bpf/       │   │
+│  │  seccomp/landlock                                    │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────┐  │
+│  │Scheduler │ │ Memory   │ │ VFS      │ │ Network        │  │
+│  │Stride    │ │ Buddy    │ │ 9 FS     │ │ smoltcp        │  │
+│  │+FIFO/RR  │ │ Slab     │ │ mounts   │ │ E1000/VirtIO   │  │
+│  └──────────┘ └──────────┘ └──────────┘ └────────────────┘  │
+│                                                              │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────┐  │
+│  │Drivers   │ │ GUI      │ │ eBPF     │ │ Security       │  │
+│  │27 devs   │ │Compositor│ │ VM+Ver   │ │ SMEP/UMIP/     │  │
+│  │PCI/ACPI  │ │30 FPS    │ │ JIT+Map  │ │ CFI/Caps       │  │
+│  └──────────┘ └──────────┘ └──────────┘ └────────────────┘  │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │              Arch Abstraction (Arch trait)           │   │
+│  │  x86_64 (SYSCALL/SYSRET, FSGSBASE)                   │   │
+│  │  aarch64 (SVC/ERET, TPIDR_EL0, GICv2/v3) — BUILD FAILS│  │
+│  │  riscv64 (RV64GC, SBI, PLIC) — NOT BUILT IN CI       │   │
+│  └──────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Boot Flow
 
 ```
 UEFI firmware
-    â”‚
-    â–¼
-bootloader crate (UEFI boot protocol)
-    â”‚
-    â–¼
+    │
+    ▼
+Limine bootloader
+    │
+    ▼
 kernel_main()
-    â”œâ”€â”€ KASLR init (RDTSC entropy)
-    â”œâ”€â”€ CPUID feature detection (SMEP, UMIP, FSGSBASE)
-    â”œâ”€â”€ Memory init (OffsetPageTable, physical map)
-    â”œâ”€â”€ Framebuffer init (UEFI GOP)
-    â”œâ”€â”€ Frame allocator init (Buddy)
-    â”œâ”€â”€ Heap init (linked_list_allocator @ 0xFFFF_C000_0000_0000)
-    â”œâ”€â”€ GDT + TSS init
-    â”œâ”€â”€ IDT + PIC init (exception handlers, IRQs)
-    â”œâ”€â”€ Syscall init (STAR/LStar/SFMask MSRs, SYSCALL entry)
-    â”œâ”€â”€ ACPI init (RSDP parse, FADT, MADT)
-    â”œâ”€â”€ APIC init (LAPIC + I/O APIC)
-    â”œâ”€â”€ SMP boot (SIPI to APs)
-    â”œâ”€â”€ PS/2 init (keyboard + mouse)
-    â”œâ”€â”€ PCI enumeration (scan bus, init drivers)
-    â”œâ”€â”€ VFS init (mount initrd, devfs, ctlfs, tmpfs, partitions)
-    â”œâ”€â”€ Network init (smoltcp, E1000)
-    â”œâ”€â”€ LSM init
-    â”œâ”€â”€ GUI init (compositor, window manager, desktop)
-    â”œâ”€â”€ Spawn async tasks (kernel shell, GUI refresh, network poll)
-    â”œâ”€â”€ Spawn init_os_task (loads /bin/init into userspace)
-    â”œâ”€â”€ Enable interrupts (sti)
-    â””â”€â”€ Enter scheduler (never returns)
+    ├─► KASLR init (RDTSC entropy — relocations broken, see issues.md A-6)
+    ├─► CPUID feature detection (SMEP, UMIP, FSGSBASE)
+    ├─► Memory init (OffsetPageTable, physical map)
+    ├─► Framebuffer init (UEFI GOP)
+    ├─► Frame allocator init (Buddy)
+    ├─► Heap init (linked_list_allocator @ 0xFFFF_C000_0000_0000)
+    ├─► GDT + TSS init
+    ├─► IDT + PIC init (exception handlers, IRQs)
+    ├─► Syscall init (STAR/LStar/SFMask MSRs, SYSCALL entry)
+    ├─► ACPI init (RSDP parse, FADT, MADT)
+    ├─► APIC init (LAPIC + I/O APIC)
+    ├─► SMP boot (SIPI to APs)
+    ├─► PS/2 init (keyboard + mouse)
+    ├─► PCI enumeration (scan bus, init drivers)
+    ├─► VFS init (mount initrd, devfs, ctlfs, tmpfs, partitions)
+    ├─► Network init (smoltcp, E1000)
+    ├─► LSM init
+    ├─► GUI init (compositor, window manager, desktop)
+    ├─► Spawn async tasks (kernel shell, GUI refresh, network poll)
+    ├─► Spawn init_os_task (loads /bin/init into userspace)
+    ├─► Enable interrupts (sti)
+    └─► Enter scheduler (never returns)
 ```
 
 ### Memory Layout
 
 ```
-0x0000_0000_0000 â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-                 â”‚   Userspace          â”‚
-                 â”‚   (per-process)      â”‚
-0x7FFF_FFFF_E000 â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-                 â”‚   Kernel Mapping     â”‚
-0xFFFF_8000_0000 â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-                 â”‚   Physical Memory    â”‚
-                 â”‚   (1:1 mapped)       â”‚
-0xFFFF_C000_0000 â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-                 â”‚   Kernel Heap        â”‚
-                 â”‚   (Buddy + Slab)     â”‚
-0xFFFF_FFFF_FFFF â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+0x0000_0000_0000 ┌──────────────────────────────────┐
+                 │   Userspace          │
+                 │   (per-process)      │
+0x7FFF_FFFF_E000 ├──────────────────────────────────┤
+                 │   Kernel Mapping     │
+0xFFFF_8000_0000 ├──────────────────────────────────┤
+                 │   Physical Memory    │
+                 │   (1:1 mapped)       │
+0xFFFF_C000_0000 ├──────────────────────────────────┤
+                 │   Kernel Heap        │
+                 │   (Buddy + Slab)     │
+0xFFFF_FFFF_FFFF └──────────────────────────────────┘
 ```
 
 ---
@@ -211,7 +215,7 @@ kernel_main()
 
 ### Syscalls
 
-The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall ABI is **frozen for v1.0**.
+The kernel dispatches ~225 syscalls with Linux-compatible numbering (~223 handlers, ~40 fully functional). The syscall ABI is **frozen for v1.0**.
 
 | Category | Syscalls |
 |----------|----------|
@@ -232,12 +236,14 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 | **eBPF** | `bpf` |
 | **io_uring** | `io_uring_setup` `io_uring_enter` |
 
+**Honest classification:** See `docs/syscall-classification.md` — ~40 fully functional, ~34 with limitations, ~10 experimental, ~15 stubs, ~31 unsupported.
+
 ### Filesystems
 
 | Filesystem | Type | Features |
 |------------|------|----------|
-| **SkyFS** | Journaling read-write | Custom filesystem with B-tree extent storage, WAL journaling, block allocator, inline data, format utility |
-| **Ext2** | Read-only | Linux ext2 for root/partition mounts |
+| **SkyFS** | Journaling read-write | Custom filesystem with B-tree extent storage, WAL journaling, block allocator, inline data, format utility — **no crash testing, unbounded extent copy F-2** |
+| **Ext2** | Read-write | Linux ext2 for root/partition mounts — **dir traversal unbounded F-1** |
 | **FAT32** | Read-write | Via `fatfs` crate, MBR/GPT partition support |
 | **TarFS** | Read-only in-memory | Embedded initrd, also mounts tar from block devices |
 | **RamFS/Tmpfs** | In-memory read-write | `/tmp`, `/run` mounts |
@@ -250,15 +256,15 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 
 | Driver | Description |
 |--------|-------------|
-| **AHCI** | SATA controller driver with NCQ, PRD-based DMA |
-| **NVMe** | NVMe SSD driver with admin/I/O queues, PRP DMA, BlockDevice trait |
+| **AHCI** | SATA controller driver with NCQ, PRD-based DMA — **completion wait unbounded A-1, CTBA bug A-2** |
+| **NVMe** | NVMe SSD driver with admin/I/O queues, PRP DMA, BlockDevice trait — **MSI broken A-3, queue bugs N-1/N-2** |
 | **VirtIO-Block** | Para-virtualized block device for QEMU/KVM |
 
 #### Networking
 
 | Driver | Description |
 |--------|-------------|
-| **Intel E1000** | 82540EM Gigabit Ethernet with TX/RX descriptor rings, interrupts |
+| **Intel E1000** | 82540EM Gigabit Ethernet with TX/RX descriptor rings, interrupts — **IRQ path allocates in IRQ context E-1** |
 | **VirtIO-Net** | Para-virtualized network device |
 
 #### Input
@@ -272,7 +278,7 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 
 | Driver | Description |
 |--------|-------------|
-| **HDA** | Intel High Definition Audio â€” playback, volume control (0-100%), stream halt |
+| **HDA** | Intel High Definition Audio — playback, volume control (0-100%), stream halt — **untested** |
 | **PC Speaker** | Legacy programmable interval timer beeper |
 
 #### Display
@@ -280,13 +286,13 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 | Driver | Description |
 |--------|-------------|
 | **UEFI GOP** | Framebuffer from boot services, linear 32bpp |
-| **VirtIO GPU** | Para-virtualized GPU with 2D commands, cursor, scanout |
+| **VirtIO GPU** | Para-virtualized GPU with 2D commands, cursor, scanout — **untested** |
 
 #### USB
 
 | Driver | Description |
 |--------|-------------|
-| **xHCI** | USB 3.0 controller â€” device descriptor parsing, config walking, HID/mass storage class detection |
+| **xHCI** | USB 3.0 controller — device descriptor parsing, config walking, HID/mass storage class detection — **polled only, IMAN bug X-2** |
 
 #### Other
 
@@ -300,7 +306,7 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 ### Process & Scheduler
 
 ```
-- Preemptive priority-based round-robin scheduler
+- Preemptive stride scheduler + SCHED_FIFO/SCHED_RR + CPU affinity + work stealing
 - 8 priority levels (0 = highest, 7 = idle)
 - Per-CPU run queues + global queue
 - Time quantum configurable per priority
@@ -311,7 +317,7 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 - Per-process UID/GID/EUID/EGID
 - File descriptor tables per process
 - Virtual memory area (VMA) tracking per process
-- CLONE_VM for thread creation
+- CLONE_VM for thread creation (CoW clone, not shared memory)
 - clear_child_tid + futex for pthread_join
 - Linux emulation mode per-process
 ```
@@ -322,12 +328,13 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 - Physical: Buddy frame allocator (order 0-10)
 - Kernel heap: Slab allocator + linked_list_allocator
 - Virtual: OffsetPageTable (4-level paging)
-- KASLR: Randomized kernel base via RDTSC entropy
+- KASLR: Randomized kernel base via RDTSC entropy — **relocations never applied (issues.md A-6)**
 - Stack canary: __stack_chk_guard seeded at boot
 - Guard pages on kernel stacks
-- SMAP/SMEP/UMIP hardware protections
+- SMAP/SMEP/UMIP hardware protections (CR4 bits)
 - Virt-to-phys via OffsetPageTable::translate_addr
 - DMA buffers: DmaBuf and RingBuf RAII containers
+- Swap: In-memory stub only, not to device
 ```
 
 ### Security
@@ -338,12 +345,15 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 | **SMAP** | Supervisor Mode Access Prevention (EFLAGS.AC) |
 | **UMIP** | User-Mode Instruction Prevention (CR4 bit 11) |
 | **FSGSBASE** | FS/GS base instructions (when available, MSR fallback) |
-| **KASLR** | Kernel ASLR via RDTSC + sequential entropy mixing |
+| **KASLR** | Kernel ASLR via RDTSC + sequential entropy mixing — **obfuscation only, relocations never applied** |
 | **Stack Canary** | `__stack_chk_guard` with randomized seed |
-| **Capabilities** | CAP_SYS_ADMIN, CAP_KILL, CAP_SYS_BOOT, CAP_SETUID, CAP_SETGID with audit logging |
-| **LSM** | Linux Security Module skeleton with policy loading from `/etc/lsm_policy` |
-| **Audit** | Security events logged to serial with PID context |
+| **Capabilities** | CAP_SYS_ADMIN, CAP_KILL, CAP_SYS_BOOT, CAP_SETUID, CAP_SETGID with audit logging — **enforcement minimal** |
+| **LSM** | Linux Security Module skeleton with policy loading from `/etc/lsm_policy` — **not enforced** |
+| **Audit** | Security events logged to serial with PID context — **serial output only, not structured** |
 | **User Memory Safety** | SMAP-safe read/write via `user_access` module with bounds checking |
+| **seccomp BPF** | Verifier exists, no filter execution — **stub** |
+| **Landlock** | Structures defined, no access control — **stub** |
+| **CFI** | "2 static targets" — not real CFI — **stub** |
 
 ### Networking
 
@@ -356,12 +366,13 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 - Loopback interface
 - Static IP configuration
 - ARP cache
+- Unix sockets (AF_UNIX) — socketpair fixed FD-4, sendmsg/recvmsg offset fixed FD-15
 ```
 
 ### GUI Compositor
 
 ```
-- Full compositing window manager at 30 FPS
+- Compositing window manager at 30 FPS
 - Per-window framebuffers with damage tracking
 - Mouse cursor with hardware cursor support
 - Keyboard input routing
@@ -374,12 +385,14 @@ The kernel provides 90+ syscalls with Linux-compatible numbering. The syscall AB
 - Clipboard support
 ```
 
-The GUI is rendered entirely in kernel space â€” no userspace display server needed. Each window gets a dedicated framebuffer, and the compositor blends them together at 30 FPS.
+**Status: PARTIAL** — 10 dead functions including its two core entry points (`composite_frame`, `composite_window`). Not usable as a desktop.
+
+The GUI is rendered entirely in kernel space — no userspace display server needed. Each window gets a dedicated framebuffer, and the compositor blends them together at 30 FPS.
 
 ### eBPF
 
 ```
-- In-kernel eBPF virtual machine
+- In-kernel eBPF virtual machine (feature-gated)
 - Verifier with safety checks:
   - Bounds checking on all memory access
   - R10 frame pointer write protection
@@ -416,14 +429,16 @@ The kernel includes a per-process Linux emulation mode, auto-detected via ELF in
 ```
 - Native helper sandbox engine (gated by ash feature)
 - SYS_ASH_* syscalls for rule enforcement
+- **Feature-gated, syscall handlers unreachable**
 ```
 
 ### io_uring
 
 ```
-- Linux-compatible io_uring setup/enter syscalls
-- SYS_IO_URING_SETUP (#425)
-- SYS_IO_URING_ENTER (#426)
+- Linux-compatible io_uring setup/enter syscalls (stubs)
+- SYS_IO_URING_SETUP (#425) — allocates memory, no actual ring
+- SYS_IO_URING_ENTER (#426) — returns 0
+- SYS_IO_URING_REGISTER (#427) — returns 0
 ```
 
 ---
@@ -520,12 +535,14 @@ qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=bootimage-vahi_kernel.bi
 ```
 - UEFI boot via OVMF.fd
 - 512 MB RAM
-- 2 CPU cores (SMP)
+- 2 CPU cores (SMP) — SMP-4 hangs after tests, SMP-8 hangs in early boot
 - AHCI disk controller
 - Intel E1000 NIC (user-mode networking)
 - VGA display (GOP framebuffer)
 - Serial console for logging
 ```
+
+---
 
 ## Filesystem Support
 
@@ -533,22 +550,22 @@ qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=bootimage-vahi_kernel.bi
 
 | FS | R/W | Mount point | Notes |
 |----|-----|-------------|-------|
-| Ext2 | âœ… | Auto-detected on block devices | Full R/W, indirect blocks, mkdir, create |
+| Ext2 | ✅ | Auto-detected on block devices | Full R/W, indirect blocks, mkdir, create — **dir traversal unbounded F-1** |
 | Ext4 | Read | Auto-detected | Read-only, extent trees (cfg feature) |
-| FAT32 | âœ… | Auto-detected on block devices | Via fatfs crate |
+| FAT32 | ✅ | Auto-detected on block devices | Via fatfs crate |
 | TarFS | Read | Initrd / block devices | ustar format |
-| Tmpfs | âœ… | `/tmp` | In-memory, writable |
-| DevFS | âœ… | `/dev` | Device nodes (tty0, fb0, null, zero, block devs) |
+| Tmpfs | ✅ | `/tmp` | In-memory, writable |
+| DevFS | ✅ | `/dev` | Device nodes (tty0, fb0, null, zero, block devs) |
 | CtlFS | Read | `/ctl` | Plan9-style control files |
 
 ### Auto-Mount Behavior
 
 During boot, `vfs::init()` scans all block devices and partitions, auto-detecting and mounting ext2, ext4, FAT32, TarFS, and SkyFS under `/mnt/`. The root filesystem is selected from:
 
-1. Explicit `BOOT_DEVICE` index â†’ tries ext4 â†’ ext2 â†’ SkyFS
-2. First block device partition â†’ tries ext4 â†’ ext2 â†’ SkyFS
-3. First whole block device â†’ tries ext4 â†’ ext2 â†’ SkyFS
-4. Bootloader initrd â†’ TarFS (fallback)
+1. Explicit `BOOT_DEVICE` index → tries ext4 → ext2 → SkyFS
+2. First block device partition → tries ext4 → ext2 → SkyFS
+3. First whole block device → tries ext4 → ext2 → SkyFS
+4. Bootloader initrd → TarFS (fallback)
 
 ### Testing with an Ext2 Disk Image
 
@@ -589,11 +606,11 @@ spkg install hello-world.skp
 With the `self_test` feature enabled, five ext2 filesystem tests run at boot:
 
 ```
-ext2_format_mount   â€” Format and mount minimal ext2
-ext2_read_file      â€” Read pre-written file, verify content
-ext2_write_file     â€” Create, write, read back file
-ext2_mkdir_and_stat â€” Create directory, verify stat
-ext2_permissions    â€” Verify permission bits in stat
+ext2_format_mount   — Format and mount minimal ext2
+ext2_read_file      — Read pre-written file, verify content
+ext2_write_file     — Create, write, read back file
+ext2_mkdir_and_stat — Create directory, verify stat
+ext2_permissions    — Verify permission bits in stat
 ```
 
 See `docs/filesystem-design.md` for the full FS architecture.
@@ -633,10 +650,10 @@ SKYIOUS KERNEL/
 │       ├── syscalls/              # Syscall dispatch, numbers, errno, signals
 │       ├── vfs/                   # VFS manager, ramfs, devfs, ctlfs, tarfs, fat, ext2, skyfs
 │       ├── drivers/               # PS/2, RTC, graphics, input, watchdog, net, block, storage, gpu, audio, usb
-│       ├── apic/                  # APIC module, LAPIC, I/O APIC, MSI
+│       ├── apic/                  # APIC module, LAPIC, I/O APIC, MSI (kernel copy live)
 │       ├── net/                   # Network stack (smoltcp), DHCP, DNS
 │       ├── gui/                   # GUI compositor, window manager, terminal, splash
-│       ├── compositor/            # Compositor: blend, blur, flush, scene, shadow, vsync
+│       ├── compositor/            # Compositor: blend, blur, flush, scene, shadow, vsync (10 dead fns)
 │       ├── ebpf/                  # eBPF VM, verifier, JIT, maps, helpers
 │       ├── crypto/                # Crypto module, SHA-256, entropy
 │       ├── objects/               # KernelObject trait, handle table, security
@@ -647,33 +664,34 @@ SKYIOUS KERNEL/
 │       ├── debug/                 # Debug module, symbol lookup
 │       ├── verified/              # Verified proofs (concurrency, journal, scheduler)
 │       └── tests/                 # Unit tests (self_test feature)
-├── crates/                        # 19 extracted crates
-│   ├── sync/                      # vahi-sync: IrqSafeMutex (90 lines)
-│   ├── memory/                    # vahi-memory: buddy, slab, paging, swap, frame_info
-│   ├── crypto/                    # vahi-crypto: SHA-256, HMAC, PBKDF2, entropy (308 lines)
-│   ├── hal/                       # vahi-hal: DMA, IRQ controller, platform, timer
+├── crates/                        # 17 workspace crates (+ gdt not in workspace, sync is kernel-internal)
+│   ├── memory/                    # vahi-memory: frame_info only (buddy/slab/paging in kernel)
+│   ├── crypto/                    # vahi-crypto: SHA-256, HMAC, PBKDF2, entropy (478 lines, 9 tests)
+│   ├── hal/                       # vahi-hal: DMA, IRQ controller, platform, timer (256 lines)
 │   ├── limine/                    # vahi-limine: Limine boot protocol (140 lines)
-│   ├── apic/                      # vahi-apic: Local APIC, I/O APIC, MSI (1072 lines)
-│   ├── types/                     # vahi-types: Shared types, Errno, credentials, VMA
-│   ├── arch/                      # vahi-arch: x86_64, aarch64, HAL
-│   ├── gdt/                       # vahi-gdt: GDT/IDT/TSS management
-│   ├── task/                      # vahi-task: process, thread, scheduler, OOM
-│   ├── syscalls/                  # vahi-syscalls: syscall numbers, dispatch, ptrace/seccomp/namespaces
-│   ├── vfs/                       # vahi-vfs: VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE
-│   ├── net/                       # vahi-net: TCP Reno, UDP, DHCP, DNS, Unix sockets
-│   ├── drivers/                   # vahi-drivers: NVMe, E1000, VirtIO, PS/2, xHCI, HDA, GPU
-│   ├── acpi/                      # vahi-acpi: ACPI tables, MADT, PRT
-│   ├── objects/                   # vahi-objects: KernelObject trait, handle table, security
-│   ├── ipc/                       # vahi-ipc: IPC primitives
-│   ├── pci/                       # vahi-pci: PCI subsystem
-│   └── verified/                  # vahi-verified: Verified proofs (concurrency, journal, scheduler, runner)
+│   ├── apic/                      # vahi-apic: Local APIC, I/O APIC, MSI (865 lines, trait-based)
+│   ├── types/                     # vahi-types: Shared types, Errno, credentials, VMA, traits (532 lines)
+│   ├── arch/                      # vahi-arch: x86_64, aarch64, HAL (141 lines, scaffolded)
+│   ├── gdt/                       # vahi-gdt: GDT/IDT/TSS management (76 lines, scaffolded, NOT in workspace)
+│   ├── task/                      # vahi-task: process, thread, scheduler, OOM (652+ lines, scaffolded)
+│   ├── syscalls/                  # vahi-syscalls: syscall numbers, dispatch, ptrace/seccomp/namespaces (200+ lines, scaffolded)
+│   ├── vfs/                       # vahi-vfs: VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE (6861 lines, scaffolded+code)
+│   ├── net/                       # vahi-net: TCP Reno, UDP, DHCP, DNS, Unix sockets (500+ lines, scaffolded)
+│   ├── drivers/                   # vahi-drivers: NVMe, E1000, VirtIO, PS/2, xHCI, HDA, GPU (600+ lines, scaffolded)
+│   ├── acpi/                      # vahi-acpi: ACPI tables, MADT, PRT (220 lines, scaffolded)
+│   ├── objects/                   # vahi-objects: KernelObject trait, handle table, security (660 lines, extracted)
+│   ├── ipc/                       # vahi-ipc: IPC primitives (120 lines, scaffolded)
+│   ├── pci/                       # vahi-pci: PCI subsystem (150 lines, scaffolded)
+│   └── verified/                  # vahi-verified: Verified proofs (feature-gated, optional dep)
+│   ├── pci/                       # vahi-pci: PCI subsystem (150 lines, scaffolded)
+│   └── verified/                  # vahi-verified: Verified proofs (feature-gated, optional dep)
 ├── builder/                       # Bootimage builder crate
 │   └── src/main.rs                # Creates UEFI bootable disk image
 ├── SkyOS/                         # Initrd staging
 │   ├── bin/                       # Userspace binaries
 │   ├── etc/                       # Config files
 │   └── initrd.tar                 # Packed initramfs
-├── docs/                          # Documentation (23+ files)
+├── docs/                          # Documentation
 │   ├── index.md                   # Documentation hub
 │   ├── ARCHITECTURE.md            # Architecture overview
 │   ├── BUILD.md                   # Build instructions
@@ -701,8 +719,8 @@ SKYIOUS KERNEL/
 │   ├── test_login.ps1             # Login test
 │   └── test_panic.ps1             # Panic test
 ├── .github/workflows/             # CI pipeline
-│   ├── ci.yml                     # PR gate: fmt, host tests/clippy, kernel matrix, QEMU selftest + boot regression
-│   ├── nightly.yml                # Scheduled: cross-arch, SMP2, audit profile, 25-boot stress, cargo audit
+│   ├── ci.yml                     # PR gate: fmt, host tests/clippy, kernel build matrix, QEMU selftest + boot regression
+│   ├── nightly.yml                # Scheduled: cross-arch, SMP 2, audit profile, 25-boot stress, cargo audit
 │   └── t00-demo.yml               # On-demand harness FAIL/PANIC/TIMEOUT demos
 ├── make_bootimage.ps1             # Windows bootimage script
 ├── make_bootimage.sh              # Linux bootimage script
@@ -770,12 +788,12 @@ VGA console, confirming the full kernel-to-userspace path works end-to-end.
 
 | Benchmark | Min | P50 | P99 | Max |
 |-----------|-----|-----|-----|-----|
-| Fork/Exec (CoW clone) | 623 µs | 682 µs | 1,146 µs | 1,193 µs |
-| Pipe Throughput (4 KiB) | — | **1.33 MB/s** | — | — |
-| Context Switch (yield) | 441 ns | 475 ns | 1,016 ns | 14.4 µs |
-| mmap/munmap Latency | 352 µs | 397 µs | 702 µs | 768 µs |
-| Syscall Round-Trip (getpid) | 591 ns | 633 ns | 1,358 ns | 39.3 µs |
-| Page Alloc/Free | 42 µs | 46 µs | 107 µs | 537 µs |
+| Fork/Exec (CoW clone) | 183–202 µs | 212–264 µs | 383–394 µs | 395–440 µs |
+| Pipe Throughput (4 KiB) | — | **826 µs / 4096 B** | — | — |
+| Context Switch (yield) | 116–158 ns | 158–183 ns | 241–250 ns | 27–49 µs |
+| mmap/munmap Latency | 94–100 µs | 132–144 µs | 215–242 µs | 270–360 µs |
+| Syscall Round-Trip (getpid) | 200–258 ns | 283–350 ns | 391–416 ns | 35–56 µs |
+| Page Alloc/Free | 17–18 µs | 24–35 µs | 52–137 µs | 0.3–2.2 ms |
 
 **Memory Leak Audit**: PASS (no leak detected)
 
@@ -805,7 +823,7 @@ Jobs:
   - qemu-boot-regression: production image boot, SMP 1 and SMP 2
 # quality.yml adds: AGENTS.md policy gate (unsafe/SAFETY, no_std, TODOs, links, ADR/docs map),
 # actionlint + ShellCheck, rustdoc -D warnings, gitleaks secret scan, cargo audit
-# nightly.yml adds: cross-arch builds, SMP 2 suite, audit-profile suite, 25-boot stress, cargo audit
+# nightly.yml adds: cross-arch builds (FAIL — vahi-sync x86_64-only asm), SMP 2 suite, audit-profile suite, 25-boot stress, cargo audit
 # ci-pages.yml publishes the report site (run history, jobs, artifacts, TAP logs,
 # whole-report ZIP download) to GitHub Pages after every watched workflow on master:
 # https://<owner>.github.io/<repo>/ci/
@@ -841,13 +859,13 @@ pub trait Arch: Send + Sync {
 - FSGSBASE (rdfsbase/wrfsbase) for TLS, MSR fallback
 - 4-level paging (48-bit virtual address space)
 - Higher-half kernel at 0xFFFFFFFF80000000
-- UEFI boot via bootloader crate
+- UEFI boot via Limine bootloader
 - Full exception handling: #PF, #GP, #UD, #NM, #SS, #DB, #BP, #DF (IST)
 - APIC (LAPIC + I/O APIC)
 - SMP via SIPI
 ```
 
-### aarch64 (In Progress)
+### aarch64 (Build Fails)
 
 ```
 - _start_aarch64 entry point with BSS clearing
@@ -862,6 +880,16 @@ pub trait Arch: Send + Sync {
 - 4-level page tables (48-bit VA) with MMU init (stub)
 - Kernel loaded at 0x40080000 (QEMU virt DRAM)
 - Target spec: aarch64-unknown-none (soft-float, strict-align)
+- BUILD FAILS: vahi-sync uses x86_64-only asm/intrinsics unconditionally (issues.md P-1)
+```
+
+### RISC-V (Not Built in CI)
+
+```
+- RV64GC target
+- SBI interface
+- PLIC interrupt controller
+- Status unknown — never built in CI
 ```
 
 ---
@@ -904,7 +932,7 @@ cd .. && python builder/build_limine_image.py --kernel target/x86_64-unknown-non
 
 ---
 
-## Recent Fixes (August 2026)
+## Recent Fixes (August–October 2026)
 
 | Fix | Impact |
 |-----|--------|
@@ -917,6 +945,10 @@ cd .. && python builder/build_limine_image.py --kernel target/x86_64-unknown-non
 | **Selftest VGA buffer page fault** | Selftest held VGA WRITER lock across test functions that could fault. Switched to serial-only output. |
 | **Soft-float / MMX config warnings** | Removed deprecated `+soft-float` and `-mmx` target features from both `.cargo/config.toml` files. These are unstable in newer Rust nightly. |
 | **Clippy zero errors** | 395→0 via targeted `#![allow]` suppressions for mechanical lints, plus 3 per-function fixes (`never_loop`, `while_immutable_condition`, `mut_from_ref`). `#![deny(warnings)]` retained. |
+| **mqueue fd install** | Fixed — 18 contract tests in `kernel/src/tests/mqueue_contract.rs` and `mqueue_semantics.rs` |
+| **fd-table write-through** | Fixed FD-1..FD-4, FD-15: all fd mutations now go through `Process::with_fd_table` |
+| **KASLR PD-index arithmetic** | Fixed — kernel image is at PD index 0, not 511 (issues.md A-8) |
+| **xmas-elf upgrade** | 0.9.1 → 0.10.0 (RUSTSEC-2025-0018, issues.md V-1) |
 
 ---
 
@@ -936,6 +968,8 @@ Key provisions:
 - Optional Maintainer Right clause for upstream fork incorporation
 - 30-day cure period for license violations
 - "or any later version" compatibility
+
+---
 
 ## Testing with a Disk Drive
 

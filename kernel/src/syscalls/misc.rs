@@ -4,7 +4,6 @@ use super::*;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 
 use crate::syscalls::user_access;
-use core::sync::atomic::Ordering;
 
 const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
@@ -16,50 +15,35 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     }
     const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
+    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
+    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
+    const CLOCK_MONOTONIC_RAW: u64 = 4;
+    const CLOCK_REALTIME_COARSE: u64 = 5;
+    const CLOCK_MONOTONIC_COARSE: u64 = 6;
+    const CLOCK_BOOTTIME: u64 = 7;
+    const CLOCK_REALTIME_ALARM: u64 = 8;
+    const CLOCK_BOOTTIME_ALARM: u64 = 9;
 
-    // Fast path: try vDSO for CLOCK_MONOTONIC and CLOCK_REALTIME (x86_64 only)
+    // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC and CLOCK_REALTIME (x86_64 only)
     #[cfg(target_arch = "x86_64")]
     if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME) {
-        let vdso_ptr = crate::vdso_page();
-        if !vdso_ptr.is_null() {
-            // SAFETY: vdso_page returns valid pointer if not null
-            let vdso = unsafe { &*vdso_ptr };
-            let mut seq = vdso.seq.load(Ordering::Acquire);
-            loop {
-                // Data fields use Relaxed: on x86_64 (TSO), loads don't reorder with loads.
-                // The seqlock counter (seq) uses Acquire which synchronizes with the writer's Release.
-                // This matches Linux vDSO seqlock reader pattern.
-                let (sec, nsec) = if clock_id == CLOCK_MONOTONIC {
-                    (
-                        vdso.monotonic_sec.load(Ordering::Relaxed) as i64,
-                        vdso.monotonic_nsec.load(Ordering::Relaxed) as i64,
-                    )
-                } else {
-                    (
-                        vdso.realtime_sec.load(Ordering::Relaxed) as i64,
-                        vdso.realtime_nsec.load(Ordering::Relaxed) as i64,
-                    )
-                };
-                let seq2 = vdso.seq.load(Ordering::Acquire);
-                if seq == seq2 && seq % 2 == 0 {
-                    let ts = Timespec { tv_sec: sec, tv_nsec: nsec };
-                    if unsafe {
-                        user_access::copy_to_user(
-                            tp as *mut u8,
-                            core::slice::from_raw_parts(
-                                &ts as *const _ as *const u8,
-                                core::mem::size_of::<Timespec>(),
-                            ),
-                        )
-                    }
-                    .is_ok()
-                    {
-                        return 0;
-                    }
-                    return errno::Errno::EFAULT as u64;
-                }
-                seq = seq2;
+        let (sec, nsec) = crate::vdso_read_tsc_time(clock_id);
+        if sec != 0 || nsec != 0 {
+            let ts = Timespec { tv_sec: sec as i64, tv_nsec: nsec as i64 };
+            if unsafe {
+                user_access::copy_to_user(
+                    tp as *mut u8,
+                    core::slice::from_raw_parts(
+                        &ts as *const _ as *const u8,
+                        core::mem::size_of::<Timespec>(),
+                    ),
+                )
             }
+            .is_ok()
+            {
+                return 0;
+            }
+            return errno::Errno::EFAULT as u64;
         }
     }
 
@@ -80,6 +64,46 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
                 tv_nsec: ((total_ms % 1000) * 1_000_000) as i64,
             }
         }
+        CLOCK_MONOTONIC_RAW => {
+            // Same as monotonic but without NTP adjustments - use tick-based
+            let ticks = crate::interrupts::get_ticks();
+            let total_ms = ticks * 10;
+            Timespec {
+                tv_sec: (total_ms / 1000) as i64,
+                tv_nsec: ((total_ms % 1000) * 1_000_000) as i64,
+            }
+        }
+        CLOCK_BOOTTIME => {
+            // Monotonic time including suspend - use tick-based
+            let ticks = crate::interrupts::get_ticks();
+            let total_ms = ticks * 10;
+            Timespec {
+                tv_sec: (total_ms / 1000) as i64,
+                tv_nsec: ((total_ms % 1000) * 1_000_000) as i64,
+            }
+        }
+        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
+            // Low-resolution versions - round to 1ms
+            let ticks = crate::interrupts::get_ticks();
+            let total_ms = ticks * 10;
+            let coarse_sec = (total_ms / 1000) as i64;
+            Timespec {
+                tv_sec: if clock_id == CLOCK_REALTIME_COARSE {
+                    coarse_sec
+                } else {
+                    coarse_sec
+                },
+                tv_nsec: 0,
+            }
+        }
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            // Process/thread CPU time - not implemented, return 0
+            Timespec { tv_sec: 0, tv_nsec: 0 }
+        }
+        CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => {
+            // Alarm clocks - not implemented
+            return errno::Errno::EINVAL as u64;
+        }
         _ => return errno::Errno::EINVAL as u64,
     };
     if unsafe {
@@ -98,11 +122,36 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     0
 }
 
-pub fn sys_clock_getres(_clock_id: u64, res: *mut Timespec) -> u64 {
-    // All clocks report 1ms resolution (100Hz tick)
-    let ts = Timespec {
-        tv_sec: 0,
-        tv_nsec: 1_000_000,
+pub fn sys_clock_getres(clock_id: u64, res: *mut Timespec) -> u64 {
+    const CLOCK_REALTIME: u64 = 0;
+    const CLOCK_MONOTONIC: u64 = 1;
+    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
+    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
+    const CLOCK_MONOTONIC_RAW: u64 = 4;
+    const CLOCK_REALTIME_COARSE: u64 = 5;
+    const CLOCK_MONOTONIC_COARSE: u64 = 6;
+    const CLOCK_BOOTTIME: u64 = 7;
+    const CLOCK_REALTIME_ALARM: u64 = 8;
+    const CLOCK_BOOTTIME_ALARM: u64 = 9;
+
+    // Resolution varies by clock type
+    let ts = match clock_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => {
+            // TSC-based: ~1ns resolution
+            Timespec { tv_sec: 0, tv_nsec: 1 }
+        }
+        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
+            // Millisecond resolution
+            Timespec { tv_sec: 0, tv_nsec: 1_000_000 }
+        }
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            // Not implemented
+            Timespec { tv_sec: 0, tv_nsec: 0 }
+        }
+        CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => {
+            return errno::Errno::EINVAL as u64;
+        }
+        _ => return errno::Errno::EINVAL as u64,
     };
     if !res.is_null() {
         if unsafe {

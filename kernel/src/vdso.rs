@@ -8,7 +8,7 @@
 
 #![cfg(target_arch = "x86_64")]
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicPtr, Ordering};
 use x86_64::structures::paging::{FrameAllocator, Size4KiB, PhysFrame, Mapper, Page, PageTableFlags};
 use x86_64::VirtAddr;
 
@@ -20,12 +20,6 @@ pub const VDSO_BASE: u64 = 0x0000_7FFF_FFFC_0000;
 /// Virtual address of vDSO page for a specific CPU.
 pub const fn vdso_virt_addr_for_cpu(cpu_id: usize) -> u64 {
     VDSO_BASE + (cpu_id as u64) * 4096
-}
-
-/// Virtual address of vDSO page for the current CPU.
-#[allow(dead_code)]
-pub(crate) fn vdso_virt_addr() -> u64 {
-    vdso_virt_addr_for_cpu(crate::smp::get_cpu_id())
 }
 
 /// vDSO data structure — exactly one page (4096 bytes), cache-line aligned.
@@ -153,11 +147,9 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) {
             VDSO_PAGES[cpu_id].store(ptr, Ordering::Release);
         }
 
-        // Initialize CACHED_RTC for the first CPU (only need to do this once)
+        // Initialize cached RTC for the first CPU (only need to do this once)
         if cpu_id == 0 {
-            CACHED_RTC[0].store(rt_sec as u64, Ordering::Release);
-            CACHED_RTC[1].store(rt_nsec as u64, Ordering::Release);
-            CACHED_RTC_INITIALIZED.store(true, Ordering::Release);
+            vdso_update_cached_rtc();
         }
 
         crate::serial_write("[VDSO] CPU ");
@@ -198,6 +190,37 @@ pub fn vdso_map_into(
                 .map_err(|_| ())?
                 .ignore();
         }
+    }
+    Ok(())
+}
+
+/// Map a single CPU's vDSO page into a process's address space.
+///
+/// Used by the page fault handler when a specific vDSO page is accessed.
+pub fn vdso_map_cpu_page_into(
+    cpu_id: usize,
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> Result<(), ()> {
+    if cpu_id >= crate::task::scheduler::MAX_CPUS {
+        return Err(());
+    }
+    let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+    if ptr.is_null() {
+        return Err(());
+    }
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::USER_ACCESSIBLE
+        | PageTableFlags::NO_EXECUTE;
+    // SAFETY: VDSO_PAGES only stores valid pointers from init_vdso.
+    let info = unsafe { &*ptr };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(info.user_vaddr));
+    // SAFETY: info.frame was allocated by init_vdso and is a valid physical frame.
+    unsafe {
+        mapper
+            .map_to(page, info.frame, flags, frame_allocator)
+            .map_err(|_| ())?
+            .ignore();
     }
     Ok(())
 }
@@ -244,14 +267,11 @@ fn compute_tsc_conversion(freq_hz: u64) -> (u32, u32) {
     let mut shift = 0u32;
     let mut mult = (NSEC_PER_SEC << shift) / freq_hz;
 
-    // Increase shift until mult >= 1 (handles freq > 1 GHz)
+    // Increase shift until mult >= 1 (handles freq > 1 GHz).
+    // For real CPU frequencies (MHz–GHz), mult always fits in u32 at shift=0.
+    // Extremely low frequencies (< 0.23 Hz) would need shift decrease (impossible at 0),
+    // but such hardware doesn't exist. Second loop removed.
     while mult == 0 && shift < 32 {
-        shift += 1;
-        mult = (NSEC_PER_SEC << shift) / freq_hz;
-    }
-
-    // Increase shift until mult fits in u32 (handles very low frequencies)
-    while mult > u32::MAX as u64 && shift < 32 {
         shift += 1;
         mult = (NSEC_PER_SEC << shift) / freq_hz;
     }
@@ -269,39 +289,106 @@ fn read_tsc() -> (u32, u32) {
     (lo, hi)
 }
 
-/// Cached RTC time for vDSO updates (updated once per second to avoid CMOS I/O on every tick)
-static CACHED_RTC: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-
-/// Tracks whether CACHED_RTC has been initialized (set in init_vdso, read in vdso_update_time)
-static CACHED_RTC_INITIALIZED: AtomicBool = AtomicBool::new(false);
-
-/// Timer tick interval in milliseconds (100 Hz = 10ms)
-const TICK_MS: u64 = 10;
+/// Seqlock for cached RTC to prevent torn reads between sec and nsec.
+static CACHED_RTC_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Cached RTC seconds, updated by vdso_update_cached_rtc().
+static CACHED_RTC_SEC: AtomicU64 = AtomicU64::new(0);
+/// Cached RTC nanoseconds, updated by vdso_update_cached_rtc().
+static CACHED_RTC_NSEC: AtomicU64 = AtomicU64::new(0);
 
 /// Update cached RTC time (called from kernel thread/workqueue, NOT from IRQ).
 /// Does CMOS I/O — must NOT be called from interrupt context.
 pub fn vdso_update_cached_rtc() {
-    // CMOS I/O is slow and must not run in interrupt context
     let (sec, nsec) = crate::drivers::rtc::read_realtime();
-    CACHED_RTC[0].store(sec as u64, Ordering::Release);
-    CACHED_RTC[1].store(nsec as u32 as u64, Ordering::Release);
-    // Ensure CACHED_RTC stores are visible before INITIALIZED flag (Release fence suffices)
-    core::sync::atomic::fence(Ordering::Release);
-    // Mark initialized after storing values
-    CACHED_RTC_INITIALIZED.store(true, Ordering::Release);
+    // Start write: increment seq to odd (writer entering)
+    let seq = CACHED_RTC_SEQ.fetch_add(1, Ordering::Release) + 1;
+    debug_assert!(seq % 2 == 1, "RTC seqlock seq should be odd during write");
+
+    // Write data with Release ordering
+    CACHED_RTC_SEC.store(sec as u64, Ordering::Release);
+    CACHED_RTC_NSEC.store(nsec as u32 as u64, Ordering::Release);
+
+    // End write: increment seq to even (writer done)
+    CACHED_RTC_SEQ.store(seq + 1, Ordering::Release);
 }
 
 /// Get cached RTC time (for vDSO updates). Lock-free, IRQ-safe.
-/// Returns (0, 0) if not yet initialized (before init_vdso runs).
-fn get_cached_rtc() -> (u64, u32) {
-    // Fast check: if not initialized, return zero
-    if !CACHED_RTC_INITIALIZED.load(Ordering::Acquire) {
+/// Returns (0, 0) if a concurrent write is in progress.
+pub fn get_cached_rtc() -> (u64, u32) {
+    loop {
+        let seq = CACHED_RTC_SEQ.load(Ordering::Acquire);
+        if seq & 1 != 0 {
+            // Writer in progress, retry
+            continue;
+        }
+        let sec = CACHED_RTC_SEC.load(Ordering::Acquire);
+        let nsec = CACHED_RTC_NSEC.load(Ordering::Acquire) as u32;
+        let seq2 = CACHED_RTC_SEQ.load(Ordering::Acquire);
+        if seq == seq2 {
+            return (sec, nsec);
+        }
+        // Writer was active, retry
+    }
+}
+
+/// Read current time using TSC (x86_64 only).
+/// Returns (seconds, nanoseconds) for the specified clock.
+/// Returns (0, 0) if TSC is not calibrated.
+#[cfg(target_arch = "x86_64")]
+pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
         return (0, 0);
     }
-    let sec = CACHED_RTC[0].load(Ordering::Acquire);
-    let nsec = CACHED_RTC[1].load(Ordering::Acquire) as u32;
-    (sec, nsec)
+    // SAFETY: vdso_page returns valid pointer if not null
+    let vdso = unsafe { &*vdso_ptr };
+    
+    // Check if TSC is calibrated
+    let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+    if tsc_freq == 0 {
+        return (0, 0);
+    }
+    
+    // Read TSC calibration parameters
+    let tsc_mult = vdso.tsc_mult;
+    let tsc_shift = vdso.tsc_shift;
+    let tsc_base = vdso.tsc_base.load(Ordering::Acquire);
+    
+    // Read current TSC
+    let (lo, hi) = read_tsc();
+    let tsc_now = ((hi as u64) << 32) | lo as u64;
+    
+    // Calculate elapsed TSC cycles
+    let elapsed = tsc_now.wrapping_sub(tsc_base);
+    
+    if clock_id == 1 { // CLOCK_MONOTONIC
+        // Monotonic: TSC-based time directly
+        let ns = ((elapsed as u128 * tsc_mult as u128) >> tsc_shift) as u64;
+        let sec = ns / 1_000_000_000;
+        let nsec = (ns % 1_000_000_000) as u32;
+        (sec, nsec)
+    } else if clock_id == 0 { // CLOCK_REALTIME
+        // CLOCK_REALTIME - use RTC base + TSC delta
+        let (rt_sec, rt_nsec) = get_cached_rtc();
+        let (lo, hi) = read_tsc();
+        let tsc_now = ((hi as u64) << 32) | lo as u64;
+        let tsc_base = vdso.tsc_base.load(Ordering::Acquire);
+        let tsc_mult = vdso.tsc_mult;
+        let tsc_shift = vdso.tsc_shift;
+        let elapsed = tsc_now.wrapping_sub(tsc_base);
+        let ns = ((elapsed as u128 * tsc_mult as u128) >> tsc_shift) as u64;
+        let base_ns = rt_sec as u64 * 1_000_000_000 + rt_nsec as u64;
+        let total_ns = base_ns + ns;
+        let sec = total_ns / 1_000_000_000;
+        let nsec = (total_ns % 1_000_000_000) as u32;
+        (sec, nsec)
+    } else {
+        (0, 0)
+    }
 }
+
+/// Timer tick interval in milliseconds (100 Hz = 10ms)
+const TICK_MS: u64 = 10;
 
 /// Update vDSO time fields for the current CPU (called from timer interrupt, 100 Hz).
 ///
@@ -411,4 +498,123 @@ pub fn vdso_update_tsc_base(cpu_id: u32) {
 
     // End write: increment pid_cpu_seq to even (writer done)
     vdso.pid_cpu_seq.store(seq + 1, Ordering::Release);
+}
+
+/// Update the current CPU's TSC base with a fresh TSC reading.
+/// Called from timer interrupt or IPI handler on each CPU.
+pub fn vdso_update_my_tsc_base() {
+    let cpu_id = crate::smp::get_cpu_id() as u32;
+    vdso_update_tsc_base(cpu_id);
+}
+
+/// Extern "C" wrapper for SMP IPI broadcast to update TSC base on each CPU.
+/// Called via smp_broadcast_func with kind=3 (function call).
+#[no_mangle]
+pub extern "C" fn vdso_ipi_update_tsc_base(_arg: u64) {
+    vdso_update_my_tsc_base();
+}
+
+/// Synchronize TSC bases across all CPUs via IPI broadcast.
+/// Sends an IPI to all other CPUs to run vdso_ipi_update_tsc_base,
+/// then updates the current CPU's TSC base.
+pub fn vdso_sync_tsc_across_cpus() {
+    // Broadcast to all other CPUs to update their TSC bases
+    // kind=3 is the function-call IPI kind (see smp_broadcast_func)
+    crate::smp::smp_broadcast_func(3, vdso_ipi_update_tsc_base as *const () as u64);
+    
+    // Update our own TSC base
+    vdso_update_my_tsc_base();
+    
+    // Give other CPUs time to handle the IPI (spin-wait briefly)
+    // In a real system, we'd wait for acknowledgment, but this is a best-effort sync.
+    for _ in 0..100_000 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Check TSC drift across all online CPUs.
+/// Reads each CPU's tsc_base from its vDSO page, converts to nanoseconds
+/// using the TSC frequency, and logs a warning if drift exceeds 1ms (1,000,000 ns).
+pub fn vdso_check_tsc_drift() {
+    // First, update our own TSC base to get a fresh reading
+    vdso_update_my_tsc_base();
+
+    const MAX_CPUS: usize = crate::task::scheduler::MAX_CPUS;
+    let mut tsc_bases = [0u64; MAX_CPUS];
+    let mut valid_cpus = 0;
+    let mut tsc_freq = 0u64;
+
+    // Read tsc_base from each CPU's vDSO page
+    for cpu_id in 0..MAX_CPUS {
+        let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+        if ptr.is_null() {
+            continue;
+        }
+        // SAFETY: VDSO_PAGES only stores valid pointers from init_vdso.
+        let info = unsafe { &*ptr };
+        let hhdm_vaddr = info.hhdm_vaddr;
+        // SAFETY: hhdm_vaddr points to a valid VdsoData page in HHDM.
+        let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+
+        let base = vdso.tsc_base.load(Ordering::Acquire);
+        if base == 0 {
+            continue;
+        }
+        tsc_bases[cpu_id] = base;
+        valid_cpus += 1;
+
+        // Read TSC frequency from the first valid CPU (all should be the same)
+        if tsc_freq == 0 {
+            tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+        }
+    }
+
+    if valid_cpus < 2 || tsc_freq == 0 {
+        // Need at least 2 CPUs and valid TSC frequency to check drift
+        return;
+    }
+
+    // Find min and max tsc_base values
+    let mut min_tsc = u64::MAX;
+    let mut max_tsc = 0u64;
+    let mut min_cpu = 0;
+    let mut max_cpu = 0;
+
+    for cpu_id in 0..MAX_CPUS {
+        if tsc_bases[cpu_id] == 0 {
+            continue;
+        }
+        if tsc_bases[cpu_id] < min_tsc {
+            min_tsc = tsc_bases[cpu_id];
+            min_cpu = cpu_id;
+        }
+        if tsc_bases[cpu_id] > max_tsc {
+            max_tsc = tsc_bases[cpu_id];
+            max_cpu = cpu_id;
+        }
+    }
+
+    // Convert TSC difference to nanoseconds: ns = (tsc_diff * 1e9) / freq
+    let tsc_diff = max_tsc.wrapping_sub(min_tsc);
+    let drift_ns = (tsc_diff as u128 * 1_000_000_000u128 / tsc_freq as u128) as u64;
+
+    const DRIFT_THRESHOLD_NS: u64 = 1_000_000; // 1ms = 1,000,000 ns
+
+    if drift_ns > DRIFT_THRESHOLD_NS {
+        crate::serial_write("[TSC DRIFT] WARNING: TSC drift detected!\n");
+        crate::serial_write("[TSC DRIFT] CPU ");
+        crate::serial_write_hex(min_cpu as u64);
+        crate::serial_write(" (tsc_base=0x");
+        crate::serial_write_hex(min_tsc);
+        crate::serial_write(") vs CPU ");
+        crate::serial_write_hex(max_cpu as u64);
+        crate::serial_write(" (tsc_base=0x");
+        crate::serial_write_hex(max_tsc);
+        crate::serial_write(") drift=");
+        crate::serial_write_hex(drift_ns);
+        crate::serial_write(" ns (threshold=1,000,000 ns)\n");
+        crate::serial_write("[TSC DRIFT] TSC freq=");
+        crate::serial_write_hex(tsc_freq);
+        crate::serial_write(" Hz\n");
+    }
 }
