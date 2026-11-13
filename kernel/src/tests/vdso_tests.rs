@@ -452,6 +452,7 @@ pub fn test_vdso_exec_remaps_pages() -> Result<(), &'static str> {
         return Err("vDSO page not mapped after vdso_map_into");
     }
     
+    crate::vdso::frame_ref_tests::test_frame_references()?;
     crate::serial_write("[VDSO EXEC] remap test OK\n");
     Ok(())
 }

@@ -141,6 +141,9 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) {
             }
         };
 
+        // VDSO_PAGES and the HHDM writers retain this frame for the kernel lifetime.
+        crate::memory::frame_info::increment(frame.start_address());
+
         let user_vaddr = vdso_virt_addr_for_cpu(cpu_id);
 
         // Initialize the page via HHDM (same mapping used by readers) to ensure cache coherency
@@ -254,29 +257,8 @@ pub fn vdso_map_into(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> Result<(), ()> {
-    let flags = PageTableFlags::PRESENT
-        | PageTableFlags::USER_ACCESSIBLE
-        | PageTableFlags::NO_EXECUTE;
-
     for cpu_id in 0..crate::task::scheduler::MAX_CPUS {
-        let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
-        if ptr.is_null() {
-            // All pages should be pre-allocated by init_vdso() before any process creation.
-            // Return error to indicate incomplete vDSO setup.
-            return Err(());
-        }
-        // SAFETY: VDSO_PAGES only stores valid pointers from init_vdso, which runs single-threaded before any mapping.
-        let info = unsafe { &*ptr };
-        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(info.user_vaddr));
-
-        // SAFETY: info.frame was allocated by init_vdso and is a valid physical frame.
-        // The page is a valid user-space virtual address from vdso_virt_addr_for_cpu.
-        unsafe {
-            mapper
-                .map_to(page, info.frame, flags, frame_allocator)
-                .map_err(|_| ())?
-                .ignore();
-        }
+        vdso_map_cpu_page_into(cpu_id, mapper, frame_allocator)?;
     }
     Ok(())
 }
@@ -309,6 +291,8 @@ pub fn vdso_map_cpu_page_into(
             .map_err(|_| ())?
             .ignore();
     }
+    // AddressSpace::destroy releases one reference for each mapped user page.
+    crate::memory::frame_info::increment(info.frame.start_address());
     Ok(())
 }
 
@@ -833,3 +817,7 @@ pub fn vdso_check_tsc_drift() {
         crate::serial_write(" Hz\n");
     }
 }
+
+#[cfg(feature = "self_test")]
+#[path = "tests/vdso_frame_refs.rs"]
+pub(crate) mod frame_ref_tests;
