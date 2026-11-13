@@ -48,10 +48,16 @@ pub const SCHED_NORMAL: u32 = 0;
 pub const SCHED_FIFO: u32 = 1;
 pub const SCHED_RR: u32 = 2;
 pub const SCHED_BATCH: u32 = 3;
+pub const SCHED_DEADLINE: u32 = 6; // Linux-compatible
 
 /// Returns true if the scheduling class is real-time (FIFO or RR).
 pub fn is_realtime(class: u32) -> bool {
     class == SCHED_FIFO || class == SCHED_RR
+}
+
+/// Returns true if the scheduling class is deadline (EDF).
+pub fn is_deadline(class: u32) -> bool {
+    class == SCHED_DEADLINE
 }
 
 /// Returns true if `candidate_class` should preempt `current_class`.
@@ -301,7 +307,33 @@ impl PerCpuScheduler {
             return Some(t);
         }
 
-        // 2. RT threads have strict priority over SCHED_OTHER.
+        // 2. SCHED_DEADLINE (EDF) threads have highest priority — earliest absolute deadline runs first
+        let mut best_deadline: Option<u64> = None;
+        let mut best_dl_level: Option<usize> = None;
+        let mut best_dl_idx: Option<usize> = None;
+        for level in (0..8).rev() {
+            for idx in 0..self.ready_queues[level].len() {
+                let t = &self.ready_queues[level][idx];
+                if !is_deadline(t.policy) {
+                    continue;
+                }
+                if t.affinity_mask & (1u64 << current_cpu) == 0 {
+                    continue;
+                }
+                if best_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
+                    best_deadline = Some(t.sched_deadline);
+                    best_dl_level = Some(level);
+                    best_dl_idx = Some(idx);
+                }
+            }
+        }
+        if let (Some(level), Some(idx)) = (best_dl_level, best_dl_idx) {
+            if let Some(thread) = self.ready_queues[level].remove(idx) {
+                return Some(thread);
+            }
+        }
+
+        // 3. RT threads have strict priority over SCHED_OTHER.
         //    Search all priority levels for RT threads (FIFO=1, RR=2).
         //    RT threads with higher rt_priority (1-99) run first.
         let mut best_level: Option<usize> = None;
@@ -314,6 +346,9 @@ impl PerCpuScheduler {
                 if t.policy == 0 {
                     continue;
                 } // Not RT
+                if is_deadline(t.policy) {
+                    continue;
+                } // Already handled above
                 if t.affinity_mask & (1u64 << current_cpu) == 0 {
                     continue;
                 }
@@ -359,14 +394,39 @@ impl PerCpuScheduler {
             break;
         }
 
-        // 4. Work stealing — steal from other CPUs' RT queues first, then SCHED_OTHER
+        // 4. Work stealing — steal from other CPUs' deadline queues first, then RT, then SCHED_OTHER
         for i in 0..MAX_CPUS {
             if i == current_cpu {
                 continue;
             }
             if let Some(mut other) = PER_CPU[i].try_lock() {
                 other.flush_ready_queues();
-                // Steal RT threads first — find best candidate by index
+                // Steal deadline threads first — earliest deadline
+                let mut steal_dl_level: Option<usize> = None;
+                let mut steal_dl_idx: Option<usize> = None;
+                let mut steal_dl_deadline: Option<u64> = None;
+                for level in (0..8).rev() {
+                    for idx in 0..other.ready_queues[level].len() {
+                        let t = &other.ready_queues[level][idx];
+                        if !is_deadline(t.policy) {
+                            continue;
+                        }
+                        if t.affinity_mask & (1u64 << current_cpu) == 0 {
+                            continue;
+                        }
+                        if steal_dl_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
+                            steal_dl_level = Some(level);
+                            steal_dl_idx = Some(idx);
+                            steal_dl_deadline = Some(t.sched_deadline);
+                        }
+                    }
+                }
+                if let (Some(level), Some(idx)) = (steal_dl_level, steal_dl_idx) {
+                    if let Some(thread) = other.ready_queues[level].remove(idx) {
+                        return Some(thread);
+                    }
+                }
+                // Steal RT threads second
                 let mut steal_level: Option<usize> = None;
                 let mut steal_idx: Option<usize> = None;
                 let mut steal_prio: u32 = 0;
@@ -374,6 +434,9 @@ impl PerCpuScheduler {
                     for idx in 0..other.ready_queues[level].len() {
                         let t = &other.ready_queues[level][idx];
                         if t.policy == 0 {
+                            continue;
+                        }
+                        if is_deadline(t.policy) {
                             continue;
                         }
                         if t.affinity_mask & (1u64 << current_cpu) == 0 {

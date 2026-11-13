@@ -184,7 +184,19 @@ pub struct Thread {
     pub affinity_mask: u64,
     // ── FPU state (x86_64 only) ────────────────────────────────
     #[cfg(target_arch = "x86_64")]
-    pub fpu_state: Option<Box<FpuArea>>,
+    pub fpu_state: Option<Box<FpuArea>>,    // — SCHED_DEADLINE fields ——————————————————————————
+    /// Absolute deadline (ns since boot) for SCHED_DEADLINE
+    pub sched_deadline: u64,
+    /// Runtime budget (ns) for SCHED_DEADLINE
+    pub sched_runtime: u64,
+    /// Period (ns) for SCHED_DEADLINE
+    pub sched_period: u64,
+    // — Per-thread CPU time accounting (ns) ——————————————————————————————————
+    /// Total CPU time consumed by this thread (ns)
+    pub cpu_time_ns: u64,
+    /// TSC value when this thread started its current time slice (for charging on switch-out)
+    pub slice_start_tsc: u64,
+
 }
 
 /// Maximum stride value (virtual time units). Must be >> max threads.
@@ -348,6 +360,13 @@ impl Thread {
             rr_time_slice: 0,
             sched_class: 0,                    // SCHED_NORMAL
             affinity_mask: 0xFFFFFFFFFFFFFFFF, // All CPUs
+            // SCHED_DEADLINE fields
+            sched_deadline: 0,
+            sched_runtime: 0,
+            sched_period: 0,
+            // Per-thread CPU time accounting
+            cpu_time_ns: 0,
+            slice_start_tsc: 0,
 
             #[cfg(target_arch = "x86_64")]
             fpu_state: None,
@@ -452,6 +471,13 @@ impl Thread {
             rr_time_slice: 0, // RR child starts with fresh quantum
             sched_class: self.sched_class,
             affinity_mask: self.affinity_mask,
+            // SCHED_DEADLINE fields
+            sched_deadline: self.sched_deadline,
+            sched_runtime: self.sched_runtime,
+            sched_period: self.sched_period,
+            // Per-thread CPU time accounting
+            cpu_time_ns: 0,
+            slice_start_tsc: 0,
 
             #[cfg(target_arch = "x86_64")]
             fpu_state: None,
@@ -544,6 +570,12 @@ impl Thread {
             rr_time_slice: 0,
             sched_class: self.sched_class,
             affinity_mask: self.affinity_mask,
+            // SCHED_DEADLINE fields
+            sched_deadline: self.sched_deadline,
+            sched_runtime: self.sched_runtime,
+            sched_period: self.sched_period,
+            // Per-thread CPU time accounting
+            cpu_time_ns: 0,
         })
     }
 
@@ -631,6 +663,13 @@ impl Thread {
             rr_time_slice: 0,
             sched_class: self.sched_class,
             affinity_mask: self.affinity_mask,
+            // SCHED_DEADLINE fields
+            sched_deadline: self.sched_deadline,
+            sched_runtime: self.sched_runtime,
+            sched_period: self.sched_period,
+            // Per-thread CPU time accounting
+            cpu_time_ns: 0,
+            slice_start_tsc: 0,
 
             #[cfg(target_arch = "x86_64")]
             fpu_state: None,
@@ -698,6 +737,12 @@ impl Thread {
             rr_time_slice: 0,
             sched_class: self.sched_class,
             affinity_mask: self.affinity_mask,
+            // SCHED_DEADLINE fields
+            sched_deadline: self.sched_deadline,
+            sched_runtime: self.sched_runtime,
+            sched_period: self.sched_period,
+            // Per-thread CPU time accounting
+            cpu_time_ns: 0,
         })
     }
 }
@@ -874,21 +919,51 @@ pub unsafe fn jump_to_usermode(entry: u64, user_rsp: u64) -> ! {
     // The syscall entry code uses `swapgs` to get the PerCpuData GS base; we must
     // preserve the GS base by skipping `mov gs, ax`. Then swapgs back before iretq
     // so that the next syscall entry can swap it in again.
+    // Build iretq frame on the USER stack (not kernel stack!)
+    // iretq expects (top first): RIP, CS, RFLAGS, RSP, SS
+    #[repr(C, packed)]
+    struct IretqFrame {
+        rip: u64,
+        cs: u64,
+        rflags: u64,
+        rsp: u64,
+        ss: u64,
+    }
+
+    let frame = IretqFrame {
+        rip: entry,
+        cs: cs as u64,
+        rflags,
+        rsp: user_rsp,
+        ss: ss as u64,
+    };
+
+    // Write frame to user stack at user_rsp - size_of::<IretqFrame>()
+    let frame_size = core::mem::size_of::<IretqFrame>() as u64;
+    let frame_ptr = (user_rsp - frame_size) as *mut u64;
+    unsafe {
+        core::ptr::write(frame_ptr as *mut _, core::mem::transmute::<IretqFrame, [u64; 5]>(frame));
+    }
+
+    // Debug
+    crate::serial_write(&alloc::format!("[JUMP] entry=0x{:x} user_rsp=0x{:x} frame_ptr=0x{:x}\n",
+        entry, user_rsp, frame_ptr as u64));
+
+    // Set up segment registers and swap GS
+    // swapgs to get kernel GS base; we don't mov gs,ax to preserve user GS base.
+    // The syscall entry will swapgs back on next entry.
     core::arch::asm!(
         "mov ds, ax",
         "mov es, ax",
         "mov fs, ax",
         "swapgs",
-        "mov rdi, rsi",  // Pass user_rsp to _start so it can read argc/argv from stack
-        "push rax",      // SS
-        "push rsi",      // RSP
-        "push r8",       // RFLAGS
-        "push rcx",      // CS
-        "push rdx",      // RIP
+        // Pass user_rsp to _start in RDI so it can read argc/argv from stack
+        "mov rdi, rsi",
+        // Load user stack pointer (pointing to iretq frame) and iretq
+        "mov rsp, rsi",
         "iretq",
         in("rax") ss as u64,
-        in("rsi") user_rsp,
-        in("r8") rflags,
+        in("rsi") (user_rsp - core::mem::size_of::<IretqFrame>() as u64),
         in("rcx") cs as u64,
         in("rdx") entry,
         options(noreturn)

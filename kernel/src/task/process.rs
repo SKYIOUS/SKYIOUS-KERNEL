@@ -222,6 +222,8 @@ pub struct Process {
     pub stime: core::sync::atomic::AtomicU64,
     pub cutime: core::sync::atomic::AtomicU64,
     pub cstime: core::sync::atomic::AtomicU64,
+    /// Total CPU time consumed by all threads in this process (ns)
+    pub cpu_time_ns: core::sync::atomic::AtomicU64,
     pub boot_ticks: u64,
     pub groups: crate::sync::IrqSafeMutex<alloc::vec::Vec<u32>>,
     /// Process/thread name (up to 15 chars + null)
@@ -498,6 +500,7 @@ impl Process {
             stime: core::sync::atomic::AtomicU64::new(0),
             cutime: core::sync::atomic::AtomicU64::new(0),
             cstime: core::sync::atomic::AtomicU64::new(0),
+            cpu_time_ns: core::sync::atomic::AtomicU64::new(0),
             boot_ticks: crate::interrupts::get_ticks(),
             groups: crate::sync::IrqSafeMutex::new(alloc::vec::Vec::new()),
             name: crate::sync::IrqSafeMutex::new(String::from("init")),
@@ -1155,6 +1158,15 @@ impl Process {
                                         // AT_BASE (interpreter base, 0 for static)
         push_u64(7, &mut rsp)?; // type
         push_u64(0, &mut rsp)?; // value = no interpreter loaded yet
+        // AT_SYSINFO_EHDR (vDSO address) - Linux uses 33
+        // This kernel uses per-CPU vDSO pages at VDSO_BASE + cpu_id * 4096.
+        // AT_SYSINFO_EHDR points to VDSO_BASE (CPU 0's page). Userspace computes
+        // per-CPU page addresses as VDSO_BASE + cpu_id * 4096.
+        push_u64(33, &mut rsp)?; // type = AT_SYSINFO_EHDR
+        #[cfg(target_arch = "x86_64")]
+        push_u64(crate::vdso::VDSO_BASE, &mut rsp)?; // value = vDSO base virtual address
+        #[cfg(not(target_arch = "x86_64"))]
+        push_u64(0, &mut rsp)?; // value = 0 (no vDSO on other arches)
                                 // AT_PHNUM / AT_PHENT / AT_PHDR
         push_u64(5, &mut rsp)?; // type = AT_PHNUM
         push_u64(phdr_count, &mut rsp)?;

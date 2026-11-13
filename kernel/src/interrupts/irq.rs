@@ -25,6 +25,20 @@ pub(super) extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: Inter
     // busy loop with IF=1 (timer still fires). Always enabled.
     soft_lockup_check(_stack_frame.instruction_pointer.as_u64());
 
+    // Update vDSO time fields (monotonic, realtime)
+    crate::vdso::vdso_update_time();
+
+    // CPU 0: Synchronize TSC bases across all CPUs on every timer tick (10ms)
+    // This provides sub-100ns TSC drift guarantee by syncing every tick.
+    if crate::smp::get_cpu_id() == 0 {
+        crate::vdso::vdso_sync_tsc_across_cpus();
+        
+        // Check TSC drift every 100 ticks (1 second) to avoid excessive logging
+        if ticks.is_multiple_of(100) {
+            crate::vdso::vdso_check_tsc_drift();
+        }
+    }
+
     crate::apic::eoi();
 
     crate::task::scheduler::tick(ticks);

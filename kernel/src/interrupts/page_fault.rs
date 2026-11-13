@@ -10,6 +10,7 @@ use x86_64::structures::idt::{InterruptStackFrame, PageFaultErrorCode};
 use x86_64::structures::paging::PageTableFlags;
 
 use super::diag::IrqFmtBuf;
+use crate::vdso::{vdso_map_cpu_page_into, VDSO_BASE};
 
 // Page-fault dispatch trampoline. The IDT #PF entry points here instead of
 // directly at `page_fault_handler` so user-copy faults can be aborted
@@ -119,6 +120,18 @@ pub(super) extern "x86-interrupt" fn page_fault_handler(
     if let Some(ref proc) = cur {
         let page_addr = fault_addr.as_u64() & !0xFFF;
         let page = x86_64::structures::paging::Page::containing_address(fault_addr);
+
+        // Handle vDSO page fault: map the specific CPU's vDSO page if fault is in vDSO range
+        const VDSO_RANGE_END: u64 = VDSO_BASE + (crate::task::scheduler::MAX_CPUS as u64) * 4096;
+        if fault_addr.as_u64() >= VDSO_BASE && fault_addr.as_u64() < VDSO_RANGE_END {
+            let cpu_id = ((fault_addr.as_u64() - VDSO_BASE) / 4096) as usize;
+            use crate::memory::buddy::BuddyFrameAllocator;
+            let mut fa = BuddyFrameAllocator;
+            if let Some(mut mapper) = unsafe { proc.address_space.mapper() } {
+                let _ = vdso_map_cpu_page_into(cpu_id, &mut mapper, &mut fa);
+            }
+            return;
+        }
 
         // Check global swap map for a swapped-out page
         let swap_entry = crate::memory::swap::SWAP_PAGE_MAP.lock().remove(&page_addr);

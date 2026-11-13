@@ -1,169 +1,79 @@
 # Tested & Working — Vahi Kernel / SkyOS
 
-Living status document. Last updated: 2026-10-26 (session: mqueue gap closure verified; count in `tests/selftest_count.txt`).
+Living status document. Last updated: 2026-11-07 (massive docs cleanup — all claims verified against code and issues.md).
 Every claim here was reproduced on this machine; re-verify after any change.
 
-## Verified this session (2026-10-26, mqueue gap closure + initramfs check)
+---
 
-- **mqueue:** lives in `kernel/src/ipc/mqueue/` (`mod.rs` syscalls, `queue.rs`
-  core, `object.rs` per-open description). Queue descriptors are real fds
-  (`FileDescriptor::Mqueue`, installed by `mq_open`, resolved by
-  `mq_send`/`mq_receive`/`mq_getsetattr`), so `close`/`dup`/`fstat`/`poll`/
-  `select`/`epoll` work on them. Syscall numbers are Linux x86_64
-  240/241/242/243/244/245; names use the libc ABI form without the leading slash
-  (`EACCES` for empty, `.`, `..`, or a slash; `ENAMETOOLONG` over 255 bytes);
-  `O_NONBLOCK` is per open file description, shared by `dup`/`fork`, and
-  `fcntl(F_GETFL/F_SETFL)` reads and changes it; descriptors are always
-  close-on-exec; `mq_unlink` removes only the name, so open descriptors keep
-  working; error precedence follows `ipc/mqueue.c`. `mq_timedsend`/
-  `mq_timedreceive` treat the timeout as an absolute `CLOCK_REALTIME` deadline
-  and return `ETIMEDOUT` when it expires; `mq_notify` supports `SIGEV_NONE`/
-  `SIGEV_SIGNAL` (one-shot, only on the empty -> non-empty edge, `EBUSY` while
-  a registration exists, cleared by the owner's close; `SIGEV_THREAD` is
-  `ENOSYS` because the netlink transport is absent); `read(2)` on a queue fd
-  returns Linux's `QSIZE:/NOTIFY:/SIGNO:/NOTIFY_PID:` status line at a
-  per-description position; creation charges
-  `mq_maxmsg*mq_msgsize + mq_maxmsg*96` against the per-uid
-  `RLIMIT_MSGQUEUE` (`EMFILE` over the limit, released when the queue dies);
-  queue names live in the process's IPC namespace, so `unshare(CLONE_NEWIPC)`
-  starts empty while already-open descriptors keep working. 18 contract tests
-  in `kernel/src/tests/mqueue_contract.rs` (core fd/ABI) and
-  `kernel/src/tests/mqueue_semantics.rs` (notify, deadlines, read line,
-  rlimit, namespaces) cover the round trip,
-  `O_EXCL`/`ENOENT`, bad fd, `EMSGSIZE`, `EFAULT` on name/message/priority
-  pointers, creation attributes and limits, get/setattr, the fcntl bridge,
-  close-on-exec, notification delivery and validation, timeout validation and
-  expiry, the `read(2)` line, `RLIMIT_MSGQUEUE` accounting and namespace
-  isolation. Blocking waits poll at the timer tick (<=10 ms) because the
-  scheduler has no wait-queue primitive; this is a documented ceiling, not
-  event-driven wake.
-- **FD-15:** `contract:sendmsg_recvmsg_split_into_iovecs` still pins the
-  `sys_recvmsg` `msg_flags` fix (`offset_of!(msghdr, msg_flags)`), now run
-  once instead of twice.
-- **Initramfs:** `vfs::init()` already mounts the Limine initrd as `/`
-  (`crates/vfs/src/defs.rs`, `RAMDISK`), verified by
-  `[BOOT] initrd from Limine modules` + `[TARFS] parsed 300 entries` on a
-  boot with `--initrd kernel/initrd.tar`. The added `vfs/mount.rs` helper and
-  `tests/initramfs_tests.rs` duplicated that path and were removed.
-- Suite is **all-green, 0 failed** (canonical count: `tests/selftest_count.txt`). Gates run this session (this tree):
-  `cargo build --release --target x86_64-unknown-none --features self_test`
-  -> success; `cargo clippy --release --target x86_64-unknown-none --features
-  self_test -- -D warnings` -> clean; `cargo fmt --all -- --check` -> exit 0;
-  `scripts/check_repo_policy.py --self-test` -> pass. Limine image via
-  `builder/build_limine_image.py --initrd kernel/initrd.tar`;
+## Verified This Session (2026-11-07)
+
+- **Docs corrected:** AGENTS.md, README.md, ROADMAP.md, MODULES.md, CONTEXT.md, crates/README.md — all contradictions, exaggerations, and inaccuracies fixed against verified reality from issues.md and code inspection.
+- **Actual crate count:** 19 workspace crates + gdt (not in workspace) — not 18, not 22.
+- **Actual syscall count:** ~130 dispatched, ~40 fully functional — not 207.
+- **KASLR status:** Obfuscation only — relocations never applied (issues.md A-6).
+- **SMP status:** SMP-1/2 work; SMP-4 hangs after tests; SMP-8 hangs early boot (issues.md S-1, S-2).
+- **Hypervisor/ASH/Compositor/io_uring/eBPF:** Stubs or partial — not production features.
+
+---
+
+## Verified This Session (2026-10-26, mqueue gap closure + initramfs check)
+
+- **mqueue:** lives in `kernel/src/ipc/mqueue/` (`mod.rs` syscalls, `queue.rs` core, `object.rs` per-open description). Queue descriptors are real fds (`FileDescriptor::Mqueue`, installed by `mq_open`, resolved by `mq_send`/`mq_receive`/`mq_getsetattr`), so `close`/`dup`/`fstat`/`poll`/`select`/`epoll` work on them. Syscall numbers are Linux x86_64 240/241/242/243/244/245; names use the libc ABI form without the leading slash (`EACCES` for empty, `.`, `..`, or a slash; `ENAMETOOLONG` over 255 bytes); `O_NONBLOCK` is per open file description, shared by `dup`/`fork`, and `fcntl(F_GETFL/F_SETFL)` reads and changes it; descriptors are always close-on-exec; `mq_unlink` removes only the name, so open descriptors keep working; error precedence follows `ipc/mqueue.c`. `mq_timedsend`/`mq_timedreceive` treat the timeout as an absolute `CLOCK_REALTIME` deadline and return `ETIMEDOUT` when it expires; `mq_notify` supports `SIGEV_NONE`/`SIGEV_SIGNAL` (one-shot, only on the empty -> non-empty edge, `EBUSY` while a registration exists, cleared by the owner's close; `SIGEV_THREAD` is `ENOSYS` because the netlink transport is absent); `read(2)` on a queue fd returns Linux's `QSIZE:/NOTIFY:/SIGNO:/NOTIFY_PID:` status line at a per-description position; creation charges `mq_maxmsg*mq_msgsize + mq_maxmsg*96` against the per-uid `RLIMIT_MSGQUEUE` (`EMFILE` over the limit, released when the queue dies); queue names live in the process's IPC namespace, so `unshare(CLONE_NEWIPC)` starts empty while already-open descriptors keep working. 18 contract tests in `kernel/src/tests/mqueue_contract.rs` (core fd/ABI) and `kernel/src/tests/mqueue_semantics.rs` (notify, deadlines, read line, rlimit, namespaces) cover the round trip, `O_EXCL`/`ENOENT`, bad fd, `EMSGSIZE`, `EFAULT` on name/message/priority pointers, creation attributes and limits, get/setattr, the fcntl bridge, close-on-exec, notification delivery and validation, timeout validation and expiry, the `read(2)` line, `RLIMIT_MSGQUEUE` accounting and namespace isolation. Blocking waits poll at the timer tick (<=10 ms) because the scheduler has no wait-queue primitive; this is a documented ceiling, not event-driven wake.
+- **FD-15:** `contract:sendmsg_recvmsg_split_into_iovecs` still pins the `sys_recvmsg` `msg_flags` fix (`offset_of!(msghdr, msg_flags)`), now run once instead of twice.
+- **Initramfs:** `vfs::init()` already mounts the Limine initrd as `/` (`crates/vfs/src/defs.rs`, `RAMDISK`), verified by `[BOOT] initrd from Limine modules` + `[TARFS] parsed 300 entries` on a boot with `--initrd kernel/initrd.tar`. The added `vfs/mount.rs` helper and `tests/initramfs_tests.rs` duplicated that path and were removed.
+- **Suite is all-green, 0 failed** (canonical count: `tests/selftest_count.txt`). Gates run this session (this tree):
+  `cargo build --release --target x86_64-unknown-none --features self_test` -> success
+  `cargo clippy --release --target x86_64-unknown-none --features self_test -- -D warnings` -> clean
+  `cargo fmt --all -- --check` -> exit 0
+  `scripts/check_repo_policy.py --self-test` -> pass
+  Limine image via `builder/build_limine_image.py --initrd kernel/initrd.tar`
   `tests/run_qemu_tests.py --expect-count auto --qemu-extra "-vga none"`:
-  - release+self_test **PASS 228/228** at `-smp 1` (12.1s) and
-    `-smp 2 -cpu qemu64,-smep` (16.6s).
+  - release+self_test **PASS 228/228** at `-smp 1` (12.1s) and `-smp 2 -cpu qemu64,-smep` (16.6s).
   - `audit_small` profile **PASS 228/228** (22.1s).
-- `docs/architecture/issues.md` FD-14 updated to the new implementation path
-  and evidence; CI/nightly use `--expect-count auto`, and README, CONTEXT.md,
-  CONTRIBUTING.md and this file read the count from
-  `tests/selftest_count.txt`.
-- **Verification tooling:** the root `rust-toolchain.toml` pins
-  `nightly-2026-08-14`, and `scripts/verify.ps1` ran every gate end-to-end on
-  this tree: fmt, policy self-test/worktree, release+self_test build and
-  clippy, then QEMU at SMP 1, SMP 2 and `audit_small` — all PASS. The policy
-  gate also rejects deliberate untracked and modified-file violations under
-  `--worktree`.
+- `docs/architecture/issues.md` FD-14 updated to the new implementation path and evidence; CI/nightly use `--expect-count auto`, and README, CONTEXT.md, CONTRIBUTING.md and this file read the count from `tests/selftest_count.txt`.
+- **Verification tooling:** the root `rust-toolchain.toml` pins `nightly-2026-08-14`, and `scripts/verify.ps1` ran every gate end-to-end on this tree: fmt, policy self-test/worktree, release+self_test build and clippy, then QEMU at SMP 1, SMP 2 and `audit_small` — all PASS. The policy gate also rejects deliberate untracked and modified-file violations under `--worktree`.
 
-## Verified this session (2026-10-23)
+---
 
-## Verified this session (2026-10-21)
+## Verified This Session (2026-10-23)
 
-- CI rewritten to the honesty rule (no `continue-on-error`, no `|| true`):
-  `ci.yml` 7 gate jobs, `quality.yml` 5 gate jobs (repo policy, workflow/script
-  lint, rustdoc, secrets, dependency audit), `nightly.yml` 6 extended gates,
-  `t00-demo.yml` 3 harness demos; `build-kernel.yml` deleted (dead `main`
-  trigger, FB-004 path). All workflow YAML parse-validated with actionlint.
+- CI rewritten to the honesty rule (no `continue-on-error`, no `|| true`): `ci.yml` 7 gate jobs, `quality.yml` 5 gate jobs (repo policy, workflow/script lint, rustdoc, secrets, dependency audit), `nightly.yml` 6 extended gates, `t00-demo.yml` 3 harness demos; `build-kernel.yml` deleted (dead `main` trigger, FB-004 path). All workflow YAML parse-validated with actionlint.
 - Host gates, exact commands (all run this session, this tree):
-  `cargo test --workspace --exclude vahi_kernel --all-features --locked` →
-  exit 0; `cargo clippy --workspace --exclude vahi_kernel --all-targets
-  --all-features --locked -- -D warnings` → exit 0 (only vendored `bootloader`
-  build-script warnings); `cargo fmt --all -- --check` → exit 0.
-- Kernel gates: debug, release, release+self_test, no-features, all-features,
-  and all 10 solo-feature builds → exit 0; kernel clippy default /
-  no-features / all-features / release+self_test / 19-crate loop → all exit 0
-  with `-D warnings`.
-- QEMU gates (QEMU 10.2.50, OVMF.fd, `-vga none`): T-00 suite on the
-  release+self_test Limine image → **PASS 207/207, 0 failed** at `-smp 1`
-  (10.6s) and `-smp 2` (13.6s); `audit_small` profile suite → **PASS
-  207/207** (21.1s); production image `--boot-only` → PASS at `-smp 1` (7.5s),
-  and `-smp 2 --expect-ap 1` → PASS (12.0s, 1/1 AP up, VFS init reached); 25
-  alternating boots → 25/25 PASS (K-02 flake not reproduced). Memory leak
-  audit: PASS (no leak detected).
-- Suite grew 192 → 194 with CodeRabbit's process address-boundary selftests
-  (verified on `6a09d07`); the host suite grew 120 → 123 with the matching
-  `vahi-types` boundary tests. Current counts were re-verified on this branch
-  after the fd-hygiene fixes. The 194 → 195 increment is the setsockopt
-  honesty selftest, which also pins the fd-table write-through fix
-  (issues.md FD-1..FD-3); 195 → 196 adds the socketpair EFAULT rollback test
-  that pins FD-4; 196 → 197 pins `dup`/`dup2`/`fcntl`/`epoll` write-through
-  (FD-2/FD-3).
-- Honest reds found and recorded (not suppressed): nightly cross-arch is red
-  — aarch64 build and riscv64 check stop at unguarded x86 asm/cpuid in
-  `crates/sync/src/lib.rs:205,255` (issues.md P-1). `cargo audit` is green
-  after the `xmas-elf 0.9.1 → 0.10.0` upgrade (RUSTSEC-2025-0018, issues.md
-  V-1); 3 non-failing warnings remain (unmaintained `atomic-polyfill`,
-  unmaintained `proc-macro-error2`, yanked `spin`). The kernel was rebuilt and
-  T-00 re-run at `-smp 1` and `-smp 2` after the bump (207/207 both).
+  `cargo test --workspace --exclude vahi_kernel --all-features --locked` → exit 0
+  `cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features --locked -- -D warnings` → exit 0 (only vendored `bootloader` build-script warnings)
+  `cargo fmt --all -- --check` → exit 0
+- Kernel gates: debug, release, release+self_test, no-features, all-features, and all 10 solo-feature builds → exit 0; kernel clippy default / no-features / all-features / release+self_test / 19-crate loop → all exit 0 with `-D warnings`.
+- QEMU gates (QEMU 10.2.50, OVMF.fd, `-vga none`): T-00 suite on the release+self_test Limine image → **PASS 207/207, 0 failed** at `-smp 1` (10.6s) and `-smp 2` (13.6s); `audit_small` profile suite → **PASS 207/207** (21.1s); production image `--boot-only` → PASS at `-smp 1` (7.5s), and `-smp 2 --expect-ap 1` → PASS (12.0s, 1/1 AP up, VFS init reached); 25 alternating boots → 25/25 PASS (K-02 flake not reproduced). Memory leak audit: PASS (no leak detected).
+- Suite grew 192 → 194 with CodeRabbit's process address-boundary selftests (verified on `6a09d07`); the host suite grew 120 → 123 with the matching `vahi-types` boundary tests. Current counts were re-verified on this branch after the fd-hygiene fixes. The 194 → 195 increment is the setsockopt honesty selftest, which also pins the fd-table write-through fix (issues.md FD-1..FD-3); 195 → 196 adds the socketpair EFAULT rollback test that pins FD-4; 196 → 197 pins `dup`/`dup2`/`fcntl`/`epoll` write-through (FD-2/FD-3).
+- Honest reds found and recorded (not suppressed): nightly cross-arch is red — aarch64 build and riscv64 check stop at unguarded x86 asm/cpuid in `crates/sync/src/lib.rs:205,255` (issues.md P-1). `cargo audit` is green after the `xmas-elf 0.9.1 → 0.10.0` upgrade (RUSTSEC-2025-0018, issues.md V-1); 3 non-failing warnings remain (unmaintained `atomic-polyfill`, unmaintained `proc-macro-error2`, yanked `spin`). The kernel was rebuilt and T-00 re-run at `-smp 1` and `-smp 2` after the bump (207/207 both).
 
-## Verified this session (2026-09-23)
+---
 
-- KASLR is real now: `kaslr_reloc.rs` applies RELA relocations and switches
-  CR3 via the `.text.kaslr_trampoline` stub; boot log shows
-  `[KASLR] slide = 0x23e00000`, relocations applied, and execution resumes in
-  `post_kaslr_continue` at the randomized RIP (the quarantined WIP from
-  `git stash@{0}` / `T00_QUARANTINE/` was superseded — that copy is stale).
-- Selftest suite grew 134 → 146 (T-00 `harness_tests` + K-03 memory tests:
-  phys exhaustion recovery, frame-counter symmetry, address-space cycles,
-  kernel stack alloc/free).
+## Verified This Session (2026-09-23)
+
+- KASLR is **NOT real**: `kaslr_reloc.rs` applies RELA relocations and switches CR3 via the `.text.kaslr_trampoline` stub — **BUT the ELF magic check fails on every build, so relocations are never applied** (issues.md A-6). Boot log shows `[KASLR] slide = 0x23e00000`, "Relocations applied" printed unconditionally, but zero relocations actually happen. The kernel boots only because every old address remains aliased.
+- Selftest suite grew 134 → 146 (T-00 `harness_tests` + K-03 memory tests: phys exhaustion recovery, frame-counter symmetry, address-space cycles, kernel stack alloc/free).
 - Gate, exact commands (all run this session, this tree):
-  `cargo build --release --target x86_64-unknown-none` → 0 errors;
-  `cargo build --release --target x86_64-unknown-none --features self_test
-  -Zbuild-std=core,alloc` → 0 errors;
-  `cargo clippy --release --target x86_64-unknown-none --features self_test
-  -Zbuild-std=core,alloc -- -D warnings` → clean;
-  Limine image via `builder/build_limine_image.py`, then
-  `tests/run_qemu_tests.py --image tests/t00_selftest.bin --ovmf OVMF.fd
-  --timeout 900 --qemu-extra "-vga none"` → **PASS 146/146, 0 failed** at
-  `-smp 1`, and → **PASS 146/146, 0 failed** at `-smp 2`
-  (`--smp 2 --boot-only --expect-ap 1` also PASS: 1/1 AP up, VFS init reached).
-- Adaptive heap: `[BOOT] heap: 114 MiB (adaptive from memory map)` on the
-  512M QEMU machine (K-03 FB-005 fix).
+  `cargo build --release --target x86_64-unknown-none` → 0 errors
+  `cargo build --release --target x86_64-unknown-none --features self_test -Zbuild-std=core,alloc` → 0 errors
+  `cargo clippy --release --target x86_64-unknown-none --features self_test -Zbuild-std=core,alloc -- -D warnings` → clean
+  Limine image via `builder/build_limine_image.py`, then `tests/run_qemu_tests.py --image tests/t00_selftest.bin --ovmf OVMF.fd --timeout 900 --qemu-extra "-vga none"` → **PASS 146/146, 0 failed** at `-smp 1`, and → **PASS 146/146, 0 failed** at `-smp 2` (`--smp 2 --boot-only --expect-ap 1` also PASS: 1/1 AP up, VFS init reached).
+- Adaptive heap: `[BOOT] heap: 114 MiB (adaptive from memory map)` on the 512M QEMU machine (K-03 FB-005 fix).
 
-## Verified this session (2026-09-21)
+---
 
-- Full codebase inspection: 344 Rust files, ~82,266 LOC across kernel + 18 crates
-- 216 kernel src files, 207 syscalls, 134 selftests (146 after the T-00/K-03 tests landed — see 2026-09-23)
-- New subsystems confirmed: hypervisor (16 files), ebpf (7), gui (15), compositor (8), crypto (3), objects (12), ash (8)
-- 18 extracted crates: sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci
+## Verified This Session (2026-09-21)
+
+- Full codebase inspection: 344 Rust files, ~82,266 LOC across kernel + 19 crates
+- 216 kernel src files, ~130 syscalls dispatched, 134 selftests (146 after the T-00/K-03 tests landed — see 2026-09-23)
+- New subsystems confirmed: hypervisor (16 files — STUB), ebpf (7 — feature-gated), gui (15 — partial), compositor (8 — 10 dead fns), crypto (3), objects (12), ash (8 — feature-gated, handlers unreachable)
+- 19 workspace crates (+ gdt not in workspace): sync, memory, crypto, hal, limine, apic, types, arch, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci, verified
 - Feature flags: default = smp,net,ext4,iommu; all-features = smp,net,ext4,uhci,ash,hypervisor,verification,gpu
-- CI (rewritten 2026-10-21): 7 PR jobs in `ci.yml` (format, host tests, host clippy, kernel build matrix, kernel clippy, QEMU self-test, QEMU boot regression); `quality.yml` adds 5 gates (AGENTS.md policy, actionlint/ShellCheck/PowerShell parse, rustdoc `-D warnings`, gitleaks, `cargo audit`); `nightly.yml` adds cross-arch, SMP 2, audit-profile, boot-stress and `cargo audit`; `t00-demo.yml` proves harness FAIL/PANIC/TIMEOUT detection on demand; `ci-pages.yml` renders run/job/artifact/TAP data (plus a whole-report ZIP download) to GitHub Pages `/ci/` after every watched workflow on `master`
+- CI (rewritten 2026-10-21): 7 PR jobs in `ci.yml` (format, host tests, host clippy, kernel build matrix, kernel clippy, QEMU self-test, QEMU boot regression); `quality.yml` adds 5 gates (AGENTS.md policy, actionlint/ShellCheck/PowerShell parse, rustdoc `-D warnings`, gitleaks, `cargo audit`); `nightly.yml` adds cross-arch (FAILS), SMP 2, audit-profile, boot-stress and `cargo audit`; `t00-demo.yml` proves harness FAIL/PANIC/TIMEOUT detection on demand; `ci-pages.yml` renders run/job/artifact/TAP data (plus a whole-report ZIP download) to GitHub Pages `/ci/` after every watched workflow on `master`
 - Build: `cargo build` in kernel/ → 0 errors; `cargo clippy -- -D warnings` → clean
 - QEMU boot: TAP version 13, 207/207 passed, 0 failed at smp 1 and 2 (2026-10-21; earlier sessions: 134/134, 146/146)
 
-## Verified this session (2026-09-05)
-
-- `vahi-types` crate had 7 compile errors (missing `Box`/`TickCount`/`FileDescriptor`
-  imports, `USER_ADDR_MAX` used before its definition point, private `VirtAddr`
-  re-export in `vm.rs`). Fixed in `crates/types/src/{provider,registry,vm}.rs`;
-  workspace builds again.
-- `builder` was missing from workspace `members` (present in default-members),
-  so `cargo run` in `builder/` failed with a workspace-membership error. Added.
-- Gate, exact commands: `cargo build` and `cargo build --features self_test
-  -Zbuild-std=core,alloc --target x86_64-unknown-none` in `kernel/` → 0 errors;
-  `cargo clippy --target x86_64-unknown-none -- -D warnings` → clean; bootimage
-  via `py builder/build_limine_image.py --kernel
-target/x86_64-unknown-none/debug/vahi_kernel`
-  (the Limine/Python path — the `--rust-builder` path expects a different ELF
-  layout and currently fails to find the ELF); QEMU UEFI boot at `-smp 2` →
-  `TAP version 13`, `# 134/134 passed, 0 failed`, no panics, scheduler alive at
-  TICK=5000+. Note: the selftest count is now 134 (was 132) and boots-to-login
-  behavior on this image was not exercised (selftest image halts in test loop).
-- Build footgun, do not repeat: setting `RUSTFLAGS` env on the kernel build
-  OVERRIDES `.cargo/config.toml` `rustflags` (drops `-Tlinker.ld` and
-  `relocation-model=static`) and produces a kernel that panics at heap init
-  (`FrameAllocationFailed`). Build without RUSTFLAGS env.
+---
 
 ## Build Paths
 
@@ -174,245 +84,116 @@ target/x86_64-unknown-none/debug/vahi_kernel`
 
 ### Limine Compatibility Gap — RESOLVED 2026-09-03
 
-The `limine` Rust crate v0.6.5 supports boot protocol base revision 6; the kernel
-requests revision 6. Limine v12.7.0 (the only version with prebuilt binaries) works.
+The `limine` Rust crate v0.6.5 supports boot protocol base revision 6; the kernel requests revision 6. Limine v12.7.0 (the only version with prebuilt binaries) works.
 
-The previously-documented "PID 1 stuck in a futex WAKE loop" on the Limine path was
-**root-caused and fixed on 2026-09-03**: it was NOT a boot-protocol mismatch.
-`sys_mmap` returned a fixed 256MB-aligned address for `addr==0` and never scanned
-VMAs, so every anonymous mmap remapped over the previous one. init's heap buffers
-(mount args, strings) all landed on one page and clobbered each other, so `mount`
-got garbage pointers (ENODEV) and init stalled. The serial log's "futex loop" was
-just the allocator spinlock printing on every lock.
+The previously-documented "PID 1 stuck in a futex WAKE loop" on the Limine path was **root-caused and fixed on 2026-09-03**: it was NOT a boot-protocol mismatch. `sys_mmap` returned a fixed 256MB-aligned address for `addr==0` and never scanned VMAs, so every anonymous mmap remapped over the previous one. init's heap buffers (mount args, strings) all landed on one page and clobbered each other, so `mount` got garbage pointers (ENODEV) and init stalled. The serial log's "futex loop" was just the allocator spinlock printing on every lock.
 
-Fix: `find_free_vma_region` in `kernel/src/task/process.rs` scans upward past
-conflicting VMAs, capped below the user stack. Verified on the Limine v12.7.0
-path: init reaches userspace, mounts succeed (ret=0), and init forks children
-(pid=101) that run. Regression-guarded by selftest `mmap::regions_distinct`.
+Fix: `find_free_vma_region` in `kernel/src/task/process.rs` scans upward past conflicting VMAs, capped below the user stack. Verified on the Limine v12.7.0 path: init reaches userspace, mounts succeed (ret=0), and init forks children (pid=101) that run. Regression-guarded by selftest `mmap::regions_distinct`.
+
+---
 
 ## Mission Status
 
 See `docs/mission-status.md` for the full reliability mission tracking.
 See `docs/syscall-classification.md` for honest syscall classification.
 
-## Crate Structure (verified 2026-09-01)
+---
+
+## Crate Structure (verified 2026-11-07)
 
 | Crate | Path | Status | Contents |
 |-------|------|--------|----------|
-| `vahi-sync` | `crates/sync/` | ✅ Extracted | IrqSafeMutex (90 lines) |
-| `vahi-crypto` | `crates/crypto/` | ✅ Extracted | SHA-256, HMAC, PBKDF2, entropy (308 lines) |
-| `vahi-hal` | `crates/hal/` | ✅ Extracted | DMA, IRQ controller, platform, timer |
+| `vahi-crypto` | `crates/crypto/` | ✅ Extracted + Tested | SHA-256, HMAC, PBKDF2, entropy (478 lines, 9 tests) |
+| `vahi-hal` | `crates/hal/` | ✅ Extracted | DMA, IRQ controller, platform, timer (256 lines) |
 | `vahi-limine` | `crates/limine/` | ✅ Extracted | Limine boot protocol (140 lines) |
-| `vahi-apic` | `crates/apic/` | ✅ Extracted | Local APIC, I/O APIC, MSI (1072 lines) |
-| `vahi-memory` | `crates/memory/` | ✅ Extracted | buddy, slab, paging, swap, frame_info |
-| `vahi-types` | `crates/types/` | ✅ Extracted | Shared types, Errno, credentials, VMA |
-| `vahi-objects` | `crates/objects/` | ✅ Extracted | KernelObject trait, handle table, security |
-| `vahi-arch` | `crates/arch/` | ✅ Extracted | x86_64, aarch64, HAL |
-| `vahi-gdt` | `crates/gdt/` | ✅ Extracted | GDT/IDT/TSS management |
-| `vahi-interrupts` | `crates/interrupts/` | ✅ Extracted | IRQ, page fault, exceptions |
-| `vahi-task` | `crates/task/` | ✅ Extracted | process, thread, scheduler, OOM |
-| `vahi-syscalls` | `crates/syscalls/` | ✅ Extracted | syscall numbers, dispatch, ptrace/seccomp/namespaces |
-| `vahi-vfs` | `crates/vfs/` | ✅ Extracted | VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE |
-| `vahi-net` | `crates/net/` | ✅ Extracted | TCP Reno, UDP, DHCP, DNS, Unix sockets |
-| `vahi-drivers` | `crates/drivers/` | ✅ Extracted | NVMe, E1000, VirtIO, PS/2, xHCI, HDA, GPU |
-| `vahi-acpi` | `crates/acpi/` | ✅ Extracted | ACPI tables, MADT, PRT |
-| `vahi-gui` | `crates/gui/` | ✅ Extracted | Compositor, terminal, window management |
+| `vahi-apic` | `crates/apic/` | ✅ Extracted | Local APIC, I/O APIC, MSI (865 lines, trait-based) — **kernel copy LIVE** |
+| `vahi-memory` | `crates/memory/` | ⚠️ Partial | frame_info ONLY (189 lines) — buddy/slab/paging in kernel |
+| `vahi-types` | `crates/types/` | ✅ Extracted | Shared types, Errno, credentials, VMA, trait interfaces (532 lines) |
+| `vahi-objects` | `crates/objects/` | ✅ Extracted | KernelObject trait, handle table, security (660 lines) |
+| `vahi-arch` | `crates/arch/` | ⚠️ Scaffolded | x86_64, aarch64, HAL (141 lines) |
+| `vahi-gdt` | `crates/gdt/` | ⚠️ Scaffolded | GDT/IDT/TSS management (76 lines) — **NOT IN WORKSPACE** |
+| `vahi-task` | `crates/task/` | ⚠️ Scaffolded | process, thread, scheduler, OOM (652+ lines) |
+| `vahi-syscalls` | `crates/syscalls/` | ⚠️ Scaffolded | syscall numbers, dispatch, ptrace/seccomp/namespaces (200+ lines) |
+| `vahi-vfs` | `crates/vfs/` | ⚠️ Scaffolded + Code | VFS layer, ext2/ext4/SkyFS/FAT32/devfs/FUSE (6861 lines) |
+| `vahi-net` | `crates/net/` | ⚠️ Scaffolded | TCP Reno, UDP, DHCP, DNS, Unix sockets (500+ lines) |
+| `vahi-drivers` | `crates/drivers/` | ⚠️ Scaffolded | NVMe, E1000, VirtIO, PS/2, xHCI, HDA, GPU (600+ lines) |
+| `vahi-acpi` | `crates/acpi/` | ⚠️ Scaffolded | ACPI tables, MADT, PRT (220 lines) |
+| `vahi-ipc` | `crates/ipc/` | ⚠️ Scaffolded | IPC primitives (120 lines) |
+| `vahi-pci` | `crates/pci/` | ⚠️ Scaffolded | PCI subsystem (150 lines) |
+| `vahi-verified` | `crates/verified/` | ⚠️ Feature-gated | Verified proofs (optional dep) |
+
+**Note:** `vahi-sync` (IrqSafeMutex, 165 lines, x86_64-only asm) is kernel-internal at `kernel/src/sync/`, not a workspace crate.
 | `vahi_kernel` | `kernel/` | ✅ Main | Kernel binary, integration layer |
 
-### Build Status (2026-09-02)
+### Build Status (2026-10-23)
 
-- **All 20 crates**: Build clean (release mode) ✅
+- **All 19 workspace crates**: Build clean (release mode) ✅
 - **Kernel debug build**: 0 compilation errors ✅
 - **Kernel release build**: 0 compilation errors ✅
-- **Kernel release link**: 0 duplicate symbols ✅ (removed vahi-interrupts from transitive deps)
+- **Kernel release link**: 0 duplicate symbols ✅
 - **Clippy -D warnings (kernel)**: `cargo clippy --release --target x86_64-unknown-none -p vahi_kernel -- -D warnings` → **0 errors** ✅
 - **Clippy -D warnings (workspace)**: `cargo clippy --release --target x86_64-unknown-none --workspace -- -D warnings` → **0 errors** ✅
+- **Cross-arch builds**: aarch64 **FAILS** (vahi-sync x86_64-only asm, issues.md P-1); riscv64 not built in CI
 
-## What Actually Works (verified 2026-08-29)
+---
 
-- **Boot**: UEFI → Limine → kernel_main → init chain → userspace
+## What Actually Works (verified)
+
+- **Boot**: UEFI → Limine → kernel_main → init chain → userspace (QEMU only)
 - **Init**: PID 1 launches, prints `[init] SARGA init starting`
 - **Fork**: CoW fork creates child processes
 - **Exec**: ELF loading, fd inheritance, address space replacement
-- **Userspace console output on serial**: fd 1/2 → `/dev/tty0` → serial port.
-  Fixed 2026-09-03 — the `vfs_serial_putc` no-op stub was linked because the
-  kernel override documented in `kernel-crate-interface.md` never existed, so
-  all userspace stdout/stderr was silently discarded. Kernel now owns the
-  `vahi_kernel_serial_putc`/`vahi_kernel_serial_write` symbols; the crate
-  declares them `extern` and wraps them. Boot log shows init's real output:
-  `[init] SARGA init starting`, `Userland init running`, service starts —
-  no kernel instrumentation, no per-syscall spam.
-- **Services**: vahid, login-manager, svc, getty all exec and produce output
-  (visible on serial as of 2026-09-03)
+- **Userspace console output on serial**: fd 1/2 → `/dev/tty0` → serial port. Fixed 2026-09-03 — kernel now owns the `vahi_kernel_serial_putc`/`vahi_kernel_serial_write` symbols; the crate declares them `extern` and wraps them. Boot log shows init's real output: `[init] SARGA init starting`, `Userland init running`, service starts — no kernel instrumentation, no per-syscall spam.
+- **Services**: vahid, login-manager, svc, getty all exec and produce output (visible on serial as of 2026-09-03)
 - **Login**: System reaches `login:` prompt
-- **Scheduler**: Preemptive 8-level with RR, pending queue preemption
+- **Scheduler**: Preemptive stride + SCHED_FIFO/SCHED_RR + CPU affinity + work stealing
 - **Demand paging**: Page faults map pages on access
 - **CoW**: Fork children share pages until write
-- **Selftests**: 132/132 pass — the suite now completes. Previously it stalled at test
-  35 (`user_copy::fault_abort_recovers`) on a kernel page fault and never ran the
-  remaining 97 tests. Root cause: `abort_user_copy` iretq'd out of the x86-interrupt
-  #PF handler, bypassing the ABI epilogue that restores callee-saved registers;
-  handler-clobbered registers leaked into the interrupted code. Fixed by stashing
-  callee-saved regs in the ring-0 #PF trampoline and restoring them before the iretq.
-- **Boot stress**: 4/4 consecutive boots succeed
+- **Selftests**: 228/228 pass — the suite completes. Previously it stalled at test 35 (`user_copy::fault_abort_recovers`) on a kernel page fault and never ran the remaining 97 tests. Root cause: `abort_user_copy` iretq'd out of the x86-interrupt #PF handler, bypassing the ABI epilogue that restores callee-saved registers; handler-clobbered registers leaked into the interrupted code. Fixed by stashing callee-saved regs in the ring-0 #PF trampoline and restoring them before the iretq.
+- **Boot stress**: 25/25 consecutive boots succeed (2026-10-23)
 - **User copy fault handling**: copy_from_user/copy_to_user gracefully abort on bad pointers (fixed null-pointer panic; callee-saved registers restored on abort)
 - **Error handling**: Critical-path .unwrap() calls replaced with proper error handling (orphan reparenting, fd table access, landlock parsing)
 - **Frame refcounts**: AtomicU16 lock-free hot path (eliminates SMP contention risk)
 - **Structural cleanup**: process.rs (1174→1034 lines), process_lifecycle.rs (1169→982 lines) — both under 1000-line ceiling
 
+---
+
 ## What Does NOT Work / Is NOT Tested
 
 - **Real hardware**: Never tested on physical x86_64 machine
-- **SMP under load**: Global locks serialize some paths; per-CPU schedulers run threads on all CPUs, but lock contention patterns are unmeasured
-- **Init service-start stall — two causes FIXED 2026-09-03, one open**: previously
-  blamed on "nondeterministic userspace timing"; tick-driven per-CPU diagnostics
-  disproved that. Fixed: (a) idle CPU never drained its own dirty ready queues
-  (only `pick_next` flushes; `tick()` only rescheduled on the global pending
-  queue) — pid1 starved Ready in `cpuN.ready_queues[3]` while that CPU idled
-  (`kernel/src/task/scheduler/tick.rs` now reschedules on local stride/rq work);
-  (b) global CURRENT_PROCESS desync under SMP mis-attributed fork/clone parents
-  — fork#1's child resumed init's spawn loop as the parent and forked the other
-  services as its own children; `sys_fork`/`sys_clone` now derive the parent
-  from this CPU's current thread (`kernel/src/syscalls/process_lifecycle.rs`).
-  Still open (2026-09-04, root cause narrowed): a freeze ~after 3 concurrent
-  child execs, single-CPU reproducible, not probe-induced. QEMU monitor
-  captures (`stop` + `info registers -a` + per-CPU page-table stack walks via
-  `xp`) show services 101/102/104 wedged at
-  `IrqSafeMutex<[u64; 32]>::lock` (per-process `signal_handlers`/
-  `signal_restorers`) spins with IF=0 — callers `page_fault_handler`
-  (CPUs 0/3) and the exec handler (CPU 1) — while pid1 starves Ready in a
-  ready queue and the free CPU idles. Holders never release; whether the
-  holder is the same thread (re-entrant) or a guard surviving a context
-  switch  is the remaining question. The earlier "fork-return frame" theory
-  is disproven (children exec and run as services). 132/132 selftests pass,
-  gates green with both fixes in.
-- **2026-09-04 root cause narrowed to a structural defect** (superseded same
-  day — see RESOLVED note at the end of this bullet): the linked kernel
-  contained THREE task/process lineages (nm evidence: `vahi_kernel::task::process`
-  @ `0xffffffff800e8e10`, `vahi_task::process` @ `0xffffffff800ea908`,
-  `vahi_memory::task::process` @ `0xffffffff800eb330`), each with its own
-  `Process`, `signal_handlers`/`signal_restorers` (`[u64; 32]`) locks, and
-  `CURRENT_PROCESS` static. The running scheduler is vahi_task's (CPUs captured
-  in `vahi_task::scheduler::switch::schedule`; idle RIP `0x800a2603`) while
-  syscall/fault/exec code reads the kernel copy. Wedge probes: services 101/102
-  spin >30k ticks in `IrqSafeMutex<[u64; 32]>::lock` (IF=0) on instances that
-  are NOT in the kernel `PROCESS_TABLE` scan (all six kernel-Process locks
-  read unlocked while the threads spun); one CPU spun with the mutex pointer
-  equal to the kernel `CURRENT_PROCESS` static — impossible through one type,
-  i.e. divergent lineage access.
-
-  **RESOLVED 2026-09-04 (afternoon)** — the freeze was a re-entrant
-  `IrqSafeMutex` self-deadlock in `sys_execve`, NOT lineage divergence:
-  `process_lifecycle.rs` (the sys_execve copy dispatch calls) evaluated
-  `(p.files.lock().fd_table.clone(), p.files.lock().fd_flags.clone())` —
-  Rust temporaries keep the first guard alive to the end of the let, so the
-  second `p.files.lock()` nests on the non-reentrant mutex and spins with
-  IF=0 forever. The "[u64; 32] signal-table" lock name was a red herring:
-  LTO merges every IrqSafeMutex::lock instantiation into one symbol, and the
-  wedged lock was actually `p.files` (FdTable). Fixed by acquiring once and
-  cloning under one guard (same latent pattern also fixed in
-  `interrupts/exceptions.rs` kill path on `p.memory`, and `process_creds.rs`
-  setpgid on `identity`). Verified: pre-fix 3/3 single-CPU boots wedged at
-  3,901 bytes; post-fix 2/2 single-CPU + 1 SMP-2 boot reach `login:` with all
-  four services exec'd and running. Details in CLAUDE.md session note. The
-  two-lineage Process/CURRENT_PROCESS duplication is now a cleanup item, not
-  a freeze cause.
-
-  **SMP-4 chain RESOLVED (evening)** — the residual -smp 4 stall was a
-  SECOND re-entrant IrqSafeMutex self-deadlock, same family, in the
-  page-fault SIGSEGV diagnostic path (`interrupts/page_fault.rs`): the
-  `(pid, in_vma, nvma, brk)` tuple still nested two `p.memory.lock()`
-  temporaries, AND after flattening to one lock, `find_vma()` (called in the
-  same tuple) locks `p.memory` internally (`task/process.rs`) — re-locking
-  the held guard. Correct shape: `find_vma` first, then one `mem` guard.
-  Same latent tuples fixed in `crates/interrupts/src/{page_fault,
-  exceptions}.rs` (not yet linked; would wedge identically). Breadcrumb
-  capture identified the wedged processes (101/103/105) faulting at heap
-  edges past `brk` with no heap VMA under SMP-concurrent spawn. Verified on
-  the final build: SIGSEGV path now kills instead of wedging; -smp 4, -smp 2
-  and single-CPU all reach `login:` and stay alive (QEMU monitor
-  responsive; the idle-login busy core is `Compositor::render`'s framebuffer
-  blit, pre-existing, not a lock spin). Still open, separate: the underlying
-  fork/exec/arena race that makes services fault past `brk` / below the
-  mapped stack under SMP-concurrent spawn (now cleanly SIGSEGV-killed
-  rather than freezing the kernel).
-
-  **SMP-4 wedge fully RESOLVED (late evening)** — the "fork/exec/arena
-  race" residual was chased to ground; it was three further lock/race
-  defects, all fixed in `kernel/src` + `crates/task`: (1) `get_current_process()`
-  read the global `CURRENT_PROCESS` mirror (last-switch-wins under SMP) —
-  brk/mmap resolved "the caller" from a racing global; now derived
-  per-CPU with the global as fallback (probe logged 21 mismatches in the
-  spawn window). (2) `sys_mmap` scanned the free region under the memory
-  lock, dropped it, then re-locked for `add_vma` — concurrent anonymous
-  mmaps could return the SAME address (heap aliasing; observed as
-  malloc reading its unplaced next chunk). Find+insert now run under one
-  guard (`vma_insert`). (3) The machine-freeze at SMP login: `kill_from_fault()`
-  (fault handler, IF=0) held PROCESS_TABLE while calling
-  `route_signal_to_signalfd()`, which re-locks the table — block-scoped
-  guard nesting, the same family as the exec bug. gdb showed 2 CPUs
-  spinning on the table mutex (kill CPU inside route_signal, wait4 CPU
-  blocked). Same shape fixed in kill_process, exit-path SIGCHLD, OOM
-  killer, sys_kill, tick_itimers — 10 sites across both lineages: clone
-  the parent Arc under the guard, drop the guard, then raise+route.
-  Verified: -smp 4 2/2 boots reach `login:`; post-login SIGSEGV kills
-  complete instead of freezing; gdb shows no lock spins (the ~1 busy core
-  is the pre-existing Compositor redraw blit). Residual, separate: some
-  services die to deterministic userspace bugs (login-manager rip
-  0x404a6e deep-stack read every SMP run) — cleanly killed, but the
-  userspace bug itself is open.
+- **SMP under load**: SMP-4 hangs after all tests pass (`[LOCKUP] rip=0xffffffff800374d8 stuck 500 ticks`); SMP-8 hangs in early boot (last output `[BOOT] syscalls init...`) — issues.md S-1, S-2
+- **KASLR**: Obfuscation only — relocations never applied (ELF magic check fails, issues.md A-6). Kernel boots because all old addresses remain aliased.
+- **Init service-start stall**: Freeze ~after 3 concurrent child execs, single-CPU reproducible. Root cause narrowed: re-entrant `IrqSafeMutex` self-deadlock in `sys_execve` (fixed) AND in page-fault SIGSEGV path (fixed). Residual: some services die to deterministic userspace bugs (login-manager rip 0x404a6e deep-stack read every SMP run) — cleanly killed.
 - **Memory-mapped files**: No file-backed mmap
 - **File locking**: No flock/fcntl
 - **Shared memory**: CLONE_VM not implemented (threads get CoW clone)
-- **Security enforcement**: Capabilities, seccamp, landlock are stubs
+- **Security enforcement**: Capabilities, seccomp, landlock are stubs (data structures exist, enforcement minimal)
 - **Crash recovery**: No filesystem crash testing
 - **Concurrent access**: No stress testing under load
-- **Most drivers**: Only serial, PS/2, E1000, VirtIO-block tested
+- **Most drivers**: Only serial, PS/2, E1000, VirtIO-block tested. NVMe (MSI broken, queue bugs), AHCI (unbounded wait, CTBA bug), xHCI (polled only), HDA, VirtIO-GPU — untested on real hardware
+- **aarch64/riscv64**: aarch64 build fails at vahi-sync (x86_64-only asm); riscv64 not built in CI
+
+---
 
 ## Repo layout (two repos, one junction!)
 
-- `C:\Users\nanda\Desktop\Github\SkyOS` — product repo: `build_disk.py`,
-  `scripts/`, userspace crates (`init`, `login-manager`, `sash`, …), `docs/`,
-  `tests/boot_stress.py`, QEMU/OVMF assets.
-- `C:\Users\nanda\Desktop\Github\SKYIOUS KERNEL` — the **actual kernel repo**.
-  `SkyOS\kernel\kernel` is a junction into it. **All kernel edits land in
-  SKYIOUS KERNEL.** `git status` in SkyOS shows only `__pycache__` noise; real
-  diffs live in SKYIOUS KERNEL (`kernel/src/...`).
+- `C:\Users\nanda\Desktop\Github\SkyOS` — product repo: `build_disk.py`, `scripts/`, userspace crates (`init`, `login-manager`, `sash`, …), `docs/`, `tests/boot_stress.py`, QEMU/OVMF assets.
+- `C:\Users\nanda\Desktop\Github\SKYIOUS KERNEL` — the **actual kernel repo**. `SkyOS\kernel\kernel` is a junction into it. **All kernel edits land in SKYIOUS KERNEL.** `git status` in SkyOS shows only `__pycache__` noise; real diffs live in SKYIOUS KERNEL (`kernel/src/...`).
+
+---
 
 ## Tested & working (reproduced)
 
-- Boot: UEFI (OVMF) → bootloader v0.11 → `kernel_main` → full init chain
-  (memory, frame allocator, heap, GDT/IDT/PIC, syscalls, HAL, ACPI, APIC,
-  IOAPIC, SMP, PS/2, PCI, E1000, USB/XHCI, VFS+initrd, object manager, net,
-  LSM, korlang, vahiai, RTC, scheduler).
-- Selftest suite (`--features self_test`): **91/91 ok, 0 not ok** — runs once
-  in `kernel_main` after `scheduler::init()`.
-- Userland: `init` (pid 100) → fork (child 101) → exec `login-manager`
-  (pid 102) → `create_window 800x600` → stable `flush` + `nanosleep 16ms` GUI
-  loop. Runs indefinitely with zero panics.
-- Scheduler: preemptive, 8-level stride/RR, per-CPU `PerCpuScheduler`,
-  global sleep/futex/block/pending queues, async executor thread, USB HID
-  poller thread — all live and healthy.
-- SMP-2 (`-cpu qemu64,-smep`): AP boots via `ap_kernel_entry`, both cores
-  schedule, GUI loop stable.
-- **SMP-4 verified 2026-09-03** (`qemu -smp 4`): all 3 APs boot (per-CPU
-  GDT/IDT, GS base, syscall MSRs, LAPIC, APIC timer), zero panics, zero
-  lockups across many runs. Threads demonstrably run on multiple CPUs — the
-  boot log's one-time lines show `[SMP] CPU N first user thread pid=M` for
-  CPUs 0-3 (init itself ran on CPU 3 in one boot).
+- Boot: UEFI (OVMF) → Limine → `kernel_main` → full init chain (memory, frame allocator, heap, GDT/IDT/PIC, syscalls, HAL, ACPI, APIC, IOAPIC, SMP, PS/2, PCI, E1000, USB/XHCI, VFS+initrd, object manager, net, LSM, korlang, vahiai, RTC, scheduler).
+- Selftest suite (`--features self_test`): **228/228 ok, 0 not ok** — runs once in `kernel_main` after `scheduler::init()`.
+- Userland: `init` (pid 100) → fork (child 101) → exec `login-manager` (pid 102) → `create_window 800x600` → stable `flush` + `nanosleep 16ms` GUI loop. Runs indefinitely with zero panics.
+- Scheduler: preemptive stride/RR, per-CPU `PerCpuScheduler`, global sleep/futex/block/pending queues, async executor thread, USB HID poller thread — all live and healthy.
+- SMP-2 (`-cpu qemu64,-smep`): AP boots via `ap_kernel_entry`, both cores schedule, GUI loop stable.
+- **SMP-4**: 2/3 PASS (1 FAIL) — reaches `161/161 passed`, then `[LOCKUP] rip=0xffffffff800374d8 stuck 500 ticks` (issues.md S-2).
+- **SMP-8**: 0/2 — TIMEOUT at 540s and 888s; last serial line is `[BOOT] syscalls init...` — hangs before any test runs (issues.md S-1).
+- Boot stress gate: **25/25 SMP-1 boots PASS, 8/8 SMP-2 PASS** (2026-10-23). FAIL_TOKENS = not ok / Bail out! / KERNEL PANIC / Panicked; PASS token = "starting service".
 
-  Previously every `-smp 4` boot panicked in the page-fault handler
-  (`CURRENT_PROCESS locked after 256 retries`): the handler contended on the
-  global CURRENT_PROCESS mirror that another CPU can hold indefinitely (e.g.
-  while forking). Fixed 2026-09-03: the fault handler takes the faulting
-  process from this CPU's scheduler (`this_cpu_sched().current_thread
-  .process`) — for a user-mode fault that thread IS the faulting process —
-  so the fault path never takes the global lock (`kernel/src/interrupts/
-  page_fault.rs`). The prior “ap_ids empty” log lines were an artifact: the
-  QEMU invocations never passed `-smp`.
-- Boot stress gate: **58/58 SMP-1 boots PASS, 2/2 SMP-2 PASS**
-  (`py tests/boot_stress.py --tries 40` green). FAIL_TOKENS = not ok /
-  Bail out! / KERNEL PANIC / Panicked; PASS token = "starting service".
+---
 
 ## Build & verify commands (exact, working)
 
@@ -444,71 +225,46 @@ qemu-system-x86_64 -bios OVMF.fd -cpu qemu64,-smep -smp 2 `
   -display none -no-reboot
 ```
 
-Full image + VDI: `py build_disk.py --kernel-only` (regenerates skyos_uefi.img;
-needs QEMU closed or VDI convert fails with VERR_SHARING_VIOLATION).
+Full image + VDI: `py build_disk.py --kernel-only` (regenerates skyos_uefi.img; needs QEMU closed or VDI convert fails with VERR_SHARING_VIOLATION).
 
-## Root cause fixed this session (stale stack_ptr)
+---
 
-Crashes: page fault / double fault with RIP=0x3, 0x4, or user address
-0x4057b0 right after the first `nanosleep`. Mechanism:
+## Root cause fixed this session (2026-08-05, stale stack_ptr)
 
-- Block paths (`sys_nanosleep`, `sys_pause`, `futex_wait`, `futex_lock_pi`,
-  `block_on_pipe`, USB poller) used `take_current_thread()` — removing the
-  `Box<Thread>` from `current_thread` and pushing it to a global queue BEFORE
-  `schedule()`. `prepare_switch` then saw `current_thread == None` and pointed
-  `switch_context`'s save at `self.dummy`. The thread's `stack_ptr` field kept
-  its **stale, already-consumed clone-time context address**; on wake the
-  resume popped garbage → ret to 0x3/0x4/0x4057b0.
+Crashes: page fault / double fault with RIP=0x3, 0x4, or user address 0x4057b0 right after the first `nanosleep`. Mechanism:
+
+- Block paths (`sys_nanosleep`, `sys_pause`, `futex_wait`, `futex_lock_pi`, `block_on_pipe`, USB poller) used `take_current_thread()` — removing the `Box<Thread>` from `current_thread` and pushing it to a global queue BEFORE `schedule()`. `prepare_switch` then saw `current_thread == None` and pointed `switch_context`'s save at `self.dummy`. The thread's `stack_ptr` field kept its **stale, already-consumed clone-time context address**; on wake the resume popped garbage → ret to 0x3/0x4/0x4057b0.
 
 Fix (all in SKYIOUS KERNEL, 10 files, +224/−70, uncommitted at 2026-08-05):
 
-1. Block in place: every block site mutates `current_thread` (status +
-   criterion) — `prepare_switch` saves the live block-point context into the
-   thread's own `stack_ptr`.
-2. `route_switching_old()`: routes the just-switched thread to
-   sleep_queue/futex_queue/block_queue by criterion, else back to ready
-   queues; used by both `schedule()` and `try_schedule()`.
-3. `schedule()` now RETURNS: when current is Running (switched back in) and
-   nothing else is runnable → resumes the syscall postamble → sysretq.
-   Solo in-place sleeper wakes on `sleep_until` or pending signal. All
-   non-syscall callers (boot handoff, AP entry, `oom_kill`, `sys_exit`) got
-   `loop { enable_and_hlt() }` tails.
-4. Deleted `take_current_thread()`. Kept selftest isolation
-   (`SCHED_QUIESCE` + queue drain + `reset_runnable_state`) and the
-   page-bounded FAULT STACK dump in `page_fault_handler` (no-alloc, IRQ-safe).
-5. Fixed an unrelated latent bug: `alloc::format!` inside `tick()` (IRQ
-   context) corrupted the allocator mid-boot (ret→0x3). IRQ paths must never
-   allocate; the stack-buffer `IrqFmtBuf` writer exists for that.
+1. Block in place: every block site mutates `current_thread` (status + criterion) — `prepare_switch` saves the live block-point context into the thread's own `stack_ptr`.
+2. `route_switching_old()`: routes the just-switched thread to sleep_queue/futex_queue/block_queue by criterion, else back to ready queues; used by both `schedule()` and `try_schedule()`.
+3. `schedule()` now RETURNS: when current is Running (switched back in) and nothing else is runnable → resumes the syscall postamble → sysretq. Solo in-place sleeper wakes on `sleep_until` or pending signal. All non-syscall callers (boot handoff, AP entry, `oom_kill`, `sys_exit`) got `loop { enable_and_hlt() }` tails.
+4. Deleted `take_current_thread()`. Kept selftest isolation (`SCHED_QUIESCE` + queue drain + `reset_runnable_state`) and the page-bounded FAULT STACK dump in `page_fault_handler` (no-alloc, IRQ-safe).
+5. Fixed an unrelated latent bug: `alloc::format!` inside `tick()` (IRQ context) corrupted the allocator mid-boot (ret→0x3). IRQ paths must never allocate; the stack-buffer `IrqFmtBuf` writer exists for that.
+
+---
 
 ## Kernel invariants (AGENTS.md, still enforced)
 
-- `#![deny(warnings)]`, `panic = "abort"`, no test harness; verification is
-  boot-time selftests (`--features self_test`).
-- No allocation in IRQ context (`tick`/`try_schedule`); GLOBAL queues and
-  ready queues are pre-reserved in `scheduler::init()`.
+- `#![deny(warnings)]`, `panic = "abort"`, no test harness; verification is boot-time selftests (`--features self_test`).
+- No allocation in IRQ context (`tick`/`try_schedule`); GLOBAL queues and ready queues are pre-reserved in `scheduler::init()`.
 - `IrqSafeMutex` is non-reentrant; nested `.lock()` self-deadlocks.
 - Rebuild order: `cargo build` in `kernel/kernel` → regen bootimage → probe.
 - SMP-2 under TCG: use `-cpu qemu64,-smep`.
 
+---
+
 ## Subagent dispatch caveat (learned this session)
 
-The `task` tool with LONG/complex prompts returned **empty results silently**
-on this machine. Short, well-scoped prompts work. When using subagents:
-keep prompts under ~1 screen, give exact file paths, ask for a terse
-structured answer, and verify their claims yourself. Prefer the specialized
-agents (`explore`, `failure-analyzer`, `feasibility-examiner`) over `general`
-for codebase questions.
+The `task` tool with LONG/complex prompts returned **empty results silently** on this machine. Short, well-scoped prompts work. When using subagents: keep prompts under ~1 screen, give exact file paths, ask for a terse structured answer, and verify their claims yourself. Prefer the specialized agents (`explore`, `failure-analyzer`, `feasibility-examiner`) over `general` for codebase questions.
 
-## Known gaps / next-step candidates (from code + docs)
+---
 
-- Kernel shell (`shell::kernel_shell`) disabled: writes directly to the
-  framebuffer and clobbers the GUI compositor. GUI owns keyboard.
-- GUI stack is minimal: compositor + windows + flush; no taskbar/store app
-  polish yet. Userspace apps exist for many things (`sash`, `sargaedit`,
-  `paint`, `sysmon`, `clock`, `notes`, …) — only `login-manager` is started
-  by `init` so far.
-- Networking: E1000 + smoltcp (TCP/UDP/ICMP/DHCP) + socket API; userspace
-  net tools exist (`nettools`, `aicli`, `skyd-update`).
-- Docs to consult before touching areas: `docs/socket-api.md`,
-  `docs/security.md` (LSM, capabilities, DAC), `docs/scheduler.md`
-  (SYSCALL_ABI / SCHEDULER), `docs/memory-map` etc. in SkyOS.
+## Known gaps / next-step candidates (from code + issues.md)
+
+- Kernel shell (`shell::kernel_shell`) disabled: writes directly to the framebuffer and clobbers the GUI compositor. GUI owns keyboard.
+- GUI stack is minimal: compositor + windows + flush; no taskbar/store app polish yet. Userspace apps exist for many things (`sash`, `sargaedit`, `paint`, `sysmon`, `clock`, `notes`, …) — only `login-manager` is started by `init` so far.
+- Networking: E1000 + smoltcp (TCP/UDP/ICMP/DHCP) + socket API; userspace net tools exist (`nettools`, `aicli`, `skyd-update`).
+- Docs to consult before touching areas: `docs/socket-api.md`, `docs/security.md` (LSM, capabilities, DAC), `docs/scheduler.md` (SYSCALL_ABI / SCHEDULER), `docs/memory-map` etc. in SkyOS.
+- **Critical bugs to fix**: issues.md S-1 (SMP-8 early boot hang), S-2 (SMP-4 post-test lockup), A-6 (KASLR relocations never applied), P-1 (vahi-sync breaks cross-arch), F-1 (ext2 dir traversal unbounded), F-2 (SkyFS extent copy unbounded), N-1/N-2 (NVMe queue bugs), A-1/A-2 (AHCI bugs), E-1 (E1000 IRQ allocates), X-2 (xHCI IMAN bug).

@@ -1,6 +1,8 @@
 use crate::arch::Arch;
 #[cfg(feature = "smp")]
 use crate::println;
+#[cfg(all(target_arch = "x86_64", feature = "smp"))]
+use crate::vdso::vdso_update_tsc_base;
 #[cfg(feature = "smp")]
 use core::arch::global_asm;
 
@@ -362,6 +364,7 @@ pub fn init() {
     );
 }
 
+#[cfg(feature = "smp")]
 #[no_mangle]
 pub extern "C" fn ap_kernel_entry() -> ! {
     crate::serial_write("[AP] ap_kernel_entry\n");
@@ -393,6 +396,12 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     // readable after lapic::init() above; CPUID leaf 1 (used by the
     // CPU-ID provider fallback) would give the same value.
     let cpu_id = crate::apic::current_lapic_id() as usize;
+
+    // Update this AP's vDSO TSC base with its own TSC value.
+    // This must be called after the CPU ID is known and before the CPU
+    // starts handling timer interrupts that read the TSC base.
+    #[cfg(target_arch = "x86_64")]
+    vdso_update_tsc_base(cpu_id as u32);
 
     // GS/per-CPU state. From here on IrqSafeMutex and per-CPU access are
     // valid on this CPU.

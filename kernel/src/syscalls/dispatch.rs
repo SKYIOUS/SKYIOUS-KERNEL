@@ -391,6 +391,7 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     );
     sys_handler!(t, args, numbers::SYS_SYNC, fs::sys_sync());
     sys_handler!(t, args, numbers::SYS_GETPID, process::sys_getpid());
+    sys_handler!(t, args, numbers::SYS_GETCPU, process::sys_getcpu(args.a1 as *mut u32, args.a2 as *mut u32));
     sys_handler!(
         t,
         args,

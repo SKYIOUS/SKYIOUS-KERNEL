@@ -9,6 +9,10 @@ inputs:
     description: "Comma-separated components to install"
     required: false
     default: "rust-src,llvm-tools-preview,clippy,rustfmt"
+outputs:
+  channel:
+    description: "Pinned Rust toolchain channel"
+    value: ${{ steps.toolchain.outputs.channel }}
 runs:
   using: "composite"
   steps:

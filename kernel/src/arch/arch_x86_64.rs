@@ -115,7 +115,7 @@ impl Arch for X86_64Arch {
         };
 
         // SAFETY: CPUID is always available on x86_64
-        let (has_fpu, has_simd, cpu_freq_hz) = unsafe {
+        let (has_fpu, has_simd, cpu_freq_hz, tsc_invariant) = unsafe {
             let mut eax1: u32;
             let mut edx1: u32;
             core::arch::asm!(
@@ -134,6 +134,26 @@ impl Arch for X86_64Arch {
             let fpu = (edx1 & 1) != 0;
             let simd = (edx1 & (1 << 26)) != 0;
 
+            // Check for invariant TSC (CPUID 0x80000007, EDX bit 8)
+            let mut tsc_invariant = false;
+            let edx80000007: u32;
+            core::arch::asm!(
+                "push rbx",
+                "mov eax, 0x80000007",
+                "cpuid",
+                "pop rbx",
+                out("edx") edx80000007,
+                out("eax") _,
+                out("ecx") _,
+                options(nostack, preserves_flags)
+            );
+            if edx80000007 & (1 << 8) != 0 {
+                tsc_invariant = true;
+                crate::serial_write("[ARCH] invariant TSC detected\n");
+            } else {
+                crate::serial_write("[ARCH] WARNING: non-invariant TSC, vDSO may drift across C-states\n");
+            }
+
             let freq = if eax1 >= 0x16 {
                 let mut ecx16: u32;
                 core::arch::asm!(
@@ -148,10 +168,12 @@ impl Arch for X86_64Arch {
                 );
                 (ecx16 as u64) * 1_000_000
             } else {
-                0
+                // Fallback for QEMU/TCG: use 2400 MHz as default
+                const DEFAULT_CPU_FREQ_HZ: u64 = 2_400_000_000;
+                DEFAULT_CPU_FREQ_HZ
             };
 
-            (fpu, simd, freq)
+            (fpu, simd, freq, tsc_invariant)
         };
 
         let boot_ticks = {
@@ -168,6 +190,7 @@ impl Arch for X86_64Arch {
             ram_size: 0,
             has_fpu,
             has_simd,
+            tsc_invariant,
             boot_time_ticks: boot_ticks,
         }
     }
@@ -179,11 +202,30 @@ impl Arch for X86_64Arch {
 
     fn init_hal_timer() {
         let pf = crate::hal::platform::get();
-        let tsc_timer = crate::hal::timer::TscTimer::new();
-        if pf.cpu_freq_hz > 0 {
-            tsc_timer.init(pf.cpu_freq_hz);
+        
+        // Check if timer already registered
+        if let Some(timer) = crate::hal::timer::current_timer() {
+            // Timer exists - try to downcast and update frequency
+            if let Some(tsc) = timer.as_any().and_then(|a| a.downcast_ref::<crate::hal::timer::TscTimer>()) {
+                if pf.cpu_freq_hz > 0 {
+                    tsc.init(pf.cpu_freq_hz);
+                    crate::serial_write("[HAL] init_hal_timer: updated existing TSC timer frequency\n");
+                } else {
+                    crate::serial_write("[HAL] init_hal_timer: CPU frequency still unknown\n");
+                }
+                return;
+            }
         }
-        crate::hal::timer::register_timer(Arc::new(tsc_timer));
+        
+        // No existing timer - create new only if frequency is known
+        if pf.cpu_freq_hz > 0 {
+            let tsc_timer = crate::hal::timer::TscTimer::new();
+            tsc_timer.init(pf.cpu_freq_hz);
+            crate::serial_write("[HAL] init_hal_timer: registered new TSC timer with frequency\n");
+            crate::hal::timer::register_timer(Arc::new(tsc_timer));
+        } else {
+            crate::serial_write("[HAL] init_hal_timer: CPU frequency unknown, skipping registration\n");
+        }
     }
 }
 

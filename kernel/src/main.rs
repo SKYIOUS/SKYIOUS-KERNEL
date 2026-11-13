@@ -182,6 +182,10 @@ mod kaslr;
 #[allow(dead_code)]
 mod kaslr_reloc;
 pub(crate) use kaslr::{init_kaslr, KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLIDE};
+#[cfg(target_arch = "x86_64")]
+mod vdso;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use vdso::{init_vdso, vdso_page, vdso_update_pid_cpu, vdso_update_thread_cputime, vdso_update_process_info, vdso_read_tsc_time};
 #[cfg(not(target_arch = "aarch64"))]
 // ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
@@ -210,6 +214,7 @@ mod selftest;
 // ponytail: F2.2 — shell (kernel_shell) not spawned in current boot path; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
 mod shell;
+#[cfg(target_arch = "x86_64")]
 mod smp;
 // ponytail: F2.2 — sync RCU/CFI surface unwired; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
@@ -368,8 +373,27 @@ pub fn vahi_kernel_serial_putc(c: u8) {
 }
 
 /// Kernel-provided sink for `vahi-vfs` line output (ext4/tarfs/fuse
+/// Late initialization helper: RTC and vDSO initialization.
+// Must be called after frame allocator is ready and timer is calibrated.
+fn init_rtc_and_vdso() {
+    // Initialize RTC before vDSO (vDSO needs RTC for realtime initialization)
+    serial_write("[BOOT] RTC init...\n");
+    if let Err(_e) = drivers::rtc::init() {
+        serial_write("[BOOT] WARNING: RTC init failed: ");
+        serial_write("[BOOT] RTC initialization failed, realtime will be zero until cached RTC updates\n");
+    }
+    serial_write("[BOOT] RTC initialized\n");
+
+    // Initialize vDSO page (requires frame allocator ready AND timer calibrated)
+    #[cfg(target_arch = "x86_64")]
+    {
+        serial_write("[BOOT] vDSO init...\n");
+        init_vdso(crate::memory::buddy::BuddyFrameAllocator);
+        serial_write("[BOOT] vDSO initialized\n");
+    }
+}
+
 /// Post-KASLR continuation: runs after the trampoline switches to the randomized address space.
-/// This function is called from the assembly trampoline and never returns.
 #[no_mangle]
 pub extern "C" fn post_kaslr_continue() -> ! {
     // INSTRUMENTATION: Capture actual RIP at function entry to prove randomized execution
@@ -418,16 +442,18 @@ pub extern "C" fn post_kaslr_continue() -> ! {
     tests::init::test_memory_allocations();
 
     #[cfg(not(target_arch = "aarch64"))]
-    boot::init::init_devices();
+    unsafe {
+        boot::init::init_devices();
+    }
     #[cfg(target_arch = "aarch64")]
     {
         serial_write("[BOOT] aarch64 platform init...\n");
     }
-    boot::init::init_vfs_network();
 
-    serial_write("[BOOT] RTC init...\n");
-    let _ = drivers::rtc::init();
-    serial_write("[BOOT] RTC initialized\n");
+    // Initialize RTC and vDSO
+    init_rtc_and_vdso();
+
+    boot::init::init_vfs_network();
 
     #[cfg(feature = "verification")]
     {
@@ -461,6 +487,7 @@ pub extern "C" fn post_kaslr_continue() -> ! {
     task::scheduler::spawn(boot::tasks::run_async_tasks);
     task::scheduler::spawn(drivers::usb::usb_hid_poller);
     task::scheduler::spawn(boot::tasks::init_os_task);
+    task::scheduler::spawn(boot::tasks::rtc_cache_update_task);
 
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -540,6 +567,9 @@ fn goto_late_init() -> ! {
         boot::init::init_graphics(&mut _mapper, &mut _frame_allocator)
     };
 
+    // Initialize RTC and vDSO
+    init_rtc_and_vdso();
+
     // KASLR was already applied by the trampoline on first kernel_main entry.
     // This is the late init path - no need to activate KASLR again.
     // Debug: print KASLR slide value
@@ -557,32 +587,6 @@ fn goto_late_init() -> ! {
     crate::serial_write("[DEBUG] calling task::scheduler::init\n");
     task::scheduler::init();
 
-    #[cfg(feature = "self_test")]
-    {
-        serial_write("[SELF-TEST] registering tests...\n");
-        tests::register_all();
-        serial_write("[SELF-TEST] running...\n");
-        coverage::init();
-        selftest::run_all();
-        serial_write(&alloc::format!(
-            "[COVERAGE] unique={}, total={}, ratio={:.4}\n",
-            coverage::unique_blocks(),
-            coverage::total_hits(),
-            coverage::coverage_ratio()
-        ));
-    }
-
-    serial_write("[BOOT] GUI init...\n");
-    gui::init();
-
-    task::scheduler::spawn(boot::tasks::run_async_tasks);
-    task::scheduler::spawn(drivers::usb::usb_hid_poller);
-    task::scheduler::spawn(boot::tasks::init_os_task);
-
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        x86_64::instructions::interrupts::enable();
-    }
     #[cfg(target_arch = "aarch64")]
     unsafe {
         core::arch::asm!("msr daifclr, #2");

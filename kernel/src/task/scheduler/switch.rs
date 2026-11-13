@@ -10,6 +10,52 @@ use super::{
 };
 use core::sync::atomic::Ordering;
 
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn read_tsc() -> u64 {
+    let (lo, hi): (u32, u32);
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi);
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Charge CPU time to the outgoing thread and its process.
+/// Called during context switch when a thread is switched out.
+/// Uses TSC delta since the thread's last slice_start_tsc.
+#[cfg(target_arch = "x86_64")]
+fn charge_cpu_time(old: &mut crate::task::thread::Thread, new: &mut crate::task::thread::Thread) {
+    let tsc_now = read_tsc();
+    let tsc_delta = tsc_now.wrapping_sub(old.slice_start_tsc);
+    
+    // Convert TSC delta to nanoseconds using vDSO calibration
+    // We need the TSC frequency from vDSO
+    let vdso_ptr = crate::vdso_page();
+    if !vdso_ptr.is_null() {
+        let vdso = unsafe { &*vdso_ptr };
+        let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+        if tsc_freq > 0 {
+            let tsc_mult = vdso.tsc_mult;
+            let tsc_shift = vdso.tsc_shift;
+            let ns = ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64;
+            
+            // Add to thread's CPU time
+            old.cpu_time_ns = old.cpu_time_ns.saturating_add(ns);
+            
+            // Update vDSO page with thread's total CPU time for CLOCK_SKYIOUS_THREAD_CPUTIME (100)
+            crate::vdso_update_thread_cputime(crate::smp::get_cpu_id() as u32, old.cpu_time_ns);
+            
+            // Add to process's CPU time (atomic, since multiple threads can run concurrently)
+            if let Some(ref proc) = old.process {
+                proc.cpu_time_ns.fetch_add(ns, Ordering::Relaxed);
+            }
+        }
+    }
+    
+    // Set the new thread's slice start TSC
+    new.slice_start_tsc = tsc_now;
+}
+
 // ─── Architecture-specific interrupt helpers ────────────────────
 
 #[cfg(target_arch = "x86_64")]
@@ -134,6 +180,17 @@ impl PerCpuScheduler {
             crate::syscalls::get_per_cpu()
                 .current_process
                 .store(process.id, core::sync::atomic::Ordering::Relaxed);
+            // Update vDSO with current PID and CPU ID
+            #[cfg(target_arch = "x86_64")]
+            crate::vdso_update_pid_cpu(process.id, crate::smp::get_cpu_id() as u32);
+            // Update vDSO with process info (cgroup, namespace, capabilities)
+            #[cfg(target_arch = "x86_64")]
+            crate::vdso_update_process_info(
+                crate::smp::get_cpu_id() as u32,
+                process.cgroup_path.lock().len() as u64,
+                0, // namespace flags - TODO: implement
+                process.creds.lock().cap_effective,
+            );
         }
 
         // Lazily allocate FPU state buffer for the incoming thread (x86_64 only)
@@ -147,7 +204,20 @@ impl PerCpuScheduler {
         let new_rsp = next.stack_ptr;
         let stack_top = next.stack_top();
 
+        // Update per-CPU cached PID and CPU ID for lock-free sys_getpid/sys_getcpu
+        let cpu_idx = crate::smp::get_cpu_id() as usize;
+        if let Some(ref process) = next.process {
+            crate::syscalls::process_lifecycle::CURRENT_PID[cpu_idx]
+                .store(process.id, Ordering::Release);
+        }
+        crate::syscalls::process_lifecycle::CURRENT_CPU_ID[cpu_idx]
+            .store(crate::smp::get_cpu_id() as u32, Ordering::Release);
+
         let old_rsp_ptr = if let Some(mut old) = self.current_thread.take() {
+            // Charge CPU time to the outgoing thread before it's switched out
+            #[cfg(target_arch = "x86_64")]
+            charge_cpu_time(&mut old, &mut next);
+            
             if old.status == crate::task::thread::ThreadStatus::Exited {
                 // Park dying thread — stack reclaimed on next route_outgoing.
                 self.switching_old = Some(old);
