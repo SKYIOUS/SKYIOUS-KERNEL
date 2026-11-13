@@ -169,3 +169,146 @@ pub fn get_tsc_frequency() -> u64 {
 pub fn get_tsc_frequency() -> u64 {
     0
 }
+
+#[cfg(target_arch = "aarch64")]
+/// ARM Generic Timer (CNTVCT_EL0) timer for aarch64.
+pub struct CntrvctTimer {
+    /// Timer frequency in Hz (typically 50-100 MHz from CNTFRQ_EL0).
+    freq_hz: AtomicU64,
+    /// Timer value at initialization.
+    start_ticks: AtomicU64,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl CntrvctTimer {
+    pub const fn new() -> Self {
+        CntrvctTimer {
+            freq_hz: AtomicU64::new(0),
+            start_ticks: AtomicU64::new(0),
+        }
+    }
+
+    pub fn init(&self, freq_hz: u64) {
+        self.set_frequency(freq_hz);
+        // Read CNTVCT_EL0
+        let val: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, cntvct_el0", out(reg) val);
+        }
+        self.start_ticks.store(val, Ordering::Relaxed);
+    }
+
+    pub fn set_frequency(&self, freq_hz: u64) {
+        self.freq_hz.store(freq_hz, Ordering::Relaxed);
+    }
+
+    pub fn frequency(&self) -> u64 {
+        self.freq_hz.load(Ordering::Relaxed)
+    }
+
+    fn read_cntvct(&self) -> u64 {
+        let val: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, cntvct_el0", out(reg) val);
+        }
+        val
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Timer for CntrvctTimer {
+    fn ticks(&self) -> u64 {
+        let freq = self.freq_hz.load(Ordering::Relaxed);
+        if freq < 1_000_000 {
+            return 0;
+        }
+        let now = self.read_cntvct();
+        let start = self.start_ticks.load(Ordering::Relaxed);
+        (now.wrapping_sub(start)) / (freq / 1_000_000)
+    }
+
+    fn set_period(&self, _micros: u64) {}
+    fn start(&self) {}
+    fn stop(&self) {}
+    fn resolution_ns(&self) -> u64 {
+        // ARM generic timer resolution depends on frequency, typically ~1-20 ns
+        1
+    }
+    fn calibrate(&self) {
+        // Frequency is read from CNTFRQ_EL0
+    }
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+/// RISC-V Time CSR / CLINT timer for riscv64.
+pub struct RiscvTimeTimer {
+    /// Timer frequency in Hz (from DT or CLINT).
+    freq_hz: AtomicU64,
+    /// Timer value at initialization.
+    start_ticks: AtomicU64,
+}
+
+#[cfg(target_arch = "riscv64")]
+impl RiscvTimeTimer {
+    pub const fn new() -> Self {
+        RiscvTimeTimer {
+            freq_hz: AtomicU64::new(0),
+            start_ticks: AtomicU64::new(0),
+        }
+    }
+
+    pub fn init(&self, freq_hz: u64) {
+        self.set_frequency(freq_hz);
+        // Read `time` CSR (RV64) or CLINT mtime
+        let val: u64;
+        unsafe {
+            core::arch::asm!("rdtime {}", out(reg) val);
+        }
+        self.start_ticks.store(val, Ordering::Relaxed);
+    }
+
+    pub fn set_frequency(&self, freq_hz: u64) {
+        self.freq_hz.store(freq_hz, Ordering::Relaxed);
+    }
+
+    pub fn frequency(&self) -> u64 {
+        self.freq_hz.load(Ordering::Relaxed)
+    }
+
+    fn read_time(&self) -> u64 {
+        let val: u64;
+        unsafe {
+            core::arch::asm!("rdtime {}", out(reg) val);
+        }
+        val
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+impl Timer for RiscvTimeTimer {
+    fn ticks(&self) -> u64 {
+        let freq = self.freq_hz.load(Ordering::Relaxed);
+        if freq < 1_000_000 {
+            return 0;
+        }
+        let now = self.read_time();
+        let start = self.start_ticks.load(Ordering::Relaxed);
+        (now.wrapping_sub(start)) / (freq / 1_000_000)
+    }
+
+    fn set_period(&self, _micros: u64) {}
+    fn start(&self) {}
+    fn stop(&self) {}
+    fn resolution_ns(&self) -> u64 {
+        1
+    }
+    fn calibrate(&self) {
+        // Frequency is typically fixed or from DT
+    }
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+}

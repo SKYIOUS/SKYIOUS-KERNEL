@@ -6,7 +6,17 @@ use super::*;
 use crate::task::process::FileDescriptor;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+
+/// Per-CPU cached PID for lock-free sys_getpid.
+/// Updated at context switch in prepare_switch with Release ordering.
+pub static CURRENT_PID: [AtomicU64; crate::task::scheduler::MAX_CPUS] = 
+    [const { AtomicU64::new(0) }; crate::task::scheduler::MAX_CPUS];
+
+/// Per-CPU cached CPU ID for lock-free sys_getcpu.
+/// Updated at context switch in prepare_switch with Release ordering.
+pub static CURRENT_CPU_ID: [AtomicU32; crate::task::scheduler::MAX_CPUS] = 
+    [const { AtomicU32::new(0) }; crate::task::scheduler::MAX_CPUS];
 
 pub fn sys_getppid() -> u64 {
     get_current_process().map_or(0, |p| p.parent_id.unwrap_or(0))
@@ -738,6 +748,15 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
     parent.children.lock().push(child_pid);
     crate::task::process::Process::register(child_arc.clone());
 
+    // Update vDSO with current process info (cgroup, namespace, capabilities)
+    #[cfg(target_arch = "x86_64")]
+    crate::vdso_update_process_info(
+        crate::smp::get_cpu_id() as u32,
+        parent.cgroup_path.lock().len() as u64, // Use path length as simple cgroup ID
+        0, // namespace flags - TODO: implement
+        parent.creds.lock().cap_effective,
+    );
+
     // 4. Add to scheduler
     crate::task::scheduler::spawn_thread(child_thread);
 
@@ -1049,7 +1068,16 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
 }
 
 pub fn sys_getpid() -> u64 {
-    // Fast path: read from vDSO if available (x86_64 only)
+    // Fast path: read from per-CPU cached PID (lock-free, updated at context switch)
+    #[cfg(target_arch = "x86_64")]
+    {
+        let cpu_idx = crate::smp::get_cpu_id() as usize;
+        let pid = CURRENT_PID[cpu_idx].load(Ordering::Acquire);
+        if pid != 0 {
+            return pid;
+        }
+    }
+    // Fallback: vDSO seqlock path
     #[cfg(target_arch = "x86_64")]
     {
         let vdso_ptr = crate::vdso_page();
@@ -1058,8 +1086,6 @@ pub fn sys_getpid() -> u64 {
             let vdso = unsafe { &*vdso_ptr };
             let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
             loop {
-                // Data field uses Relaxed: on x86_64 (TSO), loads don't reorder with loads.
-                // The pid_cpu_seq seqlock counter uses Acquire which synchronizes with writer's Release.
                 let pid = vdso.pid.load(Ordering::Relaxed);
                 let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
                 if seq == seq2 && seq % 2 == 0 {
@@ -1077,27 +1103,32 @@ pub fn sys_getcpu(cpu: *mut u32, node: *mut u32) -> u64 {
     use crate::syscalls::user_access;
     let cpu_id = crate::smp::get_cpu_id() as u32;
 
-    // Fast path: read from vDSO if available (x86_64 only)
+    // Fast path: read from per-CPU cached CPU ID (lock-free, updated at context switch)
     let cpu_val = {
         #[cfg(target_arch = "x86_64")]
         {
-            let vdso_ptr = crate::vdso_page();
-            if !vdso_ptr.is_null() {
-                // SAFETY: vdso_page returns valid pointer if not null
-                let vdso = unsafe { &*vdso_ptr };
-                let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
-                loop {
-                    // Data field uses Relaxed: on x86_64 (TSO), loads don't reorder with loads.
-                    // The pid_cpu_seq seqlock counter uses Acquire which synchronizes with writer's Release.
-                    let cpu = vdso.cpu_id.load(Ordering::Relaxed);
-                    let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
-                    if seq == seq2 && seq % 2 == 0 {
-                        break cpu;
-                    }
-                    seq = seq2;
-                }
+            let cpu_idx = crate::smp::get_cpu_id() as usize;
+            let cached_cpu = CURRENT_CPU_ID[cpu_idx].load(Ordering::Acquire);
+            if cached_cpu != 0 {
+                cached_cpu
             } else {
-                cpu_id
+                // Fallback: vDSO seqlock path
+                let vdso_ptr = crate::vdso_page();
+                if !vdso_ptr.is_null() {
+                    // SAFETY: vdso_page returns valid pointer if not null
+                    let vdso = unsafe { &*vdso_ptr };
+                    let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
+                    loop {
+                        let cpu = vdso.cpu_id.load(Ordering::Relaxed);
+                        let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+                        if seq == seq2 && seq % 2 == 0 {
+                            break cpu;
+                        }
+                        seq = seq2;
+                    }
+                } else {
+                    cpu_id
+                }
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
@@ -1351,6 +1382,16 @@ pub fn sys_execve(
     }
 
     drop(exec_guard);
+    
+    // Update vDSO with new process info (cgroup, namespace, capabilities)
+    #[cfg(target_arch = "x86_64")]
+    crate::vdso_update_process_info(
+        crate::smp::get_cpu_id() as u32,
+        process_arc.cgroup_path.lock().len() as u64,
+        0, // namespace flags - TODO: implement
+        process_arc.creds.lock().cap_effective,
+    );
+    
     unsafe {
         crate::task::thread::jump_to_usermode(entry, user_rsp);
     }

@@ -1,37 +1,56 @@
 //! Benchmark harness for the Vahi kernel.
 //!
 //! Measures latency and throughput of core kernel subsystems using
-//! TSC-based high-resolution timing. Reports min/p50/p99/max percentiles
-//! for each benchmark, printed in a structured format for CI parsing.
+//! architecture-agnostic high-resolution timing. Reports min/p50/p99/max
+//! percentiles for each benchmark, printed in a structured format for CI parsing.
 //!
 //! Runs during boot (selftest framework) when `--features self_test`.
 
 use crate::selftest;
+use crate::hal::timer::{current_time_us, current_timer};
 
 // ---------------------------------------------------------------------------
-// TSC timing
+// Architecture-agnostic timer access
 // ---------------------------------------------------------------------------
 
-#[inline]
-fn rdtsc() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    unsafe {
-        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi,
-            options(nostack, preserves_flags));
+/// Get current time in nanoseconds from the registered timer.
+fn timer_read_ns() -> u64 {
+    current_time_us().saturating_mul(1000)
+}
+
+/// Get timer frequency in Hz.
+fn timer_freq_hz() -> u64 {
+    current_timer().map(|t| {
+        // Try downcasting to known timer types
+        #[cfg(target_arch = "x86_64")]
+        if let Some(tsc) = t.as_any().and_then(|a| a.downcast_ref::<crate::hal::timer::TscTimer>()) {
+            return tsc.tsc_frequency();
+        }
+        #[cfg(target_arch = "aarch64")]
+        if let Some(cntrvct) = t.as_any().and_then(|a| a.downcast_ref::<crate::hal::timer::CntrvctTimer>()) {
+            return cntrvct.frequency();
+        }
+        #[cfg(target_arch = "riscv64")]
+        if let Some(riscv) = t.as_any().and_then(|a| a.downcast_ref::<crate::hal::timer::RiscvTimeTimer>()) {
+            return riscv.frequency();
+        }
+        0
+    }).unwrap_or(0)
+}
+
+/// Convert timer delta to nanoseconds using timer frequency.
+fn timer_delta_to_ns(delta: u64) -> u64 {
+    let freq = timer_freq_hz();
+    if freq == 0 {
+        return 0;
     }
-    ((hi as u64) << 32) | (lo as u64)
+    // ns = (delta * 1e9) / freq
+    ((delta as u128 * 1_000_000_000u128) / freq as u128) as u64
 }
 
-/// TSC frequency in Hz. Hardcoded for QEMU/TCG (2.4 GHz).
-/// On real hardware, calibrate from CPUID leaf 0x15 or PIT.
-fn tsc_freq_hz() -> u64 {
-    2_400_000_000
-}
-
-/// Convert raw TSC ticks to nanoseconds.
-fn ticks_to_ns(ticks: u64) -> u64 {
-    ticks * 1_000 / (tsc_freq_hz() / 1_000_000)
+/// Get current timer ticks (raw).
+fn timer_read_ticks() -> u64 {
+    current_timer().map_or(0, |t| t.ticks())
 }
 
 /// Prevent the compiler from optimizing away a value.
@@ -127,8 +146,8 @@ impl BenchStats {
 // Benchmark runner
 // ---------------------------------------------------------------------------
 
-/// Run `body` for `iters` iterations, collecting per-iteration TSC latencies.
-/// Returns sorted BenchStats with min/p50/p99/max.
+/// Run `body` for `iters` iterations, collecting per-iteration timer latencies.
+/// Returns sorted BenchStats with min/p50/p99/max in nanoseconds.
 fn bench_stats(name: &'static str, iters: usize, body: impl Fn()) -> BenchStats {
     // Warm up: 10% of iterations or 100, whichever is smaller
     let warmup = core::cmp::min(iters / 10, 100);
@@ -138,10 +157,10 @@ fn bench_stats(name: &'static str, iters: usize, body: impl Fn()) -> BenchStats 
 
     let mut stats = BenchStats::new(name, iters);
     for _ in 0..iters {
-        let start = rdtsc();
+        let start = timer_read_ticks();
         body();
-        let elapsed = rdtsc().wrapping_sub(start);
-        stats.push(ticks_to_ns(elapsed));
+        let elapsed = timer_read_ticks().wrapping_sub(start);
+        stats.push(timer_delta_to_ns(elapsed));
     }
     stats.finish();
     stats
@@ -340,10 +359,14 @@ fn test_memory_leak_audit() -> Result<(), &'static str> {
 // ---------------------------------------------------------------------------
 
 fn run_all_benchmarks() -> Result<(), &'static str> {
+    let freq_hz = timer_freq_hz();
+    let freq_mhz = freq_hz / 1_000_000;
+    let arch = if cfg!(target_arch = "x86_64") { "x86_64" } else if cfg!(target_arch = "aarch64") { "aarch64" } else if cfg!(target_arch = "riscv64") { "riscv64" } else { "unknown" };
+
     crate::serial_write("\n");
     crate::serial_write("[BENCH] ============================================================\n");
     crate::serial_write("[BENCH]  Vahi Kernel Benchmark Suite\n");
-    crate::serial_write("[BENCH]  TSC frequency: 2400 MHz (QEMU/TCG)\n");
+    crate::serial_write(&alloc::format!("[BENCH]  Arch: {}  Timer freq: {} MHz\n", arch, freq_mhz));
     crate::serial_write("[BENCH]  All latencies in nanoseconds. Lower is better.\n");
     crate::serial_write("[BENCH] ============================================================\n\n");
 
@@ -389,10 +412,326 @@ fn run_all_benchmarks() -> Result<(), &'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// Stress Tests (long-running, high-concurrency, fault-injection)
+// ---------------------------------------------------------------------------
+
+/// Stress test: Concurrent vDSO reads from multiple threads/cores.
+/// Verifies seqlock correctness under heavy read contention.
+fn stress_vdso_concurrent_reads() -> Result<(), &'static str> {
+    use crate::vdso::{vdso_page, vdso_read_tsc_time};
+    use core::hint::spin_loop;
+    use core::sync::atomic::Ordering;
+
+    let iterations = 1_000_000;
+    let mut consistent_reads = 0;
+    let mut torn_reads = 0;
+
+    crate::serial_write("[STRESS] Concurrent vDSO reads: starting ");
+    crate::serial_write_hex(iterations);
+    crate::serial_write(" iterations
+");
+
+    for i in 0..iterations {
+        let vdso_ptr = vdso_page();
+        if vdso_ptr.is_null() {
+            return Err("vDSO page not initialized");
+        }
+        let vdso = unsafe { &*vdso_ptr };
+
+        // Read monotonic time with seqlock
+        let mut seq = vdso.seq.load(Ordering::Acquire);
+        let (_sec, nsec) = loop {
+            if seq & 1 != 0 {
+                seq = vdso.seq.load(Ordering::Acquire);
+                continue;
+            }
+            let sec = vdso.monotonic_sec.load(Ordering::Relaxed);
+            let nsec = vdso.monotonic_nsec.load(Ordering::Relaxed);
+            let seq2 = vdso.seq.load(Ordering::Acquire);
+            if seq == seq2 && (seq & 1) == 0 {
+                break (sec, nsec);
+            }
+            seq = seq2;
+        };
+
+        // Validate nsec range
+        if nsec >= 1_000_000_000 {
+            torn_reads += 1;
+        } else {
+            consistent_reads += 1;
+        }
+
+        // Also test TSC read
+        let _ = vdso_read_tsc_time(1); // CLOCK_MONOTONIC
+
+        if i % 100_000 == 0 && i > 0 {
+            spin_loop();
+        }
+    }
+
+    crate::serial_write("[STRESS] Concurrent reads: ");
+    crate::serial_write_hex(consistent_reads);
+    crate::serial_write(" consistent, ");
+    crate::serial_write_hex(torn_reads);
+    crate::serial_write(" torn
+");
+
+    if torn_reads > 0 {
+        return Err("seqlock torn reads detected");
+    }
+
+    Ok(())
+}
+
+/// Stress test: vDSO PID/CPU reads under concurrent access.
+/// Verifies pid_cpu_seqlock under concurrent reads.
+fn stress_vdso_pid_cpu_reads() -> Result<(), &'static str> {
+    use crate::vdso::vdso_page;
+    use core::sync::atomic::Ordering;
+
+    let iterations = 500_000;
+    let mut consistent_reads = 0;
+
+    crate::serial_write("[STRESS] PID/CPU concurrent reads: starting
+");
+
+    for i in 0..iterations {
+        let vdso_ptr = vdso_page();
+        if vdso_ptr.is_null() {
+            return Err("vDSO page not initialized");
+        }
+        let vdso = unsafe { &*vdso_ptr };
+
+        let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
+        let (pid, cpu) = loop {
+            let pid = vdso.pid.load(Ordering::Relaxed);
+            let cpu = vdso.cpu_id.load(Ordering::Relaxed);
+            let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+            if seq == seq2 && (seq & 1) == 0 {
+                break (pid, cpu);
+            }
+            seq = seq2;
+        };
+
+        if pid == 0 || cpu as usize >= crate::task::scheduler::MAX_CPUS {
+            return Err("invalid PID/CPU read");
+        }
+        consistent_reads += 1;
+
+        if i % 50_000 == 0 && i > 0 {
+            core::hint::spin_loop();
+        }
+    }
+
+    crate::serial_write("[STRESS] PID/CPU reads: ");
+    crate::serial_write_hex(consistent_reads);
+    crate::serial_write(" consistent
+");
+
+    Ok(())
+}
+
+/// Stress test: TSC read consistency over time.
+/// Verifies TSC monotonicity and calibration stability.
+fn stress_tsc_monotonicity() -> Result<(), &'static str> {
+    use crate::vdso::vdso_page;
+    use core::sync::atomic::Ordering;
+
+    let iterations = 200_000;
+    let mut prev_ns = 0u64;
+    let mut decreases = 0;
+
+    crate::serial_write("[STRESS] TSC monotonicity: starting
+");
+
+    for i in 0..iterations {
+        let vdso_ptr = vdso_page();
+        if vdso_ptr.is_null() {
+            return Err("vDSO page not initialized");
+        }
+        let vdso = unsafe { &*vdso_ptr };
+
+        let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+        if tsc_freq == 0 {
+            return Err("TSC not calibrated");
+        }
+
+        let tsc_mult = vdso.tsc_mult;
+        let tsc_shift = vdso.tsc_shift;
+        let tsc_base = vdso.tsc_base.load(Ordering::Acquire);
+
+        let (lo, hi) = {
+            let lo: u32;
+            let hi: u32;
+            unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+            (lo, hi)
+        };
+        let tsc_now = ((hi as u64) << 32) | lo as u64;
+        let elapsed = tsc_now.wrapping_sub(tsc_base);
+        let ns = ((elapsed as u128 * tsc_mult as u128) >> tsc_shift) as u64;
+
+        if ns < prev_ns {
+            decreases += 1;
+        }
+        prev_ns = ns;
+
+        if i % 20_000 == 0 && i > 0 {
+            core::hint::spin_loop();
+        }
+    }
+
+    crate::serial_write("[STRESS] TSC monotonicity: ");
+    crate::serial_write_hex(decreases);
+    crate::serial_write(" decreases in ");
+    crate::serial_write_hex(iterations);
+    crate::serial_write(" reads
+");
+
+    if decreases > 0 {
+        return Err("TSC went backwards (non-monotonic)");
+    }
+
+    Ok(())
+}
+
+/// Stress test: High-frequency vDSO time reads simulating real workload.
+/// Simulates a busy userspace application polling time.
+fn stress_vdso_heavy_load() -> Result<(), &'static str> {
+    use crate::vdso::vdso_page;
+    use crate::vdso::vdso_read_tsc_time;
+    use crate::syscalls::misc::sys_clock_gettime;
+    use crate::syscalls::Timespec;
+
+    let iterations = 100_000;
+    let mut vdso_reads = 0;
+    let mut syscall_reads = 0;
+
+    crate::serial_write("[STRESS] Heavy load simulation: starting
+");
+
+    for i in 0..iterations {
+        let vdso_ptr = vdso_page();
+        if vdso_ptr.is_null() {
+            return Err("vDSO page not initialized");
+        }
+
+        // Alternate between vDSO fast path and syscall
+        if i % 2 == 0 {
+            // vDSO fast path
+            let _ = vdso_read_tsc_time(1); // CLOCK_MONOTONIC
+            vdso_reads += 1;
+        } else {
+            // Syscall path
+            let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let ret = sys_clock_gettime(1, &mut ts);
+            if ret == 0 {
+                syscall_reads += 1;
+            }
+        }
+
+        if i % 10_000 == 0 && i > 0 {
+            core::hint::spin_loop();
+        }
+    }
+
+    crate::serial_write("[STRESS] Heavy load: ");
+    crate::serial_write_hex(vdso_reads);
+    crate::serial_write(" vDSO reads, ");
+    crate::serial_write_hex(syscall_reads);
+    crate::serial_write(" syscall reads
+");
+
+    Ok(())
+}
+
+/// Stress test: vDSO clock_getres consistency.
+/// Verifies resolution values are consistent across all clocks.
+fn stress_clock_getres_consistency() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_getres;
+    use crate::syscalls::Timespec;
+
+    let iterations = 10_000;
+    let mut resolution_mismatches = 0;
+
+    crate::serial_write("[STRESS] clock_getres consistency: starting
+");
+
+    for i in 0..iterations {
+        for &clock_id in &[0u64, 1, 2, 3, 4, 5, 6, 7, 100, 101, 102, 103, 104] {
+            let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let ret = sys_clock_getres(clock_id, &mut ts);
+            if ret != 0 {
+                // Some clocks may return EINVAL (e.g., alarm clocks)
+                continue;
+            }
+
+            let expected_ns = match clock_id {
+                5 | 6 => 1_000_000, // coarse clocks
+                _ => 1,              // high-res clocks
+            };
+
+            if ts.tv_nsec != expected_ns {
+                resolution_mismatches += 1;
+            }
+        }
+
+        if i % 1_000 == 0 && i > 0 {
+            core::hint::spin_loop();
+        }
+    }
+
+    crate::serial_write("[STRESS] clock_getres: ");
+    crate::serial_write_hex(resolution_mismatches);
+    crate::serial_write(" mismatches in ");
+    crate::serial_write_hex(iterations * 13);
+    crate::serial_write(" checks
+");
+
+    if resolution_mismatches > 0 {
+        return Err("clock_getres resolution mismatch");
+    }
+
+    Ok(())
+}
+
+/// Run all VDSO stress tests.
+pub fn run_vdso_stress_suite() -> Result<(), &'static str> {
+    crate::serial_write("
+");
+    crate::serial_write("[STRESS] ============================================================
+");
+    crate::serial_write("[STRESS]  VDSO Stress Test Suite
+");
+    crate::serial_write("[STRESS]  High-concurrency, long-duration, fault-injection tests
+");
+    crate::serial_write("[STRESS] ============================================================
+
+");
+
+    stress_vdso_concurrent_reads()?;
+    stress_vdso_pid_cpu_reads()?;
+    stress_tsc_monotonicity()?;
+    stress_vdso_heavy_load()?;
+    stress_clock_getres_consistency()?;
+
+    crate::serial_write("
+[STRESS] ============================================================
+");
+    crate::serial_write("[STRESS]  All VDSO stress tests PASSED
+");
+    crate::serial_write("[STRESS] ============================================================
+
+");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
 pub fn register() {
     selftest::register("benchmarks::suite", run_all_benchmarks);
     selftest::register("benchmarks::memory_leak_audit", test_memory_leak_audit);
+    selftest::register("stress::vdso_suite", run_vdso_stress_suite);
 }

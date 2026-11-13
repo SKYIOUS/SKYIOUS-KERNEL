@@ -222,6 +222,8 @@ pub struct Process {
     pub stime: core::sync::atomic::AtomicU64,
     pub cutime: core::sync::atomic::AtomicU64,
     pub cstime: core::sync::atomic::AtomicU64,
+    /// Total CPU time consumed by all threads in this process (ns)
+    pub cpu_time_ns: core::sync::atomic::AtomicU64,
     pub boot_ticks: u64,
     pub groups: crate::sync::IrqSafeMutex<alloc::vec::Vec<u32>>,
     /// Process/thread name (up to 15 chars + null)
@@ -498,6 +500,7 @@ impl Process {
             stime: core::sync::atomic::AtomicU64::new(0),
             cutime: core::sync::atomic::AtomicU64::new(0),
             cstime: core::sync::atomic::AtomicU64::new(0),
+            cpu_time_ns: core::sync::atomic::AtomicU64::new(0),
             boot_ticks: crate::interrupts::get_ticks(),
             groups: crate::sync::IrqSafeMutex::new(alloc::vec::Vec::new()),
             name: crate::sync::IrqSafeMutex::new(String::from("init")),

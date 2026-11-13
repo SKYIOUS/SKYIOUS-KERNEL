@@ -637,6 +637,571 @@ pub fn test_vdso_auxv_sysinfo_ehdr() -> Result<(), &'static str> {
     Ok(())
 }
 
+
+// ---------------------------------------------------------------------------
+// vDSO Benchmarks (Cycle-accurate, TSC-based)
+// ---------------------------------------------------------------------------
+
+/// Measure clock_gettime(CLOCK_MONOTONIC) latency via vDSO fast-path.
+/// Target: <5 ns p50 (warns if exceeded in TCG).
+pub fn test_vdso_bench_clock_gettime_monotonic() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::vdso::vdso_page;
+    use crate::syscalls::Timespec;
+    
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    let _vdso = unsafe { &*vdso_ptr };
+    
+    // Warmup
+    for _ in 0..1000 {
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = sys_clock_gettime_kernel(1 /* CLOCK_MONOTONIC */, &mut ts);
+    }
+    
+    // Measure 10,000 iterations
+    let mut samples = alloc::vec::Vec::with_capacity(10000);
+    for _ in 0..10000 {
+        let start = {
+            let (lo, hi) = {
+                let lo: u32; let hi: u32;
+                unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+                (lo, hi)
+            };
+            ((hi as u64) << 32) | (lo as u64)
+        };
+        
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = sys_clock_gettime_kernel(1 /* CLOCK_MONOTONIC */, &mut ts);
+        
+        let end = {
+            let (lo, hi) = {
+                let lo: u32; let hi: u32;
+                unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+                (lo, hi)
+            };
+            ((hi as u64) << 32) | (lo as u64)
+        };
+        
+        let elapsed = end.wrapping_sub(start);
+        let freq = 2_400_000_000u64; // TCG calibration
+        let ns = (elapsed * 1_000_000_000) / freq;
+        samples.push(ns);
+    }
+    
+    samples.sort_unstable();
+    let min = samples[0];
+    let p50 = samples[samples.len() / 2];
+    let p99 = samples[samples.len() * 99 / 100];
+    let max = samples[samples.len() - 1];
+    
+    crate::serial_write(&alloc::format!("[BENCH]   vdso_bench:clock_gettime_monotonic  min {:>8} ns  p50 {:>8} ns  p99 {:>8} ns  max {:>8} ns  (10000 iters)\n",
+        min, p50, p99, max));
+    
+    // Warn if p99 exceeds target (5 ns)
+    if p99 > 5 * 2_400_000_000 / 1_000_000_000 {
+        crate::serial_write("[BENCH] WARN: p99 exceeds target (5 ns at current freq) - TCG expected\n");
+    }
+    
+    Ok(())
+}
+
+/// Benchmark getpid() via vDSO fast-path.
+/// Target: <3 ns p50 (warns if exceeded in TCG).
+pub fn test_vdso_bench_getpid() -> Result<(), &'static str> {
+    use crate::vdso::vdso_page;
+    use core::sync::atomic::Ordering;
+    
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    let vdso = unsafe { &*vdso_ptr };
+    
+    // Warmup
+    for _ in 0..1000 {
+        let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
+        let _pid = loop {
+            let pid = vdso.pid.load(Ordering::Relaxed);
+            let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+            if seq == seq2 && seq % 2 == 0 { break pid; }
+            seq = seq2;
+        };
+    }
+    
+    // Measure 10,000 iterations
+    let mut samples = alloc::vec::Vec::with_capacity(10000);
+    for _ in 0..10000 {
+        let start = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        
+        let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
+        let _pid = loop {
+            let pid = vdso.pid.load(Ordering::Relaxed);
+            let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+            if seq == seq2 && seq % 2 == 0 { break pid; }
+            seq = seq2;
+        };
+        
+        let end = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        let elapsed = end.wrapping_sub(start);
+        samples.push(elapsed);
+    }
+    
+    samples.sort_unstable();
+    let min = samples[0];
+    let p50 = samples[samples.len() / 2];
+    let p99 = samples[samples.len() * 99 / 100];
+    let max = samples[samples.len() - 1];
+    
+    crate::serial_write(&alloc::format!("[BENCH]   vdso_bench:getpid  min {:>8} cyc  p50 {:>8} cyc  p99 {:>8} cyc  max {:>8} cyc  (10000 iters)\n",
+        min, p50, p99, max));
+    
+    // Warn if p99 exceeds target (3 ns)
+    if p99 > 3 * 2_400_000_000 / 1_000_000_000 {
+        crate::serial_write("[BENCH] WARN: p99 exceeds target (3 ns at current freq) - TCG expected\n");
+    }
+    
+    Ok(())
+}
+
+/// Benchmark getcpu() via vDSO fast-path.
+/// Target: <3 ns p50 (warns if exceeded in TCG).
+pub fn test_vdso_bench_getcpu() -> Result<(), &'static str> {
+    use crate::vdso::vdso_page;
+    use core::sync::atomic::Ordering;
+    
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    let vdso = unsafe { &*vdso_ptr };
+    
+    // Warmup
+    for _ in 0..1000 {
+        let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
+        let _cpu = loop {
+            let cpu = vdso.cpu_id.load(Ordering::Relaxed);
+            let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+            if seq == seq2 && seq % 2 == 0 { break cpu; }
+            seq = seq2;
+        };
+    }
+    
+    // Measure 10,000 iterations
+    let mut samples = alloc::vec::Vec::with_capacity(10000);
+    for _ in 0..10000 {
+        let start = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        
+        let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
+        let _cpu = loop {
+            let cpu = vdso.cpu_id.load(Ordering::Relaxed);
+            let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+            if seq == seq2 && seq % 2 == 0 { break cpu; }
+            seq = seq2;
+        };
+        
+        let end = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        let elapsed = end.wrapping_sub(start);
+        samples.push(elapsed);
+    }
+    
+    samples.sort_unstable();
+    let min = samples[0];
+    let p50 = samples[samples.len() / 2];
+    let p99 = samples[samples.len() * 99 / 100];
+    let max = samples[samples.len() - 1];
+    
+    crate::serial_write(&alloc::format!("[BENCH]   vdso_bench:getcpu  min {:>8} cyc  p50 {:>8} cyc  p99 {:>8} cyc  max {:>8} cyc  (10000 iters)\n",
+        min, p50, p99, max));
+    
+    if p99 > 3 * 2_400_000_000 / 1_000_000_000 {
+        crate::serial_write("[BENCH] WARN: p99 exceeds target (3 ns at current freq) - TCG expected\n");
+    }
+    
+    Ok(())
+}
+
+/// Benchmark clock_getres() via vDSO fast-path.
+/// Target: <1 ns p50 (warns if exceeded in TCG).
+pub fn test_vdso_bench_clock_getres() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_getres;
+    use crate::syscalls::Timespec;
+    
+    // clock_getres is a const fn, so this measures the syscall overhead
+    let mut samples = alloc::vec::Vec::with_capacity(10000);
+    for _ in 0..10000 {
+        let start = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = sys_clock_getres(1, &mut ts);
+        
+        let end = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        let elapsed = end.wrapping_sub(start);
+        samples.push(elapsed);
+    }
+    
+    samples.sort_unstable();
+    let min = samples[0];
+    let p50 = samples[samples.len() / 2];
+    let p99 = samples[samples.len() * 99 / 100];
+    let max = samples[samples.len() - 1];
+    
+    crate::serial_write(&alloc::format!("[BENCH]   vdso_bench:clock_getres  min {:>8} cyc  p50 {:>8} cyc  p99 {:>8} cyc  max {:>8} cyc  (10000 iters)\n",
+        min, p50, p99, max));
+    
+    if p99 > 1 * 2_400_000_000 / 1_000_000_000 {
+        crate::serial_write("[BENCH] WARN: p99 exceeds target (1 ns at current freq) - TCG expected\n");
+    }
+    
+    Ok(())
+}
+
+/// Benchmark CLOCK_SKYIOUS_BOOT_NS via vDSO.
+/// Target: <5 ns p50 (warns if exceeded in TCG).
+pub fn test_vdso_bench_skyious_boot_ns() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    use crate::vdso::vdso_page;
+    
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    let _vdso = unsafe { &*vdso_ptr };
+    
+    let mut samples = alloc::vec::Vec::with_capacity(10000);
+    for _ in 0..10000 {
+        let start = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = sys_clock_gettime_kernel(102, &mut ts);
+        
+        let end = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        let elapsed = end.wrapping_sub(start);
+        samples.push(elapsed);
+    }
+    
+    samples.sort_unstable();
+    let min = samples[0];
+    let p50 = samples[samples.len() / 2];
+    let p99 = samples[samples.len() * 99 / 100];
+    let max = samples[samples.len() - 1];
+    
+    crate::serial_write(&alloc::format!("[BENCH]   vdso_bench:skyious_boot_ns  min {:>8} cyc  p50 {:>8} cyc  p99 {:>8} cyc  max {:>8} cyc  (10000 iters)\n",
+        min, p50, p99, max));
+    
+    if p99 > 5 * 2_400_000_000 / 1_000_000_000 {
+        crate::serial_write("[BENCH] WARN: p99 exceeds target (5 ns at current freq) - TCG expected\n");
+    }
+    
+    Ok(())
+}
+
+/// Benchmark CLOCK_THREAD_CPUTIME_ID via vDSO (syscall path).
+/// Target: <20 ns p50 (warns if exceeded in TCG).
+pub fn test_vdso_bench_cputime_syscall() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    
+    let mut samples = alloc::vec::Vec::with_capacity(10000);
+    for _ in 0..10000 {
+        let start = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = sys_clock_gettime_kernel(3, &mut ts);
+        
+        let end = { let (lo, hi) = { let lo: u32; let hi: u32; unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) }; (lo, hi) }; ((hi as u64) << 32) | (lo as u64) };
+        let elapsed = end.wrapping_sub(start);
+        samples.push(elapsed);
+    }
+    
+    samples.sort_unstable();
+    let min = samples[0];
+    let p50 = samples[samples.len() / 2];
+    let p99 = samples[samples.len() * 99 / 100];
+    let max = samples[samples.len() - 1];
+    
+    crate::serial_write(&alloc::format!("[BENCH]   vdso_bench:cputime_syscall  min {:>8} cyc  p50 {:>8} cyc  p99 {:>8} cyc  max {:>8} cyc  (10000 iters)\n",
+        min, p50, p99, max));
+    
+    if p99 > 20 * 2_400_000_000 / 1_000_000_000 {
+        crate::serial_write("[BENCH] WARN: p99 exceeds target (20 ns at current freq) - TCG expected\n");
+    }
+    
+    Ok(())
+}
+
+
+/// Verify CLOCK_THREAD_CPUTIME_ID (3) - thread CPU time via syscall.
+pub fn test_vdso_cputime_thread() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let ret = sys_clock_gettime_kernel(3, &mut ts); // CLOCK_THREAD_CPUTIME_ID
+    if ret != 0 {
+        return Err("clock_gettime(CLOCK_THREAD_CPUTIME_ID) failed");
+    }
+    
+    // Verify time is valid (can be 0 for idle thread, but should be non-negative)
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        return Err("invalid thread CPU time");
+    }
+    
+    crate::serial_write("[VDSO CPUTIME_THREAD] thread CPU time: ");
+    crate::serial_write_hex(ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64);
+    crate::serial_write(" ns
+");
+    
+    Ok(())
+}
+
+/// Verify CLOCK_PROCESS_CPUTIME_ID (2) - process CPU time via syscall.
+pub fn test_vdso_cputime_process() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let ret = sys_clock_gettime_kernel(2, &mut ts); // CLOCK_PROCESS_CPUTIME_ID
+    if ret != 0 {
+        return Err("clock_gettime(CLOCK_PROCESS_CPUTIME_ID) failed");
+    }
+    
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        return Err("invalid process CPU time");
+    }
+    
+    crate::serial_write("[VDSO CPUTIME_PROCESS] process CPU time: ");
+    crate::serial_write_hex(ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64);
+    crate::serial_write(" ns
+");
+    
+    Ok(())
+}
+
+/// Verify CLOCK_SKYIOUS_THREAD_CPUTIME (100) - thread CPU time via vDSO page.
+pub fn test_vdso_skyious_thread_cputime() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    use crate::vdso::vdso_page;
+    
+    // Test via syscall path
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let ret = sys_clock_gettime_kernel(100, &mut ts);
+    if ret != 0 {
+        return Err("clock_gettime(CLOCK_SKYIOUS_THREAD_CPUTIME) failed");
+    }
+    
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        return Err("invalid thread CPU time via vDSO page");
+    }
+    
+    // Also verify vDSO page field directly
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    let vdso = unsafe { &*vdso_ptr };
+    let ns = vdso.thread_cputime_ns.load(core::sync::atomic::Ordering::Acquire);
+    let vdso_ts = crate::syscalls::Timespec {
+        tv_sec: (ns / 1_000_000_000) as i64,
+        tv_nsec: (ns % 1_000_000_000) as i64,
+    };
+    
+    crate::serial_write("[VDSO SKYIOUS_THREAD_CPUTIME] thread CPU time: ");
+    crate::serial_write_hex(ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64);
+    crate::serial_write(" ns (vDSO page: ");
+    crate::serial_write_hex(vdso_ts.tv_sec as u64 * 1_000_000_000 + vdso_ts.tv_nsec as u64);
+    crate::serial_write(" ns)
+");
+    
+    Ok(())
+}
+
+/// Verify CLOCK_SKYIOUS_SCHED_DEADLINE (101) - scheduler deadline via vDSO.
+pub fn test_vdso_skyious_sched_deadline() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    use crate::task::scheduler::is_deadline;
+    
+    // First check if current thread is a deadline thread
+    use crate::task::scheduler::this_cpu_sched;
+    let is_deadline_thread = if let Some(sched) = this_cpu_sched().try_lock() {
+        if let Some(ref cur) = sched.current_thread {
+            is_deadline(cur.policy)
+        } else { false }
+    } else { false };
+    
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let ret = sys_clock_gettime_kernel(101, &mut ts);
+    if ret != 0 {
+        return Err("clock_gettime(CLOCK_SKYIOUS_SCHED_DEADLINE) failed");
+    }
+    
+    if is_deadline_thread {
+        // Deadline thread should have valid deadline and runtime
+        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
+            return Err("deadline thread should have non-zero deadline");
+        }
+        if ts.tv_nsec >= 1_000_000_000 {
+            return Err("runtime nsec out of range");
+        }
+        crate::serial_write("[VDSO SKYIOUS_SCHED_DEADLINE] deadline: ");
+        crate::serial_write_hex(ts.tv_sec as u64);
+        crate::serial_write(" ns, runtime: ");
+        crate::serial_write_hex(ts.tv_nsec as u64);
+        crate::serial_write(" ns
+");
+    } else {
+        // Non-deadline thread should return (0, 0)
+        if ts.tv_sec != 0 || ts.tv_nsec != 0 {
+            return Err("non-deadline thread should return (0, 0)");
+        }
+        crate::serial_write("[VDSO SKYIOUS_SCHED_DEADLINE] non-deadline thread returns (0, 0)
+");
+    }
+    
+    Ok(())
+}
+
+/// Verify CLOCK_SKYIOUS_BOOT_NS (102) - boot time in nanoseconds.
+pub fn test_vdso_skyious_boot_ns() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    use crate::vdso::vdso_read_tsc_time;
+    
+    // Test via syscall path
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let ret = sys_clock_gettime_kernel(102, &mut ts);
+    if ret != 0 {
+        return Err("clock_gettime(CLOCK_SKYIOUS_BOOT_NS) failed");
+    }
+    
+    if ts.tv_sec == 0 && ts.tv_nsec == 0 {
+        return Err("boot time should be positive");
+    }
+    
+    // Verify TSC-based time is monotonic and reasonable
+    let (tsc_sec, tsc_nsec) = vdso_read_tsc_time(1); // CLOCK_MONOTONIC
+    if tsc_sec == 0 && tsc_nsec == 0 {
+        return Err("TSC time not available");
+    }
+    
+    // BOOT_NS should be close to MONOTONIC (both TSC-based)
+    let boot_ns = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
+    let mono_ns = tsc_sec * 1_000_000_000 + tsc_nsec as u64;
+    let diff = if boot_ns > mono_ns { boot_ns - mono_ns } else { mono_ns - boot_ns };
+    
+    // Allow small difference (they're read at slightly different times)
+    if diff > 10_000_000 { // 10ms tolerance
+        return Err("BOOT_NS diverges too much from MONOTONIC");
+    }
+    
+    crate::serial_write("[VDSO SKYIOUS_BOOT_NS] boot time: ");
+    crate::serial_write_hex(boot_ns);
+    crate::serial_write(" ns
+");
+    
+    Ok(())
+}
+
+/// Verify CLOCK_SKYIOUS_KERNEL_FLAGS (103) - kernel feature flags.
+pub fn test_vdso_skyious_kernel_flags() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    use crate::vdso::vdso_page;
+    use crate::vdso::kernel_flags;
+    
+    // Test via syscall path
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let ret = sys_clock_gettime_kernel(103, &mut ts);
+    if ret != 0 {
+        return Err("clock_gettime(CLOCK_SKYIOUS_KERNEL_FLAGS) failed");
+    }
+    
+    // Verify via vDSO page directly
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    let vdso = unsafe { &*vdso_ptr };
+    let flags = vdso.kernel_flags.load(core::sync::atomic::Ordering::Acquire);
+    
+    // Verify flags match
+    let syscall_flags_low = ts.tv_sec as u64 & 0xFFFFFFFF;
+    let syscall_flags_high = (ts.tv_nsec as u64) >> 32;
+    if syscall_flags_low != (flags & 0xFFFFFFFF) || syscall_flags_high != (flags >> 32) {
+        return Err("syscall flags don't match vDSO page flags");
+    }
+    
+    // Check specific flags
+    let has_avx2 = (flags & kernel_flags::HAS_AVX2) != 0;
+    let has_nvme = (flags & kernel_flags::HAS_NVME) != 0;
+    let has_xhci = (flags & kernel_flags::HAS_XHCI) != 0;
+    let has_virtio_gpu = (flags & kernel_flags::HAS_VIRTIO_GPU) != 0;
+    
+    crate::serial_write("[VDSO SKYIOUS_KERNEL_FLAGS] flags: 0x");
+    crate::serial_write_hex(flags);
+    crate::serial_write(" (AVX2: ");
+    crate::serial_write(if has_avx2 { "yes" } else { "no" });
+    crate::serial_write(", NVMe: ");
+    crate::serial_write(if has_nvme { "yes" } else { "no" });
+    crate::serial_write(", xHCI: ");
+    crate::serial_write(if has_xhci { "yes" } else { "no" });
+    crate::serial_write(", VirtIO-GPU: ");
+    crate::serial_write(if has_virtio_gpu { "yes" } else { "no" });
+    crate::serial_write(")
+");
+    
+    Ok(())
+}
+
+/// Verify CLOCK_SKYIOUS_PROCESS_INFO (104) - per-process info.
+pub fn test_vdso_skyious_process_info() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
+    use crate::syscalls::Timespec;
+    use crate::vdso::vdso_page;
+    
+    // Test via syscall path
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let ret = sys_clock_gettime_kernel(104, &mut ts);
+    if ret != 0 {
+        return Err("clock_gettime(CLOCK_SKYIOUS_PROCESS_INFO) failed");
+    }
+    
+    // Verify via vDSO page directly
+    let vdso_ptr = vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+    let vdso = unsafe { &*vdso_ptr };
+    let cgroup_id = vdso.process_cgroup_id.load(core::sync::atomic::Ordering::Acquire);
+    let ns_flags = vdso.process_namespace_flags.load(core::sync::atomic::Ordering::Acquire);
+    let cap_eff = vdso.process_cap_effective.load(core::sync::atomic::Ordering::Acquire);
+    
+    // Verify syscall matches vDSO page
+    let syscall_cgroup = (ts.tv_sec & 0xFFFFFFFF) as u64;
+    let syscall_ns = (ts.tv_nsec & 0xFFFFFFFF) as u64;
+    let syscall_caps = (ts.tv_nsec as u64) >> 32;
+    
+    if syscall_cgroup != cgroup_id || syscall_ns != ns_flags || syscall_caps != cap_eff {
+        return Err("syscall process info doesn't match vDSO page");
+    }
+    
+    crate::serial_write("[VDSO SKYIOUS_PROCESS_INFO] cgroup: ");
+    crate::serial_write_hex(cgroup_id);
+    crate::serial_write(", ns_flags: 0x");
+    crate::serial_write_hex(ns_flags);
+    crate::serial_write(", cap_eff: 0x");
+    crate::serial_write_hex(cap_eff);
+    crate::serial_write("
+");
+    
+    Ok(())
+}
+
 /// Register all vDSO tests.
 pub fn register() {
     use crate::selftest::register;
@@ -655,4 +1220,21 @@ pub fn register() {
     register("vdso:pid_cpu_seqlock", test_vdso_pid_cpu_seqlock);
     register("vdso:fork_preserves", test_vdso_fork_preserves_pages);
     register("vdso:auxv_sysinfo_ehdr", test_vdso_auxv_sysinfo_ehdr);
+    
+    // SKYIOUS clock selftests
+    register("vdso:cputime_thread", test_vdso_cputime_thread);
+    register("vdso:cputime_process", test_vdso_cputime_process);
+    register("vdso:skyious_thread_cputime", test_vdso_skyious_thread_cputime);
+    register("vdso:skyious_sched_deadline", test_vdso_skyious_sched_deadline);
+    register("vdso:skyious_boot_ns", test_vdso_skyious_boot_ns);
+    register("vdso:skyious_kernel_flags", test_vdso_skyious_kernel_flags);
+    register("vdso:skyious_process_info", test_vdso_skyious_process_info);
+    
+    // Benchmarks
+    register("vdso_bench:clock_gettime_monotonic", test_vdso_bench_clock_gettime_monotonic);
+    register("vdso_bench:getpid", test_vdso_bench_getpid);
+    register("vdso_bench:getcpu", test_vdso_bench_getcpu);
+    register("vdso_bench:clock_getres", test_vdso_bench_clock_getres);
+    register("vdso_bench:skyious_boot_ns", test_vdso_bench_skyious_boot_ns);
+    register("vdso_bench:cputime_syscall", test_vdso_bench_cputime_syscall);
 }

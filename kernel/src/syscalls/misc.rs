@@ -4,10 +4,336 @@ use super::*;
 use crate::task::process::{FileDescriptor, CURRENT_PROCESS};
 
 use crate::syscalls::user_access;
+use core::sync::atomic::Ordering;
 
 const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
 const POLLNVAL: i16 = 0x020;
+
+/// Compile-time clock resolution lookup.
+/// Returns the resolution as (seconds, nanoseconds) for the given clock_id.
+/// Returns (0, 0) for invalid/unsupported clocks.
+const fn clock_resolution(clock_id: u64) -> (i64, i64) {
+    const CLOCK_REALTIME: u64 = 0;
+    const CLOCK_MONOTONIC: u64 = 1;
+    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
+    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
+    const CLOCK_MONOTONIC_RAW: u64 = 4;
+    const CLOCK_REALTIME_COARSE: u64 = 5;
+    const CLOCK_MONOTONIC_COARSE: u64 = 6;
+    const CLOCK_BOOTTIME: u64 = 7;
+    const CLOCK_REALTIME_ALARM: u64 = 8;
+    const CLOCK_BOOTTIME_ALARM: u64 = 9;
+    // SKYIOUS-native clocks
+    const CLOCK_SKYIOUS_THREAD_CPUTIME: u64 = 100;
+    const CLOCK_SKYIOUS_SCHED_DEADLINE: u64 = 101;
+    const CLOCK_SKYIOUS_BOOT_NS: u64 = 102;
+    const CLOCK_SKYIOUS_KERNEL_FLAGS: u64 = 103;
+    const CLOCK_SKYIOUS_PROCESS_INFO: u64 = 104;
+
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => (0, 1),
+        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => (0, 1_000_000),
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => (0, 1),
+        CLOCK_SKYIOUS_THREAD_CPUTIME | CLOCK_SKYIOUS_SCHED_DEADLINE | CLOCK_SKYIOUS_BOOT_NS
+        | CLOCK_SKYIOUS_KERNEL_FLAGS | CLOCK_SKYIOUS_PROCESS_INFO => (0, 1),
+        CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => (0, 0),
+        _ => (0, 0),
+    }
+}
+
+/// Kernel-internal version of clock_gettime that writes directly to a kernel pointer.
+/// Used by selftests and kernel code that needs time without copy_to_user overhead.
+pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
+    const CLOCK_REALTIME: u64 = 0;
+    const CLOCK_MONOTONIC: u64 = 1;
+    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
+    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
+    const CLOCK_MONOTONIC_RAW: u64 = 4;
+    const CLOCK_REALTIME_COARSE: u64 = 5;
+    const CLOCK_MONOTONIC_COARSE: u64 = 6;
+    const CLOCK_BOOTTIME: u64 = 7;
+    const CLOCK_REALTIME_ALARM: u64 = 8;
+    const CLOCK_BOOTTIME_ALARM: u64 = 9;
+    // SKYIOUS-native clocks
+    const CLOCK_SKYIOUS_THREAD_CPUTIME: u64 = 100;
+    const CLOCK_SKYIOUS_SCHED_DEADLINE: u64 = 101;
+    const CLOCK_SKYIOUS_BOOT_NS: u64 = 102;
+    const CLOCK_SKYIOUS_KERNEL_FLAGS: u64 = 103;
+    const CLOCK_SKYIOUS_PROCESS_INFO: u64 = 104;
+
+    // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC and CLOCK_REALTIME (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME) {
+        let (sec, nsec) = crate::vdso_read_tsc_time(clock_id);
+        if sec != 0 || nsec != 0 {
+            tp.tv_sec = sec as i64;
+            tp.tv_nsec = nsec as i64;
+            return 0;
+        }
+    }
+
+    // Fallback: slow path
+    *tp = match clock_id {
+        CLOCK_REALTIME => {
+            let (sec, nsec) = crate::drivers::rtc::read_realtime();
+            Timespec {
+                tv_sec: sec,
+                tv_nsec: nsec,
+            }
+        }
+        CLOCK_MONOTONIC => {
+            let ticks = crate::interrupts::get_ticks();
+            let total_ms = ticks * 10;
+            Timespec {
+                tv_sec: (total_ms / 1000) as i64,
+                tv_nsec: ((total_ms % 1000) * 1_000_000) as i64,
+            }
+        }
+        CLOCK_MONOTONIC_RAW => {
+            // Same as monotonic but without NTP adjustments - use tick-based
+            let ticks = crate::interrupts::get_ticks();
+            let total_ms = ticks * 10;
+            Timespec {
+                tv_sec: (total_ms / 1000) as i64,
+                tv_nsec: ((total_ms % 1000) * 1_000_000) as i64,
+            }
+        }
+        CLOCK_BOOTTIME => {
+            // Monotonic time including suspend - use tick-based
+            let ticks = crate::interrupts::get_ticks();
+            let total_ms = ticks * 10;
+            Timespec {
+                tv_sec: (total_ms / 1000) as i64,
+                tv_nsec: ((total_ms % 1000) * 1_000_000) as i64,
+            }
+        }
+        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
+            // Low-resolution versions - round to 1ms
+            let ticks = crate::interrupts::get_ticks();
+            let total_ms = ticks * 10;
+            let coarse_sec = (total_ms / 1000) as i64;
+            Timespec {
+                tv_sec: coarse_sec,
+                tv_nsec: 0,
+            }
+        }
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            // Process/thread CPU time — read from scheduler + in-flight slice
+            #[cfg(target_arch = "x86_64")]
+            {
+                use crate::task::scheduler::this_cpu_sched;
+                use core::sync::atomic::Ordering;
+                
+                let tsc_now = {
+                    let (lo, hi): (u32, u32);
+                    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+                    ((hi as u64) << 32) | (lo as u64)
+                };
+                
+                let ts = if let Some(sched) = this_cpu_sched().try_lock() {
+                    if let Some(ref cur) = sched.current_thread {
+                        if clock_id == CLOCK_THREAD_CPUTIME_ID {
+                            // Thread CPU time: thread's accumulated + in-flight slice
+                            let tsc_delta = tsc_now.wrapping_sub(cur.slice_start_tsc);
+                            let ns = {
+                                let vdso_ptr = crate::vdso_page();
+                                if !vdso_ptr.is_null() {
+                                    let vdso = unsafe { &*vdso_ptr };
+                                    let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+                                    if tsc_freq > 0 {
+                                        let tsc_mult = vdso.tsc_mult;
+                                        let tsc_shift = vdso.tsc_shift;
+                                        ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64
+                                    } else { 0 }
+                                } else { 0 }
+                            };
+                            let total_ns = cur.cpu_time_ns.saturating_add(ns);
+                            Timespec {
+                                tv_sec: (total_ns / 1_000_000_000) as i64,
+                                tv_nsec: (total_ns % 1_000_000_000) as i64,
+                            }
+                        } else {
+                            // Process CPU time: process's accumulated + in-flight slice from current thread
+                            if let Some(ref proc) = cur.process {
+                                let tsc_delta = tsc_now.wrapping_sub(cur.slice_start_tsc);
+                                let ns = {
+                                    let vdso_ptr = crate::vdso_page();
+                                    if !vdso_ptr.is_null() {
+                                        let vdso = unsafe { &*vdso_ptr };
+                                        let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+                                        if tsc_freq > 0 {
+                                            let tsc_mult = vdso.tsc_mult;
+                                            let tsc_shift = vdso.tsc_shift;
+                                            ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64
+                                        } else { 0 }
+                                    } else { 0 }
+                                };
+                                let proc_ns = proc.cpu_time_ns.load(Ordering::Relaxed);
+                                let total_ns = proc_ns.saturating_add(ns);
+                                Timespec {
+                                    tv_sec: (total_ns / 1_000_000_000) as i64,
+                                    tv_nsec: (total_ns % 1_000_000_000) as i64,
+                                }
+                            } else {
+                                Timespec { tv_sec: 0, tv_nsec: 0 }
+                            }
+                        }
+                    } else {
+                        Timespec { tv_sec: 0, tv_nsec: 0 }
+                    }
+                } else {
+                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                };
+                ts
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Timespec { tv_sec: 0, tv_nsec: 0 }
+            }
+        }
+        // SKYIOUS-native clocks
+        CLOCK_SKYIOUS_THREAD_CPUTIME => {
+            // Thread CPU time via vDSO page — zero-syscall fast-path for userspace
+            // Reads thread_cputime_ns directly from vDSO page (no seqlock needed)
+            #[cfg(target_arch = "x86_64")]
+            {
+                let vdso_ptr = crate::vdso_page();
+                if !vdso_ptr.is_null() {
+                    let vdso = unsafe { &*vdso_ptr };
+                    let ns = vdso.thread_cputime_ns.load(Ordering::Acquire);
+                    Timespec {
+                        tv_sec: (ns / 1_000_000_000) as i64,
+                        tv_nsec: (ns % 1_000_000_000) as i64,
+                    }
+                } else {
+                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Timespec { tv_sec: 0, tv_nsec: 0 }
+            }
+        }
+        CLOCK_SKYIOUS_SCHED_DEADLINE => {
+            // Scheduler deadline parameters for current thread (EDF)
+            // Returns absolute deadline in tv_sec (ns since boot), runtime in tv_nsec
+            #[cfg(target_arch = "x86_64")]
+            {
+                use crate::task::scheduler::{this_cpu_sched, is_deadline};
+                
+                let ts = if let Some(sched) = this_cpu_sched().try_lock() {
+                    if let Some(ref cur) = sched.current_thread {
+                        if is_deadline(cur.policy) {
+                            Timespec {
+                                tv_sec: cur.sched_deadline as i64, // absolute deadline (ns since boot)
+                                tv_nsec: cur.sched_runtime as i64, // runtime budget (ns)
+                            }
+                        } else {
+                            Timespec { tv_sec: 0, tv_nsec: 0 }
+                        }
+                    } else {
+                        Timespec { tv_sec: 0, tv_nsec: 0 }
+                    }
+                } else {
+                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                };
+                ts
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Timespec { tv_sec: 0, tv_nsec: 0 }
+            }
+        }
+        CLOCK_SKYIOUS_BOOT_NS => {
+            // Raw TSC nanoseconds since boot (no seqlock, read-only after init)
+            // Fast path: inline TSC read + fixed-point multiply-shift
+            #[cfg(target_arch = "x86_64")]
+            {
+                let tsc_now = {
+                    let (lo, hi): (u32, u32);
+                    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+                    ((hi as u64) << 32) | (lo as u64)
+                };
+                let vdso_ptr = crate::vdso_page();
+                if !vdso_ptr.is_null() {
+                    let vdso = unsafe { &*vdso_ptr };
+                    let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+                    if tsc_freq > 0 {
+                        let tsc_mult = vdso.tsc_mult;
+                        let tsc_shift = vdso.tsc_shift;
+                        let tsc_base = vdso.tsc_base.load(Ordering::Acquire);
+                        let elapsed = tsc_now.wrapping_sub(tsc_base);
+                        let ns = ((elapsed as u128 * tsc_mult as u128) >> tsc_shift) as u64;
+                        Timespec {
+                            tv_sec: (ns / 1_000_000_000) as i64,
+                            tv_nsec: (ns % 1_000_000_000) as i64,
+                        }
+                    } else {
+                        Timespec { tv_sec: 0, tv_nsec: 0 }
+                    }
+                } else {
+                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Timespec { tv_sec: 0, tv_nsec: 0 }
+            }
+        }
+        CLOCK_SKYIOUS_KERNEL_FLAGS => {
+            // Kernel feature flags via vDSO page — read-only after init
+            // Returns bitfield of kernel capabilities
+            #[cfg(target_arch = "x86_64")]
+            {
+                let vdso_ptr = crate::vdso_page();
+                if !vdso_ptr.is_null() {
+                    let vdso = unsafe { &*vdso_ptr };
+                    let flags = vdso.kernel_flags.load(Ordering::Acquire);
+                    Timespec {
+                        tv_sec: (flags & 0xFFFFFFFF) as i64,
+                        tv_nsec: (flags >> 32) as i64,
+                    }
+                } else {
+                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Timespec { tv_sec: 0, tv_nsec: 0 }
+            }
+        }
+        CLOCK_SKYIOUS_PROCESS_INFO => {
+            // Process info via vDSO page — cgroup ID, namespace flags, capabilities
+            #[cfg(target_arch = "x86_64")]
+            {
+                let vdso_ptr = crate::vdso_page();
+                if !vdso_ptr.is_null() {
+                    let vdso = unsafe { &*vdso_ptr };
+                    let cgroup_id = vdso.process_cgroup_id.load(Ordering::Acquire);
+                    let namespace_flags = vdso.process_namespace_flags.load(Ordering::Acquire);
+                    let cap_effective = vdso.process_cap_effective.load(Ordering::Acquire);
+                    Timespec {
+                        tv_sec: (cgroup_id & 0xFFFFFFFF) as i64,
+                        tv_nsec: ((namespace_flags & 0xFFFFFFFF) as i64) | ((cap_effective & 0xFFFFFFFF) as i64) << 32,
+                    }
+                } else {
+                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Timespec { tv_sec: 0, tv_nsec: 0 }
+            }
+        }
+        CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => {
+            // Alarm clocks - not implemented
+            return errno::Errno::EINVAL as u64;
+        }
+        _ => return errno::Errno::EINVAL as u64,
+    };
+    0
+}
 
 pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     if tp.is_null() {
@@ -23,6 +349,12 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     const CLOCK_BOOTTIME: u64 = 7;
     const CLOCK_REALTIME_ALARM: u64 = 8;
     const CLOCK_BOOTTIME_ALARM: u64 = 9;
+    // SKYIOUS-native clocks
+    const CLOCK_SKYIOUS_THREAD_CPUTIME: u64 = 100;
+    const CLOCK_SKYIOUS_SCHED_DEADLINE: u64 = 101;
+    const CLOCK_SKYIOUS_BOOT_NS: u64 = 102;
+    const CLOCK_SKYIOUS_KERNEL_FLAGS: u64 = 103;
+    const CLOCK_SKYIOUS_PROCESS_INFO: u64 = 104;
 
     // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC and CLOCK_REALTIME (x86_64 only)
     #[cfg(target_arch = "x86_64")]
@@ -97,8 +429,78 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
             }
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            // Process/thread CPU time - not implemented, return 0
-            Timespec { tv_sec: 0, tv_nsec: 0 }
+            // Process/thread CPU time — read from scheduler + in-flight slice
+            #[cfg(target_arch = "x86_64")]
+            {
+                use crate::task::scheduler::this_cpu_sched;
+                use core::sync::atomic::Ordering;
+                
+                let tsc_now = {
+                    let (lo, hi): (u32, u32);
+                    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+                    ((hi as u64) << 32) | (lo as u64)
+                };
+                
+                let ts = if let Some(sched) = this_cpu_sched().try_lock() {
+                    if let Some(ref cur) = sched.current_thread {
+                        if clock_id == CLOCK_THREAD_CPUTIME_ID {
+                            // Thread CPU time: thread's accumulated + in-flight slice
+                            let tsc_delta = tsc_now.wrapping_sub(cur.slice_start_tsc);
+                            let ns = {
+                                let vdso_ptr = crate::vdso_page();
+                                if !vdso_ptr.is_null() {
+                                    let vdso = unsafe { &*vdso_ptr };
+                                    let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+                                    if tsc_freq > 0 {
+                                        let tsc_mult = vdso.tsc_mult;
+                                        let tsc_shift = vdso.tsc_shift;
+                                        ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64
+                                    } else { 0 }
+                                } else { 0 }
+                            };
+                            let total_ns = cur.cpu_time_ns.saturating_add(ns);
+                            Timespec {
+                                tv_sec: (total_ns / 1_000_000_000) as i64,
+                                tv_nsec: (total_ns % 1_000_000_000) as i64,
+                            }
+                        } else {
+                            // Process CPU time: process's accumulated + in-flight slice from current thread
+                            if let Some(ref proc) = cur.process {
+                                let tsc_delta = tsc_now.wrapping_sub(cur.slice_start_tsc);
+                                let ns = {
+                                    let vdso_ptr = crate::vdso_page();
+                                    if !vdso_ptr.is_null() {
+                                        let vdso = unsafe { &*vdso_ptr };
+                                        let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+                                        if tsc_freq > 0 {
+                                            let tsc_mult = vdso.tsc_mult;
+                                            let tsc_shift = vdso.tsc_shift;
+                                            ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64
+                                        } else { 0 }
+                                    } else { 0 }
+                                };
+                                let proc_ns = proc.cpu_time_ns.load(Ordering::Relaxed);
+                                let total_ns = proc_ns.saturating_add(ns);
+                                Timespec {
+                                    tv_sec: (total_ns / 1_000_000_000) as i64,
+                                    tv_nsec: (total_ns % 1_000_000_000) as i64,
+                                }
+                            } else {
+                                Timespec { tv_sec: 0, tv_nsec: 0 }
+                            }
+                        }
+                    } else {
+                        Timespec { tv_sec: 0, tv_nsec: 0 }
+                    }
+                } else {
+                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                };
+                ts
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Timespec { tv_sec: 0, tv_nsec: 0 }
+            }
         }
         CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => {
             // Alarm clocks - not implemented
@@ -123,36 +525,12 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
 }
 
 pub fn sys_clock_getres(clock_id: u64, res: *mut Timespec) -> u64 {
-    const CLOCK_REALTIME: u64 = 0;
-    const CLOCK_MONOTONIC: u64 = 1;
-    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
-    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
-    const CLOCK_MONOTONIC_RAW: u64 = 4;
-    const CLOCK_REALTIME_COARSE: u64 = 5;
-    const CLOCK_MONOTONIC_COARSE: u64 = 6;
-    const CLOCK_BOOTTIME: u64 = 7;
-    const CLOCK_REALTIME_ALARM: u64 = 8;
-    const CLOCK_BOOTTIME_ALARM: u64 = 9;
-
-    // Resolution varies by clock type
-    let ts = match clock_id {
-        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => {
-            // TSC-based: ~1ns resolution
-            Timespec { tv_sec: 0, tv_nsec: 1 }
-        }
-        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
-            // Millisecond resolution
-            Timespec { tv_sec: 0, tv_nsec: 1_000_000 }
-        }
-        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            // Not implemented
-            Timespec { tv_sec: 0, tv_nsec: 0 }
-        }
-        CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => {
-            return errno::Errno::EINVAL as u64;
-        }
-        _ => return errno::Errno::EINVAL as u64,
-    };
+    // Resolution via compile-time constant function
+    let (sec, nsec) = clock_resolution(clock_id);
+    if sec == 0 && nsec == 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    let ts = Timespec { tv_sec: sec, tv_nsec: nsec };
     if !res.is_null() {
         if unsafe {
             user_access::copy_to_user(

@@ -22,6 +22,16 @@ pub const fn vdso_virt_addr_for_cpu(cpu_id: usize) -> u64 {
     VDSO_BASE + (cpu_id as u64) * 4096
 }
 
+/// Kernel feature flags for CLOCK_SKYIOUS_KERNEL_FLAGS (103).
+/// Bitfield exposed via vDSO for userspace feature detection.
+pub mod kernel_flags {
+    pub const HAS_AVX2: u64 = 1 << 0;          // CPUID leaf 7 EBX bit 5
+    pub const HAS_NVME: u64 = 1 << 1;          // NVMe controller present
+    pub const HAS_XHCI: u64 = 1 << 2;          // xHCI USB controller present
+    pub const HAS_VIRTIO_GPU: u64 = 1 << 3;    // VirtIO GPU present
+    // Bits 4-15 reserved for net stack version and FS features
+}
+
 /// vDSO data structure — exactly one page (4096 bytes), cache-line aligned.
 ///
 /// Layout (offsets verified by seqlock protocol):
@@ -36,7 +46,14 @@ pub const fn vdso_virt_addr_for_cpu(cpu_id: usize) -> u64 {
 ///   0x040: pid_cpu_seq (AtomicU64) — even = consistent, odd = updating (PID/CPU fields)
 ///   0x048: pid (AtomicU64)
 ///   0x050: cpu_id (AtomicU32) + padding
-///   0x058-0xFFF: reserved (zero)
+///   0x058: thread_cputime_ns (AtomicU64) — thread CPU time for CLOCK_SKYIOUS_THREAD_CPUTIME (100)
+///   0x060: kernel_flags (AtomicU64) — kernel feature flags for CLOCK_SKYIOUS_KERNEL_FLAGS (103)
+///   0x068: process_cgroup_id (AtomicU64) — cgroup ID for CLOCK_SKYIOUS_PROCESS_INFO (104)
+///   0x070: process_namespace_flags (AtomicU64) — namespace flags for CLOCK_SKYIOUS_PROCESS_INFO (104)
+///   0x078: process_cap_effective (AtomicU64) — effective capabilities for CLOCK_SKYIOUS_PROCESS_INFO (104)
+///   0x080: tsc_sync_ack_count (AtomicU32) — TSC sync IPI acknowledgment count (Phase 2.3)
+///   0x084: tsc_sync_seq (AtomicU32) — TSC sync sequence number (Phase 2.3)
+///   0x088-0xFFF: reserved (zero)
 #[repr(C, align(4096))]
 pub struct VdsoData {
     pub seq: AtomicU64,
@@ -54,7 +71,25 @@ pub struct VdsoData {
     pub pid: AtomicU64,
     pub cpu_id: AtomicU32,
     _pad3: [u32; 1],
-    _reserved: [u64; 501], // Fill to 4096 bytes exactly (8+8+4+4+8+4+4+8+4+8+8+4+4+501*8 = 4096)
+    /// Thread CPU time (ns) for CLOCK_SKYIOUS_THREAD_CPUTIME (100)
+    /// Updated at context switch, read by userspace without seqlock
+    pub thread_cputime_ns: AtomicU64,
+    /// Kernel feature flags for CLOCK_SKYIOUS_KERNEL_FLAGS (103)
+    /// Read-only after init, bitfield of kernel capabilities
+    pub kernel_flags: AtomicU64,
+    /// Process cgroup ID for CLOCK_SKYIOUS_PROCESS_INFO (104)
+    pub process_cgroup_id: AtomicU64,
+    /// Process namespace flags for CLOCK_SKYIOUS_PROCESS_INFO (104)
+    pub process_namespace_flags: AtomicU64,
+    /// Process effective capabilities for CLOCK_SKYIOUS_PROCESS_INFO (104)
+    pub process_cap_effective: AtomicU64,
+    /// TSC sync IPI acknowledgment counter for Phase 2.3
+    /// Incremented by each CPU after updating its TSC base
+    pub tsc_sync_ack_count: AtomicU32,
+    /// TSC sync sequence number for Phase 2.3
+    /// Incremented by coordinator (CPU 0) before each sync
+    pub tsc_sync_seq: AtomicU32,
+    _reserved: [u64; 495], // Fill to 4096 bytes exactly
 }
 
 // Compile-time size check
@@ -129,6 +164,30 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) {
         let total_ms = ticks * TICK_MS;
         vdso.monotonic_sec.store((total_ms / 1000) as u64, Ordering::Release);
         vdso.monotonic_nsec.store(((total_ms % 1000) * 1_000_000) as u32, Ordering::Release);
+
+        // Initialize kernel feature flags (CPU 0 only, then copy to all CPUs)
+        if cpu_id == 0 {
+            let mut flags = 0u64;
+            // Detect AVX2 (CPUID leaf 7, EBX bit 5)
+            let features = core::arch::x86_64::__cpuid(7);
+            if (features.ebx >> 5) & 1 != 0 {
+                flags |= crate::vdso::kernel_flags::HAS_AVX2;
+            }
+            // Assume NVMe, XHCI, VirtIO-GPU present (driver availability)
+            flags |= crate::vdso::kernel_flags::HAS_NVME;
+            flags |= crate::vdso::kernel_flags::HAS_XHCI;
+            flags |= crate::vdso::kernel_flags::HAS_VIRTIO_GPU;
+            // Net stack version 1 (bits 4-7)
+            flags |= 1 << 4;
+            // FS features: ext2, ext4, fat32, skyfs, ramfs (bits 8-15)
+            flags |= 0x1F << 8;
+            
+            vdso.kernel_flags.store(flags, Ordering::Release);
+        } else {
+            // For other CPUs, will be copied after init loop
+            vdso.kernel_flags.store(0, Ordering::Release);
+        }
+
         let (rt_sec, rt_nsec) = crate::drivers::rtc::read_realtime();
         if rt_sec == 0 && rt_nsec == 0 {
             crate::serial_write("[VDSO] WARNING: RTC not initialized, realtime will be zero until cached RTC updates\n");
@@ -157,6 +216,24 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) {
         crate::serial_write(" page at 0x");
         crate::serial_write_hex(user_vaddr);
         crate::serial_write("\n");
+    }
+
+    // Copy kernel_flags from CPU 0 to all other CPUs
+    let cpu0_ptr = VDSO_PAGES[0].load(Ordering::Acquire);
+    if !cpu0_ptr.is_null() {
+        let info = unsafe { &*cpu0_ptr };
+        let cpu0_hhdm = info.hhdm_vaddr;
+        let cpu0_vdso = unsafe { &*(cpu0_hhdm as *const VdsoData) };
+        let flags = cpu0_vdso.kernel_flags.load(Ordering::Acquire);
+        for cpu_id in 1..crate::task::scheduler::MAX_CPUS {
+            let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+            if !ptr.is_null() {
+                let info = unsafe { &*ptr };
+                let hhdm_vaddr = info.hhdm_vaddr;
+                let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+                vdso.kernel_flags.store(flags, Ordering::Release);
+            }
+        }
     }
 }
 
@@ -466,6 +543,56 @@ pub fn vdso_update_pid_cpu(pid: u64, cpu_id: u32) {
     vdso.pid_cpu_seq.store(seq + 1, Ordering::Release);
 }
 
+/// Update thread CPU time in the vDSO page for the current CPU.
+/// Called from context switch to expose thread CPU time via CLOCK_SKYIOUS_THREAD_CPUTIME (100).
+/// No seqlock needed — single AtomicU64 write is atomic on x86_64.
+pub fn vdso_update_thread_cputime(cpu_id: u32, ns: u64) {
+    let cpu_idx = cpu_id as usize;
+    if cpu_idx >= crate::task::scheduler::MAX_CPUS {
+        return;
+    }
+    
+    let ptr = VDSO_PAGES[cpu_idx].load(Ordering::Acquire);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: VDSO_PAGES only stores valid pointers from init_vdso.
+    let info = unsafe { &*ptr };
+    // Use cached HHDM address
+    let hhdm_vaddr = info.hhdm_vaddr;
+    // SAFETY: hhdm_vaddr points to a valid VdsoData page in HHDM.
+    let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+    
+    // Atomic store — no seqlock needed for single u64 on x86_64
+    vdso.thread_cputime_ns.store(ns, Ordering::Release);
+}
+
+/// Update process info in the vDSO page for the current CPU.
+/// Called from fork/clone/execve to expose process info via CLOCK_SKYIOUS_PROCESS_INFO (104).
+/// No seqlock needed — single AtomicU64 writes are atomic on x86_64.
+pub fn vdso_update_process_info(cpu_id: u32, cgroup_id: u64, namespace_flags: u64, cap_effective: u64) {
+    let cpu_idx = cpu_id as usize;
+    if cpu_idx >= crate::task::scheduler::MAX_CPUS {
+        return;
+    }
+    
+    let ptr = VDSO_PAGES[cpu_idx].load(Ordering::Acquire);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: VDSO_PAGES only stores valid pointers from init_vdso.
+    let info = unsafe { &*ptr };
+    // Use cached HHDM address
+    let hhdm_vaddr = info.hhdm_vaddr;
+    // SAFETY: hhdm_vaddr points to a valid VdsoData page in HHDM.
+    let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+    
+    // Atomic stores — no seqlock needed for single u64 on x86_64
+    vdso.process_cgroup_id.store(cgroup_id, Ordering::Release);
+    vdso.process_namespace_flags.store(namespace_flags, Ordering::Release);
+    vdso.process_cap_effective.store(cap_effective, Ordering::Release);
+}
+
 /// Update TSC base for a specific CPU (called when CPU comes online).
 /// This should be called from AP bringup code after the CPU is fully online.
 /// Uses pid_cpu_seq seqlock to protect tsc_base for consistency with other fields.
@@ -509,15 +636,51 @@ pub fn vdso_update_my_tsc_base() {
 
 /// Extern "C" wrapper for SMP IPI broadcast to update TSC base on each CPU.
 /// Called via smp_broadcast_func with kind=3 (function call).
+/// Increments the TSC sync acknowledgment counter after updating.
 #[no_mangle]
 pub extern "C" fn vdso_ipi_update_tsc_base(_arg: u64) {
     vdso_update_my_tsc_base();
+    
+    // Increment the acknowledgment counter after updating TSC base
+    let cpu_id = crate::smp::get_cpu_id() as usize;
+    if cpu_id < crate::task::scheduler::MAX_CPUS {
+        let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+        if !ptr.is_null() {
+            let info = unsafe { &*ptr };
+            let hhdm_vaddr = info.hhdm_vaddr;
+            let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+            vdso.tsc_sync_ack_count.fetch_add(1, Ordering::Release);
+        }
+    }
 }
 
-/// Synchronize TSC bases across all CPUs via IPI broadcast.
+/// Synchronize TSC bases across all CPUs via IPI broadcast with acknowledgment.
 /// Sends an IPI to all other CPUs to run vdso_ipi_update_tsc_base,
-/// then updates the current CPU's TSC base.
+/// waits for all CPUs to acknowledge, then updates the current CPU's TSC base.
 pub fn vdso_sync_tsc_across_cpus() {
+    let max_cpus = crate::task::scheduler::MAX_CPUS;
+    let current_cpu = crate::smp::get_cpu_id() as usize;
+    
+    // Reset acknowledgment counters on all CPUs
+    for cpu_id in 0..max_cpus {
+        let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+        if !ptr.is_null() {
+            let info = unsafe { &*ptr };
+            let hhdm_vaddr = info.hhdm_vaddr;
+            let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+            vdso.tsc_sync_ack_count.store(0, Ordering::Release);
+        }
+    }
+    
+    // Increment sync sequence number
+    let ptr = VDSO_PAGES[current_cpu].load(Ordering::Acquire);
+    if !ptr.is_null() {
+        let info = unsafe { &*ptr };
+        let hhdm_vaddr = info.hhdm_vaddr;
+        let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+        vdso.tsc_sync_seq.fetch_add(1, Ordering::Release);
+    }
+    
     // Broadcast to all other CPUs to update their TSC bases
     // kind=3 is the function-call IPI kind (see smp_broadcast_func)
     crate::smp::smp_broadcast_func(3, vdso_ipi_update_tsc_base as *const () as u64);
@@ -525,9 +688,51 @@ pub fn vdso_sync_tsc_across_cpus() {
     // Update our own TSC base
     vdso_update_my_tsc_base();
     
-    // Give other CPUs time to handle the IPI (spin-wait briefly)
-    // In a real system, we'd wait for acknowledgment, but this is a best-effort sync.
-    for _ in 0..100_000 {
+    // Increment our own ack count
+    if current_cpu < crate::task::scheduler::MAX_CPUS {
+        let ptr = VDSO_PAGES[current_cpu].load(Ordering::Acquire);
+        if !ptr.is_null() {
+            let info = unsafe { &*ptr };
+            let hhdm_vaddr = info.hhdm_vaddr;
+            let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+            vdso.tsc_sync_ack_count.fetch_add(1, Ordering::Release);
+        }
+    }
+    
+    // Wait for all other CPUs to acknowledge
+    // Count online CPUs (those with valid tsc_base)
+    let mut online_cpus = 0;
+    for cpu_id in 0..max_cpus {
+        let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+        if !ptr.is_null() {
+            let info = unsafe { &*ptr };
+            let hhdm_vaddr = info.hhdm_vaddr;
+            let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+            if vdso.tsc_base.load(Ordering::Acquire) != 0 {
+                online_cpus += 1;
+            }
+        }
+    }
+    
+    // Wait for acknowledgments (with timeout)
+    const MAX_WAIT_LOOPS: u32 = 1_000_000;
+    for _ in 0..MAX_WAIT_LOOPS {
+        let mut ack_count = 0;
+        for cpu_id in 0..max_cpus {
+            let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
+            if !ptr.is_null() {
+                let info = unsafe { &*ptr };
+                let hhdm_vaddr = info.hhdm_vaddr;
+                let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+                if vdso.tsc_sync_ack_count.load(Ordering::Acquire) > 0 {
+                    ack_count += 1;
+                }
+            }
+        }
+        // We expect all online CPUs to have acknowledged (including ourselves)
+        if ack_count >= online_cpus {
+            break;
+        }
         core::hint::spin_loop();
     }
 }
@@ -598,7 +803,7 @@ pub fn vdso_check_tsc_drift() {
     let tsc_diff = max_tsc.wrapping_sub(min_tsc);
     let drift_ns = (tsc_diff as u128 * 1_000_000_000u128 / tsc_freq as u128) as u64;
 
-    const DRIFT_THRESHOLD_NS: u64 = 1_000_000; // 1ms = 1,000,000 ns
+    const DRIFT_THRESHOLD_NS: u64 = 100; // 100ns target for best-in-class
 
     if drift_ns > DRIFT_THRESHOLD_NS {
         crate::serial_write("[TSC DRIFT] WARNING: TSC drift detected!\n");

@@ -28,13 +28,10 @@ pub async fn network_poll_task() {
 
 /// Kernel thread that updates the cached RTC time once per second.
 /// Runs in process context (not IRQ) to allow CMOS I/O.
+/// TSC sync and drift check are now handled in the timer interrupt handler (CPU 0, every tick).
 pub extern "C" fn rtc_cache_update_task() -> ! {
     loop {
         crate::vdso::vdso_update_cached_rtc();
-        
-        // Synchronize TSC bases across all CPUs and check for drift
-        crate::vdso::vdso_sync_tsc_across_cpus();
-        crate::vdso::vdso_check_tsc_drift();
 
         // Sleep for 1 second (100 ticks at 100 Hz)
         let target = crate::interrupts::get_ticks() + 100;
