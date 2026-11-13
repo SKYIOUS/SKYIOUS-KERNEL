@@ -133,14 +133,24 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) {
 
     // Allocate and initialize one page per CPU
     for cpu_id in 0..crate::task::scheduler::MAX_CPUS {
-        let frame = frame_allocator
-            .allocate_frame()
-            .expect("vDSO: failed to allocate frame");
+        let Some(frame) = frame_allocator.allocate_frame() else {
+            crate::serial_write("vDSO: failed to allocate frame\n");
+            x86_64::instructions::interrupts::disable();
+            loop {
+                x86_64::instructions::hlt();
+            }
+        };
 
         let user_vaddr = vdso_virt_addr_for_cpu(cpu_id);
 
         // Initialize the page via HHDM (same mapping used by readers) to ensure cache coherency
-        let phys_offset = *crate::memory::PHYSICAL_MEMORY_OFFSET.get().expect("HHDM offset not set");
+        let Some(&phys_offset) = crate::memory::PHYSICAL_MEMORY_OFFSET.get() else {
+            crate::serial_write("HHDM offset not set\n");
+            x86_64::instructions::interrupts::disable();
+            loop {
+                x86_64::instructions::hlt();
+            }
+        };
         let hhdm_vaddr = phys_offset + frame.start_address().as_u64();
         let vdso_ptr = hhdm_vaddr as *mut VdsoData;
         // SAFETY: hhdm_vaddr points to a valid physical frame mapped in HHDM, which is always mapped.
