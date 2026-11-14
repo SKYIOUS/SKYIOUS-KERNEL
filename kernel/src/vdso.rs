@@ -277,8 +277,6 @@ pub fn vdso_map_into(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> Result<(), ()> {
-    let flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
-
     for cpu_id in 0..crate::task::scheduler::MAX_CPUS {
         vdso_map_cpu_page_into(cpu_id, mapper, frame_allocator)?;
     }

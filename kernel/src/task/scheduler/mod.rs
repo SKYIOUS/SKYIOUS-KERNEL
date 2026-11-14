@@ -337,7 +337,7 @@ impl PerCpuScheduler {
                 if t.affinity_mask & (1u64 << current_cpu) == 0 {
                     continue;
                 }
-if best_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
+                if best_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
                     best_deadline = Some(t.sched_deadline);
                     best_dl_level = Some(level);
                     best_dl_idx = Some(idx);
@@ -434,7 +434,7 @@ if best_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
                         if t.affinity_mask & (1u64 << current_cpu) == 0 {
                             continue;
                         }
-if steal_dl_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
+                        if steal_dl_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
                             steal_dl_level = Some(level);
                             steal_dl_idx = Some(idx);
                             steal_dl_deadline = Some(t.sched_deadline);
