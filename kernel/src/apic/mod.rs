@@ -420,8 +420,8 @@ fn route_gsi(gsi: u8, vector: u8, active_low: bool, level: bool) {
 // Bus frequency (calibrated by LAPIC timer init)
 // ---------------------------------------------------------------------------
 
-/// Minimum reasonable bus frequency (100 MHz).
-const MIN_BUS_FREQUENCY_HZ: u32 = 100_000_000;
+/// Minimum reasonable bus frequency (24 MHz — CPUID.0x15 can return this on some CPUs).
+const MIN_BUS_FREQUENCY_HZ: u32 = 24_000_000;
 /// Maximum reasonable bus frequency (4 GHz).
 const MAX_BUS_FREQUENCY_HZ: u32 = 4_000_000_000;
 
@@ -433,7 +433,11 @@ static BUS_FREQUENCY_HZ: core::sync::atomic::AtomicU32 = core::sync::atomic::Ato
 /// Returns `None` if not yet calibrated.
 pub fn get_bus_frequency_hz() -> Option<u32> {
     let freq = BUS_FREQUENCY_HZ.load(core::sync::atomic::Ordering::Acquire);
-    if freq == 0 { None } else { Some(freq) }
+    if freq == 0 {
+        None
+    } else {
+        Some(freq)
+    }
 }
 
 /// Set the calibrated bus frequency in Hz (called by LAPIC timer init).

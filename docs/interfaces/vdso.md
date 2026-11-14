@@ -115,7 +115,7 @@ uint64_t read_monotonic() {
         if (seq & 1) continue;  // Writer in progress
         sec = __atomic_load_n(&vdso->monotonic_sec, __ATOMIC_RELAXED);
         nsec = __atomic_load_n(&vdso->monotonic_nsec, __ATOMIC_RELAXED);
-    } while (seq != __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE));
+    } while (seq != __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE) || (seq & 1));
     return sec * 1000000000 + nsec;
 }
 ```

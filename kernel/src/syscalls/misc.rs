@@ -35,8 +35,11 @@ const fn clock_resolution(clock_id: u64) -> (i64, i64) {
         CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => (0, 1),
         CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => (0, 1_000_000),
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => (0, 1),
-        CLOCK_SKYIOUS_THREAD_CPUTIME | CLOCK_SKYIOUS_SCHED_DEADLINE | CLOCK_SKYIOUS_BOOT_NS
-        | CLOCK_SKYIOUS_KERNEL_FLAGS | CLOCK_SKYIOUS_PROCESS_INFO => (0, 1),
+        CLOCK_SKYIOUS_THREAD_CPUTIME
+        | CLOCK_SKYIOUS_SCHED_DEADLINE
+        | CLOCK_SKYIOUS_BOOT_NS
+        | CLOCK_SKYIOUS_KERNEL_FLAGS
+        | CLOCK_SKYIOUS_PROCESS_INFO => (0, 1),
         CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => (0, 0),
         _ => (0, 0),
     }
@@ -124,13 +127,13 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
             {
                 use crate::task::scheduler::this_cpu_sched;
                 use core::sync::atomic::Ordering;
-                
+
                 let tsc_now = {
                     let (lo, hi): (u32, u32);
                     unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
                     ((hi as u64) << 32) | (lo as u64)
                 };
-                
+
                 let ts = if let Some(sched) = this_cpu_sched().try_lock() {
                     if let Some(ref cur) = sched.current_thread {
                         if clock_id == CLOCK_THREAD_CPUTIME_ID {
@@ -145,8 +148,12 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
                                         let tsc_mult = vdso.tsc_mult;
                                         let tsc_shift = vdso.tsc_shift;
                                         ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64
-                                    } else { 0 }
-                                } else { 0 }
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                }
                             };
                             let total_ns = cur.cpu_time_ns.saturating_add(ns);
                             Timespec {
@@ -165,9 +172,14 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
                                         if tsc_freq > 0 {
                                             let tsc_mult = vdso.tsc_mult;
                                             let tsc_shift = vdso.tsc_shift;
-                                            ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64
-                                        } else { 0 }
-                                    } else { 0 }
+                                            ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift)
+                                                as u64
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        0
+                                    }
                                 };
                                 let proc_ns = proc.cpu_time_ns.load(Ordering::Relaxed);
                                 let total_ns = proc_ns.saturating_add(ns);
@@ -176,20 +188,32 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
                                     tv_nsec: (total_ns % 1_000_000_000) as i64,
                                 }
                             } else {
-                                Timespec { tv_sec: 0, tv_nsec: 0 }
+                                Timespec {
+                                    tv_sec: 0,
+                                    tv_nsec: 0,
+                                }
                             }
                         }
                     } else {
-                        Timespec { tv_sec: 0, tv_nsec: 0 }
+                        Timespec {
+                            tv_sec: 0,
+                            tv_nsec: 0,
+                        }
                     }
                 } else {
-                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
                 };
                 ts
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                Timespec { tv_sec: 0, tv_nsec: 0 }
+                Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }
             }
         }
         // SKYIOUS-native clocks
@@ -207,12 +231,18 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
                         tv_nsec: (ns % 1_000_000_000) as i64,
                     }
                 } else {
-                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
                 }
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                Timespec { tv_sec: 0, tv_nsec: 0 }
+                Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }
             }
         }
         CLOCK_SKYIOUS_SCHED_DEADLINE => {
@@ -220,8 +250,8 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
             // Returns absolute deadline in tv_sec (ns since boot), runtime in tv_nsec
             #[cfg(target_arch = "x86_64")]
             {
-                use crate::task::scheduler::{this_cpu_sched, is_deadline};
-                
+                use crate::task::scheduler::{is_deadline, this_cpu_sched};
+
                 let ts = if let Some(sched) = this_cpu_sched().try_lock() {
                     if let Some(ref cur) = sched.current_thread {
                         if is_deadline(cur.policy) {
@@ -230,19 +260,31 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
                                 tv_nsec: cur.sched_runtime as i64, // runtime budget (ns)
                             }
                         } else {
-                            Timespec { tv_sec: 0, tv_nsec: 0 }
+                            Timespec {
+                                tv_sec: 0,
+                                tv_nsec: 0,
+                            }
                         }
                     } else {
-                        Timespec { tv_sec: 0, tv_nsec: 0 }
+                        Timespec {
+                            tv_sec: 0,
+                            tv_nsec: 0,
+                        }
                     }
                 } else {
-                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
                 };
                 ts
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                Timespec { tv_sec: 0, tv_nsec: 0 }
+                Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }
             }
         }
         CLOCK_SKYIOUS_BOOT_NS => {
@@ -270,15 +312,24 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
                             tv_nsec: (ns % 1_000_000_000) as i64,
                         }
                     } else {
-                        Timespec { tv_sec: 0, tv_nsec: 0 }
+                        Timespec {
+                            tv_sec: 0,
+                            tv_nsec: 0,
+                        }
                     }
                 } else {
-                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
                 }
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                Timespec { tv_sec: 0, tv_nsec: 0 }
+                Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }
             }
         }
         CLOCK_SKYIOUS_KERNEL_FLAGS => {
@@ -295,12 +346,18 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
                         tv_nsec: (flags >> 32) as i64,
                     }
                 } else {
-                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
                 }
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                Timespec { tv_sec: 0, tv_nsec: 0 }
+                Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }
             }
         }
         CLOCK_SKYIOUS_PROCESS_INFO => {
@@ -315,15 +372,22 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
                     let cap_effective = vdso.process_cap_effective.load(Ordering::Acquire);
                     Timespec {
                         tv_sec: (cgroup_id & 0xFFFFFFFF) as i64,
-                        tv_nsec: ((namespace_flags & 0xFFFFFFFF) as i64) | ((cap_effective & 0xFFFFFFFF) as i64) << 32,
+                        tv_nsec: ((namespace_flags & 0xFFFFFFFF) as i64)
+                            | ((cap_effective & 0xFFFFFFFF) as i64) << 32,
                     }
                 } else {
-                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
                 }
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                Timespec { tv_sec: 0, tv_nsec: 0 }
+                Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }
             }
         }
         CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => {
@@ -361,7 +425,10 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME) {
         let (sec, nsec) = crate::vdso_read_tsc_time(clock_id);
         if sec != 0 || nsec != 0 {
-            let ts = Timespec { tv_sec: sec as i64, tv_nsec: nsec as i64 };
+            let ts = Timespec {
+                tv_sec: sec as i64,
+                tv_nsec: nsec as i64,
+            };
             if unsafe {
                 user_access::copy_to_user(
                     tp as *mut u8,
@@ -434,13 +501,13 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
             {
                 use crate::task::scheduler::this_cpu_sched;
                 use core::sync::atomic::Ordering;
-                
+
                 let tsc_now = {
                     let (lo, hi): (u32, u32);
                     unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
                     ((hi as u64) << 32) | (lo as u64)
                 };
-                
+
                 let ts = if let Some(sched) = this_cpu_sched().try_lock() {
                     if let Some(ref cur) = sched.current_thread {
                         if clock_id == CLOCK_THREAD_CPUTIME_ID {
@@ -455,8 +522,12 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
                                         let tsc_mult = vdso.tsc_mult;
                                         let tsc_shift = vdso.tsc_shift;
                                         ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64
-                                    } else { 0 }
-                                } else { 0 }
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                }
                             };
                             let total_ns = cur.cpu_time_ns.saturating_add(ns);
                             Timespec {
@@ -475,9 +546,14 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
                                         if tsc_freq > 0 {
                                             let tsc_mult = vdso.tsc_mult;
                                             let tsc_shift = vdso.tsc_shift;
-                                            ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64
-                                        } else { 0 }
-                                    } else { 0 }
+                                            ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift)
+                                                as u64
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        0
+                                    }
                                 };
                                 let proc_ns = proc.cpu_time_ns.load(Ordering::Relaxed);
                                 let total_ns = proc_ns.saturating_add(ns);
@@ -486,20 +562,32 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
                                     tv_nsec: (total_ns % 1_000_000_000) as i64,
                                 }
                             } else {
-                                Timespec { tv_sec: 0, tv_nsec: 0 }
+                                Timespec {
+                                    tv_sec: 0,
+                                    tv_nsec: 0,
+                                }
                             }
                         }
                     } else {
-                        Timespec { tv_sec: 0, tv_nsec: 0 }
+                        Timespec {
+                            tv_sec: 0,
+                            tv_nsec: 0,
+                        }
                     }
                 } else {
-                    Timespec { tv_sec: 0, tv_nsec: 0 }
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
                 };
                 ts
             }
             #[cfg(not(target_arch = "x86_64"))]
             {
-                Timespec { tv_sec: 0, tv_nsec: 0 }
+                Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }
             }
         }
         CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM => {
@@ -530,7 +618,10 @@ pub fn sys_clock_getres(clock_id: u64, res: *mut Timespec) -> u64 {
     if sec == 0 && nsec == 0 {
         return errno::Errno::EINVAL as u64;
     }
-    let ts = Timespec { tv_sec: sec, tv_nsec: nsec };
+    let ts = Timespec {
+        tv_sec: sec,
+        tv_nsec: nsec,
+    };
     if !res.is_null() {
         if unsafe {
             user_access::copy_to_user(

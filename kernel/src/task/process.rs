@@ -720,6 +720,22 @@ impl Process {
                     None => return Err("Program header virtual range overflow"),
                 };
 
+                // Reject any PT_LOAD memory range that intersects the mapped vDSO window.
+                // vDSO is mapped at VDSO_BASE (0x0000_7FFF_FFFC_0000) with MAX_CPUS pages.
+                // Use overflow-safe range intersection check.
+                {
+                    const VDSO_BASE: u64 = 0x0000_7FFF_FFFC_0000;
+                    const VDSO_END: u64 =
+                        VDSO_BASE + (crate::task::scheduler::MAX_CPUS as u64) * 4096;
+                    // Check if [virt_start, virt_end) intersects [VDSO_BASE, VDSO_END)
+                    let seg_start = virt_start;
+                    let seg_end = virt_end;
+                    // Overlap exists if: seg_start < VDSO_END && VDSO_BASE < seg_end
+                    if seg_start < VDSO_END && VDSO_BASE < seg_end {
+                        return Err("ELF segment intersects vDSO window");
+                    }
+                }
+
                 let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
                 if ph.flags().is_write() {
                     flags |= PageTableFlags::WRITABLE;
@@ -1132,48 +1148,48 @@ impl Process {
         let random_bytes_addr = rsp; // pointer to the 16 random bytes
 
         // AT_NULL (sentinel, pushed first = lowest address)
-        push_u64(0, &mut rsp)?; // type = AT_NULL
+        // Push value first, then type (stack grows down, so type ends up at lower address)
         push_u64(0, &mut rsp)?; // value = 0
+        push_u64(0, &mut rsp)?; // type = AT_NULL
                                 // AT_RANDOM
-        push_u64(25, &mut rsp)?; // type = AT_RANDOM
         push_u64(random_bytes_addr, &mut rsp)?; // value = pointer to random bytes
-                                                // AT_PLATFORM
-        push_u64(15, &mut rsp)?; // type = AT_PLATFORM
+        push_u64(25, &mut rsp)?; // type = AT_RANDOM
+                                 // AT_PLATFORM
         push_u64(0, &mut rsp)?; // value = NULL (no platform string)
-                                // AT_CLKTCK
-        push_u64(17, &mut rsp)?; // type
+        push_u64(15, &mut rsp)?; // type = AT_PLATFORM
+                                 // AT_CLKTCK
         push_u64(100, &mut rsp)?; // value = 100 Hz
-                                  // AT_PAGESZ
-        push_u64(6, &mut rsp)?; // type
+        push_u64(17, &mut rsp)?; // type
+                                 // AT_PAGESZ
         push_u64(4096, &mut rsp)?; // value
-                                   // AT_HWCAP
+        push_u64(6, &mut rsp)?; // type
+                                // AT_HWCAP
+        push_u64(0, &mut rsp)?; // value
         push_u64(16, &mut rsp)?; // type
+                                 // AT_FLAGS
         push_u64(0, &mut rsp)?; // value
-                                // AT_FLAGS
         push_u64(3, &mut rsp)?; // type
-        push_u64(0, &mut rsp)?; // value
                                 // AT_ENTRY
-        push_u64(9, &mut rsp)?; // type
         push_u64(elf_entry, &mut rsp)?; // value
-                                        // AT_BASE (interpreter base, 0 for static)
-        push_u64(7, &mut rsp)?; // type
+        push_u64(9, &mut rsp)?; // type
+                                // AT_BASE (interpreter base, 0 for static)
         push_u64(0, &mut rsp)?; // value = no interpreter loaded yet
-        // AT_SYSINFO_EHDR (vDSO address) - Linux uses 33
-        // This kernel uses per-CPU vDSO pages at VDSO_BASE + cpu_id * 4096.
-        // AT_SYSINFO_EHDR points to VDSO_BASE (CPU 0's page). Userspace computes
-        // per-CPU page addresses as VDSO_BASE + cpu_id * 4096.
-        push_u64(33, &mut rsp)?; // type = AT_SYSINFO_EHDR
-        #[cfg(target_arch = "x86_64")]
+        push_u64(7, &mut rsp)?; // type
+                                // AT_SYSINFO_EHDR (vDSO address) - Linux uses 33
+                                // This kernel uses per-CPU vDSO pages at VDSO_BASE + cpu_id * 4096.
+                                // AT_SYSINFO_EHDR points to VDSO_BASE (CPU 0's page). Userspace computes
+                                // per-CPU page addresses as VDSO_BASE + cpu_id * 4096.
         push_u64(crate::vdso::VDSO_BASE, &mut rsp)?; // value = vDSO base virtual address
         #[cfg(not(target_arch = "x86_64"))]
         push_u64(0, &mut rsp)?; // value = 0 (no vDSO on other arches)
-                                // AT_PHNUM / AT_PHENT / AT_PHDR
+        push_u64(33, &mut rsp)?; // type = AT_SYSINFO_EHDR
+                                 // AT_PHNUM / AT_PHENT / AT_PHDR
+        push_u64(phdr_count, &mut rsp)?; // value
         push_u64(5, &mut rsp)?; // type = AT_PHNUM
-        push_u64(phdr_count, &mut rsp)?;
+        push_u64(phdr_entry_size, &mut rsp)?; // value
         push_u64(4, &mut rsp)?; // type = AT_PHENT
-        push_u64(phdr_entry_size, &mut rsp)?;
+        push_u64(phdr_addr, &mut rsp)?; // value
         push_u64(33, &mut rsp)?; // type = AT_PHDR
-        push_u64(phdr_addr, &mut rsp)?;
 
         // ── argc ──
         push_u64(argv.len() as u64, &mut rsp)?;

@@ -68,6 +68,25 @@ SKYIOUS KERNEL controls the entire software stack:
 
 ---
 
+### 6. Migration-Safe getpid/getcpu Mechanism
+
+**Decision**: Per-CPU vDSO pages store PID/CPU for the currently running thread on that CPU. On thread migration, the new CPU's page is updated via context switch before the thread resumes.
+
+**Mechanism**:
+- Each CPU has its own vDSO page at `VDSO_BASE + cpu_id * 4096`
+- Context switch on CPU N updates page N's PID/CPU fields via `pid_cpu_seq` seqlock
+- Userspace reads from the page corresponding to its current CPU (determined via `getcpu` syscall or `rdpid` instruction on supported CPUs)
+- The PID in the page always matches the process currently running on that CPU
+
+**Why page-local seqlock is insufficient**: A simple page-local seqlock only protects against concurrent reads/writes on the same page. It doesn't handle migration where a thread moves from CPU A to CPU B - the thread must read from CPU B's page after migration, which requires the kernel to have updated CPU B's page before the thread resumes. The context switch on the target CPU ensures this ordering.
+
+**Trade-offs**: 
+- Requires context switch to update vDSO before thread resumes on new CPU
+- Userspace must use `getcpu` syscall (or `rdpid` on x86) to find current CPU, then read from that page
+- On x86 without `rdpid`, the `getcpu` syscall is a small overhead but still faster than full `getpid` syscall
+
+---
+
 ## Architecture-Specific Decisions
 
 ### x86_64 (Primary)

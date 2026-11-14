@@ -151,7 +151,9 @@ impl Arch for X86_64Arch {
                 tsc_invariant = true;
                 crate::serial_write("[ARCH] invariant TSC detected\n");
             } else {
-                crate::serial_write("[ARCH] WARNING: non-invariant TSC, vDSO may drift across C-states\n");
+                crate::serial_write(
+                    "[ARCH] WARNING: non-invariant TSC, vDSO may drift across C-states\n",
+                );
             }
 
             let freq = if eax1 >= 0x16 {
@@ -202,21 +204,26 @@ impl Arch for X86_64Arch {
 
     fn init_hal_timer() {
         let pf = crate::hal::platform::get();
-        
+
         // Check if timer already registered
         if let Some(timer) = crate::hal::timer::current_timer() {
             // Timer exists - try to downcast and update frequency
-            if let Some(tsc) = timer.as_any().and_then(|a| a.downcast_ref::<crate::hal::timer::TscTimer>()) {
+            if let Some(tsc) = timer
+                .as_any()
+                .and_then(|a| a.downcast_ref::<crate::hal::timer::TscTimer>())
+            {
                 if pf.cpu_freq_hz > 0 {
                     tsc.init(pf.cpu_freq_hz);
-                    crate::serial_write("[HAL] init_hal_timer: updated existing TSC timer frequency\n");
+                    crate::serial_write(
+                        "[HAL] init_hal_timer: updated existing TSC timer frequency\n",
+                    );
                 } else {
                     crate::serial_write("[HAL] init_hal_timer: CPU frequency still unknown\n");
                 }
                 return;
             }
         }
-        
+
         // No existing timer - create new only if frequency is known
         if pf.cpu_freq_hz > 0 {
             let tsc_timer = crate::hal::timer::TscTimer::new();
@@ -224,7 +231,9 @@ impl Arch for X86_64Arch {
             crate::serial_write("[HAL] init_hal_timer: registered new TSC timer with frequency\n");
             crate::hal::timer::register_timer(Arc::new(tsc_timer));
         } else {
-            crate::serial_write("[HAL] init_hal_timer: CPU frequency unknown, skipping registration\n");
+            crate::serial_write(
+                "[HAL] init_hal_timer: CPU frequency unknown, skipping registration\n",
+            );
         }
     }
 }

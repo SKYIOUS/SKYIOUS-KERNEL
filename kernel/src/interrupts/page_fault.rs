@@ -122,8 +122,13 @@ pub(super) extern "x86-interrupt" fn page_fault_handler(
         let page = x86_64::structures::paging::Page::containing_address(fault_addr);
 
         // Handle vDSO page fault: map the specific CPU's vDSO page if fault is in vDSO range
+        // Only handle non-protection-violation faults (demand paging); let protection
+        // violations continue to the existing fault handling path.
         const VDSO_RANGE_END: u64 = VDSO_BASE + (crate::task::scheduler::MAX_CPUS as u64) * 4096;
-        if fault_addr.as_u64() >= VDSO_BASE && fault_addr.as_u64() < VDSO_RANGE_END {
+        if fault_addr.as_u64() >= VDSO_BASE
+            && fault_addr.as_u64() < VDSO_RANGE_END
+            && !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        {
             let cpu_id = ((fault_addr.as_u64() - VDSO_BASE) / 4096) as usize;
             use crate::memory::buddy::BuddyFrameAllocator;
             let mut fa = BuddyFrameAllocator;

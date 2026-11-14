@@ -185,7 +185,10 @@ pub(crate) use kaslr::{init_kaslr, KASLR_APPLIED, KASLR_DEBUG_SLIDE, KERNEL_SLID
 #[cfg(target_arch = "x86_64")]
 mod vdso;
 #[cfg(target_arch = "x86_64")]
-pub(crate) use vdso::{init_vdso, vdso_page, vdso_update_pid_cpu, vdso_update_thread_cputime, vdso_update_process_info, vdso_read_tsc_time};
+pub(crate) use vdso::{
+    init_vdso, vdso_page, vdso_read_tsc_time, vdso_update_pid_cpu, vdso_update_process_info,
+    vdso_update_thread_cputime,
+};
 #[cfg(not(target_arch = "aarch64"))]
 // ponytail: F2.2 — keyboard PS/2 surface; see ADR-029-syscall-module-lint-hygiene.md
 #[allow(dead_code)]
@@ -380,7 +383,9 @@ fn init_rtc_and_vdso() {
     serial_write("[BOOT] RTC init...\n");
     if let Err(_e) = drivers::rtc::init() {
         serial_write("[BOOT] WARNING: RTC init failed: ");
-        serial_write("[BOOT] RTC initialization failed, realtime will be zero until cached RTC updates\n");
+        serial_write(
+            "[BOOT] RTC initialization failed, realtime will be zero until cached RTC updates\n",
+        );
     }
     serial_write("[BOOT] RTC initialized\n");
 
@@ -388,7 +393,9 @@ fn init_rtc_and_vdso() {
     #[cfg(target_arch = "x86_64")]
     {
         serial_write("[BOOT] vDSO init...\n");
-        init_vdso(crate::memory::buddy::BuddyFrameAllocator);
+        if let Err(()) = init_vdso(crate::memory::buddy::BuddyFrameAllocator) {
+            serial_write("[BOOT] ERROR: vDSO initialization failed\n");
+        }
         serial_write("[BOOT] vDSO initialized\n");
     }
 }

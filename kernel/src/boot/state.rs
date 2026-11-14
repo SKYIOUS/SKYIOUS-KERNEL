@@ -134,14 +134,14 @@ fn state_create_address_space(
     let elf_data = ctx.elf_data.as_ref().ok_or(BootError::InitNotFound)?;
     let address_space = crate::memory::paging::AddressSpace::new(&mut frame_allocator)
         .ok_or(BootError::AddressSpaceCreationFailed)?;
-    
+
     // Map vDSO page into the address space (x86_64 only)
     #[cfg(target_arch = "x86_64")]
     if let Some(mut mapper) = unsafe { address_space.mapper() } {
         vdso_map_into(&mut mapper, &mut frame_allocator)
             .map_err(|_| BootError::VdsoMappingFailed)?;
     }
-    
+
     let mut process =
         Process::load_elf(elf_data, address_space).map_err(|_| BootError::InvalidElf)?;
     // Force PID 1 — Process::load_elf assigns next_id() (100+), but

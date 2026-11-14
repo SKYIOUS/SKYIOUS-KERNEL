@@ -53,14 +53,14 @@ vahi-arch ← x86_64, spin
 vahi-task ← vahi-types, vahi-sync, vahi-memory, vahi-hal, vahi-arch, vahi-objects, vahi-gdt
 vahi-vfs ← vahi-sync, vahi-memory, vahi-drivers, vahi-syscalls, vahi-objects, hashbrown
 vahi-net ← vahi-sync, vahi-syscalls, vahi-task, smoltcp, hashbrown
-vahi-drivers ← vahi-types, vahi-sync, vahi-interrupts, vahi-acpi, vahi-memory
+vahi-drivers ← vahi-types, vahi-hal, vahi-pci, vahi-apic, vahi-limine, vahi-syscalls, vahi-arch, vahi-memory
 vahi-objects ← vahi-sync
 vahi-syscalls ← vahi-sync, vahi-types
 vahi-ipc ← vahi-sync, vahi-types
 vahi-pci ← vahi-sync, vahi-memory, vahi-limine, vahi-apic
 ```
 
-**Critical issue:** `vahi-sync` uses `core::arch::x86_64::__cpuid` and `asm!("pushfq; pop {rflags}; cli", options(att_syntax))` unconditionally at `crates/sync/src/lib.rs:205,255` — breaks aarch64/riscv64 builds (issues.md P-1).
+**Critical issue:** `vahi-sync` uses `core::arch::x86_64::__cpuid` and `asm!("pushfq; pop {rflags}; cli", options(att_syntax))` unconditionally at `crates/sync/src/lib.rs:205,255` — breaks aarch64/riscv64 builds (issues.md P-1). The actual source location is `crates/sync/src/lib.rs` lines 205 and 255.
 
 ## Extraction Status (Honest)
 

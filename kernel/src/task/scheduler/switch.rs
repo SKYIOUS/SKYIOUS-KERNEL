@@ -27,7 +27,7 @@ fn read_tsc() -> u64 {
 fn charge_cpu_time(old: &mut crate::task::thread::Thread, new: &mut crate::task::thread::Thread) {
     let tsc_now = read_tsc();
     let tsc_delta = tsc_now.wrapping_sub(old.slice_start_tsc);
-    
+
     // Convert TSC delta to nanoseconds using vDSO calibration
     // We need the TSC frequency from vDSO
     let vdso_ptr = crate::vdso_page();
@@ -38,22 +38,26 @@ fn charge_cpu_time(old: &mut crate::task::thread::Thread, new: &mut crate::task:
             let tsc_mult = vdso.tsc_mult;
             let tsc_shift = vdso.tsc_shift;
             let ns = ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64;
-            
+
             // Add to thread's CPU time
             old.cpu_time_ns = old.cpu_time_ns.saturating_add(ns);
-            
-            // Update vDSO page with thread's total CPU time for CLOCK_SKYIOUS_THREAD_CPUTIME (100)
+
+            // Update vDSO page with outgoing thread's total CPU time for CLOCK_SKYIOUS_THREAD_CPUTIME (100)
             crate::vdso_update_thread_cputime(crate::smp::get_cpu_id() as u32, old.cpu_time_ns);
-            
+
             // Add to process's CPU time (atomic, since multiple threads can run concurrently)
             if let Some(ref proc) = old.process {
                 proc.cpu_time_ns.fetch_add(ns, Ordering::Relaxed);
             }
         }
     }
-    
+
     // Set the new thread's slice start TSC
     new.slice_start_tsc = tsc_now;
+
+    // Publish incoming thread's CPU time to vDSO (for when it becomes current)
+    // This is done outside any calibration-dependent condition
+    crate::vdso_update_thread_cputime(crate::smp::get_cpu_id() as u32, new.cpu_time_ns);
 }
 
 // ─── Architecture-specific interrupt helpers ────────────────────
@@ -217,7 +221,7 @@ impl PerCpuScheduler {
             // Charge CPU time to the outgoing thread before it's switched out
             #[cfg(target_arch = "x86_64")]
             charge_cpu_time(&mut old, &mut next);
-            
+
             if old.status == crate::task::thread::ThreadStatus::Exited {
                 // Park dying thread — stack reclaimed on next route_outgoing.
                 self.switching_old = Some(old);
@@ -240,6 +244,12 @@ impl PerCpuScheduler {
                 p
             }
         } else {
+            // No outgoing thread - initialize new thread's slice_start_tsc
+            #[cfg(target_arch = "x86_64")]
+            {
+                let tsc_now = read_tsc();
+                next.slice_start_tsc = tsc_now;
+            }
             self.switching_old = None;
             &raw mut self.dummy
         };

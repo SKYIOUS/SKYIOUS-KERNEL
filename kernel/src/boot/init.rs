@@ -164,24 +164,34 @@ pub fn init_architecture() {
 pub unsafe fn init_devices() {
     crate::serial_write("[BOOT] ACPI init...\n");
     crate::acpi::init(crate::limine::rsdp_addr());
-    
+
     crate::serial_write("[BOOT] APIC init...\n");
     crate::apic::init();
-    
-    // Get CPU frequency from APIC calibration (now available after APIC init)
-    let cpu_freq = crate::apic::get_bus_frequency_hz().unwrap_or(0);
-    crate::serial_write("[BOOT] CPU frequency: ");
-    crate::serial_write_hex(cpu_freq as u64);
+
+    // Get TSC frequency from APIC calibration (now available after APIC init)
+    // Keep bus frequency separate from CPU/TSC frequency
+    let tsc_freq = crate::hal::timer::get_tsc_frequency();
+    crate::serial_write("[BOOT] TSC frequency: ");
+    crate::serial_write_hex(tsc_freq);
     crate::serial_write(" Hz\n");
-    
-    if cpu_freq == 0 {
-        crate::serial_write("[BOOT] WARNING: CPU frequency calibration failed, timing will be broken!\n");
-    } else if let Err(e) = crate::hal::platform::set_cpu_frequency(cpu_freq as u64) {
+
+    if tsc_freq == 0 {
+        crate::serial_write(
+            "[BOOT] WARNING: TSC frequency calibration failed, timing will be broken!\n",
+        );
+    } else if let Err(e) = crate::hal::platform::set_cpu_frequency(tsc_freq) {
         crate::serial_write("[BOOT] ERROR: Failed to set CPU frequency: ");
         crate::serial_write(e);
         crate::serial_write("\n");
     }
-    
+
+    // Also set bus frequency for APIC timer reference
+    if let Some(bus_freq) = crate::apic::get_bus_frequency_hz() {
+        crate::serial_write("[BOOT] APIC bus frequency: ");
+        crate::serial_write_hex(bus_freq as u64);
+        crate::serial_write(" Hz\n");
+    }
+
     // Re-initialize TSC timer now that platform info has CPU frequency
     <crate::arch::CurrentArch as crate::arch::Arch>::init_hal_timer();
     #[cfg(feature = "self_test")]

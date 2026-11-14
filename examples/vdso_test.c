@@ -1,7 +1,7 @@
 /*
  * vDSO userspace helper — minimal C implementation for reading vDSO data.
  *
- * Compile: gcc -nostdlib -static -o vdso_test vdso_test.c
+ * Compile: gcc -static -o vdso_test vdso_test.c
  * Run in Vahi kernel: ./vdso_test
  *
  * Per-CPU vDSO pages: each CPU has its own page at VDSO_BASE + cpu_id * 4096
@@ -24,6 +24,7 @@ struct vdso_data {
     uint32_t tsc_mult;
     uint32_t tsc_shift;
     volatile uint64_t tsc_base;
+    volatile uint64_t tsc_base_origin;  /* Original TSC base at boot (preserved across syncs) */
     volatile uint64_t pid_cpu_seq;
     volatile uint64_t pid;
     volatile uint32_t cpu_id;
@@ -31,7 +32,7 @@ struct vdso_data {
 };
 
 /* Fixed base virtual address of vDSO pages (from kernel) */
-#define VDSO_BASE 0x00007FFFFFC0000ULL
+#define VDSO_BASE 0x00007FFFFFFC0000ULL
 
 /* Max CPUs */
 #define MAX_CPUS 8
@@ -58,14 +59,15 @@ static inline int vdso_read_retry_pid_cpu(const struct vdso_data *v, uint64_t se
 
 /* Get current CPU ID via syscall (for finding the right vDSO page) */
 int getcpu_syscall(unsigned *cpu, unsigned *node) {
-    register long r10 __asm__("r10") = 0;
-    register long r8 __asm__("r8") = 0;
     register long syscall_nr __asm__("rax") = 309;
+    register long rdi __asm__("rdi") = (long)cpu;
+    register long rsi __asm__("rsi") = (long)node;
     long ret;
     __asm__ volatile("syscall"
-        : "=a"(ret), "+D"(cpu), "+S"(node), "+d"(r10), "+r"(r8)
-        : "a"(syscall_nr)
+        : "=a"(ret)
+        : "a"(309), "D"(cpu), "S"(node)
         : "rcx", "r11", "memory");
+    /* Syscall writes CPU to *cpu and node to *node */
     return (int)ret;
 }
 
@@ -119,7 +121,10 @@ int getpid_vdso(void) {
     return (int)pid;
 }
 
-/* Read CPU ID from vDSO (uses pid_cpu_seq seqlock) */
+/* Read CPU ID from vDSO (uses pid_cpu_seq seqlock).
+ * Returns the current CPU ID. The PID in the same vDSO page belongs to the
+ * process currently running on that CPU, which is the caller's PID if the
+ * caller is running on that CPU (as determined by getcpu_syscall). */
 int getcpu_vdso(void) {
     const struct vdso_data *vdso = vdso_page_current();
     uint64_t seq;
@@ -137,13 +142,15 @@ uint64_t get_tsc_freq_vdso(void) {
     return __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_RELAXED);
 }
 
-/* High-resolution time via TSC (nanoseconds since boot) */
+/* High-resolution time via TSC (nanoseconds since boot).
+ * Uses tsc_base_origin (preserved across TSC syncs) to maintain
+ * boot-relative time across TSC base rewrites. */
 uint64_t get_time_ns_tsc(void) {
     const struct vdso_data *vdso = vdso_page_current();
     uint64_t freq = __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_RELAXED);
     uint32_t mult = vdso->tsc_mult;
     uint32_t shift = vdso->tsc_shift;
-    uint64_t base = __atomic_load_n(&vdso->tsc_base, __ATOMIC_RELAXED);
+    uint64_t base = __atomic_load_n(&vdso->tsc_base_origin, __ATOMIC_RELAXED);
 
     if (freq == 0 || mult == 0)
         return 0;
@@ -152,7 +159,7 @@ uint64_t get_time_ns_tsc(void) {
     __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
     uint64_t now = ((uint64_t)hi << 32) | lo;
     uint64_t elapsed = now - base;
-    return (elapsed * mult) >> shift;
+    return ((__uint128_t)elapsed * mult) >> shift;
 }
 
 /* Test all CPU pages are consistent */
@@ -188,12 +195,12 @@ void test_all_cpu_pages(void) {
 
 int main(void) {
     long sec, nsec;
-    int pid, cpu;
+    int pid;
+    unsigned cpu, node;
 
     printf("vDSO test starting...\n");
     printf("VDSO base address: 0x%llx\n", (unsigned long long)VDSO_BASE);
     
-    unsigned cpu, node;
     getcpu_syscall(&cpu, &node);
     printf("Current CPU (via syscall): %u\n", cpu);
     printf("TSC freq: %llu Hz\n", (unsigned long long)get_tsc_freq_vdso());

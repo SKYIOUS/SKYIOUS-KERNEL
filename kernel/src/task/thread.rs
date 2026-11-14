@@ -184,7 +184,7 @@ pub struct Thread {
     pub affinity_mask: u64,
     // ── FPU state (x86_64 only) ────────────────────────────────
     #[cfg(target_arch = "x86_64")]
-    pub fpu_state: Option<Box<FpuArea>>,    // — SCHED_DEADLINE fields ——————————————————————————
+    pub fpu_state: Option<Box<FpuArea>>, // — SCHED_DEADLINE fields ——————————————————————————
     /// Absolute deadline (ns since boot) for SCHED_DEADLINE
     pub sched_deadline: u64,
     /// Runtime budget (ns) for SCHED_DEADLINE
@@ -196,7 +196,6 @@ pub struct Thread {
     pub cpu_time_ns: u64,
     /// TSC value when this thread started its current time slice (for charging on switch-out)
     pub slice_start_tsc: u64,
-
 }
 
 /// Maximum stride value (virtual time units). Must be >> max threads.
@@ -576,6 +575,7 @@ impl Thread {
             sched_period: self.sched_period,
             // Per-thread CPU time accounting
             cpu_time_ns: 0,
+            slice_start_tsc: 0,
         })
     }
 
@@ -743,6 +743,7 @@ impl Thread {
             sched_period: self.sched_period,
             // Per-thread CPU time accounting
             cpu_time_ns: 0,
+            slice_start_tsc: 0,
         })
     }
 }
@@ -942,30 +943,39 @@ pub unsafe fn jump_to_usermode(entry: u64, user_rsp: u64) -> ! {
     let frame_size = core::mem::size_of::<IretqFrame>() as u64;
     let frame_ptr = (user_rsp - frame_size) as *mut u64;
     unsafe {
-        core::ptr::write(frame_ptr as *mut _, core::mem::transmute::<IretqFrame, [u64; 5]>(frame));
+        core::ptr::write(
+            frame_ptr as *mut _,
+            core::mem::transmute::<IretqFrame, [u64; 5]>(frame),
+        );
     }
 
     // Debug
-    crate::serial_write(&alloc::format!("[JUMP] entry=0x{:x} user_rsp=0x{:x} frame_ptr=0x{:x}\n",
-        entry, user_rsp, frame_ptr as u64));
+    crate::serial_write(&alloc::format!(
+        "[JUMP] entry=0x{:x} user_rsp=0x{:x} frame_ptr=0x{:x}\n",
+        entry,
+        user_rsp,
+        frame_ptr as u64
+    ));
 
     // Set up segment registers and swap GS
     // swapgs to get kernel GS base; we don't mov gs,ax to preserve user GS base.
     // The syscall entry will swapgs back on next entry.
+    let frame_ptr = user_rsp - core::mem::size_of::<IretqFrame>() as u64;
     core::arch::asm!(
         "mov ds, ax",
         "mov es, ax",
         "mov fs, ax",
         "swapgs",
-        // Pass user_rsp to _start in RDI so it can read argc/argv from stack
-        "mov rdi, rsi",
+        // Pass original user_rsp to _start in RDI so it can read argc/argv from stack
+        "mov rdi, rdx",
         // Load user stack pointer (pointing to iretq frame) and iretq
         "mov rsp, rsi",
         "iretq",
         in("rax") ss as u64,
-        in("rsi") (user_rsp - core::mem::size_of::<IretqFrame>() as u64),
+        in("rsi") frame_ptr,
         in("rcx") cs as u64,
-        in("rdx") entry,
+        in("rdx") user_rsp,  // pass original user_rsp in rdx
+        in("r8") entry,      // entry is already in iretq frame, but keep for consistency
         options(noreturn)
     );
 }

@@ -6,16 +6,16 @@ use super::*;
 use crate::task::process::FileDescriptor;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Per-CPU cached PID for lock-free sys_getpid.
 /// Updated at context switch in prepare_switch with Release ordering.
-pub static CURRENT_PID: [AtomicU64; crate::task::scheduler::MAX_CPUS] = 
+pub static CURRENT_PID: [AtomicU64; crate::task::scheduler::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::task::scheduler::MAX_CPUS];
 
 /// Per-CPU cached CPU ID for lock-free sys_getcpu.
 /// Updated at context switch in prepare_switch with Release ordering.
-pub static CURRENT_CPU_ID: [AtomicU32; crate::task::scheduler::MAX_CPUS] = 
+pub static CURRENT_CPU_ID: [AtomicU32; crate::task::scheduler::MAX_CPUS] =
     [const { AtomicU32::new(0) }; crate::task::scheduler::MAX_CPUS];
 
 pub fn sys_getppid() -> u64 {
@@ -368,8 +368,8 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
     }
 
     let policy = unsafe { *(attr_ptr.add(4) as *const u32) };
-    // Validate policy: 0=SCHED_NORMAL, 1=SCHED_FIFO, 2=SCHED_RR, 3=SCHED_BATCH
-    if policy > 3 {
+    // Validate policy: 0=SCHED_NORMAL, 1=SCHED_FIFO, 2=SCHED_RR, 3=SCHED_BATCH, 6=SCHED_DEADLINE
+    if policy > 6 || policy == 4 || policy == 5 {
         return errno::Errno::EINVAL as u64;
     }
 
@@ -379,6 +379,22 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
         0
     };
 
+    // Read SCHED_DEADLINE attributes if policy is DEADLINE
+    let (sched_runtime, sched_deadline, sched_period) = if policy == 6 {
+        if size < 48 {
+            return errno::Errno::EINVAL as u64;
+        }
+        let runtime = unsafe { *(attr_ptr.add(16) as *const u64) };
+        let deadline = unsafe { *(attr_ptr.add(24) as *const u64) };
+        let period = unsafe { *(attr_ptr.add(32) as *const u64) };
+        if runtime == 0 || deadline == 0 || period == 0 || deadline > period {
+            return errno::Errno::EINVAL as u64;
+        }
+        (runtime, deadline, period)
+    } else {
+        (0, 0, 0)
+    };
+
     // Map scheduling policy to priority and RT fields
     let (priority, rt_priority, rr_quantum) = if policy == 1 || policy == 2 {
         // SCHED_FIFO / SCHED_RR: rt_priority 1-99
@@ -386,6 +402,9 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
         let quantum = if policy == 2 { 4u32 } else { 0u32 }; // 4 ticks for RR
                                                              // RT threads go to priority level 7 (highest) for queue ordering
         (7u8, rt_prio, quantum)
+    } else if policy == 6 {
+        // SCHED_DEADLINE: highest priority for queue ordering
+        (7u8, 0, 0)
     } else {
         // SCHED_NORMAL (0) / SCHED_BATCH (3): map nice [-20..19] to priority [0..7]
         let nice = nice_or_rt_prio;
@@ -419,7 +438,12 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
                 cur.rr_time_slice = rr_quantum;
                 cur.priority = priority;
                 cur.sched_class = policy;
-                if policy == 1 || policy == 2 {
+                if policy == 6 {
+                    cur.sched_runtime = sched_runtime;
+                    cur.sched_deadline = sched_deadline;
+                    cur.sched_period = sched_period;
+                    cur.stride = 0; // DEADLINE threads don't use stride
+                } else if policy == 1 || policy == 2 {
                     cur.stride = 0; // RT threads don't use stride
                 }
             }
@@ -437,7 +461,12 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
                 t.rr_time_slice = rr_quantum;
                 t.priority = priority;
                 t.sched_class = policy;
-                if policy == 1 || policy == 2 {
+                if policy == 6 {
+                    t.sched_runtime = sched_runtime;
+                    t.sched_deadline = sched_deadline;
+                    t.sched_period = sched_period;
+                    t.stride = 0;
+                } else if policy == 1 || policy == 2 {
                     t.stride = 0;
                 }
             }
@@ -753,7 +782,7 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
     crate::vdso_update_process_info(
         crate::smp::get_cpu_id() as u32,
         parent.cgroup_path.lock().len() as u64, // Use path length as simple cgroup ID
-        0, // namespace flags - TODO: implement
+        0,                                      // namespace flags - TODO: implement
         parent.creds.lock().cap_effective,
     );
 
@@ -1382,7 +1411,13 @@ pub fn sys_execve(
     }
 
     drop(exec_guard);
-    
+
+    // Refresh PID publication during exec before entering userspace:
+    // update both CURRENT_PID and the vDSO PID to reflect the replacement process
+    let cpu_idx = crate::smp::get_cpu_id() as usize;
+    crate::syscalls::process_lifecycle::CURRENT_PID[cpu_idx]
+        .store(process_arc.id, Ordering::Release);
+
     // Update vDSO with new process info (cgroup, namespace, capabilities)
     #[cfg(target_arch = "x86_64")]
     crate::vdso_update_process_info(
@@ -1391,7 +1426,11 @@ pub fn sys_execve(
         0, // namespace flags - TODO: implement
         process_arc.creds.lock().cap_effective,
     );
-    
+
+    // Also update vDSO PID/CPU for the current CPU
+    #[cfg(target_arch = "x86_64")]
+    crate::vdso_update_pid_cpu(process_arc.id, crate::smp::get_cpu_id() as u32);
+
     unsafe {
         crate::task::thread::jump_to_usermode(entry, user_rsp);
     }

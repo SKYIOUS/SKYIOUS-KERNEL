@@ -32,7 +32,7 @@ pub(super) extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: Inter
     // This provides sub-100ns TSC drift guarantee by syncing every tick.
     if crate::smp::get_cpu_id() == 0 {
         crate::vdso::vdso_sync_tsc_across_cpus();
-        
+
         // Check TSC drift every 100 ticks (1 second) to avoid excessive logging
         if ticks.is_multiple_of(100) {
             crate::vdso::vdso_check_tsc_drift();

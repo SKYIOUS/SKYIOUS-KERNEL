@@ -21,6 +21,9 @@ Single 4 KiB page containing atomic data:
 ```rust
 #[repr(C, align(4096))]
 pub struct VdsoData {
+    // Seqlock for time fields
+    pub seq: AtomicU64,                 // Even = consistent, odd = updating
+    
     // Time — updated every timer tick (100 Hz)
     pub monotonic_sec: AtomicU64,       // CLOCK_MONOTONIC seconds
     pub monotonic_nsec: AtomicU32,      // CLOCK_MONOTONIC nanoseconds
@@ -31,17 +34,29 @@ pub struct VdsoData {
     pub tsc_freq_hz: AtomicU64,         // TSC frequency (Hz)
     pub tsc_mult: u32,                  // Multiplier for TSC → nanoseconds
     pub tsc_shift: u32,                 // Shift for TSC → nanoseconds
-    pub tsc_base: AtomicU64,            // TSC at boot (for elapsed calc)
+    pub tsc_base: AtomicU64,            // TSC at last sync (for elapsed calc)
+    pub tsc_base_origin: AtomicU64,     // Original TSC base at boot (preserved across syncs)
+    
+    // Seqlock for PID/CPU fields
+    pub pid_cpu_seq: AtomicU64,         // Even = consistent, odd = updating
     
     // Process/CPU identity — updated on context switch
     pub pid: AtomicU64,                 // Current process ID
     pub cpu_id: AtomicU32,              // Current CPU ID
     
-    // Version/seqlock for lock-free readers
-    pub seq: AtomicU64,                 // Even = consistent, odd = updating
+    // SKYIOUS clocks
+    pub thread_cputime_ns: AtomicU64,   // CLOCK_SKYIOUS_THREAD_CPUTIME (100)
+    pub kernel_flags: AtomicU64,        // CLOCK_SKYIOUS_KERNEL_FLAGS (103)
+    pub process_cgroup_id: AtomicU64,   // CLOCK_SKYIOUS_PROCESS_INFO (104)
+    pub process_namespace_flags: AtomicU64, // CLOCK_SKYIOUS_PROCESS_INFO (104)
+    pub process_cap_effective: AtomicU64,   // CLOCK_SKYIOUS_PROCESS_INFO (104)
+    
+    // TSC sync fields
+    pub tsc_sync_ack_count: AtomicU32,  // TSC sync IPI acknowledgment count
+    pub tsc_sync_seq: AtomicU32,        // TSC sync sequence number
 }
 ```
-Total: ~64 bytes (fits in one cache line pair). Rest of page reserved.
+Total: ~144 bytes. Rest of page reserved.
 
 ### 2. Mapping Strategy
 - **Virtual address**: Fixed per-arch address in user space (x86_64: `0x0000_7FFF_FFFC_0000` — 256 KiB below `USER_MMAP_TOP`; aarch64/riscv64: similar). Each CPU gets a page at `VDSO_BASE + cpu_id * 4096`.
@@ -51,8 +66,11 @@ Total: ~64 bytes (fits in one cache line pair). Rest of page reserved.
 
 ### 3. Update Mechanism
 - **Timer tick (100 Hz)**: Update `monotonic_*`, `realtime_*`, `seq` (write sequence: odd → data → even)
-- **Context switch**: Update `pid`, `cpu_id` (same seq protocol)
-- **TSC calibration**: `tsc_freq_hz`, `tsc_mult`, `tsc_shift`, `tsc_base` set at boot (read-only after)
+- **Context switch**: Update `pid`, `cpu_id` (same seq protocol, using `pid_cpu_seq`)
+- **TSC calibration**: `tsc_freq_hz`, `tsc_mult`, `tsc_shift`, `tsc_base`, `tsc_base_origin` set at boot (read-only after)
+- **TSC sync (IPI)**: Update `tsc_base` on each CPU, preserve `tsc_base_origin` for boot-relative time
+- **Thread CPU time**: Update `thread_cputime_ns` on context switch
+- **Process info**: Update `process_cgroup_id`, `process_namespace_flags`, `process_cap_effective` on fork/exec/cred change
 
 ### 4. Syscall Fast Paths
 Modify syscalls to check vDSO first:

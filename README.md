@@ -96,7 +96,7 @@
 | Filesystems | 2 supported (TarFS, DevFS), 7 experimental/partial (SkyFS, ext2, ext4, FAT32, ramfs, ctlfs, FUSE) |
 | Drivers | 7 working (serial, PS/2, E1000, VirtIO-block, PC speaker, RTC), 12+ experimental/partial |
 | Kernel threads | Preemptive stride scheduler + async executor |
-| Supported archs | x86_64 (QEMU only, never tested on real hardware), aarch64 (build fails — x86_64-only asm in vahi-sync), riscv64 (not built in CI) |
+| Supported archs | x86_64 (QEMU only, never tested on real hardware), aarch64 (build fails — x86_64-only asm in kernel sync), riscv64 (not built in CI) |
 | Boot protocol | UEFI via Limine bootloader |
 | Crates | 17 workspace crates (+ gdt not in workspace, sync is kernel-internal) |
 
@@ -880,7 +880,7 @@ pub trait Arch: Send + Sync {
 - 4-level page tables (48-bit VA) with MMU init (stub)
 - Kernel loaded at 0x40080000 (QEMU virt DRAM)
 - Target spec: aarch64-unknown-none (soft-float, strict-align)
-- BUILD FAILS: vahi-sync uses x86_64-only asm/intrinsics unconditionally (issues.md P-1)
+- BUILD FAILS: x86_64-only asm in kernel sync module (issues.md P-1)
 ```
 
 ### RISC-V (Not Built in CI)

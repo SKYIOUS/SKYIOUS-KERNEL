@@ -28,7 +28,7 @@ struct vdso_data {
     uint32_t tsc_mult;
     uint32_t tsc_shift;
     volatile uint64_t tsc_base;
-    volatile int64_t tsc_offset;
+    volatile uint64_t tsc_base_origin;  /* Original TSC base at boot (preserved across syncs) */
     volatile uint64_t pid_cpu_seq;
     volatile uint64_t pid;
     volatile uint32_t cpu_id;
@@ -50,13 +50,6 @@ struct vdso_data {
     volatile uint64_t process_cgroup_id;
     volatile uint64_t process_namespace_flags;
     volatile uint64_t process_cap_effective;
-};
-
-/* Architecture-specific timer source */
-enum vdso_timer_source {
-    VDSO_TIMER_TSC,      /* x86_64 TSC */
-    VDSO_TIMER_CNTRVCT,  /* aarch64 CNTVCT_EL0 */
-    VDSO_TIMER_RISCV,    /* riscv64 `time` CSR / CLINT mtime */
 };
 
 /* Fixed vDSO constants (from kernel) */
@@ -98,7 +91,14 @@ static inline const struct vdso_data *vdso_page_current(void) {
         : "=a"(ret), "=D"(cpu), "=S"(node)
         : "a"(309), "D"(cpu), "S"(node), "d"(0), "r"(0)
         : "rcx", "r11", "r10", "r8", "memory");
-    return (const struct vdso_data *)(VDSO_BASE + cpu * 4096);
+    const struct vdso_data *vdso = (const struct vdso_data *)(VDSO_BASE + cpu * 4096);
+    /* Check kernel-provided availability contract: seq must be even and tsc_freq_hz non-zero */
+    uint64_t seq = __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE);
+    uint64_t freq = __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_ACQUIRE);
+    if (freq == 0 || (seq & 1)) {
+        return NULL;
+    }
+    return vdso;
 }
 
 /* Seqlock read helpers */
@@ -235,11 +235,9 @@ int clock_gettime(int clock_id, struct timespec *tp) {
         }
 
         case 2: /* CLOCK_PROCESS_CPUTIME_ID */ {
-            /* Read process CPU time from vDSO (updated at context switch) */
-            uint64_t ns = __atomic_load_n(&vdso->thread_cputime_ns, __ATOMIC_ACQUIRE);
-            tp->tv_sec = ns / 1000000000;
-            tp->tv_nsec = ns % 1000000000;
-            return 0;
+            /* Process CPU time is not exposed via vDSO (only thread CPU time is).
+             * Fall back to syscall to get process-wide CPU time. */
+            goto fallback;
         }
 
         case 3: /* CLOCK_THREAD_CPUTIME_ID */ {
@@ -267,18 +265,18 @@ int clock_gettime(int clock_id, struct timespec *tp) {
         }
 
         case 102: /* CLOCK_SKYIOUS_BOOT_NS */ {
-            /* SKYIOUS-native: raw TSC nanoseconds since boot */
+            /* SKYIOUS-native: raw TSC nanoseconds since boot.
+             * Uses tsc_base_origin (preserved across TSC syncs) to maintain
+             * boot-relative time across TSC base rewrites. */
             uint64_t freq = __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_ACQUIRE);
             if (freq == 0) goto fallback;
 
 #if defined(__x86_64__)
             uint32_t mult = vdso->tsc_mult;
             uint32_t shift = vdso->tsc_shift;
-            uint64_t base = __atomic_load_n(&vdso->tsc_base, __ATOMIC_ACQUIRE);
-            int64_t offset = __atomic_load_n(&vdso->tsc_offset, __ATOMIC_ACQUIRE);
-            uint64_t effective_base = (base + (uint64_t)offset);
+            uint64_t base = __atomic_load_n(&vdso->tsc_base_origin, __ATOMIC_ACQUIRE);
             uint64_t now = vdso_read_timer();
-            uint64_t delta = now - effective_base;
+            uint64_t delta = now - base;
             uint64_t ns = ((__uint128_t)delta * mult) >> shift;
             tp->tv_sec = ns / 1000000000;
             tp->tv_nsec = ns % 1000000000;
@@ -286,11 +284,9 @@ int clock_gettime(int clock_id, struct timespec *tp) {
 #else
             uint64_t freq_val = vdso->tsc_freq_hz;
             if (freq_val == 0) goto fallback;
-            uint64_t base = __atomic_load_n(&vdso->tsc_base, __ATOMIC_ACQUIRE);
-            int64_t offset = __atomic_load_n(&vdso->tsc_offset, __ATOMIC_ACQUIRE);
-            uint64_t effective_base = (base + (uint64_t)offset);
+            uint64_t base = __atomic_load_n(&vdso->tsc_base_origin, __ATOMIC_ACQUIRE);
             uint64_t now = vdso_read_timer();
-            uint64_t delta = now - effective_base;
+            uint64_t delta = now - base;
             uint64_t ns = (delta * 1000000000ULL) / freq_val;
             tp->tv_sec = ns / 1000000000;
             tp->tv_nsec = ns % 1000000000;
@@ -312,11 +308,14 @@ int clock_gettime(int clock_id, struct timespec *tp) {
         }
 
         case 104: /* CLOCK_SKYIOUS_PROCESS_INFO */ {
-            /* SKYIOUS-native: per-process info */
+            /* SKYIOUS-native: per-process info
+             * tv_sec = cgroup_id (low 32 bits)
+             * tv_nsec = namespace_flags (low 32 bits) | (cap_effective << 32) */
             uint64_t cgroup_id = __atomic_load_n(&vdso->process_cgroup_id, __ATOMIC_ACQUIRE);
             uint64_t ns_flags = __atomic_load_n(&vdso->process_namespace_flags, __ATOMIC_ACQUIRE);
-            tp->tv_sec = (long)cgroup_id;
-            tp->tv_nsec = (long)(ns_flags & 0xFFFFFFFF);
+            uint64_t cap_eff = __atomic_load_n(&vdso->process_cap_effective, __ATOMIC_ACQUIRE);
+            tp->tv_sec = (long)(cgroup_id & 0xFFFFFFFF);
+            tp->tv_nsec = (long)((ns_flags & 0xFFFFFFFF) | ((cap_eff & 0xFFFFFFFF) << 32));
             return 0;
         }
 
@@ -441,9 +440,10 @@ fallback:
     register long rsi __asm__("rsi") = (long)node;
     long ret;
     __asm__ volatile("syscall"
-        : "=a"(ret), "+D"(cpu), "+S"(node)
-        : "a"(309)
+        : "=a"(ret)
+        : "a"(309), "D"(cpu), "S"(node)
         : "rcx", "r11", "memory");
+    /* Syscall writes CPU to *cpu and node to *node; return value is in ret */
     return (int)ret;
 }
 
@@ -461,20 +461,16 @@ uint64_t get_time_ns_tsc(void) {
 #if defined(__x86_64__)
     uint32_t mult = vdso->tsc_mult;
     uint32_t shift = vdso->tsc_shift;
-    uint64_t base = __atomic_load_n(&vdso->tsc_base, __ATOMIC_ACQUIRE);
-    int64_t offset = __atomic_load_n(&vdso->tsc_offset, __ATOMIC_ACQUIRE);
-    uint64_t effective_base = (base + (uint64_t)offset);
+    uint64_t base = __atomic_load_n(&vdso->tsc_base_origin, __ATOMIC_ACQUIRE);
     uint64_t now = vdso_read_timer();
-    uint64_t delta = now - effective_base;
+    uint64_t delta = now - base;
     return ((__uint128_t)delta * mult) >> shift;
 #else
     uint64_t freq_val = __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_ACQUIRE);
     if (freq_val == 0) return 0;
-    uint64_t base = __atomic_load_n(&vdso->tsc_base, __ATOMIC_ACQUIRE);
-    int64_t offset = __atomic_load_n(&vdso->tsc_offset, __ATOMIC_ACQUIRE);
-    uint64_t effective_base = (base + (uint64_t)offset);
+    uint64_t base = __atomic_load_n(&vdso->tsc_base_origin, __ATOMIC_ACQUIRE);
     uint64_t now = vdso_read_timer();
-    uint64_t delta = now - effective_base;
+    uint64_t delta = now - base;
     return (delta * 1000000000ULL) / freq_val;
 #endif
 }

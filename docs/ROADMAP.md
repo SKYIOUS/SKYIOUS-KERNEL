@@ -134,7 +134,7 @@ Last updated: 2026-11-07 (massive docs cleanup — corrected all status claims a
 | A1.3 RCU optimization | 🔲 Not started |
 | A1.4 EEVDF scheduler | 🔲 Not started |
 | A1.5 Context switch optimization | 🔲 Not started |
-| A1.6 vDSO | 🔲 Not started |
+| A1.6 vDSO | ✅ Implemented (init, updates, address-space mapping, libc use) |
 
 ### A2: Advanced Kernel Features
 | Task | Status |

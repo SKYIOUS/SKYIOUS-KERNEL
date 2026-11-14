@@ -122,7 +122,7 @@ See `docs/syscall-classification.md` for honest syscall classification.
 | `vahi-pci` | `crates/pci/` | ⚠️ Scaffolded | PCI subsystem (150 lines) |
 | `vahi-verified` | `crates/verified/` | ⚠️ Feature-gated | Verified proofs (optional dep) |
 
-**Note:** `vahi-sync` (IrqSafeMutex, 165 lines, x86_64-only asm) is kernel-internal at `kernel/src/sync/`, not a workspace crate.
+**Note:** `vahi-sync` (IrqSafeMutex, 165 lines, x86_64-only asm) is kernel-internal at `kernel/src/sync/`, not a workspace crate. The `vahi-hal` crate provides the cross-platform IrqSafeMutex trait; the kernel's sync module is the implementation.
 | `vahi_kernel` | `kernel/` | ✅ Main | Kernel binary, integration layer |
 
 ### Build Status (2026-10-23)

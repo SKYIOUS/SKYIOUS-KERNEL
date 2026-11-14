@@ -64,7 +64,7 @@ Tier 2 (depends on Tier 0-1):
   vahi-task       ← vahi-sync + vahi-memory + vahi-types
   vahi-vfs        ← vahi-sync + vahi-memory
   vahi-net        ← vahi-sync + vahi-syscalls + vahi-task + smoltcp + hashbrown
-  vahi-drivers    ← vahi-types + vahi-sync + vahi-interrupts + vahi-acpi + vahi-memory
+  vahi-drivers    ← vahi-types + vahi-hal + vahi-pci + vahi-apic + vahi-limine + vahi-syscalls + vahi-arch + vahi-memory
   vahi-ipc        ← vahi-sync + vahi-types
   vahi-pci        ← vahi-sync + vahi-memory + vahi-limine + vahi-apic
   vahi-syscalls   ← vahi-sync + vahi-types
