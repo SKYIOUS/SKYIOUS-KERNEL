@@ -136,7 +136,7 @@ impl PerCpuScheduler {
                     _ => false,
                 };
                 if want_idle {
-                    self.idle.take().unwrap()
+                    self.idle.take()?
                 } else {
                     return None;
                 }
