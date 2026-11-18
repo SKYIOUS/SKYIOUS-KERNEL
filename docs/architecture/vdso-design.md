@@ -80,6 +80,15 @@ SKYIOUS KERNEL controls the entire software stack:
 
 **Why page-local seqlock is insufficient**: A simple page-local seqlock only protects against concurrent reads/writes on the same page. It doesn't handle migration where a thread moves from CPU A to CPU B - the thread must read from CPU B's page after migration, which requires the kernel to have updated CPU B's page before the thread resumes. The context switch on the target CPU ensures this ordering.
 
+**Userspace read protocol**: To safely read per-CPU fields (PID, CPU ID) without kernel assistance:
+1. Call `getcpu` syscall (or use `rdpid` on supported CPUs) to obtain current CPU ID.
+2. Compute the vDSO page address: `VDSO_BASE + cpu_id * 4096`.
+3. Read the `pid_cpu_seq` seqlock (Acquire), then read `pid` and `cpu_id` (Relaxed), then read `pid_cpu_seq` again (Acquire).
+4. **Validate CPU identity**: Compare the `cpu_id` read from the vDSO page with the CPU ID from step 1. If they differ, the thread has migrated — retry from step 1 or fall back to the `getpid`/`getcpu` syscall.
+5. If `pid_cpu_seq` is even and unchanged between the two reads, the data is consistent.
+
+This validation ensures that a saved pointer to the original CPU's page is never used after migration, because the CPU ID check will fail and trigger a retry with the new CPU's page.
+
 **Trade-offs**: 
 - Requires context switch to update vDSO before thread resumes on new CPU
 - Userspace must use `getcpu` syscall (or `rdpid` on x86) to find current CPU, then read from that page

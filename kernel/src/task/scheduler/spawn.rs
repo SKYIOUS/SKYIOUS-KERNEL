@@ -34,7 +34,7 @@ pub fn block_on_pipe(key: u64) {
 /// Wake all threads blocked on a pipe key.
 pub fn wake_pipe(key: u64) {
     let mut sched = this_cpu_sched().lock();
-    let woken = GLOBAL.wake_blocked_threads(key, u32::MAX, &mut *sched);
+    let woken = GLOBAL.wake_blocked_threads(key, u32::MAX, &mut sched);
     if woken > 0 {
         broadcast_reschedule_ipi();
     }
@@ -58,7 +58,7 @@ pub fn add_futex_thread(thread: crate::task::thread::Thread) {
 /// Wake threads from futex wait queue.
 pub fn wake_futex(uaddr: u64, max_wake: u32) -> u32 {
     let mut sched = this_cpu_sched().lock();
-    let woken = GLOBAL.wake_futex(uaddr, max_wake, &mut *sched);
+    let woken = GLOBAL.wake_futex(uaddr, max_wake, &mut sched);
     if woken > 0 {
         broadcast_reschedule_ipi();
     }

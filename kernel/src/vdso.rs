@@ -192,7 +192,7 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
         let ticks = crate::interrupts::get_ticks();
         let total_ms = ticks * TICK_MS;
         vdso.monotonic_sec
-            .store((total_ms / 1000) as u64, Ordering::Release);
+            .store(total_ms / 1000, Ordering::Release);
         vdso.monotonic_nsec
             .store(((total_ms % 1000) * 1_000_000) as u32, Ordering::Release);
 
@@ -257,8 +257,8 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
         let cpu0_vdso = unsafe { &*(cpu0_hhdm as *const VdsoData) };
         let flags = cpu0_vdso.kernel_flags.load(Ordering::Acquire);
         for cpu_id in 1..crate::task::scheduler::MAX_CPUS {
-            let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
-            if !ptr.is_null() {
+            let ptr = VDSO_PAGES.get(cpu_id).map(|a| a.load(Ordering::Acquire)).filter(|&v| !v.is_null());
+            if let Some(ptr) = ptr {
                 let info = unsafe { &*ptr };
                 let hhdm_vaddr = info.hhdm_vaddr;
                 let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
@@ -268,6 +268,21 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
     }
 
     Ok(())
+}
+
+/// Update kernel feature flags on all CPU vDSO pages.
+/// Called by device drivers when they detect hardware (NVMe, xHCI, VirtIO-GPU, etc.).
+/// Uses atomic OR to add the flag to existing flags on all CPUs.
+pub fn vdso_set_kernel_flag(flag: u64) {
+    for ptr in VDSO_PAGES.iter().take(crate::task::scheduler::MAX_CPUS) {
+        let ptr = ptr.load(Ordering::Acquire);
+        if !ptr.is_null() {
+            let info = unsafe { &*ptr };
+            let hhdm_vaddr = info.hhdm_vaddr;
+            let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+            vdso.kernel_flags.fetch_or(flag, Ordering::Release);
+        }
+    }
 }
 
 /// Map all vDSO pages into a process's address space.
@@ -484,7 +499,7 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
         let tsc_shift = vdso.tsc_shift;
         let elapsed = tsc_now.wrapping_sub(tsc_base);
         let ns = ((elapsed as u128 * tsc_mult as u128) >> tsc_shift) as u64;
-        let base_ns = rt_sec as u64 * 1_000_000_000 + rt_nsec as u64;
+        let base_ns = rt_sec * 1_000_000_000 + rt_nsec as u64;
         let total_ns = base_ns + ns;
         let sec = total_ns / 1_000_000_000;
         let nsec = (total_ns % 1_000_000_000) as u32;
@@ -512,7 +527,7 @@ const TICK_MS: u64 = 10;
 pub fn vdso_update_time() {
     let ticks = crate::interrupts::get_ticks();
     let total_ms = ticks * TICK_MS;
-    let monotonic_sec = (total_ms / 1000) as u64;
+    let monotonic_sec = total_ms / 1000;
     let monotonic_nsec = ((total_ms % 1000) * 1_000_000) as u32;
 
     // Use cached RTC to avoid CMOS I/O on every tick
@@ -541,8 +556,8 @@ pub fn vdso_update_time() {
     // makes the intent explicit and is correct on all architectures.
     vdso.monotonic_sec.store(monotonic_sec, Ordering::Release);
     vdso.monotonic_nsec.store(monotonic_nsec, Ordering::Release);
-    vdso.realtime_sec.store(rt_sec as u64, Ordering::Release);
-    vdso.realtime_nsec.store(rt_nsec as u32, Ordering::Release);
+    vdso.realtime_sec.store(rt_sec, Ordering::Release);
+    vdso.realtime_nsec.store(rt_nsec, Ordering::Release);
 
     // End write: increment seq to even (writer done) with Release ordering
     vdso.seq.store(seq + 1, Ordering::Release);
@@ -687,7 +702,7 @@ pub extern "C" fn vdso_ipi_update_tsc_base(_arg: u64) {
     vdso_update_my_tsc_base();
 
     // Increment the acknowledgment counter after updating TSC base
-    let cpu_id = crate::smp::get_cpu_id() as usize;
+    let cpu_id = crate::smp::get_cpu_id();
     if cpu_id < crate::task::scheduler::MAX_CPUS {
         let ptr = VDSO_PAGES[cpu_id].load(Ordering::Acquire);
         if !ptr.is_null() {
@@ -704,7 +719,7 @@ pub extern "C" fn vdso_ipi_update_tsc_base(_arg: u64) {
 /// waits for all CPUs to acknowledge, then updates the current CPU's TSC base.
 pub fn vdso_sync_tsc_across_cpus() {
     let max_cpus = crate::task::scheduler::MAX_CPUS;
-    let current_cpu = crate::smp::get_cpu_id() as usize;
+    let current_cpu = crate::smp::get_cpu_id();
 
     // Reset acknowledgment counters on all online CPUs
     let online_cpus = crate::task::scheduler::online_cpu_ids();
@@ -819,16 +834,16 @@ pub fn vdso_check_tsc_drift() {
     let mut min_cpu = 0;
     let mut max_cpu = 0;
 
-    for cpu_id in 0..MAX_CPUS {
-        if tsc_bases[cpu_id] == 0 {
+    for (cpu_id, &tsc) in tsc_bases.iter().enumerate().take(MAX_CPUS) {
+        if tsc == 0 {
             continue;
         }
-        if tsc_bases[cpu_id] < min_tsc {
-            min_tsc = tsc_bases[cpu_id];
+        if tsc < min_tsc {
+            min_tsc = tsc;
             min_cpu = cpu_id;
         }
-        if tsc_bases[cpu_id] > max_tsc {
-            max_tsc = tsc_bases[cpu_id];
+        if tsc > max_tsc {
+            max_tsc = tsc;
             max_cpu = cpu_id;
         }
     }

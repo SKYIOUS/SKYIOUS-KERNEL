@@ -32,11 +32,19 @@ vdso_virt_addr(cpu_id) = VDSO_BASE + cpu_id * 4096
 | 0x030 | 4 | `tsc_mult` | TSC multiplier (read-only after init) |
 | 0x034 | 4 | `tsc_shift` | TSC shift (read-only after init) |
 | 0x038 | 8 | `tsc_base` | TSC base value at last sync (AtomicU64) |
-| 0x040 | 8 | `pid_cpu_seq` | Seqlock for PID/CPU fields |
-| 0x048 | 8 | `pid` | Current process ID (AtomicU64) |
-| 0x050 | 4 | `cpu_id` | Current CPU ID (AtomicU32) |
-| 0x054 | 4 | `_pad3` | Padding |
-| 0x058+ | ~4032 | `_reserved` | Reserved for future use |
+| 0x040 | 8 | `tsc_base_origin` | Original TSC base at boot (preserved across syncs) |
+| 0x048 | 8 | `pid_cpu_seq` | Seqlock for PID/CPU fields |
+| 0x050 | 8 | `pid` | Current process ID (AtomicU64) |
+| 0x058 | 4 | `cpu_id` | Current CPU ID (AtomicU32) |
+| 0x05C | 4 | `_pad3` | Padding |
+| 0x060 | 8 | `thread_cputime_ns` | Thread CPU time for CLOCK_SKYIOUS_THREAD_CPUTIME (100) |
+| 0x068 | 8 | `kernel_flags` | Kernel feature flags for CLOCK_SKYIOUS_KERNEL_FLAGS (103) |
+| 0x070 | 8 | `process_cgroup_id` | Cgroup ID for CLOCK_SKYIOUS_PROCESS_INFO (104) |
+| 0x078 | 8 | `process_namespace_flags` | Namespace flags for CLOCK_SKYIOUS_PROCESS_INFO (104) |
+| 0x080 | 8 | `process_cap_effective` | Effective capabilities for CLOCK_SKYIOUS_PROCESS_INFO (104) |
+| 0x088 | 4 | `tsc_sync_ack_count` | TSC sync IPI acknowledgment count |
+| 0x08C | 4 | `tsc_sync_seq` | TSC sync sequence number |
+| 0x090+ | ~3952 | `_reserved` | Reserved for future use |
 
 ## Seqlock Protocol
 
@@ -101,9 +109,18 @@ struct vdso_data {
     volatile uint32_t tsc_mult;
     volatile uint32_t tsc_shift;
     volatile uint64_t tsc_base;
+    volatile uint64_t tsc_base_origin;  /* Original TSC base at boot */
     volatile uint64_t pid_cpu_seq;
     volatile uint64_t pid;
     volatile uint32_t cpu_id;
+    uint32_t _pad3;
+    volatile uint64_t thread_cputime_ns;   /* CLOCK_SKYIOUS_THREAD_CPUTIME (100) */
+    volatile uint64_t kernel_flags;        /* CLOCK_SKYIOUS_KERNEL_FLAGS (103) */
+    volatile uint64_t process_cgroup_id;   /* CLOCK_SKYIOUS_PROCESS_INFO (104) */
+    volatile uint64_t process_namespace_flags;
+    volatile uint64_t process_cap_effective;
+    volatile uint32_t tsc_sync_ack_count;
+    volatile uint32_t tsc_sync_seq;
 };
 
 struct vdso_data *vdso = (struct vdso_data *)__vdso_base;

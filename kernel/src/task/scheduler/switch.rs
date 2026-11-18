@@ -136,10 +136,7 @@ impl PerCpuScheduler {
                     _ => false,
                 };
                 if want_idle {
-                    match self.idle.take() {
-                        Some(idle) => idle,
-                        None => return None,
-                    }
+                    self.idle.take().unwrap()
                 } else {
                     return None;
                 }
@@ -189,12 +186,17 @@ impl PerCpuScheduler {
             crate::vdso_update_pid_cpu(process.id, crate::smp::get_cpu_id() as u32);
             // Update vDSO with process info (cgroup, namespace, capabilities)
             #[cfg(target_arch = "x86_64")]
-            crate::vdso_update_process_info(
-                crate::smp::get_cpu_id() as u32,
-                process.cgroup_path.lock().len() as u64,
-                0, // namespace flags - TODO: implement
-                process.creds.lock().cap_effective,
-            );
+            {
+                // Use try_lock to avoid blocking in timer-switch path; fallback to 0 on contention.
+                let cgroup_len =
+                    process.cgroup_path.try_lock().map(|s| s.len()).unwrap_or(0) as u64;
+                crate::vdso_update_process_info(
+                    crate::smp::get_cpu_id() as u32,
+                    cgroup_len,
+                    0, // namespace flags - TODO: implement
+                    process.creds.lock().cap_effective,
+                );
+            }
         }
 
         // Lazily allocate FPU state buffer for the incoming thread (x86_64 only)
@@ -209,7 +211,7 @@ impl PerCpuScheduler {
         let stack_top = next.stack_top();
 
         // Update per-CPU cached PID and CPU ID for lock-free sys_getpid/sys_getcpu
-        let cpu_idx = crate::smp::get_cpu_id() as usize;
+        let cpu_idx = crate::smp::get_cpu_id();
         if let Some(ref process) = next.process {
             crate::syscalls::process_lifecycle::CURRENT_PID[cpu_idx]
                 .store(process.id, Ordering::Release);
@@ -276,7 +278,6 @@ impl PerCpuScheduler {
                     ),
                 );
                 let n = w.len;
-                drop(w);
                 crate::serial_write(core::str::from_utf8(&scratch[..n]).unwrap_or(""));
             }
         }
@@ -338,22 +339,19 @@ pub fn schedule() {
             let mut s = this_cpu_sched().lock();
             s.prepare_switch_tls()
         }
-        .map_or(
-            (
-                core::ptr::null_mut(),
-                0,
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null(),
-            ),
-            |(a, b, c, d, e)| (a, b, c, d, e),
-        );
+        .unwrap_or((
+            core::ptr::null_mut(),
+            0,
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+        ));
         #[cfg(target_arch = "aarch64")]
         let (old_ptr, new_sp, new_fs) = {
             let mut s = this_cpu_sched().lock();
             s.prepare_switch_tls()
         }
-        .map_or((core::ptr::null_mut(), 0, 0), |(a, b, c)| (a, b, c));
+        .unwrap_or((core::ptr::null_mut(), 0, 0));
 
         if !old_ptr.is_null() {
             #[cfg(target_arch = "x86_64")]
@@ -375,7 +373,7 @@ pub fn schedule() {
                 if cur.status == crate::task::thread::ThreadStatus::Blocked {
                     let time_wake = cur
                         .sleep_until
-                        .map_or(false, |t| crate::interrupts::get_ticks() >= t);
+                        .is_some_and(|t| crate::interrupts::get_ticks() >= t);
                     let sig_wake =
                         cur.sleep_until.is_some() && crate::syscalls::check_signal_interrupt();
                     if time_wake || sig_wake {

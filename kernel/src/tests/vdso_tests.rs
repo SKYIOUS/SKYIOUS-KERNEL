@@ -3,7 +3,10 @@
 use crate::syscalls::process_lifecycle::sys_getpid;
 use crate::task::scheduler::MAX_CPUS;
 use crate::vdso::{vdso_page, vdso_virt_addr_for_cpu, VDSO_BASE};
+use crate::tests::benchmarks::{map_test_userspace_page, unmap_test_userspace_page};
 use core::sync::atomic::Ordering;
+use x86_64::structures::paging::Translate;
+use x86_64::structures::paging::mapper::TranslateResult;
 
 /// Verify vDSO page is mapped at the expected virtual address.
 pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
@@ -23,29 +26,22 @@ pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
     // Inspect the userspace page-table entry to verify mapping
     let cpu_id = crate::smp::get_cpu_id() as usize;
     let vdso_vaddr = VDSO_BASE + (cpu_id as u64) * 4096;
-    let page = x86_64::structures::paging::Page::<x86_64::structures::paging::Size4KiB>::containing_address(
+    let _page = x86_64::structures::paging::Page::<x86_64::structures::paging::Size4KiB>::containing_address(
         x86_64::VirtAddr::new(vdso_vaddr)
     );
     let current_as = crate::task::process::CURRENT_PROCESS.lock();
     if let Some(proc) = current_as.as_ref() {
-        if let Some(mut mapper) = unsafe { proc.address_space.mapper() } {
-            let entry = mapper.translate_page(page);
-            if entry.is_err() {
+        if let Some(mapper) = unsafe { proc.address_space.mapper() } {
+            let result = mapper.translate(x86_64::VirtAddr::new(vdso_vaddr));
+            if let TranslateResult::Mapped { flags, .. } = result {
+                if !flags.contains(x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE) {
+                    return Err("vDSO page not user-accessible");
+                }
+                if !flags.contains(x86_64::structures::paging::PageTableFlags::PRESENT) {
+                    return Err("vDSO page not present");
+                }
+            } else {
                 return Err("vDSO page not mapped in page table");
-            }
-            // Verify user-accessible and present
-            let entry = entry.unwrap();
-            if !entry
-                .flags()
-                .contains(x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE)
-            {
-                return Err("vDSO page not user-accessible");
-            }
-            if !entry
-                .flags()
-                .contains(x86_64::structures::paging::PageTableFlags::PRESENT)
-            {
-                return Err("vDSO page not present");
             }
         }
     }
@@ -284,27 +280,26 @@ pub fn test_vdso_seqlock_retry() -> Result<(), &'static str> {
         seq = seq2;
     };
 
-    // Verify the seqlock protocol with explicit assertions
+    // Verify the seqlock protocol with strict assertions.
+    // Any inconsistency indicates a bug in the writer/reader protocol.
     // Test time fields with seq seqlock
     let seq1 = vdso.seq.load(Ordering::Acquire);
     let _sec = vdso.monotonic_sec.load(Ordering::Relaxed);
     let seq2 = vdso.seq.load(Ordering::Acquire);
-
-    // Assert: if seq1 == seq2 and seq1 is even, read was consistent
     assert!(
         seq1 == seq2 && seq1 % 2 == 0,
-        "Expected consistent even seq for time fields"
+        "Seqlock inconsistency detected for time fields: seq1={} seq2={}",
+        seq1, seq2
     );
 
     // Test PID/CPU fields with pid_cpu_seq seqlock
     let seq1 = vdso.pid_cpu_seq.load(Ordering::Acquire);
     let _pid = vdso.pid.load(Ordering::Relaxed);
     let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
-
-    // Assert: if seq1 == seq2 and seq1 is even, read was consistent
     assert!(
         seq1 == seq2 && seq1 % 2 == 0,
-        "Expected consistent even seq for PID/CPU fields"
+        "Seqlock inconsistency detected for PID/CPU fields: seq1={} seq2={}",
+        seq1, seq2
     );
 
     // Test that odd seq would be rejected (by checking initial state is even)
@@ -540,7 +535,17 @@ pub fn test_vdso_fork_preserves_pages() -> Result<(), &'static str> {
     }
 
     // Fork a child process
+    // Set up register frame with valid user instruction pointer (regs[15] = RIP)
+    // and valid user stack pointer (regs[17] = RSP) to avoid creating a child
+    // with a zeroed continuation.
     let mut regs = [0u64; 18]; // 18 words for Thread::clone_fork
+    // User space layout constants:
+    // - Text/code: ~0x0000_7FFF_F000_0000 (below mmap region)
+    // - Stack: ~0x0000_7FFF_FFFF_E000 (near USER_MMAP_TOP - 8 KiB)
+    const USER_TEXT_BASE: u64 = 0x0000_7FFF_F000_0000;
+    const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_E000;
+    regs[15] = USER_TEXT_BASE; // Valid user RIP
+    regs[17] = USER_STACK_TOP; // Valid user RSP
     let child_pid = sys_fork(regs.as_mut_ptr());
 
     // Validate fork result using errno convention
@@ -655,13 +660,8 @@ pub fn test_vdso_auxv_sysinfo_ehdr() -> Result<(), &'static str> {
 
     // Inspect the auxiliary vector of the current process
     // The current process should have AT_SYSINFO_EHDR in its auxv
-    use crate::task::process::CURRENT_PROCESS;
-    let cur = CURRENT_PROCESS.lock();
-    if let Some(proc) = cur.as_ref() {
-        // The auxv is set up during exec; verify AT_SYSINFO_EHDR is present
-        // Note: In a real test, we'd check the actual auxv passed to userspace
-        // For now, verify the constants match
-    }
+    // Note: In a real test, we'd check the actual auxv passed to userspace
+    // For now, verify the constants match
 
     crate::serial_write("[VDSO AUXV] AT_SYSINFO_EHDR = 33 -> VDSO_BASE = 0x");
     crate::serial_write_hex(VDSO_BASE);
@@ -918,45 +918,11 @@ pub fn test_vdso_bench_getcpu() -> Result<(), &'static str> {
 /// Benchmark clock_getres() via vDSO fast-path.
 /// Target: <1 ns p50 (warns if exceeded in TCG).
 pub fn test_vdso_bench_clock_getres() -> Result<(), &'static str> {
-    use crate::memory::buddy::BuddyFrameAllocator;
     use crate::syscalls::misc::sys_clock_getres;
     use crate::syscalls::Timespec;
-    use x86_64::structures::paging::{Mapper, Page, PageTableFlags, Size4KiB};
-    use x86_64::VirtAddr;
 
-    // Allocate a userspace page for the test
-    let mut fa = BuddyFrameAllocator;
-    let frame = fa.allocate_frame().ok_or("Failed to allocate frame")?;
-    let phys_offset = *crate::memory::PHYSICAL_MEMORY_OFFSET
-        .get()
-        .ok_or("HHDM not set")?;
-    let user_vaddr = 0x7FFF_F000_0000u64; // Test userspace address
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(user_vaddr));
-
-    // Map the frame into the current address space
-    let current_as = crate::task::process::CURRENT_PROCESS.lock();
-    let mut mapper = unsafe {
-        current_as
-            .as_ref()
-            .unwrap()
-            .address_space
-            .mapper()
-            .ok_or("Mapper failed")?
-    };
-    unsafe {
-        mapper
-            .map_to(
-                page,
-                frame,
-                PageTableFlags::PRESENT
-                    | PageTableFlags::USER_ACCESSIBLE
-                    | PageTableFlags::WRITABLE,
-                &mut fa,
-            )
-            .map_err(|_| "Map failed")?
-            .flush();
-    }
-    drop(current_as);
+    // Allocate and map a userspace page for the test
+    let (frame, user_vaddr, page) = map_test_userspace_page()?;
 
     // clock_getres is a const fn, so this measures the syscall overhead
     let mut samples = alloc::vec::Vec::with_capacity(10000);
@@ -971,7 +937,7 @@ pub fn test_vdso_bench_clock_getres() -> Result<(), &'static str> {
             ((hi as u64) << 32) | (lo as u64)
         };
 
-        let mut ts = Timespec {
+        let _ts = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
@@ -996,30 +962,17 @@ pub fn test_vdso_bench_clock_getres() -> Result<(), &'static str> {
     }
 
     // Cleanup
-    let current_as = crate::task::process::CURRENT_PROCESS.lock();
-    let mut mapper = unsafe {
-        current_as
-            .as_ref()
-            .unwrap()
-            .address_space
-            .mapper()
-            .ok_or("Mapper failed")?
-    };
-    unsafe {
-        let _ = mapper.unmap(page);
-    }
-    drop(current_as);
-    crate::memory::frame_info::decrement(frame.start_address());
+    unmap_test_userspace_page(frame, page)?;
 
     if samples.is_empty() {
         return Err("All sys_clock_getres calls failed");
     }
 
     samples.sort_unstable();
-    let min = samples[0];
-    let p50 = samples[samples.len() / 2];
-    let p99 = samples[samples.len() * 99 / 100];
-    let max = samples[samples.len() - 1];
+    let _min = samples[0];
+    let _p50 = samples[samples.len() / 2];
+    let _p99 = samples[samples.len() * 99 / 100];
+    let _max = samples[samples.len() - 1];
 
     // Convert cycles to ns using calibrated frequency
     let vdso_ptr = crate::vdso::vdso_page();

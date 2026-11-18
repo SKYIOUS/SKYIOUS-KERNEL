@@ -9,14 +9,21 @@
 #include <stddef.h>
 #include "vdso_libc.h"
 
-/* Kernel serial output syscall */
+/* Kernel write syscall (SYS_WRITE = 1) - writes to fd 1 (stdout/serial) */
 static void vfs_serial_write(const char *str) {
     size_t len = 0;
     while (str[len]) len++;
-    register long syscall_nr __asm__("rax") = 400; /* SYS_serial_write */
-    register long rdi __asm__("rdi") = (long)str;
-    register long rsi __asm__("rsi") = (long)len;
-    __asm__ volatile("syscall" : : "a"(400), "D"(str), "S"(len) : "rcx", "r11", "memory");
+    register long syscall_nr __asm__("rax") = 1; /* SYS_write */
+    register long rdi __asm__("rdi") = 1; /* fd = stdout */
+    register long rsi __asm__("rsi") = (long)str;
+    register long rdx __asm__("rdx") = (long)len;
+    long ret;
+    __asm__ volatile("syscall"
+        : "=a"(ret)
+        : "a"(1), "D"(1), "S"(str), "d"(len)
+        : "rcx", "r11", "memory");
+    /* Check result - if negative, it's an error */
+    (void)ret;
 }
 
 static void vfs_serial_putc(char c) {

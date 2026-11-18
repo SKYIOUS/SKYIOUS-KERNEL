@@ -14,6 +14,7 @@
 #include "vdso_libc.h"
 
 #include <stdint.h>
+#include <stddef.h> /* for NULL */
 
 /* vDSO data structure (matches kernel's VdsoData) - internal, defined here */
 struct vdso_data {
@@ -87,16 +88,27 @@ struct vdso_data {
 static inline const struct vdso_data *vdso_page_current(void) {
     unsigned cpu = 0, node = 0;
     long ret;
+    /* getcpu syscall (309): kernel writes CPU to *cpu and node to *node.
+     * We pass pointers to local variables, not the values themselves. */
     __asm__ volatile("syscall"
-        : "=a"(ret), "=D"(cpu), "=S"(node)
-        : "a"(309), "D"(cpu), "S"(node), "d"(0), "r"(0)
-        : "rcx", "r11", "r10", "r8", "memory");
+        : "=a"(ret)
+        : "a"(309), "D"(&cpu), "S"(&node), "d"(0), "r"(0)
+        : "rcx", "r11", "memory");
+    if (ret != 0) {
+        return NULL; /* getcpu syscall failed */
+    }
     const struct vdso_data *vdso = (const struct vdso_data *)(VDSO_BASE + cpu * 4096);
     /* Check kernel-provided availability contract: seq must be even and tsc_freq_hz non-zero */
     uint64_t seq = __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE);
     uint64_t freq = __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_ACQUIRE);
     if (freq == 0 || (seq & 1)) {
         return NULL;
+    }
+    /* Validate CPU identity: the vDSO page's cpu_id must match the CPU we got from getcpu.
+     * This ensures the thread hasn't migrated to another CPU between getcpu and page access. */
+    uint32_t vdso_cpu = __atomic_load_n(&vdso->cpu_id, __ATOMIC_ACQUIRE);
+    if (vdso_cpu != cpu) {
+        return NULL; /* Migration detected; caller should retry or fall back to syscall */
     }
     return vdso;
 }
