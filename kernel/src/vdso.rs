@@ -191,8 +191,7 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
         // Initialize time fields from current tick counter and RTC
         let ticks = crate::interrupts::get_ticks();
         let total_ms = ticks * TICK_MS;
-        vdso.monotonic_sec
-            .store(total_ms / 1000, Ordering::Release);
+        vdso.monotonic_sec.store(total_ms / 1000, Ordering::Release);
         vdso.monotonic_nsec
             .store(((total_ms % 1000) * 1_000_000) as u32, Ordering::Release);
 
@@ -257,7 +256,10 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
         let cpu0_vdso = unsafe { &*(cpu0_hhdm as *const VdsoData) };
         let flags = cpu0_vdso.kernel_flags.load(Ordering::Acquire);
         for cpu_id in 1..crate::task::scheduler::MAX_CPUS {
-            let ptr = VDSO_PAGES.get(cpu_id).map(|a| a.load(Ordering::Acquire)).filter(|&v| !v.is_null());
+            let ptr = VDSO_PAGES
+                .get(cpu_id)
+                .map(|a| a.load(Ordering::Acquire))
+                .filter(|&v| !v.is_null());
             if let Some(ptr) = ptr {
                 let info = unsafe { &*ptr };
                 let hhdm_vaddr = info.hhdm_vaddr;
@@ -277,8 +279,12 @@ pub fn vdso_set_kernel_flag(flag: u64) {
     for ptr in VDSO_PAGES.iter().take(crate::task::scheduler::MAX_CPUS) {
         let ptr = ptr.load(Ordering::Acquire);
         if !ptr.is_null() {
+            // SAFETY: `ptr` was published by `init_vdso` with Release ordering,
+            // and the frame is retained for kernel lifetime (VDSO_FRAME_REFS).
             let info = unsafe { &*ptr };
             let hhdm_vaddr = info.hhdm_vaddr;
+            // SAFETY: `hhdm_vaddr` is the HHDM mapping of a frame retained by
+            // `VDSO_FRAME_REFS`, so the page remains valid and mapped.
             let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
             vdso.kernel_flags.fetch_or(flag, Ordering::Release);
         }
@@ -623,9 +629,10 @@ pub fn vdso_update_thread_cputime(cpu_id: u32, ns: u64) {
 /// Update process info in the vDSO page for the current CPU.
 /// Called from fork/clone/execve to expose process info via CLOCK_SKYIOUS_PROCESS_INFO (104).
 /// No seqlock needed — single AtomicU64 writes are atomic on x86_64.
+/// Pass None for cgroup_id to skip updating it (e.g., in IRQ context where lock is unavailable).
 pub fn vdso_update_process_info(
     cpu_id: u32,
-    cgroup_id: u64,
+    cgroup_id: Option<u64>,
     namespace_flags: u64,
     cap_effective: u64,
 ) {
@@ -646,7 +653,9 @@ pub fn vdso_update_process_info(
     let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
 
     // Atomic stores — no seqlock needed for single u64 on x86_64
-    vdso.process_cgroup_id.store(cgroup_id, Ordering::Release);
+    if let Some(cg_id) = cgroup_id {
+        vdso.process_cgroup_id.store(cg_id, Ordering::Release);
+    }
     vdso.process_namespace_flags
         .store(namespace_flags, Ordering::Release);
     vdso.process_cap_effective
@@ -866,7 +875,9 @@ pub fn vdso_check_tsc_drift() {
         crate::serial_write_hex(max_tsc);
         crate::serial_write(") drift=");
         crate::serial_write_hex(drift_ns);
-        crate::serial_write(" ns (threshold=1,000,000 ns)\n");
+        crate::serial_write(" ns (threshold=");
+        crate::serial_write_hex(DRIFT_THRESHOLD_NS);
+        crate::serial_write(" ns)\n");
         crate::serial_write("[TSC DRIFT] TSC freq=");
         crate::serial_write_hex(tsc_freq);
         crate::serial_write(" Hz\n");

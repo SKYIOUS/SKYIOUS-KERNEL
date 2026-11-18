@@ -187,12 +187,11 @@ impl PerCpuScheduler {
             // Update vDSO with process info (cgroup, namespace, capabilities)
             #[cfg(target_arch = "x86_64")]
             {
-                // Use try_lock to avoid blocking in timer-switch path; fallback to 0 on contention.
-                let cgroup_len =
-                    process.cgroup_path.try_lock().map(|s| s.len()).unwrap_or(0) as u64;
+                // Use try_lock to avoid blocking in timer-switch path; skip cgroup update on contention.
+                let cgroup_id = process.cgroup_path.try_lock().map(|s| s.len() as u64);
                 crate::vdso_update_process_info(
                     crate::smp::get_cpu_id() as u32,
-                    cgroup_len,
+                    cgroup_id,
                     0, // namespace flags - TODO: implement
                     process.creds.lock().cap_effective,
                 );
@@ -302,7 +301,7 @@ impl PerCpuScheduler {
             .as_ref()
             .and_then(|t| t.fpu_state.as_ref())
             .map(|b| b.as_ref() as *const _ as *mut crate::task::thread::FpuArea)
-            .unwrap_or(core::ptr::null_mut());
+            .unwrap_or_default();
         let (old, new) = self.prepare_switch()?;
         let cur = self.current_thread.as_ref()?;
         let fs_base = cur.fs_base;
@@ -310,7 +309,7 @@ impl PerCpuScheduler {
             .fpu_state
             .as_ref()
             .map(|b| b.as_ref() as *const _ as *const crate::task::thread::FpuArea)
-            .unwrap_or(core::ptr::null());
+            .unwrap_or_default();
         Some((old, new, fs_base, old_fpu_ptr, new_fpu))
     }
 

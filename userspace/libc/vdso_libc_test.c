@@ -10,30 +10,43 @@
 #include "vdso_libc.h"
 
 /* Kernel write syscall (SYS_WRITE = 1) - writes to fd 1 (stdout/serial) */
-static void vfs_serial_write(const char *str) {
+static int vfs_serial_write(const char *str) {
     size_t len = 0;
     while (str[len]) len++;
-    register long syscall_nr __asm__("rax") = 1; /* SYS_write */
-    register long rdi __asm__("rdi") = 1; /* fd = stdout */
-    register long rsi __asm__("rsi") = (long)str;
-    register long rdx __asm__("rdx") = (long)len;
-    long ret;
-    __asm__ volatile("syscall"
-        : "=a"(ret)
-        : "a"(1), "D"(1), "S"(str), "d"(len)
-        : "rcx", "r11", "memory");
-    /* Check result - if negative, it's an error */
-    (void)ret;
+    size_t total_written = 0;
+    while (total_written < len) {
+        size_t remaining = len - total_written;
+        register long syscall_nr __asm__("rax") = 1; /* SYS_write */
+        register long rdi __asm__("rdi") = 1; /* fd = stdout */
+        register long rsi __asm__("rsi") = (long)(str + total_written);
+        register long rdx __asm__("rdx") = (long)remaining;
+        long ret;
+        __asm__ volatile("syscall"
+            : "=a"(ret)
+            : "a"(1), "D"(1), "S"(str + total_written), "d"(remaining)
+            : "rcx", "r11", "memory");
+        if (ret < 0) {
+            return ret; /* Error */
+        }
+        if (ret == 0) {
+            return -1; /* Zero progress - avoid infinite loop */
+        }
+        total_written += ret;
+    }
+    return 0;
 }
 
-static void vfs_serial_putc(char c) {
+static int vfs_serial_putc(char c) {
     char buf[2] = {c, 0};
-    vfs_serial_write(buf);
+    return vfs_serial_write(buf);
 }
 
-static void puts_custom(const char *s) {
-    while (*s) vfs_serial_putc(*s++);
-    vfs_serial_putc('\n');
+static int puts_custom(const char *s) {
+    while (*s) {
+        int ret = vfs_serial_putc(*s++);
+        if (ret < 0) return ret;
+    }
+    return vfs_serial_putc('\n');
 }
 
 /* Exit syscall - we need this to properly exit the test */

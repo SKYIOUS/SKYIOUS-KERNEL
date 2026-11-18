@@ -253,27 +253,21 @@ int clock_gettime(int clock_id, struct timespec *tp) {
         }
 
         case 3: /* CLOCK_THREAD_CPUTIME_ID */ {
-            /* Read thread CPU time from vDSO (updated at context switch) */
-            uint64_t ns = __atomic_load_n(&vdso->thread_cputime_ns, __ATOMIC_ACQUIRE);
-            tp->tv_sec = ns / 1000000000;
-            tp->tv_nsec = ns % 1000000000;
-            return 0;
+            /* Thread CPU time via vDSO omits the current running slice.
+             * Fall back to syscall for accurate process-wide CPU time. */
+            goto fallback;
         }
 
         case 100: /* CLOCK_SKYIOUS_THREAD_CPUTIME */ {
-            /* SKYIOUS-native: thread CPU time via vDSO (same as CLOCK_THREAD_CPUTIME_ID) */
-            uint64_t ns = __atomic_load_n(&vdso->thread_cputime_ns, __ATOMIC_ACQUIRE);
-            tp->tv_sec = ns / 1000000000;
-            tp->tv_nsec = ns % 1000000000;
-            return 0;
+            /* SKYIOUS-native: thread CPU time via vDSO omits current running slice.
+             * Fall back to syscall for accurate value including current slice. */
+            goto fallback;
         }
 
         case 101: /* CLOCK_SKYIOUS_SCHED_DEADLINE */ {
-            /* SKYIOUS-native: scheduler deadline info via vDSO */
-            /* For now, return 0 if not a deadline thread */
-            tp->tv_sec = 0;
-            tp->tv_nsec = 0;
-            return 0;
+            /* SKYIOUS-native: scheduler deadline info via vDSO.
+             * Not exposed via vDSO fast path; use syscall fallback. */
+            goto fallback;
         }
 
         case 102: /* CLOCK_SKYIOUS_BOOT_NS */ {

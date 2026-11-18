@@ -2,11 +2,11 @@
 
 use crate::syscalls::process_lifecycle::sys_getpid;
 use crate::task::scheduler::MAX_CPUS;
-use crate::vdso::{vdso_page, vdso_virt_addr_for_cpu, VDSO_BASE};
 use crate::tests::benchmarks::{map_test_userspace_page, unmap_test_userspace_page};
+use crate::vdso::{vdso_page, vdso_virt_addr_for_cpu, VDSO_BASE};
 use core::sync::atomic::Ordering;
-use x86_64::structures::paging::Translate;
 use x86_64::structures::paging::mapper::TranslateResult;
+use x86_64::structures::paging::Translate;
 
 /// Verify vDSO page is mapped at the expected virtual address.
 pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
@@ -289,7 +289,8 @@ pub fn test_vdso_seqlock_retry() -> Result<(), &'static str> {
     assert!(
         seq1 == seq2 && seq1 % 2 == 0,
         "Seqlock inconsistency detected for time fields: seq1={} seq2={}",
-        seq1, seq2
+        seq1,
+        seq2
     );
 
     // Test PID/CPU fields with pid_cpu_seq seqlock
@@ -299,7 +300,8 @@ pub fn test_vdso_seqlock_retry() -> Result<(), &'static str> {
     assert!(
         seq1 == seq2 && seq1 % 2 == 0,
         "Seqlock inconsistency detected for PID/CPU fields: seq1={} seq2={}",
-        seq1, seq2
+        seq1,
+        seq2
     );
 
     // Test that odd seq would be rejected (by checking initial state is even)
@@ -539,9 +541,9 @@ pub fn test_vdso_fork_preserves_pages() -> Result<(), &'static str> {
     // and valid user stack pointer (regs[17] = RSP) to avoid creating a child
     // with a zeroed continuation.
     let mut regs = [0u64; 18]; // 18 words for Thread::clone_fork
-    // User space layout constants:
-    // - Text/code: ~0x0000_7FFF_F000_0000 (below mmap region)
-    // - Stack: ~0x0000_7FFF_FFFF_E000 (near USER_MMAP_TOP - 8 KiB)
+                               // User space layout constants:
+                               // - Text/code: ~0x0000_7FFF_F000_0000 (below mmap region)
+                               // - Stack: ~0x0000_7FFF_FFFF_E000 (near USER_MMAP_TOP - 8 KiB)
     const USER_TEXT_BASE: u64 = 0x0000_7FFF_F000_0000;
     const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_E000;
     regs[15] = USER_TEXT_BASE; // Valid user RIP
@@ -981,6 +983,10 @@ pub fn test_vdso_bench_clock_getres() -> Result<(), &'static str> {
     } else {
         2_400_000_000u64
     };
+    if tsc_freq == 0 {
+        unmap_test_userspace_page(frame, page)?;
+        return Err("TSC frequency not calibrated (tsc_freq_hz=0)");
+    }
 
     // Convert samples from cycles to ns
     let samples_ns: alloc::vec::Vec<u64> = samples
