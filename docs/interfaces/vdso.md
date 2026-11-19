@@ -68,30 +68,53 @@ vdso_page(cpu_id) = AT_SYSINFO_EHDR + cpu_id * 4096
 
 ## Supported Clocks (Fast Path)
 
-| Clock ID | Name | Fast Path |
-|----------|------|-----------|
-| 0 | CLOCK_REALTIME | ✅ TSC + cached RTC |
-| 1 | CLOCK_MONOTONIC | ✅ TSC-based |
+| Clock ID | Name | Fast Path | Notes |
+|----------|------|-----------|-------|
+| 0 | CLOCK_REALTIME | ✅ TSC + cached RTC | Interpolates from cached RTC + TSC delta |
+| 1 | CLOCK_MONOTONIC | ✅ TSC-based | TSC elapsed since `tsc_base` |
+| 7 | CLOCK_BOOTTIME | ✅ Same as MONOTONIC | Uses cached monotonic snapshot |
+| 4 | CLOCK_MONOTONIC_RAW | ✅ Same as MONOTONIC | Uses cached monotonic snapshot |
+| 102 | CLOCK_SKYIOUS_BOOT_NS | ✅ TSC + `tsc_base_origin` | Raw TSC ns since boot (preserved across TSC syncs) |
+| 103 | CLOCK_SKYIOUS_KERNEL_FLAGS | ✅ Direct atomic load | Kernel feature bitfield |
+| 104 | CLOCK_SKYIOUS_PROCESS_INFO | ✅ Direct atomic loads | Cgroup ID, namespace flags, capabilities |
 
-Other clocks fall back to syscall implementation.
+Other clocks (2=CLOCK_PROCESS_CPUTIME_ID, 3=CLOCK_THREAD_CPUTIME_ID, 100=CLOCK_SKYIOUS_THREAD_CPUTIME, 101=CLOCK_SKYIOUS_SCHED_DEADLINE) fall back to syscall because:
+- Thread CPU time (3, 100) omits the current running slice in the vDSO fast path
+- Process CPU time (2) requires kernel aggregation
+- Scheduler deadline (101) is not exposed via vDSO
 
 ## TSC Time Calculation
 
-For CLOCK_MONOTONIC:
+### CLOCK_MONOTONIC (fast path)
 ```
 elapsed = rdtsc() - tsc_base
 ns = (elapsed * tsc_mult) >> tsc_shift
+sec = ns / 1e9
+nsec = ns % 1e9
 ```
 
-For CLOCK_REALTIME:
+### CLOCK_REALTIME (fast path)
 ```
 elapsed = rdtsc() - tsc_base
 ns = (elapsed * tsc_mult) >> tsc_shift
-base_ns = cached_rtc_sec * 1e9 + cached_rtc_nsec
+base_ns = cached_rtc_sec * 1e9 + cached_rtc_nsec  // paired snapshot from get_cached_rtc()
 total_ns = base_ns + ns
+sec = total_ns / 1e9
+nsec = total_ns % 1e9
 ```
 
-TSC calibration uses Linux algorithm: `mult = (1e9 << shift) / freq`
+### CLOCK_SKYIOUS_BOOT_NS (fast path)
+```
+elapsed_boot = rdtsc() - tsc_base_origin  // preserved across TSC syncs
+ns = (elapsed_boot * tsc_mult) >> tsc_shift
+sec = ns / 1e9
+nsec = ns % 1e9
+```
+
+### Kernel interpolation (vdso_read_tsc_time)
+The kernel-side `vdso_read_tsc_time()` implements the above. For CLOCK_REALTIME it calls `get_cached_rtc()` which returns a seqlock-protected (sec, nsec) pair, ensuring the RTC snapshot is consistent. Userspace libc reads the cached `realtime_sec`/`realtime_nsec` fields directly (seqlock-protected by `seq`), which are updated by the timer tick handler at 100 Hz.
+
+TSC calibration uses Linux algorithm: `mult = (1e9 << shift) / freq` where `shift` is chosen so `mult` fits in u32.
 
 ## Userspace Access Example
 

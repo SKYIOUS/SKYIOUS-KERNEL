@@ -59,7 +59,7 @@ SKYIOUS KERNEL controls the entire software stack:
 **Decision**: Userspace libc uses vDSO fast paths as the primary ABI. Syscalls are fallback only.
 
 **Rationale**:
-- **Zero syscall overhead**: `clock_gettime`, `getpid`, `getcpu` become single memory loads (or TSC read + math) in userspace.
+- **Minimal syscall overhead**: `clock_gettime` and `getpid` become single memory loads (or TSC read + math) in userspace. `getcpu` still requires a syscall (or `rdpid` on x86) to determine the current CPU before reading the per-CPU page — this is faster than full `getpid`/`getcpu` syscalls but not zero overhead.
 - **Custom libc**: `sash`/`init` are built with vDSO fast paths as the only path. No `vdso.so`/`ld.so` dance.
 - **AT_SYSINFO_EHDR**: Points directly to vDSO base. No `dlopen`/`ld.so` resolution needed.
 
@@ -139,20 +139,22 @@ This validation ensures that a saved pointer to the original CPU's page is never
 | **Per-CPU pages** (chosen) | Zero false sharing, simple sync, NUMA-local | 4 KiB × MAX_CPUS memory | ✅ Memory is cheap; cache line ping-pong is expensive |
 | Shared page + padding | Less memory | False sharing on seqlock counters, remote NUMA access | ❌ False sharing kills scalability |
 
-### 3. TSC Sync Frequency
+### 3. TSC Sync Cadence
 
-| Interval | Drift Bound | Overhead | Decision |
-|----------|-------------|----------|----------|
-| **Every tick (10ms)** | < 100ns | 1 IPI + 100k spin loops / tick | ✅ Meets sub-100ns goal |
-| Every 100 ticks (1s) | ~1ms | 100x less IPIs | ❌ Exceeds 100ns target |
-| On-demand (drift > threshold) | Variable | Unpredictable latency | ❌ Non-deterministic |
+| Interval | Mechanism | Drift Bound | Overhead | Status |
+|----------|-----------|-------------|----------|--------|
+| **Every tick (10ms)** | IPI broadcast to all CPUs; each AP updates its `tsc_base` | ~100ns (target, not measured) | 1 IPI + up to 1,000,000 spin-loop iterations per tick for ack wait | ✅ Primary sync |
+| **Every 100 ticks (1s)** | `vdso_check_tsc_drift()` reads all online CPUs' `tsc_base` and compares | Logs warning if > 100ns | Samples taken at different times; skew bound by sampling window | ✅ Drift detection |
+| On-demand (drift > threshold) | Not implemented | Variable | Unpredictable latency | ❌ Non-deterministic |
+
+**Note**: The "Every tick" bound of <100ns is a *design target*. The diagnostic compares samples taken at different times (sequential reads of each CPU's page), so the measured difference includes sampling skew. The ack wait loop allows up to 1,000,000 iterations before timeout.
 
 ### 4. Drift Threshold
 
 | Threshold | False Positive Rate | Detection Speed | Decision |
 |-----------|---------------------|-----------------|----------|
-| 1ms (current) | Low | 1s | ⚠️ Start conservative |
-| **100ns (target)** | Medium | 10ms | ✅ Goal for production |
+| 1ms (current warning threshold) | Low | 1s | ⚠️ Start conservative |
+| **100ns (target for production)** | Medium | 10ms | ✅ Goal; labeled as target, not measured result |
 | 1μs | High | 10ms | ❌ Too noisy |
 
 ---
