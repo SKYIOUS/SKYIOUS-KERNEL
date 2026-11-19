@@ -1451,7 +1451,7 @@ pub fn sys_execve(
     crate::vdso_update_pid_cpu(process_arc.id, crate::smp::get_cpu_id() as u32);
 
     unsafe {
-        crate::task::thread::jump_to_usermode(entry, user_rsp);
+        crate::task::thread::jump_to_usermode(entry, user_rsp, None);
     }
 }
 

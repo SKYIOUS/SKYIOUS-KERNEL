@@ -71,7 +71,7 @@ fn test_mapper(
     let offset = *crate::memory::PHYSICAL_MEMORY_OFFSET
         .get()
         .ok_or("HHDM unavailable")?;
-    let pml4_frame = space._pml4_phys();
+    let pml4_frame = space.pml4_frame();
     let addr = VirtAddr::new(offset + pml4_frame.start_address().as_u64());
     // SAFETY: this test exclusively accesses the inactive space's page tables,
     // all backed by valid frames reachable through the permanent HHDM mapping.

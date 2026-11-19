@@ -56,6 +56,10 @@ vdso_virt_addr(cpu_id) = VDSO_BASE + cpu_id * 4096
 - Writer (context switch): increments to odd, writes PID/CPU, increments to even
 - Reader: same protocol as time fields
 
+### RTC Cached Sample (CACHED_RTC_SEQ)
+- Writer (RTC update thread): uses `compare_exchange_weak` with AcqRel ordering to serialize across CPUs; writes sec, nsec, and TSC timestamp atomically; increments to even
+- Reader: same protocol as time fields; reads (sec, nsec, tsc_timestamp) as a consistent triple
+
 ## Auxiliary Vector Entry
 
 ### AT_SYSINFO_EHDR (type 33)
@@ -93,9 +97,7 @@ sec = ns / 1e9
 nsec = ns % 1e9
 ```
 
-<!-- coderabbit-ai-generated:v1 -->
 
-<!-- coderabbit-ai-generated-section:v1:33d6138a442c2ab88bf37fe7c8996c03486cc0e0d70bb09de11bc45533895a3c -->
 
 ### CLOCK_REALTIME (fast path)
 ```
@@ -109,8 +111,6 @@ nsec = total_ns % 1e9
 
 
 
-<!-- /coderabbit-ai-generated:v1 -->
-
 ### CLOCK_SKYIOUS_BOOT_NS (fast path)
 ```
 elapsed_boot = rdtsc() - tsc_base_origin  // preserved across TSC syncs
@@ -120,15 +120,7 @@ nsec = ns % 1e9
 ```
 
 ### Kernel interpolation (vdso_read_tsc_time)
-The kernel-side `vdso_read_tsc_time()` implements the above.
-
-<!-- coderabbit-ai-generated:v1 -->
-
-<!-- coderabbit-ai-generated-section:v1:21a4cc63c65f9f729a75d418af154edc6a5d314adc2f770567afc98b96aac794 -->
-
-For CLOCK_REALTIME it reads a seqlock-protected RTC sample (sec, nsec, TSC timestamp) and interpolates from that timestamp. TSC synchronization does not change the cached sample or its timestamp. `get_cached_rtc()` returns the time fields of the same sample.
-
-<!-- /coderabbit-ai-generated:v1 -->
+The kernel-side `vdso_read_tsc_time()` implements the above. For CLOCK_REALTIME it reads a seqlock-protected RTC sample (sec, nsec, TSC timestamp) and interpolates from that timestamp. TSC synchronization does not change the cached sample or its timestamp. `get_cached_rtc()` returns the time fields of the same sample. The RTC seqlock now uses `compare_exchange_weak` for writer serialization across CPUs.
 
 Userspace libc reads the cached `realtime_sec`/`realtime_nsec` fields directly (seqlock-protected by `seq`), which are updated by the timer tick handler at 100 Hz.
 

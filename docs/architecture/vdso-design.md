@@ -178,16 +178,30 @@ This validation ensures that a saved pointer to the original CPU's page is never
 ```
 
 ### v2 (SKYIOUS Clocks) — Current
-Added at 0x058+:
+Added at 0x040+:
 ```
-0x058: thread_cputime_ns (8)          // CLOCK_SKYIOUS_THREAD_CPUTIME (100)
-0x060: kernel_flags (8)                // CLOCK_SKYIOUS_KERNEL_FLAGS (103)
-0x068: process_cgroup_id (8)           // CLOCK_SKYIOUS_PROCESS_INFO (104)
-0x070: process_namespace_flags (8)     // CLOCK_SKYIOUS_PROCESS_INFO (104)
-0x078: process_cap_effective (8)       // CLOCK_SKYIOUS_PROCESS_INFO (104)
+0x040: tsc_base_origin (8)             // Original TSC base at boot (preserved across syncs)
+0x048: pid_cpu_seq (8)                 // Seqlock for PID/CPU fields
+0x050: pid (8)                         // Current process ID
+0x058: cpu_id (4) + pad (4)            // Current CPU ID
+0x060: thread_cputime_ns (8)           // CLOCK_SKYIOUS_THREAD_CPUTIME (100)
+0x068: kernel_flags (8)                // CLOCK_SKYIOUS_KERNEL_FLAGS (103)
+0x070: process_cgroup_id (8)           // CLOCK_SKYIOUS_PROCESS_INFO (104)
+0x078: process_namespace_flags (8)     // CLOCK_SKYIOUS_PROCESS_INFO (104)
+0x080: process_cap_effective (8)       // CLOCK_SKYIOUS_PROCESS_INFO (104)
+0x088: tsc_sync_ack_count (4)          // TSC sync IPI acknowledgment count
+0x08C: tsc_sync_seq (4)                // TSC sync sequence number
 ```
 
-**Total used: ~120 bytes of 4096**. Plenty of room for future clocks.
+**Total used: ~144 bytes of 4096**. Plenty of room for future clocks.
+
+### CLOCK_REALTIME: RTC-Cached TSC Interpolation
+
+**Problem**: TSC synchronization (IPI broadcast every tick) updates `tsc_base` on each CPU. If `CLOCK_REALTIME` used `tsc_base` directly, every TSC sync would cause a step change in the reported wall-clock time.
+
+**Solution**: The kernel caches a consistent (RTC sec, RTC nsec, TSC timestamp) triple under a seqlock (`CACHED_RTC_SEQ`). `CLOCK_REALTIME` interpolates from this cached TSC timestamp (`cached_rtc_tsc`), not from the live `tsc_base`. TSC synchronization updates `tsc_base` but leaves the cached RTC sample unchanged, so wall-clock time is continuous across syncs.
+
+**RTC Seqlock Upgrade**: The RTC seqlock now uses `compare_exchange_weak` with `AcqRel` ordering to serialize writers across CPUs, preventing writer starvation. The cached sample includes `CACHED_RTC_TSC` (the TSC value at the moment of RTC read).
 
 ---
 

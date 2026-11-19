@@ -272,6 +272,25 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
     Ok(())
 }
 
+/// Update kernel feature flags on all CPU vDSO pages.
+/// Called by device drivers when they detect hardware (NVMe, xHCI, VirtIO-GPU, etc.).
+/// Uses atomic OR to add the flag to existing flags on all CPUs.
+pub fn vdso_set_kernel_flag(flag: u64) {
+    for ptr in VDSO_PAGES.iter().take(crate::task::scheduler::MAX_CPUS) {
+        let ptr = ptr.load(Ordering::Acquire);
+        if !ptr.is_null() {
+            // SAFETY: `ptr` was published by `init_vdso` with Release ordering,
+            // and the frame is retained for kernel lifetime (VDSO_FRAME_REFS).
+            let info = unsafe { &*ptr };
+            let hhdm_vaddr = info.hhdm_vaddr;
+            // SAFETY: `hhdm_vaddr` is the HHDM mapping of a frame retained by
+            // `VDSO_FRAME_REFS`, so the page remains valid and mapped.
+            let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
+            vdso.kernel_flags.fetch_or(flag, Ordering::Release);
+        }
+    }
+}
+
 /// Map all vDSO pages into a process's address space.
 ///
 /// Call this when creating a new process/isolate.

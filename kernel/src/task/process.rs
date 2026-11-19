@@ -238,6 +238,8 @@ pub struct Process {
     pub timerslack: core::sync::atomic::AtomicU64,
     /// Immutable cgroup membership snapshot; this kernel has no migration path.
     pub cgroup_path: String,
+    /// TLS range for userspace (start, end) - set during ELF loading
+    pub tls_range: crate::sync::IrqSafeMutex<Option<(u64, u64)>>,
     // ─── Sub-structs (single Mutex each) ─────────────────────────
     pub memory: Mutex<ProcessMemory>,
     pub files: Mutex<ProcessFiles>,
@@ -509,6 +511,7 @@ impl Process {
             child_subreaper: core::sync::atomic::AtomicBool::new(false),
             timerslack: core::sync::atomic::AtomicU64::new(0),
             cgroup_path: String::from("/"),
+            tls_range: crate::sync::IrqSafeMutex::new(None),
             // Sub-structs
             memory: Mutex::new(ProcessMemory {
                 brk: 0,
