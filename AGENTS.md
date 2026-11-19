@@ -221,7 +221,7 @@ workspace root `Cargo.toml` owns `[profile.release]`; `kernel/Cargo.toml`'s own
 will be ignored"), so kernel-specific profile settings do not apply.
 
 ## Workspace structure
-- `Cargo.toml` (root) — workspace members: kernel, builder, 19 crates (gdt NOT in workspace)
+- `Cargo.toml` (root) — workspace members: kernel, builder, 17 crates (gdt NOT in workspace)
 - `kernel/` — the kernel (its own Cargo.toml, .cargo/config.toml, linker.ld)
 - `crates/` — 17 workspace crates (memory, crypto, hal, limine, apic, types, arch, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci, verified); gdt NOT in workspace; sync is kernel-internal
 - `builder/` — Python scripts for Limine-bootable GPT disk images
@@ -234,9 +234,15 @@ will be ignored"), so kernel-specific profile settings do not apply.
 Completed this session:
 - Massive docs cleanup: corrected contradictions, exaggerations, and inaccuracies across AGENTS.md, README.md, ROADMAP.md, MODULES.md, tested-working.md, CONTEXT.md, crates/README.md
 - Identified actual crate count: 17 workspace crates (+ gdt not in workspace, sync is kernel-internal), not 18 or 22
-- Corrected syscall count: ~225 syscall numbers defined, ~223 handlers, ~225 dispatch entries, ~40 fully functional
+- Corrected syscall count: ~130 syscalls dispatched, ~40 fully functional (not 207/225)
 - Corrected feature claims: KASLR relocations broken, SMP 4/8 hangs, hypervisor/ASH/io_uring/Compositor are stubs/partial
 - Updated architecture summary to reflect verified reality from issues.md and tested-working.md
+
+## Session log (2026-11-19)
+Completed this session (docs reconciliation):
+- Fixed remaining contradictions in PLAN.md, ROADMAP.md, README.md, AGENTS.md, CONTEXT.md
+- Updated all docs to match verified facts from issues.md and tested-working.md
+- Archived roadmap-revised/ to docs/archive/roadmap-revised-2026-11-19/
 
 ## Conventions & gotchas
 - **Allocator**: `linked_list_allocator` crate, heap at fixed address. `alloc_error_handler` triggers OOM killer.

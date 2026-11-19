@@ -104,7 +104,7 @@ Tier 3+ (depends on Tier 0-2):
 
 ## Kernel Integration Status
 
-The kernel depends on all 19 workspace crates. Remaining integration work:
+The kernel depends on all 17 workspace crates. Remaining integration work:
 
 1. **`objects/`** — kernel defines `ObjectTypeId`, `ObjectHeader`, `KernelObject` (crate extracted, kernel must re-export)
 2. **`task/`** — kernel defines `Process`, `VfsNode`, `Credentials` (crate scaffolded)

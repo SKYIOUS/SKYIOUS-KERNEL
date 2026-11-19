@@ -8,7 +8,7 @@ Every claim here was reproduced on this machine; re-verify after any change.
 ## Verified This Session (2026-11-07)
 
 - **Docs corrected:** AGENTS.md, README.md, ROADMAP.md, MODULES.md, CONTEXT.md, crates/README.md — all contradictions, exaggerations, and inaccuracies fixed against verified reality from issues.md and code inspection.
-- **Actual crate count:** 19 workspace crates + gdt (not in workspace) — not 18, not 22.
+- **Actual crate count:** 17 workspace crates (+ gdt not in workspace, sync kernel-internal) — not 18, not 22.
 - **Actual syscall count:** ~130 dispatched, ~40 fully functional — not 207.
 - **KASLR status:** Obfuscation only — relocations never applied (issues.md A-6).
 - **SMP status:** SMP-1/2 work; SMP-4 hangs after tests; SMP-8 hangs early boot (issues.md S-1, S-2).
@@ -64,10 +64,10 @@ Every claim here was reproduced on this machine; re-verify after any change.
 
 ## Verified This Session (2026-09-21)
 
-- Full codebase inspection: 344 Rust files, ~82,266 LOC across kernel + 19 crates
+- Full codebase inspection: 344 Rust files, ~82,266 LOC across kernel + 17 workspace crates
 - 216 kernel src files, ~130 syscalls dispatched, 134 selftests (146 after the T-00/K-03 tests landed — see 2026-09-23)
 - New subsystems confirmed: hypervisor (16 files — STUB), ebpf (7 — feature-gated), gui (15 — partial), compositor (8 — 10 dead fns), crypto (3), objects (12), ash (8 — feature-gated, handlers unreachable)
-- 19 workspace crates (+ gdt not in workspace): sync, memory, crypto, hal, limine, apic, types, arch, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci, verified
+- 17 workspace crates (+ gdt not in workspace, sync kernel-internal): memory, crypto, hal, limine, apic, types, arch, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci, verified
 - Feature flags: default = smp,net,ext4,iommu; all-features = smp,net,ext4,uhci,ash,hypervisor,verification,gpu
 - CI (rewritten 2026-10-21): 7 PR jobs in `ci.yml` (format, host tests, host clippy, kernel build matrix, kernel clippy, QEMU self-test, QEMU boot regression); `quality.yml` adds 5 gates (AGENTS.md policy, actionlint/ShellCheck/PowerShell parse, rustdoc `-D warnings`, gitleaks, `cargo audit`); `nightly.yml` adds cross-arch (FAILS), SMP 2, audit-profile, boot-stress and `cargo audit`; `t00-demo.yml` proves harness FAIL/PANIC/TIMEOUT detection on demand; `ci-pages.yml` renders run/job/artifact/TAP data (plus a whole-report ZIP download) to GitHub Pages `/ci/` after every watched workflow on `master`
 - Build: `cargo build` in kernel/ → 0 errors; `cargo clippy -- -D warnings` → clean
@@ -127,7 +127,7 @@ See `docs/syscall-classification.md` for honest syscall classification.
 
 ### Build Status (2026-10-23)
 
-- **All 19 workspace crates**: Build clean (release mode) ✅
+- **All 17 workspace crates**: Build clean (release mode) ✅
 - **Kernel debug build**: 0 compilation errors ✅
 - **Kernel release build**: 0 compilation errors ✅
 - **Kernel release link**: 0 duplicate symbols ✅

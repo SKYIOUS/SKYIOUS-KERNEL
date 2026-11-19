@@ -12,7 +12,7 @@
 **Status:** Partially Complete
 
 ### What Exists
-- Selftest framework with TAP output (127 tests — up from 116)
+- Selftest framework with TAP output (228 tests — count in `tests/selftest_count.txt`)
 - QEMU boot test scripts (boot_stress_100.ps1)
 - Clippy + build verification
 - **NEW: Process lifecycle tests** (9 tests: process creation, fd inheritance, emulation mode, process table, address space, CoW clone, try_lock safety, fork cycle, fd clone+restore)
@@ -27,10 +27,10 @@
 - CI integration (tests run manually, not on every commit)
 
 ### Evidence
-- Selftests: 128/128 pass (kernel-internal, not syscall-level, includes fork/exec/exit stress test)
+- Selftests: 228/228 pass (kernel-internal, not syscall-level, includes fork/exec/exit stress test)
 - No crash after selftests complete (selftest loop bug + page fault handler fixed)
 - User copy fault handling: copy_from_user/copy_to_user aborts on bad pointers
-- Boot: 4/4 consecutive boots succeed
+- Boot: 25/25 SMP-1 boots succeed, 8/8 SMP-2 succeed
 - Build: clean with 0 new warnings
 
 ---
@@ -70,7 +70,7 @@
 - 4-level page tables ✓
 - CoW fork ✓
 - Demand paging ✓
-- KASLR ✓
+- KASLR (obfuscation only — relocations never applied, A-6) ✓
 - TLB flush on CoW ✓
 
 ### Not Working / Untested
@@ -212,7 +212,7 @@ SMP is claimed but the global lock architecture means adding more CPUs makes thi
 ### Working
 - SMEP/SMAP (hardware features, just CR4 bits)
 - Stack canary (__stack_chk_guard)
-- KASLR (30-bit entropy)
+- KASLR (obfuscation only — relocations never applied, A-6)
 
 ### Stub / Not Enforced
 - Capabilities (data structures exist, enforcement minimal)

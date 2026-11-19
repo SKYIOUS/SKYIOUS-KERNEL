@@ -6,14 +6,14 @@
 <div align="center">
 
 [![Rust](https://img.shields.io/badge/Rust-nightly-dea584?logo=rust&logoColor=fff)](https://www.rust-lang.org)
-[![Arch](https://img.shields.io/badge/arch-x86__64%20%7C%20aarch64-blueviolet)](#)
+[![Arch](https://img.shields.io/badge/arch-x86__64%20%7C%20aarch64%20(BUILD%20FAILS)-blueviolet)](#)
 [![License: SSL](https://img.shields.io/badge/license-SSL-green)](#)
 [![Syscalls](https://img.shields.io/badge/syscalls-~40%20working-blue)](#)
 [![Drivers](https://img.shields.io/badge/drivers-7%20working-orange)](#)
 [![Filesystems](https://img.shields.io/badge/fs-2%20supported-yellowgreen)](#)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero-brightgreen)](#)
-[![Boot](https://img.shields.io/badge/boot-96%25%20success-brightgreen)](#)
+[![Boot](https://img.shields.io/badge/boot-SMP--1%2F2%20verified-brightgreen)](#)
 
 </div>
 
@@ -55,15 +55,15 @@
 |--------|--------|
 | Clippy | **Zero warnings** (86 lints suppressed — see `#![allow(...)]` in main.rs) |
 | Build | Debug + Release pass clean |
-| QEMU boot | Boots to login prompt. Fork/exec works. All 4 services start. |
-| Init process | **PID 1 launches**, forks 4 services, all exec successfully |
-| Source lines | ~82,266 across 344 files (kernel + 19 crates) |
+| QEMU boot | **25/25 SMP-1 boots pass, 8/8 SMP-2 pass** (tested-working.md) |
+| Init process | **PID 1 launches**, forks services, all exec successfully |
+| Source lines | ~82,266 across 344 files (kernel + 17 workspace crates) |
 | Working syscalls | ~40 fully functional (not 207 — see `docs/syscall-classification.md`) |
 | Working drivers | 7 (serial, PS/2 kbd/mouse, E1000, VirtIO-block, PC speaker, RTC) |
 | Supported filesystems | 2 (TarFS for initrd, DevFS for /dev) |
 | Real hardware | **Never tested** — QEMU only |
-| SMP | SMP-1/2 work; SMP-4 hangs after tests; SMP-8 hangs in early boot (see issues.md S-1, S-2) |
-| Selftests | **all pass** (count pinned in `tests/selftest_count.txt`; eBPF, SkyFS, ext2, memory, scheduler, stress, fuzzer, benchmarks, process lifecycle, negative-path, T-00 harness) |
+| SMP | SMP-1/2 work; **SMP-4 hangs after tests; SMP-8 hangs early boot** (S-1, S-2 OPEN) |
+| Selftests | **228/228 pass** (count in `tests/selftest_count.txt`) |
 | Memory leak audit | **PASS** (no leak detected) |
 
 ### Benchmark Results (QEMU/TCG, 512M RAM, 2400 MHz TSC)
@@ -91,12 +91,12 @@
 
 | Metric | Value |
 |--------|-------|
-| Lines of Rust | ~82,266 across 344 files (kernel + 19 crates) |
+| Lines of Rust | ~82,266 across 344 files (kernel + 17 workspace crates) |
 | Syscalls | ~40 fully functional, ~34 with limitations, ~10 experimental, ~15 stubs, ~31 unsupported (see `docs/syscall-classification.md`) |
 | Filesystems | 2 supported (TarFS, DevFS), 7 experimental/partial (SkyFS, ext2, ext4, FAT32, ramfs, ctlfs, FUSE) |
 | Drivers | 7 working (serial, PS/2, E1000, VirtIO-block, PC speaker, RTC), 12+ experimental/partial |
 | Kernel threads | Preemptive stride scheduler + async executor |
-| Supported archs | x86_64 (QEMU only, never tested on real hardware), aarch64 (build fails — x86_64-only asm in kernel sync), riscv64 (not built in CI) |
+| Supported archs | x86_64 (QEMU only, never tested on real hardware), aarch64 (BUILD FAILS at vahi-sync P-1), riscv64 (not built in CI) |
 | Boot protocol | UEFI via Limine bootloader |
 | Crates | 17 workspace crates (+ gdt not in workspace, sync is kernel-internal) |
 
@@ -139,15 +139,18 @@
 │                                                              │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────┐  │
 │  │Scheduler │ │ Memory   │ │ VFS      │ │ Network        │  │
-│  │Stride    │ │ Buddy    │ │ 9 FS     │ │ smoltcp        │  │
-│  │+FIFO/RR  │ │ Slab     │ │ mounts   │ │ E1000/VirtIO   │  │
+│  │Stride    │ │ Buddy    │ │ 2 supp., │ │ smoltcp        │  │
+│  │+FIFO/RR  │ │ Slab     │ │ 7 exp.   │ │ E1000/VirtIO   │  │
 │  └──────────┘ └──────────┘ └──────────┘ └────────────────┘  │
 │                                                              │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────┐  │
 │  │Drivers   │ │ GUI      │ │ eBPF     │ │ Security       │  │
-│  │27 devs   │ │Compositor│ │ VM+Ver   │ │ SMEP/UMIP/     │  │
-│  │PCI/ACPI  │ │30 FPS    │ │ JIT+Map  │ │ CFI/Caps       │  │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────────┘  │
+│  │7 work,   │ │Compositor│ │ VM+Ver   │ │ SMEP/UMIP/     │  │
+│  │12+ exp.  │ │(partial) │ │ JIT+Map  │ │ CFI/Caps       │  │
+│  │PCI/ACPI  │ │10 dead   │ │(feat-gtd)│ │(stubs: sec-    │  │
+│  │          │ │fns)      │ │          │ │ comp, land-    │  │
+│  └──────────┘ └──────────┘ └──────────┘ │ lock, CFI)     │  │
+│                                          └────────────────┘  │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              Arch Abstraction (Arch trait)           │   │
@@ -215,7 +218,7 @@ kernel_main()
 
 ### Syscalls
 
-The kernel dispatches ~225 syscalls with Linux-compatible numbering (~223 handlers, ~40 fully functional). The syscall ABI is **frozen for v1.0**.
+The kernel dispatches ~130 syscalls with Linux-compatible numbering (~40 fully functional). The syscall ABI is **frozen for v1.0**.
 
 | Category | Syscalls |
 |----------|----------|
@@ -371,8 +374,10 @@ The kernel dispatches ~225 syscalls with Linux-compatible numbering (~223 handle
 
 ### GUI Compositor
 
+> **⚠️ Status: PARTIAL** — 10 dead functions including its two core entry points (`composite_frame`, `composite_window`). Not usable as a desktop.
+
 ```
-- Compositing window manager at 30 FPS
+- Compositing window manager at 30 FPS (claimed; unverified)
 - Per-window framebuffers with damage tracking
 - Mouse cursor with hardware cursor support
 - Keyboard input routing
@@ -385,11 +390,11 @@ The kernel dispatches ~225 syscalls with Linux-compatible numbering (~223 handle
 - Clipboard support
 ```
 
-**Status: PARTIAL** — 10 dead functions including its two core entry points (`composite_frame`, `composite_window`). Not usable as a desktop.
-
 The GUI is rendered entirely in kernel space — no userspace display server needed. Each window gets a dedicated framebuffer, and the compositor blends them together at 30 FPS.
 
 ### eBPF
+
+> **Status: PARTIAL, feature-gated**
 
 ```
 - In-kernel eBPF virtual machine (feature-gated)
@@ -683,8 +688,6 @@ SKYIOUS KERNEL/
 │   ├── ipc/                       # vahi-ipc: IPC primitives (120 lines, scaffolded)
 │   ├── pci/                       # vahi-pci: PCI subsystem (150 lines, scaffolded)
 │   └── verified/                  # vahi-verified: Verified proofs (feature-gated, optional dep)
-│   ├── pci/                       # vahi-pci: PCI subsystem (150 lines, scaffolded)
-│   └── verified/                  # vahi-verified: Verified proofs (feature-gated, optional dep)
 ├── builder/                       # Bootimage builder crate
 │   └── src/main.rs                # Creates UEFI bootable disk image
 ├── SkyOS/                         # Initrd staging
@@ -758,7 +761,7 @@ docs/
 ├── decisions/       # ADRs — binding architectural decisions
 ├── interfaces/      # Public API contracts (memory, task, vfs, drivers, syscalls)
 ├── invariants/      # Cross-module invariants
-├── roadmap-revised/ # Milestones, testing strategy, CI/CD, technical debt
+├── roadmap-revised/ # ARCHIVED → docs/archive/roadmap-revised-2026-11-19/
 ├── verified-proofs/ # Proofs for scheduler, locks, journal, interrupts
 └── *.md             # PLAN, ROADMAP, security, filesystem, ASH, harness docs
 ```
