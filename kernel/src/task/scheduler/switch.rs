@@ -187,8 +187,8 @@ impl PerCpuScheduler {
             // Update vDSO with process info (cgroup, namespace, capabilities)
             #[cfg(target_arch = "x86_64")]
             {
-                // Use try_lock to avoid blocking in timer-switch path; skip cgroup update on contention.
-                let cgroup_id = process.cgroup_path.try_lock().map(|s| s.len() as u64);
+                // Membership is immutable, so publishing it cannot contend in IRQ context.
+                let cgroup_id = Some(process.cgroup_path.len() as u64);
                 crate::vdso_update_process_info(
                     crate::smp::get_cpu_id() as u32,
                     cgroup_id,

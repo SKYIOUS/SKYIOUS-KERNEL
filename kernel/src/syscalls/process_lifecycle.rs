@@ -731,9 +731,9 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
     };
     // Cgroup pids.max check
     {
-        let cg_path = parent.cgroup_path.lock();
+        let cg_path = &parent.cgroup_path;
         let hierarchy = crate::syscalls::cgroup::cgroup_ensure();
-        if let Some(cg) = hierarchy.find_cgroup(&cg_path) {
+        if let Some(cg) = hierarchy.find_cgroup(cg_path) {
             if !cg.can_fork() {
                 return errno::Errno::EAGAIN as u64;
             }
@@ -800,7 +800,7 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
     #[cfg(target_arch = "x86_64")]
     crate::vdso_update_process_info(
         crate::smp::get_cpu_id() as u32,
-        Some(parent.cgroup_path.lock().len() as u64),
+        Some(parent.cgroup_path.len() as u64),
         0, // namespace flags - TODO: implement
         parent.creds.lock().cap_effective,
     );
@@ -1441,7 +1441,7 @@ pub fn sys_execve(
     #[cfg(target_arch = "x86_64")]
     crate::vdso_update_process_info(
         crate::smp::get_cpu_id() as u32,
-        Some(process_arc.cgroup_path.lock().len() as u64),
+        Some(process_arc.cgroup_path.len() as u64),
         0, // namespace flags - TODO: implement
         process_arc.creds.lock().cap_effective,
     );

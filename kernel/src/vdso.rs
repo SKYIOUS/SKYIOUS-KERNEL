@@ -272,25 +272,6 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
     Ok(())
 }
 
-/// Update kernel feature flags on all CPU vDSO pages.
-/// Called by device drivers when they detect hardware (NVMe, xHCI, VirtIO-GPU, etc.).
-/// Uses atomic OR to add the flag to existing flags on all CPUs.
-pub fn vdso_set_kernel_flag(flag: u64) {
-    for ptr in VDSO_PAGES.iter().take(crate::task::scheduler::MAX_CPUS) {
-        let ptr = ptr.load(Ordering::Acquire);
-        if !ptr.is_null() {
-            // SAFETY: `ptr` was published by `init_vdso` with Release ordering,
-            // and the frame is retained for kernel lifetime (VDSO_FRAME_REFS).
-            let info = unsafe { &*ptr };
-            let hhdm_vaddr = info.hhdm_vaddr;
-            // SAFETY: `hhdm_vaddr` is the HHDM mapping of a frame retained by
-            // `VDSO_FRAME_REFS`, so the page remains valid and mapped.
-            let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
-            vdso.kernel_flags.fetch_or(flag, Ordering::Release);
-        }
-    }
-}
-
 /// Map all vDSO pages into a process's address space.
 ///
 /// Call this when creating a new process/isolate.
@@ -408,27 +389,48 @@ fn read_tsc() -> (u32, u32) {
     (lo, hi)
 }
 
-/// Seqlock for cached RTC to prevent torn reads between sec and nsec.
+/// Seqlock for the RTC sample and its counter timestamp.
 static CACHED_RTC_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Cached RTC seconds, updated by vdso_update_cached_rtc().
 static CACHED_RTC_SEC: AtomicU64 = AtomicU64::new(0);
 /// Cached RTC nanoseconds, updated by vdso_update_cached_rtc().
 static CACHED_RTC_NSEC: AtomicU64 = AtomicU64::new(0);
+static CACHED_RTC_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// Update cached RTC time (called from kernel thread/workqueue, NOT from IRQ).
-/// Does CMOS I/O — must NOT be called from interrupt context.
+/// Takes the RTC lock; must NOT be called from interrupt context.
 pub fn vdso_update_cached_rtc() {
-    let (sec, nsec) = crate::drivers::rtc::read_realtime();
     // Disable local interrupts to prevent IRQ handler from spinning on odd seq
     let flags = crate::interrupts::save_and_cli();
 
-    // Start write: increment seq to odd (writer entering)
-    let seq = CACHED_RTC_SEQ.fetch_add(1, Ordering::Release) + 1;
+    // Serialize samplers across CPUs so a delayed writer cannot replace a newer sample.
+    let mut previous = CACHED_RTC_SEQ.load(Ordering::Acquire);
+    loop {
+        if previous & 1 != 0 {
+            core::hint::spin_loop();
+            previous = CACHED_RTC_SEQ.load(Ordering::Acquire);
+            continue;
+        }
+        match CACHED_RTC_SEQ.compare_exchange_weak(
+            previous,
+            previous.wrapping_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(seq) => previous = seq,
+        }
+    }
+    let seq = previous.wrapping_add(1);
+    let (sec, nsec) = crate::drivers::rtc::read_realtime();
+    let (lo, hi) = read_tsc();
+    let sampled_tsc = ((hi as u64) << 32) | lo as u64;
     debug_assert!(seq % 2 == 1, "RTC seqlock seq should be odd during write");
 
     // Write data with Release ordering
     CACHED_RTC_SEC.store(sec as u64, Ordering::Release);
     CACHED_RTC_NSEC.store(nsec as u32 as u64, Ordering::Release);
+    CACHED_RTC_TSC.store(sampled_tsc, Ordering::Release);
 
     // End write: increment seq to even (writer done)
     CACHED_RTC_SEQ.store(seq + 1, Ordering::Release);
@@ -438,8 +440,12 @@ pub fn vdso_update_cached_rtc() {
 }
 
 /// Get cached RTC time (for vDSO updates). Lock-free, IRQ-safe.
-/// Returns (0, 0) if a concurrent write is in progress.
 pub fn get_cached_rtc() -> (u64, u32) {
+    let (sec, nsec, _) = cached_rtc_sample();
+    (sec, nsec)
+}
+
+fn cached_rtc_sample() -> (u64, u32, u64) {
     loop {
         let seq = CACHED_RTC_SEQ.load(Ordering::Acquire);
         if seq & 1 != 0 {
@@ -448,9 +454,10 @@ pub fn get_cached_rtc() -> (u64, u32) {
         }
         let sec = CACHED_RTC_SEC.load(Ordering::Acquire);
         let nsec = CACHED_RTC_NSEC.load(Ordering::Acquire) as u32;
+        let sampled_tsc = CACHED_RTC_TSC.load(Ordering::Acquire);
         let seq2 = CACHED_RTC_SEQ.load(Ordering::Acquire);
         if seq == seq2 {
-            return (sec, nsec);
+            return (sec, nsec, sampled_tsc);
         }
         // Writer was active, retry
     }
@@ -497,13 +504,10 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
     } else if clock_id == 0 {
         // CLOCK_REALTIME
         // CLOCK_REALTIME - use RTC base + TSC delta
-        let (rt_sec, rt_nsec) = get_cached_rtc();
+        let (rt_sec, rt_nsec, sampled_tsc) = cached_rtc_sample();
         let (lo, hi) = read_tsc();
         let tsc_now = ((hi as u64) << 32) | lo as u64;
-        let tsc_base = vdso.tsc_base.load(Ordering::Acquire);
-        let tsc_mult = vdso.tsc_mult;
-        let tsc_shift = vdso.tsc_shift;
-        let elapsed = tsc_now.wrapping_sub(tsc_base);
+        let elapsed = tsc_now.wrapping_sub(sampled_tsc);
         let ns = ((elapsed as u128 * tsc_mult as u128) >> tsc_shift) as u64;
         let base_ns = rt_sec * 1_000_000_000 + rt_nsec as u64;
         let total_ns = base_ns + ns;
@@ -521,6 +525,34 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
     } else {
         (0, 0)
     }
+}
+
+/// Changing the synchronization base must not change the cached RTC sample's age.
+#[cfg(feature = "self_test")]
+pub(crate) fn test_realtime_sample_base() -> Result<(), &'static str> {
+    let flags = crate::interrupts::save_and_cli();
+    let ptr = vdso_page();
+    if ptr.is_null() {
+        crate::interrupts::restore_if(flags);
+        return Err("vDSO unavailable for RTC regression");
+    }
+    // SAFETY: the permanent HHDM vDSO mapping remains live during this test.
+    let vdso = unsafe { &*ptr };
+    if vdso.tsc_freq_hz.load(Ordering::Acquire) == 0 {
+        crate::interrupts::restore_if(flags);
+        return Err("RTC regression requires a calibrated TSC");
+    }
+    let before = vdso_read_tsc_time(0);
+    let saved = vdso.tsc_base.swap(0, Ordering::AcqRel);
+    let after = vdso_read_tsc_time(0);
+    vdso.tsc_base.store(saved, Ordering::Release);
+    crate::interrupts::restore_if(flags);
+    let before_ns = before.0 as u128 * 1_000_000_000 + before.1 as u128;
+    let after_ns = after.0 as u128 * 1_000_000_000 + after.1 as u128;
+    if before_ns == 0 || after_ns < before_ns || after_ns - before_ns > 100_000_000 {
+        return Err("RTC interpolation changed with the TSC synchronization base");
+    }
+    Ok(())
 }
 
 /// Timer tick interval in milliseconds (100 Hz = 10ms)

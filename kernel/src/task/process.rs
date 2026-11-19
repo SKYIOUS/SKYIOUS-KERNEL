@@ -236,8 +236,8 @@ pub struct Process {
     pub child_subreaper: core::sync::atomic::AtomicBool,
     /// Timer slack value in nanoseconds
     pub timerslack: core::sync::atomic::AtomicU64,
-    /// Cgroup path (e.g. "/", "/system.slice/docker.service")
-    pub cgroup_path: crate::sync::IrqSafeMutex<String>,
+    /// Immutable cgroup membership snapshot; this kernel has no migration path.
+    pub cgroup_path: String,
     // ─── Sub-structs (single Mutex each) ─────────────────────────
     pub memory: Mutex<ProcessMemory>,
     pub files: Mutex<ProcessFiles>,
@@ -508,7 +508,7 @@ impl Process {
             dumpable: core::sync::atomic::AtomicBool::new(true),
             child_subreaper: core::sync::atomic::AtomicBool::new(false),
             timerslack: core::sync::atomic::AtomicU64::new(0),
-            cgroup_path: crate::sync::IrqSafeMutex::new(String::from("/")),
+            cgroup_path: String::from("/"),
             // Sub-structs
             memory: Mutex::new(ProcessMemory {
                 brk: 0,

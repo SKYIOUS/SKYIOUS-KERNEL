@@ -93,15 +93,23 @@ sec = ns / 1e9
 nsec = ns % 1e9
 ```
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:33d6138a442c2ab88bf37fe7c8996c03486cc0e0d70bb09de11bc45533895a3c -->
+
 ### CLOCK_REALTIME (fast path)
 ```
-elapsed = rdtsc() - tsc_base
+elapsed = rdtsc() - cached_rtc_tsc
 ns = (elapsed * tsc_mult) >> tsc_shift
-base_ns = cached_rtc_sec * 1e9 + cached_rtc_nsec  // paired snapshot from get_cached_rtc()
+base_ns = cached_rtc_sec * 1e9 + cached_rtc_nsec  // paired with cached_rtc_tsc under the RTC seqlock
 total_ns = base_ns + ns
 sec = total_ns / 1e9
 nsec = total_ns % 1e9
 ```
+
+
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ### CLOCK_SKYIOUS_BOOT_NS (fast path)
 ```
@@ -112,7 +120,17 @@ nsec = ns % 1e9
 ```
 
 ### Kernel interpolation (vdso_read_tsc_time)
-The kernel-side `vdso_read_tsc_time()` implements the above. For CLOCK_REALTIME it calls `get_cached_rtc()` which returns a seqlock-protected (sec, nsec) pair, ensuring the RTC snapshot is consistent. Userspace libc reads the cached `realtime_sec`/`realtime_nsec` fields directly (seqlock-protected by `seq`), which are updated by the timer tick handler at 100 Hz.
+The kernel-side `vdso_read_tsc_time()` implements the above.
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:21a4cc63c65f9f729a75d418af154edc6a5d314adc2f770567afc98b96aac794 -->
+
+For CLOCK_REALTIME it reads a seqlock-protected RTC sample (sec, nsec, TSC timestamp) and interpolates from that timestamp. TSC synchronization does not change the cached sample or its timestamp. `get_cached_rtc()` returns the time fields of the same sample.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+Userspace libc reads the cached `realtime_sec`/`realtime_nsec` fields directly (seqlock-protected by `seq`), which are updated by the timer tick handler at 100 Hz.
 
 TSC calibration uses Linux algorithm: `mult = (1e9 << shift) / freq` where `shift` is chosen so `mult` fits in u32.
 

@@ -2,7 +2,6 @@
 
 use crate::syscalls::process_lifecycle::sys_getpid;
 use crate::task::scheduler::MAX_CPUS;
-use crate::tests::benchmarks::{map_test_userspace_page, unmap_test_userspace_page};
 use crate::vdso::{vdso_page, vdso_virt_addr_for_cpu, VDSO_BASE};
 use core::sync::atomic::Ordering;
 use x86_64::structures::paging::mapper::TranslateResult;
@@ -26,25 +25,29 @@ pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
     // Inspect the userspace page-table entry to verify mapping
     let cpu_id = crate::smp::get_cpu_id() as usize;
     let vdso_vaddr = VDSO_BASE + (cpu_id as u64) * 4096;
-    let _page = x86_64::structures::paging::Page::<x86_64::structures::paging::Size4KiB>::containing_address(
-        x86_64::VirtAddr::new(vdso_vaddr)
-    );
-    let current_as = crate::task::process::CURRENT_PROCESS.lock();
-    if let Some(proc) = current_as.as_ref() {
-        if let Some(mapper) = unsafe { proc.address_space.mapper() } {
-            let result = mapper.translate(x86_64::VirtAddr::new(vdso_vaddr));
-            if let TranslateResult::Mapped { flags, .. } = result {
-                if !flags.contains(x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE) {
-                    return Err("vDSO page not user-accessible");
-                }
-                if !flags.contains(x86_64::structures::paging::PageTableFlags::PRESENT) {
-                    return Err("vDSO page not present");
-                }
-            } else {
-                return Err("vDSO page not mapped in page table");
-            }
+    crate::tests::mqueue_contract::with_user_page(|_| {
+        let current = crate::task::process::CURRENT_PROCESS.lock();
+        let proc = current.as_ref().ok_or("mapping fixture has no process")?;
+        if x86_64::registers::control::Cr3::read().0 != proc.address_space._pml4_phys() {
+            return Err("mapping fixture address space is not active");
         }
-    }
+        // SAFETY: the fixture activated this space and holds it live until return.
+        let mut mapper =
+            unsafe { proc.address_space.mapper() }.ok_or("mapping fixture mapper unavailable")?;
+        crate::vdso::vdso_map_into(&mut mapper, &mut crate::memory::buddy::BuddyFrameAllocator)
+            .map_err(|_| "mapping fixture vDSO mapping failed")?;
+        match mapper.translate(x86_64::VirtAddr::new(vdso_vaddr)) {
+            TranslateResult::Mapped { flags, .. }
+                if flags.contains(
+                    x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
+                        | x86_64::structures::paging::PageTableFlags::PRESENT,
+                ) =>
+            {
+                Ok(())
+            }
+            _ => Err("vDSO page lacks a present userspace mapping"),
+        }
+    })??;
 
     // Verify seq starts at 0 (even = consistent)
     let seq = vdso.seq.load(Ordering::Acquire);
@@ -380,6 +383,7 @@ pub fn test_vdso_seqlock_concurrent_reads() -> Result<(), &'static str> {
 
 /// Verify seqlock read protocol with RTC cached time.
 pub fn test_vdso_rtc_seqlock() -> Result<(), &'static str> {
+    crate::vdso::test_realtime_sample_base()?;
     // Read cached RTC multiple times
     let mut last_sec = 0u64;
     let mut consistent_reads = 0;
@@ -508,122 +512,196 @@ pub fn test_vdso_pid_cpu_seqlock() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Verify vDSO pages are preserved across fork.
-/// After fork, child should have access to same vDSO pages with correct PID.
+// This position-independent payload is copied into an executable user page.
+// Both fork continuations stay in ring 3; a pipe transports the child's verdict.
+// Poll readiness before read: the pipe's empty-read path halts inside the syscall.
+core::arch::global_asm!(
+    ".pushsection .rodata",
+    ".global vdso_fork_payload_start",
+    ".global vdso_fork_payload_end",
+    "vdso_fork_payload_start:",
+    "sub rsp, 256",
+    "mov rdi, rsp",
+    "mov eax, 22",
+    "syscall",
+    "test rax, rax",
+    "jnz 9f",
+    "mov eax, 57",
+    "syscall",
+    "test rax, rax",
+    "js 9f",
+    "jz 2f",
+    "mov r13d, 10000",
+    "mov byte ptr [rsp + 20], 0",
+    "6:",
+    "mov edi, [rsp]",
+    "lea rsi, [rsp + 20]",
+    "lea rdx, [rsp + 32]",
+    "mov r10d, 4096",
+    "mov eax, 262",
+    "syscall",
+    "test rax, rax",
+    "jnz 9f",
+    "cmp qword ptr [rsp + 32 + {stat_size}], 1",
+    "je 7f",
+    "dec r13d",
+    "jz 9f",
+    "mov eax, 24",
+    "syscall",
+    "jmp 6b",
+    "7:",
+    "mov edi, [rsp]",
+    "lea rsi, [rsp + 16]",
+    "mov edx, 1",
+    "xor eax, eax",
+    "syscall",
+    "cmp rax, 1",
+    "jne 9f",
+    "cmp byte ptr [rsp + 16], 0",
+    "jne 9f",
+    "xor edi, edi",
+    "jmp 8f",
+    "2:",
+    "mov eax, 39",
+    "syscall",
+    "mov rbx, {vdso}",
+    "3:",
+    "mov rcx, [rbx + {pid_seq}]",
+    "test cl, 1",
+    "jnz 3b",
+    "mov rdx, [rbx + {pid}]",
+    "cmp rcx, [rbx + {pid_seq}]",
+    "jne 3b",
+    "cmp rax, rdx",
+    "jne 5f",
+    "4:",
+    "mov rcx, [rbx + {seq}]",
+    "test cl, 1",
+    "jnz 4b",
+    "mov edx, [rbx + {nsec}]",
+    "cmp rcx, [rbx + {seq}]",
+    "jne 4b",
+    "cmp edx, 1000000000",
+    "jae 5f",
+    "mov byte ptr [rsp + 16], 0",
+    "jmp 12f",
+    "5:",
+    "mov byte ptr [rsp + 16], 1",
+    "12:",
+    "mov edi, [rsp + 4]",
+    "lea rsi, [rsp + 16]",
+    "mov edx, 1",
+    "mov eax, 1",
+    "syscall",
+    "cmp rax, 1",
+    "jne 9f",
+    "xor edi, edi",
+    "jmp 8f",
+    "9:",
+    "mov edi, 1",
+    "8:",
+    "mov eax, 60",
+    "syscall",
+    "ud2",
+    "vdso_fork_payload_end:",
+    ".popsection",
+    stat_size = const core::mem::offset_of!(crate::vfs::Stat, st_size),
+    vdso = const VDSO_BASE,
+    pid_seq = const core::mem::offset_of!(crate::vdso::VdsoData, pid_cpu_seq),
+    pid = const core::mem::offset_of!(crate::vdso::VdsoData, pid),
+    seq = const core::mem::offset_of!(crate::vdso::VdsoData, seq),
+    nsec = const core::mem::offset_of!(crate::vdso::VdsoData, monotonic_nsec),
+);
+
+extern "C" fn vdso_fork_user_entry() -> ! {
+    // SAFETY: the test maps executable code and a writable stack before enqueueing.
+    unsafe { crate::task::thread::jump_to_usermode(0x2000_0000, 0x2000_2000) }
+}
+
+/// A mapped userspace parent forks, waits for a pipe report, and verifies it.
 pub fn test_vdso_fork_preserves_pages() -> Result<(), &'static str> {
-    use crate::syscalls::process_lifecycle::{sys_fork, sys_getpid};
-
-    let vdso_ptr = vdso_page();
-    if vdso_ptr.is_null() {
-        return Err("vDSO page not initialized");
+    // The synchronous selftest runner isolates synthetic scheduler fixtures.
+    // Scheduling here would hang in schedule() while that isolation is active.
+    if crate::task::scheduler::SCHED_QUIESCE.load(Ordering::Acquire)
+        || crate::task::scheduler::this_cpu_sched()
+            .lock()
+            .current_thread
+            .is_none()
+    {
+        return Err("userspace fork fixture requires a running scheduler");
     }
-    // SAFETY: vdso_page returns valid pointer if not null
-    let vdso = unsafe { &*vdso_ptr };
 
-    // Read current PID via vDSO
-    let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
-    let parent_pid = loop {
-        let pid = vdso.pid.load(Ordering::Relaxed);
-        let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
-        if seq == seq2 && seq % 2 == 0 {
-            break pid;
+    use crate::memory::{buddy::BuddyFrameAllocator, paging::AddressSpace};
+    use crate::task::{process::Process, thread::Thread};
+    use alloc::sync::Arc;
+    use x86_64::{registers::control::Cr3, structures::paging::Page, VirtAddr};
+
+    unsafe extern "C" {
+        static vdso_fork_payload_start: u8;
+        static vdso_fork_payload_end: u8;
+    }
+    let mut fa = BuddyFrameAllocator;
+    let mut space = AddressSpace::new(&mut fa).ok_or("fork fixture allocation failed")?;
+    let (previous, flags) = Cr3::read();
+    // SAFETY: space is live and inherits the current kernel mappings.
+    unsafe { space.activate() };
+    let setup = (|| {
+        for va in [0x2000_0000, 0x2000_1000] {
+            space
+                .map_user_page(Page::containing_address(VirtAddr::new(va)), &mut fa)
+                .ok_or("fork fixture page mapping failed")?;
         }
-        seq = seq2;
-    };
-
-    // Verify parent PID matches syscall
-    if parent_pid != sys_getpid() {
-        return Err("parent vDSO PID mismatch with syscall");
-    }
-
-    // Fork a child process
-    // Set up register frame with valid user instruction pointer (regs[15] = RIP)
-    // and valid user stack pointer (regs[17] = RSP) to avoid creating a child
-    // with a zeroed continuation.
-    let mut regs = [0u64; 18]; // 18 words for Thread::clone_fork
-                               // User space layout constants:
-                               // - Text/code: ~0x0000_7FFF_F000_0000 (below mmap region)
-                               // - Stack: ~0x0000_7FFF_FFFF_E000 (near USER_MMAP_TOP - 8 KiB)
-    const USER_TEXT_BASE: u64 = 0x0000_7FFF_F000_0000;
-    const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_E000;
-    regs[15] = USER_TEXT_BASE; // Valid user RIP
-    regs[17] = USER_STACK_TOP; // Valid user RSP
-    let child_pid = sys_fork(regs.as_mut_ptr());
-
-    // Validate fork result using errno convention
-    if child_pid == u64::MAX || child_pid > u32::MAX as u64 {
-        // sys_fork returns errno on error (high bit set or specific values)
-        // On success, returns child PID
-        return Err("fork failed");
-    }
-
-    if child_pid == 0 {
-        // In child - verify vDSO still works and PID updated
-        let vdso_ptr = vdso_page();
-        if vdso_ptr.is_null() {
-            return Err("child: vDSO page not initialized");
+        // SAFETY: space is active and uniquely accessed during setup.
+        let mut mapper = unsafe { space.mapper() }.ok_or("fork fixture mapper unavailable")?;
+        crate::vdso::vdso_map_into(&mut mapper, &mut fa)
+            .map_err(|_| "fork fixture vDSO mapping failed")?;
+        let start = core::ptr::addr_of!(vdso_fork_payload_start);
+        let len = core::ptr::addr_of!(vdso_fork_payload_end) as usize - start as usize;
+        if len > 4096 {
+            return Err("fork payload exceeds code page");
         }
-        let vdso = unsafe { &*vdso_ptr };
-
-        // Verify PID is updated to child's PID
-        let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
-        let child_vdso_pid = loop {
-            let pid = vdso.pid.load(Ordering::Relaxed);
-            let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
-            if seq == seq2 && seq % 2 == 0 {
-                break pid;
-            }
-            seq = seq2;
-        };
-
-        if child_vdso_pid != crate::syscalls::process_lifecycle::sys_getpid() {
-            crate::serial_write("[VDSO FORK] child PID mismatch\n");
-            return Err("child: vDSO PID mismatch");
+        // SAFETY: linker symbols delimit immutable payload bytes in this image.
+        let code = unsafe { core::slice::from_raw_parts(start, len) };
+        crate::tests::mqueue_contract::user_write(0x2000_0000, code)
+    })();
+    // SAFETY: restores the live CR3 saved before fixture setup.
+    unsafe { Cr3::write(previous, flags) };
+    if let Err(err) = setup {
+        space.destroy();
+        return Err(err);
+    }
+    let process = Arc::new(Process::new(Process::next_id(), None, space));
+    process.add_vma(crate::task::process::Vma {
+        start: 0x2000_0000,
+        end: 0x2000_2000,
+        flags: x86_64::structures::paging::PageTableFlags::PRESENT
+            | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
+            | x86_64::structures::paging::PageTableFlags::WRITABLE,
+        _name: "vdso fork fixture",
+        file_handle: None,
+        file_offset: 0,
+        is_shared: false,
+        shm_id: None,
+    });
+    Process::register(process.clone());
+    let mut thread = Thread::new(vdso_fork_user_entry);
+    thread.process = Some(process.clone());
+    // A fixed CPU makes VDSO_BASE the child's selected per-CPU page.
+    thread.affinity_mask = 1;
+    crate::task::scheduler::spawn_thread(thread);
+    let start = crate::interrupts::get_ticks();
+    while process.exit_code.load(Ordering::Acquire) == i32::MIN {
+        if crate::interrupts::get_ticks().wrapping_sub(start) > 1000 {
+            return Err("userspace fork fixture timed out");
         }
-
-        // Verify time still readable
-        let mut seq = vdso.seq.load(Ordering::Acquire);
-        let (_sec, _nsec) = loop {
-            let sec = vdso.monotonic_sec.load(Ordering::Relaxed);
-            let nsec = vdso.monotonic_nsec.load(Ordering::Relaxed);
-            let seq2 = vdso.seq.load(Ordering::Acquire);
-            if seq == seq2 && seq % 2 == 0 {
-                break (sec, nsec);
-            }
-            seq = seq2;
-        };
-
-        crate::serial_write("[VDSO FORK] child vDSO OK\n");
-        return Ok(());
+        crate::task::scheduler::schedule();
     }
-
-    // Parent continues here - give child time to run and exit
-    // Note: We can't easily wait for child in selftest context, so we just
-    // verify parent vDSO still works after fork
-
-    // Verify parent vDSO still works
-    let vdso_ptr = vdso_page();
-    if vdso_ptr.is_null() {
-        return Err("parent vDSO page lost after fork");
+    crate::task::process::PROCESS_TABLE
+        .lock()
+        .retain(|id, child| *id != process.id && child.parent_id != Some(process.id));
+    if process.exit_code.load(Ordering::Acquire) != 0 {
+        return Err("userspace parent or child rejected fork vDSO state");
     }
-    let vdso = unsafe { &*vdso_ptr };
-
-    // Verify parent PID unchanged
-    let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
-    let parent_vdso_pid = loop {
-        let pid = vdso.pid.load(Ordering::Relaxed);
-        let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
-        if seq == seq2 && seq % 2 == 0 {
-            break pid;
-        }
-        seq = seq2;
-    };
-
-    if parent_vdso_pid != parent_pid {
-        return Err("parent PID changed after fork");
-    }
-
-    crate::serial_write("[VDSO FORK] parent vDSO OK\n");
     Ok(())
 }
 
@@ -923,90 +1001,85 @@ pub fn test_vdso_bench_clock_getres() -> Result<(), &'static str> {
     use crate::syscalls::misc::sys_clock_getres;
     use crate::syscalls::Timespec;
 
-    // Allocate and map a userspace page for the test
-    let (frame, user_vaddr, page) = map_test_userspace_page()?;
-
-    // clock_getres is a const fn, so this measures the syscall overhead
-    let mut samples = alloc::vec::Vec::with_capacity(10000);
-    for _ in 0..10000 {
-        let start = {
-            let (lo, hi) = {
-                let lo: u32;
-                let hi: u32;
-                unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
-                (lo, hi)
+    crate::tests::mqueue_contract::with_user_page(|user_vaddr| {
+        // clock_getres is a const fn, so this measures the syscall overhead
+        let mut samples = alloc::vec::Vec::with_capacity(10000);
+        for _ in 0..10000 {
+            let start = {
+                let (lo, hi) = {
+                    let lo: u32;
+                    let hi: u32;
+                    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+                    (lo, hi)
+                };
+                ((hi as u64) << 32) | (lo as u64)
             };
-            ((hi as u64) << 32) | (lo as u64)
-        };
 
-        let _ts = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let ts_ptr = user_vaddr as *mut Timespec;
-        let ret = sys_clock_getres(1, ts_ptr);
-        if ret != 0 {
-            // If syscall fails, we can't measure - skip
-            continue;
+            let _ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let ts_ptr = user_vaddr as *mut Timespec;
+            let ret = sys_clock_getres(1, ts_ptr);
+            if ret != 0 {
+                // If syscall fails, we can't measure - skip
+                continue;
+            }
+
+            let end = {
+                let (lo, hi) = {
+                    let lo: u32;
+                    let hi: u32;
+                    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
+                    (lo, hi)
+                };
+                ((hi as u64) << 32) | (lo as u64)
+            };
+            let elapsed = end.wrapping_sub(start);
+            samples.push(elapsed);
         }
 
-        let end = {
-            let (lo, hi) = {
-                let lo: u32;
-                let hi: u32;
-                unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi) };
-                (lo, hi)
-            };
-            ((hi as u64) << 32) | (lo as u64)
+        if samples.is_empty() {
+            return Err("All sys_clock_getres calls failed");
+        }
+
+        samples.sort_unstable();
+        let _min = samples[0];
+        let _p50 = samples[samples.len() / 2];
+        let _p99 = samples[samples.len() * 99 / 100];
+        let _max = samples[samples.len() - 1];
+
+        // Convert cycles to ns using calibrated frequency
+        let vdso_ptr = crate::vdso::vdso_page();
+        let tsc_freq = if !vdso_ptr.is_null() {
+            unsafe { &*vdso_ptr }.tsc_freq_hz.load(Ordering::Acquire)
+        } else {
+            2_400_000_000u64
         };
-        let elapsed = end.wrapping_sub(start);
-        samples.push(elapsed);
-    }
+        if tsc_freq == 0 {
+            return Err("TSC frequency not calibrated (tsc_freq_hz=0)");
+        }
 
-    // Cleanup
-    unmap_test_userspace_page(frame, page)?;
+        // Convert samples from cycles to ns
+        let samples_ns: alloc::vec::Vec<u64> = samples
+            .iter()
+            .map(|&c| ((c as u128 * 1_000_000_000u128) / tsc_freq as u128) as u64)
+            .collect();
 
-    if samples.is_empty() {
-        return Err("All sys_clock_getres calls failed");
-    }
+        let min = *samples_ns.iter().min().unwrap_or(&0);
+        let p50 = samples_ns[samples_ns.len() / 2];
+        let p99 = samples_ns[samples_ns.len() * 99 / 100];
+        let max = *samples_ns.iter().max().unwrap_or(&0);
 
-    samples.sort_unstable();
-    let _min = samples[0];
-    let _p50 = samples[samples.len() / 2];
-    let _p99 = samples[samples.len() * 99 / 100];
-    let _max = samples[samples.len() - 1];
-
-    // Convert cycles to ns using calibrated frequency
-    let vdso_ptr = crate::vdso::vdso_page();
-    let tsc_freq = if !vdso_ptr.is_null() {
-        unsafe { &*vdso_ptr }.tsc_freq_hz.load(Ordering::Acquire)
-    } else {
-        2_400_000_000u64
-    };
-    if tsc_freq == 0 {
-        unmap_test_userspace_page(frame, page)?;
-        return Err("TSC frequency not calibrated (tsc_freq_hz=0)");
-    }
-
-    // Convert samples from cycles to ns
-    let samples_ns: alloc::vec::Vec<u64> = samples
-        .iter()
-        .map(|&c| ((c as u128 * 1_000_000_000u128) / tsc_freq as u128) as u64)
-        .collect();
-
-    let min = *samples_ns.iter().min().unwrap_or(&0);
-    let p50 = samples_ns[samples_ns.len() / 2];
-    let p99 = samples_ns[samples_ns.len() * 99 / 100];
-    let max = *samples_ns.iter().max().unwrap_or(&0);
-
-    crate::serial_write(&alloc::format!("[BENCH]   vdso_bench:clock_getres  min {:>8} ns  p50 {:>8} ns  p99 {:>8} ns  max {:>8} ns  ({} iters)\n",
+        crate::serial_write(&alloc::format!("[BENCH]   vdso_bench:clock_getres  min {:>8} ns  p50 {:>8} ns  p99 {:>8} ns  max {:>8} ns  ({} iters)\n",
         min, p50, p99, max, samples_ns.len()));
 
-    if p99 > 1 {
-        crate::serial_write("[BENCH] WARN: p99 exceeds target (1 ns) - TCG expected\n");
-    }
+        if p99 > 1 {
+            crate::serial_write("[BENCH] WARN: p99 exceeds target (1 ns) - TCG expected\n");
+        }
 
-    Ok(())
+        Ok(())
+    })?
 }
 
 /// Benchmark CLOCK_SKYIOUS_BOOT_NS via vDSO.
