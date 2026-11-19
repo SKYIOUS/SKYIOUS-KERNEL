@@ -984,7 +984,6 @@ pub fn test_vdso_bench_clock_getres() -> Result<(), &'static str> {
         2_400_000_000u64
     };
     if tsc_freq == 0 {
-        unmap_test_userspace_page(frame, page)?;
         return Err("TSC frequency not calibrated (tsc_freq_hz=0)");
     }
 
