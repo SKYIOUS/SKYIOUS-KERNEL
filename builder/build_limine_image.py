@@ -968,13 +968,16 @@ void _start(void) {
         init_bin = os.path.join(tmpdir, 'init')
         print(f"  Compiling init with {compiler}...")
         ret = subprocess.run([
-            compiler, '-static', '-Os', '-Wall', '-Wextra',
+            compiler, '-static', '-nostartfiles', '-Os', '-Wall', '-Wextra',
             '-I', userspace_dir,
             init_c, vdso_libc_a, '-o', init_bin
         ], capture_output=True, text=True)
         if ret.returncode != 0:
             print(f"  ERROR: Failed to compile init: {ret.stderr}")
             return b''
+        # On Windows, gcc may produce .exe
+        if not os.path.exists(init_bin) and os.path.exists(init_bin + '.exe'):
+            init_bin = init_bin + '.exe'
         print(f"  Created {init_bin}")
         
         # Create minimal sash.c (simple shell)
@@ -1105,13 +1108,16 @@ void _start(void) {
         sash_bin = os.path.join(tmpdir, 'sash')
         print(f"  Compiling sash with {compiler}...")
         ret = subprocess.run([
-            compiler, '-static', '-Os', '-Wall', '-Wextra',
+            compiler, '-static', '-nostartfiles', '-Os', '-Wall', '-Wextra',
             '-I', userspace_dir,
             sash_c, vdso_libc_a, '-o', sash_bin
         ], capture_output=True, text=True)
         if ret.returncode != 0:
             print(f"  ERROR: Failed to compile sash: {ret.stderr}")
             return b''
+        # On Windows, gcc may produce .exe
+        if not os.path.exists(sash_bin) and os.path.exists(sash_bin + '.exe'):
+            sash_bin = sash_bin + '.exe'
         print(f"  Created {sash_bin}")
         
         # Create vdso.conf

@@ -61,7 +61,7 @@ pub fn cfi_init() {
     let mut targets = CFI_STATE.static_targets.lock();
 
     // Register core kernel functions that are called via transmuted pointers.
-// SMP entry point — called when APs boot
+    // SMP entry point — called when APs boot
     #[cfg(feature = "smp")]
     register_static(
         &mut targets,

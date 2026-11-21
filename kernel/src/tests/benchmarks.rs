@@ -750,7 +750,7 @@ fn stress_clock_getres_consistency() -> Result<(), &'static str> {
             let ts = unsafe { core::ptr::read_volatile(ts_ptr) };
 
             let expected_ns = match clock_id {
-                5 | 6 => 1_000_000, // coarse clocks
+                5 | 6 => 10_000_000, // coarse clocks (10ms)
                 _ => 1,             // high-res clocks
             };
 

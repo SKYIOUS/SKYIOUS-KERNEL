@@ -182,7 +182,20 @@ jobs:
             --image bootimage-vahi_kernel.bin \
             --timeout 540 \
             --log qemu_test.log
-        continue-on-error: true
+          if ! grep -q "TAP version" qemu_test.log; then
+            echo "ERROR: No TAP output found"
+            exit 1
+          fi
+          if grep -q "not ok.*vdso" qemu_test.log; then
+            echo "ERROR: VDSO tests failed"
+            exit 1
+          fi
+          VDSO_PASS=$(grep -c "ok.*vdso" qemu_test.log || true)
+          if [ "$VDSO_PASS" -lt 25 ]; then
+            echo "ERROR: Only $VDSO_PASS vDSO tests passed (expected 25+)"
+            exit 1
+          fi
+          echo "VDSO tests: $VDSO_PASS passed" 
 
       - name: Upload QEMU test logs
         uses: actions/upload-artifact@v4
@@ -293,7 +306,7 @@ jobs:
       - name: Check for unsafe blocks without SAFETY comments
         run: |
           echo "Checking for unsafe blocks without SAFETY comments..."
-          UNSAFE_WITHOUT_SAFETY=$(grep -r "unsafe {" --include="*.rs" kernel/src | grep -v "// SAFETY:" | grep -v "//SAFETY:" | wc -l)
+          UNSAFE_WITHOUT_SAFETY=$(grep -r "unsafe {" --include="*.rs" kernel/src | grep -v "// SAFETY:" | grep -vc "//SAFETY:" || true)
           if [ "$UNSAFE_WITHOUT_SAFETY" -gt 0 ]; then
             echo "WARNING: Found $UNSAFE_WITHOUT_SAFETY unsafe blocks without SAFETY comments"
             grep -r "unsafe {" --include="*.rs" kernel/src | grep -v "// SAFETY:" | grep -v "//SAFETY:" | head -20
@@ -305,13 +318,13 @@ jobs:
         run: |
           echo "Checking for prohibited patterns..."
           # Check for println! usage in kernel
-          PRINTLN_COUNT=$(grep -r "println!" --include="*.rs" kernel/src | grep -v "test" | grep -v "// " | wc -l)
+          PRINTLN_COUNT=$(grep -r "println!" --include="*.rs" kernel/src | grep -v "test" | grep -vc "// " || true)
           if [ "$PRINTLN_COUNT" -gt 0 ]; then
             echo "WARNING: Found $PRINTLN_COUNT println! calls in kernel (should use serial_write)"
             grep -r "println!" --include="*.rs" kernel/src | grep -v "test" | grep -v "// " | head -10
           fi
           # Check for std imports
-          STD_IMPORTS=$(grep -r "use std::" --include="*.rs" kernel/src | grep -v "test" | wc -l)
+          STD_IMPORTS=$(grep -r "use std::" --include="*.rs" kernel/src | grep -v "test" | grep -vc "test" || true)
           if [ "$STD_IMPORTS" -gt 0 ]; then
             echo "ERROR: Found std imports in kernel (kernel is #![no_std])"
             grep -r "use std::" --include="*.rs" kernel/src | grep -v "test"

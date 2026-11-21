@@ -102,22 +102,6 @@ static inline void vdso_log_once(const char *msg) {
     }
 }
 
-/* Check if vDSO page is mapped and accessible using mincore */
-static inline int vdso_is_mapped(const struct vdso_data *vdso) {
-    /* Use mincore syscall (27) to check if page is resident */
-    unsigned char vec;
-    register long syscall_nr __asm__("rax") = 27; /* SYS_mincore */
-    register long rdi __asm__("rdi") = (long)vdso;
-    register long rsi __asm__("rsi") = 4096;
-    register long rdx __asm__("rdx") = (long)&vec;
-    long ret;
-    __asm__ volatile("syscall"
-        : "=a"(ret)
-        : "a"(27), "D"(vdso), "S"(4096), "d"(&vec)
-        : "rcx", "r11", "memory");
-    if (ret != 0) return 0;
-    return (vec & 1) != 0;
-}
 
 static inline const struct vdso_data *vdso_page_current(void) {
     unsigned cpu = 0, node = 0;
@@ -132,10 +116,6 @@ static inline const struct vdso_data *vdso_page_current(void) {
         return NULL; /* getcpu syscall failed */
     }
     const struct vdso_data *vdso = (const struct vdso_data *)(VDSO_BASE + cpu * 4096);
-    /* Check if vDSO page is mapped */
-    if (!vdso_is_mapped(vdso)) {
-        return NULL;
-    }
     /* Check kernel-provided availability contract: seq must be even and tsc_freq_hz non-zero */
     uint64_t seq = __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE);
     uint64_t freq = __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_ACQUIRE);

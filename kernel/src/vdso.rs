@@ -523,10 +523,15 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
         let (rt_sec, rt_nsec, sampled_tsc) = cached_rtc_sample();
         let (lo, hi) = read_tsc();
         let tsc_now = ((hi as u64) << 32) | lo as u64;
-        let elapsed = tsc_now.wrapping_sub(sampled_tsc);
+        // Clamp negative delta (reader TSC behind writer TSC)
+        let elapsed = if tsc_now >= sampled_tsc {
+            tsc_now.wrapping_sub(sampled_tsc)
+        } else {
+            0
+        };
         let ns = ((elapsed as u128 * tsc_mult as u128) >> tsc_shift) as u64;
         let base_ns = rt_sec * 1_000_000_000 + rt_nsec as u64;
-        let total_ns = base_ns + ns;
+        let total_ns = base_ns.saturating_add(ns);
         let sec = total_ns / 1_000_000_000;
         let nsec = (total_ns % 1_000_000_000) as u32;
         (sec, nsec)
@@ -539,23 +544,20 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
         let nsec = (ns % 1_000_000_000) as u32;
         (sec, nsec)
     } else if clock_id == 5 {
-        // CLOCK_REALTIME_COARSE - 10ms resolution from ticks (no seqlock needed)
-        // Same as MONOTONIC_COARSE + cached RTC offset
-        let ticks = crate::interrupts::get_ticks();
-        let total_ms = ticks * 10;
-        let sec = total_ms / 1000;
-        let nsec = ((total_ms % 1000) * 1_000_000) as u32;
-        // Add cached RTC offset for realtime
+        // CLOCK_REALTIME_COARSE - 10ms resolution from cached RTC (no seqlock needed)
+        // Return cached RTC sample at 10ms granularity
         let (rt_sec, rt_nsec) = get_cached_rtc();
-        let total_ns = rt_sec * 1_000_000_000 + rt_nsec as u64 + sec * 1_000_000_000 + nsec as u64;
-        (total_ns / 1_000_000_000, (total_ns % 1_000_000_000) as u32)
+        let coarse_nsec = (rt_nsec as u64 / 10_000_000) * 10_000_000;
+        (rt_sec, coarse_nsec as u32)
     } else if clock_id == 6 {
         // CLOCK_MONOTONIC_COARSE - 10ms resolution from ticks (no seqlock needed)
         let ticks = crate::interrupts::get_ticks();
-        let total_ms = ticks * 10;
+        let total_ms = ticks * TICK_MS;
         let sec = total_ms / 1000;
         let nsec = ((total_ms % 1000) * 1_000_000) as u32;
-        (sec, nsec)
+        // Round to 10ms
+        let coarse_nsec = (nsec as u64 / 10_000_000) * 10_000_000;
+        (sec, coarse_nsec as u32)
     } else {
         (0, 0)
     }
