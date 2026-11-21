@@ -89,8 +89,7 @@ pub fn sys_sendmmsg(fd: u64, mmsg_ptr: *mut mmsghdr, vlen: u64, flags: u64) -> u
         let mut sent_count: usize = 0;
         let mut sockets = crate::net::SOCKETS.lock();
 
-        for i in 0..vlen {
-            let msg = &mut mmsg[i];
+        for msg in mmsg.iter_mut().take(vlen) {
             let hdr = msg.msg_hdr;
 
             if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
@@ -274,8 +273,7 @@ pub fn sys_recvmmsg(
         let mut recv_count: usize = 0;
         let mut sockets = crate::net::SOCKETS.lock();
 
-        for i in 0..vlen {
-            let msg = &mut mmsg[i];
+        for msg in mmsg.iter_mut().take(vlen) {
             let hdr = msg.msg_hdr;
 
             if hdr.msg_iov.is_null() || hdr.msg_iovlen == 0 || hdr.msg_iovlen > IOV_MAX {
@@ -333,7 +331,7 @@ pub fn sys_recvmmsg(
                         }
                         if unsafe {
                             user_access::copy_to_user(
-                                iov.iov_base as *mut u8,
+                                iov.iov_base,
                                 &recv_buf[written..written + chunk],
                             )
                         }

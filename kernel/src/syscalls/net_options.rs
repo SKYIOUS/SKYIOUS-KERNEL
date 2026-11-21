@@ -330,7 +330,7 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                         let to_copy = core::cmp::min(iov.iov_len, n - offset);
                         if unsafe {
                             user_access::copy_to_user(
-                                iov.iov_base as *mut u8,
+                                iov.iov_base,
                                 &recv_buf[offset..offset + to_copy],
                             )
                         }
@@ -346,11 +346,10 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                     // Update msg_namelen for unix socket (write empty sockaddr_un)
                     if !hdr.msg_name.is_null() {
                         let empty_len: u32 = 2;
-                        let _ = unsafe {
-                            user_access::copy_to_user(hdr.msg_name as *mut u8, &[1u8, 0u8])
-                        };
+                        let _ = unsafe { user_access::copy_to_user(hdr.msg_name, &[1u8, 0u8]) };
                         let namelen_ptr = (msg as usize + 8) as *mut u32;
                         let _ = unsafe {
+                            #[allow(clippy::unnecessary_cast)]
                             user_access::copy_to_user(
                                 namelen_ptr as *mut u8,
                                 &empty_len.to_ne_bytes(),
@@ -360,6 +359,7 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                     let flags_ptr =
                         (msg as usize + core::mem::offset_of!(msghdr, msg_flags)) as *mut i32;
                     let _ = unsafe {
+                        #[allow(clippy::unnecessary_cast)]
                         user_access::copy_to_user(flags_ptr as *mut u8, &0i32.to_ne_bytes())
                     };
                     return n as u64;
@@ -449,10 +449,7 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                 }
                 let to_copy = core::cmp::min(iov.iov_len, n - offset);
                 if unsafe {
-                    user_access::copy_to_user(
-                        iov.iov_base as *mut u8,
-                        &recv_buf[offset..offset + to_copy],
-                    )
+                    user_access::copy_to_user(iov.iov_base, &recv_buf[offset..offset + to_copy])
                 }
                 .is_err()
                 {
@@ -473,11 +470,10 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                             sockaddr[..2].copy_from_slice(&AF_INET.to_ne_bytes());
                             sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
                             sockaddr[4..8].copy_from_slice(ipv4.as_bytes());
-                            let _ = unsafe {
-                                user_access::copy_to_user(hdr.msg_name as *mut u8, &sockaddr)
-                            };
+                            let _ = unsafe { user_access::copy_to_user(hdr.msg_name, &sockaddr) };
                             let namelen_ptr = (msg as usize + 8) as *mut u32;
                             let _ = unsafe {
+                                #[allow(clippy::unnecessary_cast)]
                                 user_access::copy_to_user(
                                     namelen_ptr as *mut u8,
                                     &sa_len.to_ne_bytes(),
@@ -490,11 +486,10 @@ pub fn sys_recvmsg(sockfd: i64, msg: *mut msghdr, flags: i32) -> u64 {
                             sockaddr[..2].copy_from_slice(&AF_INET6.to_ne_bytes());
                             sockaddr[2..4].copy_from_slice(&ep.port.to_be_bytes());
                             sockaddr[8..24].copy_from_slice(ipv6.as_bytes());
-                            let _ = unsafe {
-                                user_access::copy_to_user(hdr.msg_name as *mut u8, &sockaddr)
-                            };
+                            let _ = unsafe { user_access::copy_to_user(hdr.msg_name, &sockaddr) };
                             let namelen_ptr = (msg as usize + 8) as *mut u32;
                             let _ = unsafe {
+                                #[allow(clippy::unnecessary_cast)]
                                 user_access::copy_to_user(
                                     namelen_ptr as *mut u8,
                                     &sa_len.to_ne_bytes(),
@@ -683,10 +678,8 @@ pub fn sys_getsockopt(
                             return 0;
                         }
                         SO_PEERCRED => {
-                            let (pid, uid, gid) = match crate::net::unix::getpeercred_unix(handle) {
-                                Ok(v) => v,
-                                Err(_) => (0u32, 0u32, 0u32),
-                            };
+                            let (pid, uid, gid) =
+                                crate::net::unix::getpeercred_unix(handle).unwrap_or_default();
                             #[repr(C)]
                             struct ucred {
                                 pid: u32,

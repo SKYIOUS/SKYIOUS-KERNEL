@@ -420,20 +420,19 @@ pub fn tnum_verify(insns: &[EbpfInsn]) -> bool {
                 }
             },
             BPF_LD => {
-                if insn.code & BPF_SIZE_MASK == BPF_DW && insn.code & 0xe0 == 0x00 {
-                    if cur + 1 >= insns.len() {
-                        return false;
-                    }
-                    let n = &insns[cur + 1];
-                    let imm64 = (insn.imm as u64) | ((n.imm as u64) << 32);
-                    let mut post = pre.clone();
-                    post.regs[insn.dst_reg as usize] = RegState::exact(imm64);
-                    let next = cur + 2;
-                    if next < insns.len() {
-                        push_merged(&mut state_map, &mut worklist, next, &post);
-                    }
-                } else {
+                if insn.code & BPF_SIZE_MASK != BPF_DW
+                    || insn.code & 0xe0 != 0x00
+                    || cur + 1 >= insns.len()
+                {
                     return false;
+                }
+                let n = &insns[cur + 1];
+                let imm64 = (insn.imm as u64) | ((n.imm as u64) << 32);
+                let mut post = pre.clone();
+                post.regs[insn.dst_reg as usize] = RegState::exact(imm64);
+                let next = cur + 2;
+                if next < insns.len() {
+                    push_merged(&mut state_map, &mut worklist, next, &post);
                 }
             }
             _ => return false,

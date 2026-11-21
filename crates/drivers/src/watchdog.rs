@@ -49,9 +49,16 @@ pub fn check() {
                     elapsed
                 ));
                 loop {
+                    #[cfg(target_arch = "x86_64")]
                     unsafe {
                         core::arch::asm!("hlt");
                     }
+                    #[cfg(target_arch = "aarch64")]
+                    unsafe {
+                        core::arch::asm!("wfe");
+                    }
+                    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                    {}
                 }
             } else if elapsed > WATCHDOG_TIMEOUT_TICKS / 2 && !watchdog.warned {
                 println!(

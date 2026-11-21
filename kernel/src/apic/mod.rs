@@ -440,6 +440,17 @@ pub fn get_bus_frequency_hz() -> Option<u32> {
     }
 }
 
+/// Get the estimated TSC frequency in Hz (bus_freq * 10).
+/// Returns `None` if bus frequency not yet calibrated.
+pub fn get_tsc_frequency_hz() -> Option<u32> {
+    let freq = BUS_FREQUENCY_HZ.load(core::sync::atomic::Ordering::Acquire);
+    if freq == 0 {
+        None
+    } else {
+        Some(freq * 10)
+    }
+}
+
 /// Set the calibrated bus frequency in Hz (called by LAPIC timer init).
 /// Only sets the value if not already calibrated (first writer wins).
 /// Returns an error if freq_hz is 0 or unreasonably large.
@@ -448,7 +459,7 @@ pub(crate) fn set_bus_frequency_hz(freq_hz: u32) -> Result<(), &'static str> {
         return Err("bus frequency cannot be 0");
     }
     // Sanity check: bus frequency should be in a reasonable range
-    if freq_hz < MIN_BUS_FREQUENCY_HZ || freq_hz > MAX_BUS_FREQUENCY_HZ {
+    if !(MIN_BUS_FREQUENCY_HZ..=MAX_BUS_FREQUENCY_HZ).contains(&freq_hz) {
         return Err("bus frequency out of expected range");
     }
     BUS_FREQUENCY_HZ

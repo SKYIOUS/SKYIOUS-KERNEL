@@ -8,6 +8,7 @@
 
 use crate::hal::timer::{current_time_us, current_timer};
 use crate::selftest;
+use x86_64::structures::paging::{Mapper, Page, Size4KiB};
 
 // ---------------------------------------------------------------------------
 // Architecture-agnostic timer access
@@ -507,6 +508,7 @@ fn stress_vdso_concurrent_reads() -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Stress test: vDSO PID/CPU reads under concurrent access.
 /// Verifies pid_cpu_seqlock under concurrent reads.
 #[cfg(target_arch = "x86_64")]
@@ -628,11 +630,12 @@ fn stress_tsc_monotonicity() -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Stress test: High-frequency vDSO time reads simulating real workload.
 /// Simulates a busy userspace application polling time.
 #[cfg(target_arch = "x86_64")]
 fn stress_vdso_heavy_load() -> Result<(), &'static str> {
-    use crate::syscalls::misc::sys_clock_gettime;
+    use crate::syscalls::misc::sys_clock_gettime_kernel;
     use crate::syscalls::Timespec;
     use crate::vdso::vdso_page;
     use crate::vdso::vdso_read_tsc_time;
@@ -640,6 +643,7 @@ fn stress_vdso_heavy_load() -> Result<(), &'static str> {
     let iterations = 100_000;
     let mut vdso_reads = 0;
     let mut syscall_reads = 0;
+    let mut failed_reads = 0;
 
     crate::serial_write(
         "[STRESS] Heavy load simulation: starting
@@ -658,14 +662,16 @@ fn stress_vdso_heavy_load() -> Result<(), &'static str> {
             let _ = vdso_read_tsc_time(1); // CLOCK_MONOTONIC
             vdso_reads += 1;
         } else {
-            // Syscall path
+            // Syscall path - use kernel-stack Timespec
             let mut ts = Timespec {
                 tv_sec: 0,
                 tv_nsec: 0,
             };
-            let ret = sys_clock_gettime(1, &mut ts);
+            let ret = sys_clock_gettime_kernel(1, &mut ts);
             if ret == 0 {
                 syscall_reads += 1;
+            } else {
+                failed_reads += 1;
             }
         }
 
@@ -678,14 +684,29 @@ fn stress_vdso_heavy_load() -> Result<(), &'static str> {
     crate::serial_write_hex(vdso_reads);
     crate::serial_write(" vDSO reads, ");
     crate::serial_write_hex(syscall_reads);
+    crate::serial_write(" syscall reads, ");
+    crate::serial_write_hex(failed_reads);
     crate::serial_write(
-        " syscall reads
+        " failed reads
 ",
     );
+
+    // Verify we got the expected number of successful reads
+    let expected_reads = iterations / 2;
+    if vdso_reads != expected_reads {
+        return Err("vDSO read count mismatch");
+    }
+    if syscall_reads != expected_reads {
+        return Err("syscall read count mismatch");
+    }
+    if failed_reads > 0 {
+        return Err("some syscall reads failed unexpectedly");
+    }
 
     Ok(())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Stress test: vDSO clock_getres consistency.
 /// Verifies resolution values are consistent across all clocks.
 #[cfg(target_arch = "x86_64")]
@@ -695,6 +716,11 @@ fn stress_clock_getres_consistency() -> Result<(), &'static str> {
 
     let iterations = 10_000;
     let mut resolution_mismatches = 0;
+    let mut failed_calls = 0;
+
+    // Allocate and map a userspace page for the test
+    let (frame, user_vaddr, page) = map_test_userspace_page()?;
+    let ts_ptr = user_vaddr as *mut Timespec;
 
     crate::serial_write(
         "[STRESS] clock_getres consistency: starting
@@ -703,15 +729,25 @@ fn stress_clock_getres_consistency() -> Result<(), &'static str> {
 
     for i in 0..iterations {
         for &clock_id in &[0u64, 1, 2, 3, 4, 5, 6, 7, 100, 101, 102, 103, 104] {
-            let mut ts = Timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            let ret = sys_clock_getres(clock_id, &mut ts);
+            // Clear the userspace buffer
+            unsafe {
+                core::ptr::write_volatile(
+                    ts_ptr,
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                );
+            }
+            let ret = sys_clock_getres(clock_id, ts_ptr);
             if ret != 0 {
                 // Some clocks may return EINVAL (e.g., alarm clocks)
+                failed_calls += 1;
                 continue;
             }
+
+            // Read back the result from userspace
+            let ts = unsafe { core::ptr::read_volatile(ts_ptr) };
 
             let expected_ns = match clock_id {
                 5 | 6 => 1_000_000, // coarse clocks
@@ -728,9 +764,14 @@ fn stress_clock_getres_consistency() -> Result<(), &'static str> {
         }
     }
 
+    // Cleanup
+    unmap_test_userspace_page(frame, page)?;
+
     crate::serial_write("[STRESS] clock_getres: ");
     crate::serial_write_hex(resolution_mismatches);
-    crate::serial_write(" mismatches in ");
+    crate::serial_write(" mismatches, ");
+    crate::serial_write_hex(failed_calls);
+    crate::serial_write(" failed calls in ");
     crate::serial_write_hex(iterations * 13);
     crate::serial_write(
         " checks
@@ -790,6 +831,79 @@ pub fn run_vdso_stress_suite() -> Result<(), &'static str> {
 ",
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers for userspace page mapping
+// ---------------------------------------------------------------------------
+
+/// Map a test page at a fixed userspace address for stress tests.
+/// Returns (frame, user_virt_addr, page) or error.
+#[cfg(target_arch = "x86_64")]
+pub fn map_test_userspace_page() -> Result<
+    (
+        x86_64::structures::paging::PhysFrame<Size4KiB>,
+        u64,
+        Page<Size4KiB>,
+    ),
+    &'static str,
+> {
+    use crate::memory::buddy::BuddyFrameAllocator;
+    use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
+    use x86_64::VirtAddr;
+
+    let mut fa = BuddyFrameAllocator;
+    let frame = fa.allocate_frame().ok_or("Failed to allocate frame")?;
+    let user_vaddr = 0x7FFF_F000_0000u64; // Test userspace address
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(user_vaddr));
+
+    let current_as = crate::task::process::CURRENT_PROCESS.lock();
+    let mut mapper = unsafe {
+        current_as
+            .as_ref()
+            .ok_or("No current process")?
+            .address_space
+            .mapper()
+            .ok_or("Mapper failed")?
+    };
+    unsafe {
+        mapper
+            .map_to(
+                page,
+                frame,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::USER_ACCESSIBLE
+                    | PageTableFlags::WRITABLE,
+                &mut fa,
+            )
+            .map_err(|_| "Map failed")?
+            .flush();
+    }
+    drop(current_as);
+
+    Ok((frame, user_vaddr, page))
+}
+
+/// Unmap a test page and clean up frame tracking.
+#[cfg(target_arch = "x86_64")]
+pub fn unmap_test_userspace_page(
+    frame: x86_64::structures::paging::PhysFrame<Size4KiB>,
+    page: Page<Size4KiB>,
+) -> Result<(), &'static str> {
+    let current_as = crate::task::process::CURRENT_PROCESS.lock();
+    let mut mapper = unsafe {
+        current_as
+            .as_ref()
+            .ok_or("No current process")?
+            .address_space
+            .mapper()
+            .ok_or("Mapper failed")?
+    };
+    let (_frame, flush) = mapper.unmap(page).map_err(|_| "Unmap failed")?;
+    flush.flush();
+    drop(current_as);
+    crate::memory::frame_info::decrement(frame.start_address());
     Ok(())
 }
 

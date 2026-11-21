@@ -173,9 +173,7 @@ lazy_static::lazy_static! {
 pub(crate) fn tcp_stats_on_connect(pid: u64, handle: SocketHandle) {
     let tick = crate::hal::timer::current_time_us();
     let mut stats = TCP_STATS.lock();
-    let entry = stats
-        .entry((pid, handle))
-        .or_insert_with(TcpConnectionStats::default);
+    let entry = stats.entry((pid, handle)).or_default();
     entry.connect_tick = tick;
     // Initialize congestion control for this connection.
     crate::net::tcp_congestion::create(socket_handle_id(&handle), 1460);
@@ -185,9 +183,7 @@ pub(crate) fn tcp_stats_on_connect(pid: u64, handle: SocketHandle) {
 pub(crate) fn tcp_stats_record_send(pid: u64, handle: SocketHandle, bytes: u64) {
     let tick = crate::hal::timer::current_time_us();
     let mut stats = TCP_STATS.lock();
-    let entry = stats
-        .entry((pid, handle))
-        .or_insert_with(TcpConnectionStats::default);
+    let entry = stats.entry((pid, handle)).or_default();
     entry.bytes_acked += bytes;
     entry.segs_out += 1;
     entry.last_data_sent_tick = tick;
@@ -197,9 +193,7 @@ pub(crate) fn tcp_stats_record_send(pid: u64, handle: SocketHandle, bytes: u64) 
 pub(crate) fn tcp_stats_record_recv(pid: u64, handle: SocketHandle, bytes: u64) {
     let tick = crate::hal::timer::current_time_us();
     let mut stats = TCP_STATS.lock();
-    let entry = stats
-        .entry((pid, handle))
-        .or_insert_with(TcpConnectionStats::default);
+    let entry = stats.entry((pid, handle)).or_default();
     entry.bytes_received += bytes;
     entry.segs_in += 1;
     entry.last_data_recv_tick = tick;
@@ -361,14 +355,9 @@ lazy_static::lazy_static! {
 // ─── SO_REUSEPORT infrastructure ───────────────────────────────────
 
 /// Per-socket flags for TCP/UDP sockets.
+#[derive(Default)]
 pub(crate) struct SocketFlags {
     pub reuse_port: bool,
-}
-
-impl Default for SocketFlags {
-    fn default() -> Self {
-        Self { reuse_port: false }
-    }
 }
 
 // Global per-socket flags: (pid, handle) → SocketFlags
@@ -427,9 +416,7 @@ pub(crate) fn has_reuse_port(pid: u64, handle: SocketHandle) -> bool {
 /// Set SO_REUSEPORT flag on a socket.
 pub(crate) fn set_reuse_port(pid: u64, handle: SocketHandle, enable: bool) {
     let mut flags = SOCKET_FLAGS.lock();
-    let entry = flags
-        .entry((pid, handle))
-        .or_insert_with(SocketFlags::default);
+    let entry = flags.entry((pid, handle)).or_default();
     entry.reuse_port = enable;
 }
 
@@ -551,7 +538,7 @@ pub(crate) fn recvfrom_internal(
     match stype {
         crate::task::process::SocketType::Tcp => {
             let mut result = Err(errno::Errno::EAGAIN as u64);
-            if let Some(_) = with_tcp_mut(sockets, handle, |socket| {
+            if with_tcp_mut(sockets, handle, |socket| {
                 if socket.may_recv() {
                     if let Ok(n) = socket.recv_slice(buf) {
                         #[cfg(feature = "ash")]
@@ -573,7 +560,9 @@ pub(crate) fn recvfrom_internal(
                         result = Ok((n, None));
                     }
                 }
-            }) {
+            })
+            .is_some()
+            {
                 result.map_err(|_| errno::Errno::EAGAIN as u64)
             } else {
                 Err(errno::Errno::EINVAL as u64)
@@ -581,7 +570,7 @@ pub(crate) fn recvfrom_internal(
         }
         crate::task::process::SocketType::Udp => {
             let mut result = Err(errno::Errno::EAGAIN as u64);
-            if let Some(_) = with_udp_mut(sockets, handle, |socket| {
+            if with_udp_mut(sockets, handle, |socket| {
                 if let Ok((n, meta)) = socket.recv_slice(buf) {
                     #[cfg(feature = "ash")]
                     {
@@ -596,7 +585,9 @@ pub(crate) fn recvfrom_internal(
                     }
                     result = Ok((n, Some(meta.endpoint)));
                 }
-            }) {
+            })
+            .is_some()
+            {
                 result.map_err(|_| errno::Errno::EAGAIN as u64)
             } else {
                 Err(errno::Errno::EINVAL as u64)
@@ -612,7 +603,7 @@ pub(crate) fn parse_sockaddr(
     addr_ptr: *const u8,
     addrlen: u64,
 ) -> Result<(u16, smoltcp::wire::IpAddress), errno::Errno> {
-    if addr_ptr.is_null() || addrlen < 8 || addrlen > MAX_SOCK_ADDR_LEN {
+    if addr_ptr.is_null() || !(8..=MAX_SOCK_ADDR_LEN).contains(&addrlen) {
         return Err(errno::Errno::EINVAL);
     }
     let mut family_buf = [0u8; 2];

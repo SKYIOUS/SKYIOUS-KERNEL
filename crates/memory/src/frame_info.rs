@@ -6,11 +6,13 @@
 
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use vahi_hal::sync::IrqSafeMutex as Mutex;
-use x86_64::PhysAddr;
+
+/// Opaque physical frame identifier (page frame number).
+pub type FrameId = u64;
 
 struct RefCountTable {
     counts: &'static [AtomicU16],
-    deferred: Mutex<alloc::vec::Vec<PhysAddr>>,
+    deferred: Mutex<alloc::vec::Vec<FrameId>>,
 }
 
 static REFCOUNTS: Mutex<Option<RefCountTable>> = Mutex::new(None);
@@ -33,28 +35,26 @@ pub fn init(max_phys: u64) {
     });
 }
 
-/// Increment refcount for the given physical frame. Lock-free on the hot path.
-pub fn increment(phys: PhysAddr) {
+/// Internal increment function using frame ID.
+fn increment_inner(frame: FrameId) {
     let table = REFCOUNTS.lock();
     if let Some(ref tbl) = *table {
-        let i = (phys.as_u64() >> 12) as usize;
+        let i = (frame >> 12) as usize;
         if i < tbl.counts.len() {
             tbl.counts[i].fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
-/// Decrement refcount for the given physical frame.
-/// Returns the remaining refcount. When it reaches 0 the frame is queued
-/// for deferred deallocation (under the deferred queue lock).
-pub fn decrement(phys: PhysAddr) -> u16 {
+/// Internal decrement function using frame ID.
+fn decrement_inner(frame: FrameId) -> u16 {
     let table = REFCOUNTS.lock();
     if let Some(ref tbl) = *table {
-        let i = (phys.as_u64() >> 12) as usize;
+        let i = (frame >> 12) as usize;
         if i < tbl.counts.len() {
             let prev = tbl.counts[i].fetch_sub(1, Ordering::SeqCst);
             if prev == 1 {
-                tbl.deferred.lock().push(phys);
+                tbl.deferred.lock().push(frame);
                 return 0;
             }
             return prev - 1;
@@ -63,8 +63,66 @@ pub fn decrement(phys: PhysAddr) -> u16 {
     0
 }
 
-/// Drain the deferred-free queue and free frames via the buddy allocator.
+/// Internal count function using frame ID.
+fn count_inner(frame: FrameId) -> u16 {
+    let table = REFCOUNTS.lock();
+    if let Some(ref tbl) = *table {
+        let i = (frame >> 12) as usize;
+        if i < tbl.counts.len() {
+            return tbl.counts[i].load(Ordering::Relaxed);
+        }
+    }
+    1
+}
+
+// ── x86_64-specific API (backward compatible) ──────────────────────────
+
+#[cfg(target_arch = "x86_64")]
+/// Increment refcount for a physical address.
+pub fn increment(addr: x86_64::PhysAddr) {
+    increment_inner(addr.as_u64() >> 12);
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Decrement refcount for a physical address.
+pub fn decrement(addr: x86_64::PhysAddr) -> u16 {
+    decrement_inner(addr.as_u64() >> 12)
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Count refcount for a physical address.
+pub fn count(addr: x86_64::PhysAddr) -> u16 {
+    count_inner(addr.as_u64() >> 12)
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Increment refcount for a physical frame.
+pub fn increment_frame<Size: x86_64::structures::paging::PageSize>(
+    frame: x86_64::structures::paging::PhysFrame<Size>,
+) {
+    increment_inner(frame.start_address().as_u64() >> 12);
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Decrement refcount for a physical frame.
+pub fn decrement_frame<Size: x86_64::structures::paging::PageSize>(
+    frame: x86_64::structures::paging::PhysFrame<Size>,
+) -> u16 {
+    decrement_inner(frame.start_address().as_u64() >> 12)
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Count refcount for a physical frame.
+pub fn count_frame<Size: x86_64::structures::paging::PageSize>(
+    frame: x86_64::structures::paging::PhysFrame<Size>,
+) -> u16 {
+    count_inner(frame.start_address().as_u64() >> 12)
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Drain deferred queue with buddy allocator deallocation.
 pub fn drain_deferred() {
+    use crate::buddy::BUDDY_ALLOCATOR;
     let frames = {
         let table = REFCOUNTS.lock();
         if let Some(ref tbl) = *table {
@@ -73,22 +131,50 @@ pub fn drain_deferred() {
             alloc::vec::Vec::new()
         }
     };
-    for phys in &frames {
-        let frame = x86_64::structures::paging::PhysFrame::containing_address(*phys);
-        crate::buddy::BUDDY_ALLOCATOR.lock().deallocate_frame(frame);
+    for frame_id in frames {
+        let phys = x86_64::PhysAddr::new(frame_id << 12);
+        let frame = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(phys);
+        BUDDY_ALLOCATOR.lock().deallocate_frame(frame);
     }
 }
 
-/// Returns the current refcount for a frame. Unmanaged frames return 1.
-pub fn count(phys: PhysAddr) -> u16 {
-    let table = REFCOUNTS.lock();
-    if let Some(ref tbl) = *table {
-        let i = (phys.as_u64() >> 12) as usize;
-        if i < tbl.counts.len() {
-            return tbl.counts[i].load(Ordering::Relaxed);
+// ── Platform-agnostic API (for aarch64/riscv64) ────────────────────────
+
+#[cfg(not(target_arch = "x86_64"))]
+/// Increment refcount for a frame ID.
+pub fn increment(frame: FrameId) {
+    increment_inner(frame);
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+/// Decrement refcount for a frame ID.
+pub fn decrement(frame: FrameId) -> u16 {
+    decrement_inner(frame)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+/// Count refcount for a frame ID.
+pub fn count(frame: FrameId) -> u16 {
+    count_inner(frame)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+/// Drain deferred queue with custom deallocator.
+pub fn drain_deferred<F>(mut dealloc: F)
+where
+    F: FnMut(FrameId),
+{
+    let frames = {
+        let table = REFCOUNTS.lock();
+        if let Some(ref tbl) = *table {
+            core::mem::take(&mut *tbl.deferred.lock())
+        } else {
+            alloc::vec::Vec::new()
         }
+    };
+    for frame in frames {
+        dealloc(frame);
     }
-    1
 }
 
 // ── Page-frame high-water-mark tracking ──────────────────────────────

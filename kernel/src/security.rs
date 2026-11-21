@@ -9,6 +9,8 @@
 //!   object:  resource path or "*"
 //!   class:   "file", "dir", "process", "capability", "mount"
 //!   perm:    "read", "write", "exec", "kill", "mount", "cap_sys_admin", ...
+//!
+//! See ADR-006: POSIX Capabilities + LSM for Security Model.
 
 use alloc::string::String;
 use alloc::vec::Vec;

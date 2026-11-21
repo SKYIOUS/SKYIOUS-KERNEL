@@ -190,6 +190,9 @@ pub(crate) use diag::serial_fmt;
 pub(crate) use diag::IrqFmtBuf;
 
 /// Save RFLAGS and disable interrupts (CLI). Returns the previous RFLAGS.
+/// SAFETY: Requires privileged kernel execution. Reads RFLAGS and executes CLI
+/// to disable maskable interrupts. Caller must pair with restore_if() using the
+/// returned RFLAGS value to restore the original interrupt state.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn save_and_cli() -> u64 {
@@ -201,6 +204,10 @@ pub fn save_and_cli() -> u64 {
 }
 
 /// Restore interrupt state from saved RFLAGS.
+/// SAFETY: Requires privileged kernel execution. Conditionally executes STI
+/// to re-enable maskable interrupts if the saved RFLAGS indicates they were
+/// enabled (IF=1). Caller must have previously called save_and_cli() and
+/// preserved the returned flags unchanged.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn restore_if(flags: u64) {
@@ -212,6 +219,10 @@ pub fn restore_if(flags: u64) {
 }
 
 /// Save DAIF and disable interrupts (aarch64). Returns the previous DAIF.
+/// SAFETY: Requires privileged kernel execution (EL1). Reads DAIF register and
+/// sets the IRQ mask bit (DAIF.I) to disable interrupts. Caller must pair
+/// with restore_if() using the returned DAIF value to restore the original
+/// interrupt state.
 #[cfg(target_arch = "aarch64")]
 #[inline]
 pub fn save_and_cli() -> u64 {
@@ -223,6 +234,10 @@ pub fn save_and_cli() -> u64 {
 }
 
 /// Restore interrupt state from saved DAIF (aarch64).
+/// SAFETY: Requires privileged kernel execution (EL1). Writes the saved DAIF
+/// value back to the DAIF register, restoring all interrupt mask bits (I, A, F)
+/// to their previous state. Caller must have previously called save_and_cli()
+/// and preserved the returned DAIF unchanged.
 #[cfg(target_arch = "aarch64")]
 #[inline]
 pub fn restore_if(daif: u64) {

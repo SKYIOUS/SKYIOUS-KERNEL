@@ -4,6 +4,7 @@ pub struct Tnum {
     pub mask: u64,
 }
 
+#[allow(clippy::should_implement_trait)]
 impl Tnum {
     pub const fn exact(v: u64) -> Self {
         Tnum { value: v, mask: 0 }
@@ -170,5 +171,41 @@ impl Tnum {
             value: nv & !nm,
             mask: nm,
         }
+    }
+}
+
+// Implement standard traits for Tnum
+impl core::ops::Add for Tnum {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        self.add(rhs)
+    }
+}
+
+impl core::ops::Sub for Tnum {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.sub(rhs)
+    }
+}
+
+impl core::ops::Mul for Tnum {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self::Output {
+        self.mul(rhs)
+    }
+}
+
+impl core::ops::Shl for Tnum {
+    type Output = Self;
+    fn shl(self, rhs: Self) -> Self::Output {
+        self.shl(rhs)
+    }
+}
+
+impl core::ops::Neg for Tnum {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        self.neg()
     }
 }

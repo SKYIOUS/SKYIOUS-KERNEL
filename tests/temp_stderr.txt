@@ -1,0 +1,7 @@
+usage: run_qemu_tests.py [-h] --image IMAGE [--qemu QEMU] [--ovmf OVMF]
+                         [--timeout TIMEOUT] [--boot-wait BOOT_WAIT]
+                         [--smp SMP] [--mem MEM] [--log LOG] [--serial SERIAL]
+                         [--boot-only] [--expect-ap EXPECT_AP]
+                         [--expect-count EXPECT_COUNT]
+                         [--qemu-extra QEMU_EXTRA]
+run_qemu_tests.py: error: argument --qemu-extra: expected one argument

@@ -107,6 +107,8 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             crate::println!("    -> NVMe Controller detected!");
             let bar0 = read_bar64(bus, slot, func, 0x10);
             crate::drivers::storage::nvme::NvmeController::new(bar_to_virt(bar0), bus, slot, func);
+            #[cfg(target_arch = "x86_64")]
+            crate::vdso_set_kernel_flag(crate::vdso::kernel_flags::HAS_NVME);
         }
 
         if class_code == 0x01 && subclass == 0x06 {
@@ -180,6 +182,8 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
                 crate::println!("       I/O Base: 0x{:x}", io_base);
                 crate::drivers::gpu::virtio_gpu::init(io_base);
             }
+            #[cfg(target_arch = "x86_64")]
+            crate::vdso_set_kernel_flag(crate::vdso::kernel_flags::HAS_VIRTIO_GPU);
         }
 
         if vendor_id == 0x1AF4 && device_id == 0x1000 {
@@ -230,6 +234,8 @@ fn enumerate_bus_slot(bus: u8, slot: u8) {
             let mut xhci = crate::drivers::usb::xhci::XhciController::new(virt_base, bdf);
             xhci.init();
             crate::drivers::usb::register_xhci(xhci);
+            #[cfg(target_arch = "x86_64")]
+            crate::vdso_set_kernel_flag(crate::vdso::kernel_flags::HAS_XHCI);
         }
 
         #[cfg(feature = "uhci")]

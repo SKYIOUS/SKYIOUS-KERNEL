@@ -167,7 +167,7 @@ pub fn sys_kill(pid: i64, sig: u32) -> u64 {
         let sender_uid = get_current_euid();
         crate::task::process::route_signal_to_signalfd_for(
             &proc,
-            sig as u32,
+            sig,
             crate::task::process::SI_USER,
             crate::task::process::CURRENT_PROCESS
                 .lock()

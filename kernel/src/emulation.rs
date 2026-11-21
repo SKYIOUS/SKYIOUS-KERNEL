@@ -34,11 +34,11 @@ pub fn dispatch_linux_syscall(
     }
 
     match n {
-        13 => linux_rt_sigaction(arg1 as u64, arg2 as *const u8, arg3 as *mut u8, arg4 as u64),
+        13 => linux_rt_sigaction(arg1, arg2 as *const u8, arg3 as *mut u8, arg4),
         15 => linux_rt_sigreturn(regs),
         57 => linux_fork(regs),
         63 => linux_uname(arg1 as *mut u8),
-        158 => linux_arch_prctl(arg1 as u32, arg2 as u64),
+        158 => linux_arch_prctl(arg1 as u32, arg2),
         _ => {
             let vahi_n = map_linux_to_vahi(n);
             crate::syscalls::do_syscall_unchecked(vahi_n, arg1, arg2, arg3, arg4, arg5, regs)

@@ -28,7 +28,7 @@ pub fn test_vdso_page_mapped() -> Result<(), &'static str> {
     crate::tests::mqueue_contract::with_user_page(|_| {
         let current = crate::task::process::CURRENT_PROCESS.lock();
         let proc = current.as_ref().ok_or("mapping fixture has no process")?;
-        if x86_64::registers::control::Cr3::read().0 != proc.address_space._pml4_phys() {
+        if x86_64::registers::control::Cr3::read().0 != proc.address_space.pml4_frame() {
             return Err("mapping fixture address space is not active");
         }
         // SAFETY: the fixture activated this space and holds it live until return.
@@ -670,7 +670,7 @@ core::arch::global_asm!(
 
 extern "C" fn vdso_fork_user_entry() -> ! {
     // SAFETY: the test maps executable code and a writable stack before enqueueing.
-    unsafe { crate::task::thread::jump_to_usermode(0x2000_0000, 0x2000_2000) }
+    unsafe { crate::task::thread::jump_to_usermode(0x2000_0000, 0x2000_2000, None) }
 }
 
 /// A mapped userspace parent forks, waits for a pipe report, and verifies it.

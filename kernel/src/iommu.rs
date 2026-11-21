@@ -838,7 +838,7 @@ unsafe fn invalidate_iotlb_global(mmio: u64) {
         | (0xFFFFu64 << 48)                   // Source ID = global
         | (0xFFFFu64 << 32)                   // Domain ID = global
         | (0b11u64 << 2)                      // Granularity = don't-care
-        | (0b10u64 << 0); // Type = write-invalidate
+        | 0b10u64; // Type = write-invalidate
 
     write_phys_u64(mmio + regs::IOTLB_INVD, descriptor);
 

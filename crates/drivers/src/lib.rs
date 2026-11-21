@@ -44,21 +44,35 @@ pub fn get_ticks() -> u64 {
 // Module-level `#[allow(dead_code)]` covers them; removal precondition = each
 // driver wired into the probe table or deleted (see
 // docs/decisions/ADR-029-syscall-module-lint-hygiene.md)
+
+// x86_64-specific driver modules
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub mod audio;
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub mod block;
-pub mod gpu;
+#[cfg(target_arch = "x86_64")]
+pub mod gpu; // virtio_gpu uses x86_64 graphics/serial
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub mod graphics;
-pub mod input;
-pub mod mouse;
-pub mod net;
+#[cfg(target_arch = "x86_64")]
+pub mod input; // uses lazy_static, crossbeam_queue
+#[cfg(target_arch = "x86_64")]
+pub mod mouse; // PS/2 port I/O
+#[cfg(target_arch = "x86_64")]
+pub mod net; // e1000 is x86_64-specific
+#[cfg(target_arch = "x86_64")]
 pub mod ps2;
-pub mod rtc;
+#[cfg(target_arch = "x86_64")]
+pub mod rtc; // CMOS port I/O
+#[cfg(target_arch = "x86_64")]
 pub mod serial;
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub mod storage;
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub mod usb;
 pub mod watchdog;
@@ -110,12 +124,19 @@ pub trait NicDevice: Send + Sync {
 // (circular dependency). They degrade gracefully when the underlying
 // serial driver is not yet initialized.
 
+#[cfg(target_arch = "x86_64")]
 pub fn serial_write(msg: &str) {
     if crate::serial::is_initialized() {
         crate::serial::write_str(msg);
     }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+pub fn serial_write(_msg: &str) {
+    // No-op on non-x86_64
+}
+
+#[cfg(target_arch = "x86_64")]
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {
@@ -124,6 +145,28 @@ macro_rules! print {
     };
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        let _s = alloc::format!($($arg)*);
+        $crate::serial_write(&_s);
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+#[macro_export]
+macro_rules! println {
+    () => {
+        $crate::serial_write("");
+    };
+    ($($arg:tt)*) => {
+        $crate::print!($($arg)*);
+        $crate::serial_write("");
+    };
+}
+
+#[cfg(not(target_arch = "x86_64"))]
 #[macro_export]
 macro_rules! println {
     () => {

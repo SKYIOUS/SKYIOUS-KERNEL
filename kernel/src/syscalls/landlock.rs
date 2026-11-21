@@ -190,11 +190,7 @@ pub fn sys_landlock_add_rule(
         None => return errno::Errno::EBADF as u64,
     };
 
-    ruleset
-        .add_rule(path.clone(), allowed_access)
-        .unwrap_or_else(|_e| {
-            // EPERM if locked
-        });
+    let _ = ruleset.add_rule(path.clone(), allowed_access);
 
     crate::serial_write("[LANDLOCK] Added rule fd=");
     crate::serial_write(&format!(

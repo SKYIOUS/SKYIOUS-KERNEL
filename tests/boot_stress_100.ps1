@@ -33,8 +33,9 @@ for ($i = 1; $i -le $Tries; $i++) {
     )
 
     try {
-        $result = py -3 tests/run_qemu_tests.py @args 2>&1
+        $result = & "C:\Windows\py.exe" -3 tests/run_qemu_tests.py --image $Image --timeout $Timeout --smp $Smp --qemu-extra "-vga none" 2>&1
         $exitCode = $LASTEXITCODE
+        Write-Host "DEBUG: exitCode=$exitCode, result.length=$($result.Length)" -ForegroundColor Gray
 
         if ($result -match 'RESULT: PASS') {
             Write-Host "PASS" -ForegroundColor Green
@@ -50,13 +51,17 @@ for ($i = 1; $i -le $Tries; $i++) {
             $Fail++
         }
         elseif ($result -match 'RESULT: (BOOT_FAILURE|UNEXPECTED_EXIT|TIMEOUT|INFRASTRUCTURE_ERROR)') {
-            $reason = $matches[1]
+            if ($matches -and $matches.Count -gt 1) {
+                $reason = $matches[1]
+            } else {
+                $reason = "UNKNOWN_REASON"
+            }
             Write-Host "$reason" -ForegroundColor Red
             $Fail++
         }
         else {
             Write-Host "UNKNOWN RESULT" -ForegroundColor Red
-            Write-Host $result
+            Write-Host "First 200 chars: $($result.Substring(0, [Math]::Min(200, $result.Length)))" -ForegroundColor Red
             $Fail++
         }
     }
@@ -64,6 +69,8 @@ for ($i = 1; $i -le $Tries; $i++) {
         Write-Host "ERROR: $_" -ForegroundColor Red
         $Fail++
     }
+    # Wait for any lingering QEMU processes to fully terminate
+    Start-Sleep 3
 }
 
 Write-Host ""

@@ -906,8 +906,9 @@ core::arch::global_asm!(
 ///
 /// Requires valid GDT user-mode segments. `entry` must be a canonical
 /// user-mode address. This function never returns.
-pub unsafe fn jump_to_usermode(entry: u64, user_rsp: u64) -> ! {
+pub unsafe fn jump_to_usermode(entry: u64, user_rsp: u64, tls_range: Option<(u64, u64)>) -> ! {
     use crate::gdt;
+
     let selectors = gdt::get_selectors();
 
     let ss = selectors.user_data_selector.0 | 3;
@@ -922,52 +923,103 @@ pub unsafe fn jump_to_usermode(entry: u64, user_rsp: u64) -> ! {
     // so that the next syscall entry can swap it in again.
     // Build iretq frame on the USER stack (not kernel stack!)
     // iretq expects (top first): RIP, CS, RFLAGS, RSP, SS
-    #[repr(C, packed)]
-    struct IretqFrame {
-        rip: u64,
-        cs: u64,
-        rflags: u64,
-        rsp: u64,
-        ss: u64,
-    }
+    let frame_size = 5 * 8; // 5 u64s = 40 bytes
+    let frame_user_vaddr = user_rsp - frame_size;
+    let frame_ptr = frame_user_vaddr as *mut u64;
 
-    let frame = IretqFrame {
-        rip: entry,
-        cs: cs as u64,
-        rflags,
-        rsp: user_rsp,
-        ss: ss as u64,
-    };
-
-    // Write frame to user stack at user_rsp - size_of::<IretqFrame>()
-    let frame_size = core::mem::size_of::<IretqFrame>() as u64;
-    let frame_ptr = (user_rsp - frame_size) as *mut u64;
+    // Write iretq frame DIRECTLY to the user virtual address.
+    // The user page tables are currently active (CR3 = user PML4, set by process.address_space.activate()),
+    // so writes to the user virtual address go to the correct physical page.
+    // Kernel mode can write to user pages (USER_ACCESSIBLE flag is set).
     unsafe {
-        core::ptr::write(
-            frame_ptr as *mut _,
-            core::mem::transmute::<IretqFrame, [u64; 5]>(frame),
-        );
+        frame_ptr.write(entry); // RIP
+        frame_ptr.add(1).write(cs as u64); // CS
+        frame_ptr.add(2).write(rflags); // RFLAGS
+        frame_ptr.add(3).write(user_rsp); // RSP (new user stack pointer)
+        frame_ptr.add(4).write(ss as u64); // SS
     }
+
+    // Ensure stores are globally visible before TLB flush
+    core::arch::asm!("mfence", options(nostack, preserves_flags));
+
+    // Verify the frame was written correctly by reading back directly.
+    let frame_ptr_const = frame_user_vaddr as *const u64;
+    let rip_check = frame_ptr_const.read();
+    let cs_check = frame_ptr_const.add(1).read();
+    let rflags_check = frame_ptr_const.add(2).read();
+    let rsp_check = frame_ptr_const.add(3).read();
+    let ss_check = frame_ptr_const.add(4).read();
+
+    crate::serial_write(&alloc::format!(
+        "[JUMP-VERIFY] RIP=0x{:x} (expected 0x{:x}) CS=0x{:x} RFLAGS=0x{:x} RSP=0x{:x} (expected 0x{:x}) SS=0x{:x}\n",
+        rip_check, entry, cs_check, rflags_check, rsp_check, user_rsp, ss_check
+    ));
+
+    // Flush TLB for the frame page to ensure the iretq sees the updated data.
+    core::arch::asm!("invlpg [{}]", in(reg) frame_user_vaddr, options(nostack, preserves_flags));
+
+    // Serialize to ensure TLB flush is complete
+    core::arch::asm!("cpuid", options(nostack, preserves_flags));
 
     // Debug
     crate::serial_write(&alloc::format!(
-        "[JUMP] entry=0x{:x} user_rsp=0x{:x} frame_ptr=0x{:x}\n",
+        "[JUMP] entry=0x{:x} user_rsp=0x{:x} frame_user_vaddr=0x{:x}\n",
         entry,
         user_rsp,
-        frame_ptr as u64
+        frame_user_vaddr
     ));
+
+    // Set up FS base for TLS if TLS segment is present.
+    // For static TLS (musl), the thread pointer (FS base) points to the END of the TLS segment.
+    if let Some((_tls_start, tls_end)) = tls_range {
+        crate::serial_write(&alloc::format!(
+            "[JUMP-TLS] Setting FS base to TLS end=0x{:x}\n",
+            tls_end
+        ));
+        unsafe {
+            core::arch::asm!(
+                "wrfsbase {}",
+                in(reg) tls_end,
+                options(nostack, preserves_flags)
+            );
+        }
+    }
+
+    // Ensure TLS write is visible
+    core::arch::asm!("mfence", options(nostack, preserves_flags));
+
+    // Flush TLB for the frame page AGAIN after TLS setup
+    core::arch::asm!("invlpg [{}]", in(reg) frame_user_vaddr, options(nostack, preserves_flags));
+
+    // Serialize again
+    core::arch::asm!("cpuid", options(nostack, preserves_flags));
+
+    // Debug
+    crate::serial_write(&alloc::format!(
+        "[JUMP] entry=0x{:x} user_rsp=0x{:x} frame_user_vaddr=0x{:x}\n",
+        entry,
+        user_rsp,
+        frame_user_vaddr
+    ));
+
+    // Verify frame ONE MORE TIME right before iretq
+    let frame_ptr_const = frame_user_vaddr as *const u64;
+    let rip_final = frame_ptr_const.read();
+    crate::serial_write(&alloc::format!("[JUMP-FINAL] RIP=0x{:x}\n", rip_final));
 
     // Set up segment registers and swap GS
     // swapgs to get kernel GS base; we don't mov gs,ax to preserve user GS base.
     // The syscall entry will swapgs back on next entry.
-    let frame_ptr = user_rsp - core::mem::size_of::<IretqFrame>() as u64;
+    // Note: FS is already set via wrfsbase above for TLS; we don't mov fs,ax here
+    let frame_ptr = frame_user_vaddr;
     core::arch::asm!(
         "mov ds, ax",
         "mov es, ax",
-        "mov fs, ax",
         "swapgs",
         // Pass original user_rsp to _start in RDI so it can read argc/argv from stack
         "mov rdi, rdx",
+        // cpuid to fully serialize the pipeline before iretq
+        "cpuid",
         // Load user stack pointer (pointing to iretq frame) and iretq
         "mov rsp, rsi",
         "iretq",

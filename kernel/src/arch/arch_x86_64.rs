@@ -1,6 +1,8 @@
 //! x86_64 architecture implementation.
 //!
 //! Delegates to the existing x86_64-specific modules (gdt, interrupts, task::thread, etc.).
+//!
+//! See ADR-028: Syscall-Entry Init Through the `Arch::init_syscalls()` Seam.
 
 use super::Arch;
 use crate::hal::platform::{PlatformArch, PlatformInfo};
@@ -85,7 +87,7 @@ impl Arch for X86_64Arch {
     }
 
     unsafe fn jump_to_usermode(entry: u64, rsp: u64) -> ! {
-        crate::task::thread::jump_to_usermode(entry, rsp)
+        crate::task::thread::jump_to_usermode(entry, rsp, None)
     }
 
     unsafe fn switch_thread(old_sp: *mut u64, new_sp: u64, new_fs_base: u64) {

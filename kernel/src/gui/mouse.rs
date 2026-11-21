@@ -31,8 +31,7 @@ pub fn draw_cursor(buffer: &mut [u32], x: usize, y: usize) {
     let cursor_color = 0xFFFFFFFF;
     let border_color = 0xFF000000;
 
-    for dy in 0..CURSOR_HEIGHT {
-        let row = CURSOR_BITMAP[dy];
+    for (dy, row) in CURSOR_BITMAP.iter().enumerate().take(CURSOR_HEIGHT) {
         for dx in 0..CURSOR_WIDTH {
             let bit = (row >> (CURSOR_WIDTH - 1 - dx)) & 1;
             if bit == 1 {

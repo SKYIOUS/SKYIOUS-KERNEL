@@ -194,10 +194,8 @@ pub fn sys_setrlimit(resource: u64, rlim_ptr: *const u8) -> u64 {
     match lock.as_ref() {
         Some(p) => {
             let euid = p.creds.lock().euid;
-            if euid != 0 {
-                if new_rlim.rlim_max > p.limits.lock().rlim_max[resource as usize] {
-                    return errno::Errno::EPERM as u64;
-                }
+            if euid != 0 && new_rlim.rlim_max > p.limits.lock().rlim_max[resource as usize] {
+                return errno::Errno::EPERM as u64;
             }
             {
                 let mut lim = p.limits.lock();
@@ -288,10 +286,8 @@ pub fn sys_prlimit64(
         let euid = target.creds.lock().euid;
         {
             let mut lim = target.limits.lock();
-            if euid != 0 {
-                if new_rlim.rlim_max > lim.rlim_max[resource as usize] {
-                    return errno::Errno::EPERM as u64;
-                }
+            if euid != 0 && new_rlim.rlim_max > lim.rlim_max[resource as usize] {
+                return errno::Errno::EPERM as u64;
             }
             lim.rlim_cur[resource as usize] = new_rlim.rlim_cur;
             lim.rlim_max[resource as usize] = new_rlim.rlim_max;
@@ -493,7 +489,7 @@ pub fn sys_setgroups(size: i64, list: *const u32) -> u64 {
     if !has_capability(CAP_SETGID) {
         return errno::Errno::EPERM as u64;
     }
-    if size < 0 || size > 65536 {
+    if !(0..=65536).contains(&size) {
         return errno::Errno::EINVAL as u64;
     }
     let count = size as usize;
@@ -508,8 +504,10 @@ pub fn sys_setgroups(size: i64, list: *const u32) -> u64 {
             return errno::Errno::EFAULT as u64;
         }
         groups_new.extend(
-            raw.chunks_exact(core::mem::size_of::<u32>())
-                .map(|c| u32::from_ne_bytes(c.try_into().unwrap_or([0u8; 4]))),
+            raw.as_chunks::<{ core::mem::size_of::<u32>() }>()
+                .0
+                .iter()
+                .map(|c| u32::from_ne_bytes(*c)),
         );
     }
     let process = match get_current_process() {
@@ -531,17 +529,16 @@ pub fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32)
     let vals = [creds.uid, creds.euid, creds.suid];
     let ptrs = [ruid_ptr, euid_ptr, suid_ptr];
     for (val, ptr) in vals.iter().zip(ptrs.iter()) {
-        if !ptr.is_null() {
-            if unsafe {
+        if !ptr.is_null()
+            && unsafe {
                 user_access::copy_to_user(
                     *ptr as *mut u8,
                     core::slice::from_raw_parts(val as *const u32 as *const u8, 4),
                 )
             }
             .is_err()
-            {
-                return errno::Errno::EFAULT as u64;
-            }
+        {
+            return errno::Errno::EFAULT as u64;
         }
     }
     0
@@ -554,13 +551,12 @@ pub fn sys_setresuid(ruid: u32, euid: u32, suid: u32) -> u64 {
     };
     let mut creds = process.creds.lock();
     // POSIX: unprivileged may only set each to current real/effective/saved
-    if !has_capability(CAP_SETUID) {
-        if (ruid != !0u32 && ruid != creds.uid && ruid != creds.euid && ruid != creds.suid)
+    if !has_capability(CAP_SETUID)
+        && ((ruid != !0u32 && ruid != creds.uid && ruid != creds.euid && ruid != creds.suid)
             || (euid != !0u32 && euid != creds.uid && euid != creds.euid && euid != creds.suid)
-            || (suid != !0u32 && suid != creds.uid && suid != creds.euid && suid != creds.suid)
-        {
-            return errno::Errno::EPERM as u64;
-        }
+            || (suid != !0u32 && suid != creds.uid && suid != creds.euid && suid != creds.sgid))
+    {
+        return errno::Errno::EPERM as u64;
     }
     if ruid != !0u32 {
         creds.uid = ruid;
@@ -585,17 +581,16 @@ pub fn sys_getresgid(rgid_ptr: *mut u32, egid_ptr: *mut u32, sgid_ptr: *mut u32)
     let vals = [creds.gid, creds.egid, creds.sgid];
     let ptrs = [rgid_ptr, egid_ptr, sgid_ptr];
     for (val, ptr) in vals.iter().zip(ptrs.iter()) {
-        if !ptr.is_null() {
-            if unsafe {
+        if !ptr.is_null()
+            && unsafe {
                 user_access::copy_to_user(
                     *ptr as *mut u8,
                     core::slice::from_raw_parts(val as *const u32 as *const u8, 4),
                 )
             }
             .is_err()
-            {
-                return errno::Errno::EFAULT as u64;
-            }
+        {
+            return errno::Errno::EFAULT as u64;
         }
     }
     0
@@ -607,13 +602,12 @@ pub fn sys_setresgid(rgid: u32, egid: u32, sgid: u32) -> u64 {
         None => return errno::Errno::ESRCH as u64,
     };
     let mut creds = process.creds.lock();
-    if !has_capability(CAP_SETGID) {
-        if (rgid != !0u32 && rgid != creds.gid && rgid != creds.egid && rgid != creds.sgid)
+    if !has_capability(CAP_SETGID)
+        && ((rgid != !0u32 && rgid != creds.gid && rgid != creds.egid && rgid != creds.sgid)
             || (egid != !0u32 && egid != creds.gid && egid != creds.egid && egid != creds.sgid)
-            || (sgid != !0u32 && sgid != creds.gid && sgid != creds.egid && sgid != creds.sgid)
-        {
-            return errno::Errno::EPERM as u64;
-        }
+            || (sgid != !0u32 && sgid != creds.gid && sgid != creds.egid && sgid != creds.sgid))
+    {
+        return errno::Errno::EPERM as u64;
     }
     if rgid != !0u32 {
         creds.gid = rgid;
@@ -640,7 +634,7 @@ struct Timeval {
 
 /// Linux struct rusage — 136 bytes on x86_64.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Rusage {
     ru_utime: Timeval, //  0
     ru_stime: Timeval, // 16
@@ -659,29 +653,6 @@ struct Rusage {
     ru_nvcsw: i64,     //128
     ru_nivcsw: i64,    //136
 } // total: 144 bytes
-
-impl Default for Rusage {
-    fn default() -> Self {
-        Self {
-            ru_utime: Timeval::default(),
-            ru_stime: Timeval::default(),
-            ru_maxrss: 0,
-            ru_ixrss: 0,
-            ru_idrss: 0,
-            ru_isrss: 0,
-            ru_minflt: 0,
-            ru_majflt: 0,
-            ru_nswap: 0,
-            ru_inblock: 0,
-            ru_oublock: 0,
-            ru_msgsnd: 0,
-            ru_msgrcv: 0,
-            ru_nsignals: 0,
-            ru_nvcsw: 0,
-            ru_nivcsw: 0,
-        }
-    }
-}
 
 /// getrusage(who, rusage) → 0 on success.
 ///

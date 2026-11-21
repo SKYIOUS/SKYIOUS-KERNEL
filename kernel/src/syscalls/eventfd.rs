@@ -5,8 +5,8 @@
 //! refers to an underlying 64-bit unsigned integer counter.
 //!
 //! - write(): atomically adds a uint64 value to the counter
-//! - read():  atomically returns the counter and resets to 0 (or decrements by 1
-//!            in EFD_SEMAPHORE mode); blocks if counter == 0 unless EFD_NONBLOCK
+//! - read(): atomically returns the counter and resets to 0 (or decrements by 1
+//!   in EFD_SEMAPHORE mode); blocks if counter == 0 unless EFD_NONBLOCK
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};

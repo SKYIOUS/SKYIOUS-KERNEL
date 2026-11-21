@@ -61,7 +61,7 @@ pub fn cfi_init() {
     let mut targets = CFI_STATE.static_targets.lock();
 
     // Register core kernel functions that are called via transmuted pointers.
-    // SMP entry point — called when APs boot
+// SMP entry point — called when APs boot
     #[cfg(feature = "smp")]
     register_static(
         &mut targets,
@@ -74,7 +74,8 @@ pub fn cfi_init() {
         crate::sync::rcu::synchronize_rcu as *const () as usize,
     );
 
-    // vDSO IPI handler for TSC sync — called via IPI broadcast
+    // vDSO IPI handler for TSC sync — called via IPI broadcast (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
     register_static(
         &mut targets,
         crate::vdso::vdso_ipi_update_tsc_base as *const () as usize,
@@ -141,7 +142,7 @@ pub fn cfi_check(addr: usize) -> bool {
     // Check dynamic targets (unsorted, linear scan — smaller set)
     {
         let targets = CFI_STATE.dynamic_targets.lock();
-        if targets.iter().any(|&a| a == addr) {
+        if targets.contains(&addr) {
             return true;
         }
     }

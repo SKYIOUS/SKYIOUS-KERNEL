@@ -1,3 +1,13 @@
+//! SkyFS: Vahi's native filesystem with B-tree extent storage and WAL journaling.
+//!
+//! See ADR-018: SkyFS Journaling.
+//!
+//! Features:
+//! - B-tree extent storage with inline data
+//! - WAL journaling for crash recovery
+//! - Block allocator with bitmap
+//! - Format utility (mkfs)
+
 pub mod block_alloc;
 pub mod btree;
 pub mod dir;

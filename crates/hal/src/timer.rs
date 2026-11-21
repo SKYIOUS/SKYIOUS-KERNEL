@@ -3,6 +3,8 @@
 //! Provides a global timer interface for the scheduler and sleep
 //! syscalls. The TSC (Time Stamp Counter) is the default timer
 //! on x86_64; other architectures can register alternative timers.
+//!
+//! See ADR-011: Single Kernel Clock.
 
 use crate::sync::IrqSafeMutex as Mutex;
 use alloc::sync::Arc;

@@ -45,14 +45,9 @@ unsafe fn map_phys_range(
 pub unsafe fn init_memory(
     phys_mem_offset: x86_64::VirtAddr,
 ) -> (OffsetPageTable<'static>, BuddyFrameAllocator) {
-    crate::serial_write("[BOOT] memory::init...\n");
     let mut mapper = unsafe { crate::memory::init(phys_mem_offset) };
-    crate::serial_write("[BOOT] memory::init done\n");
-
-    crate::serial_write("[BOOT] frame allocator...\n");
     unsafe { crate::memory::init_frame_allocator_limine() };
     let mut frame_allocator = BuddyFrameAllocator;
-    crate::serial_write("[BOOT] heap init...\n");
     crate::allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
 
@@ -88,6 +83,11 @@ pub unsafe fn init_memory(
 }
 
 /// Map framebuffer pages and initialize graphics subsystem.
+///
+/// # Safety
+/// Maps the framebuffer physical memory into the kernel virtual address space.
+/// `mapper` and `frame_allocator` must be valid and the framebuffer address
+/// must come from a trusted Limine boot info structure.
 #[cfg(not(target_arch = "aarch64"))]
 pub unsafe fn init_graphics(
     mapper: &mut OffsetPageTable<'static>,
@@ -100,29 +100,8 @@ pub unsafe fn init_graphics(
         let fb_phys = fb_virt.saturating_sub(hhdm);
         let fb_size = f.size();
         map_phys_range(mapper, frame_allocator, fb_phys, fb_phys + fb_size as u64);
-        crate::serial_write("[BOOT] fb pages mapped\n");
-        crate::serial_write("[BOOT] fb=present\n");
-    } else {
-        crate::serial_write("[BOOT] fb=NONE\n");
     }
-    crate::serial_write("[BOOT] graphics init...\n");
     crate::drivers::graphics::init_limine(fb);
-    crate::serial_write("[BOOT] graphics init done\n");
-
-    if crate::drivers::graphics::is_active() {
-        crate::serial_write("[BOOT] graphics=active\n");
-        // Show boot splash as soon as framebuffer is ready.
-        // crate::gui::splash::init();  // Temporarily disabled - hangs without VirtIO GPU
-    } else {
-        crate::serial_write("[BOOT] graphics=INACTIVE\n");
-    }
-    crate::serial_write("[BOOT] -> SARGA OS \u{2014} Vahi Kernel v0.3.0 starting...\n");
-    crate::serial_write("[SPLASH] SARGA OS loading...\n");
-    // ponytail: 1M spin_loop iterations took ~90s in debug+TCG; 10k is
-    // enough for a human to read a framebuffer splash.
-    for _ in 0..10_000 {
-        core::hint::spin_loop();
-    }
 }
 
 /// Initialize architecture-specific subsystems: GDT, IDT, syscalls, HAL,
@@ -130,21 +109,14 @@ pub unsafe fn init_graphics(
 #[cfg(not(target_arch = "aarch64"))]
 pub fn init_architecture() {
     use crate::arch::Arch;
-    crate::serial_write("[BOOT] gdt init...\n");
     crate::gdt::init();
-    crate::serial_write("[BOOT] idt+pic init...\n");
     crate::interrupts::init_idt();
-    crate::serial_write("[BOOT] syscalls init...\n");
     crate::syscalls::init();
-
-    crate::serial_write("[BOOT] HAL init...\n");
     let platform_info = crate::arch::CurrentArch::probe_platform();
     crate::hal::platform::init(platform_info);
     <crate::arch::CurrentArch as crate::arch::Arch>::init_hal_irq();
     <crate::arch::CurrentArch as crate::arch::Arch>::init_hal_timer();
-    crate::serial_write("[BOOT] HAL init done\n");
 
-    crate::serial_write("[BOOT] frame tracker init...\n");
     // Match the buddy allocator's usable regions; high reserved/MMIO ranges
     // must not inflate the dense refcount table beyond the kernel heap.
     let max_phys = crate::limine::iter_usable_regions()
@@ -153,7 +125,6 @@ pub fn init_architecture() {
         .expect("no usable RAM for frame tracking");
     crate::memory::frame_info::init(max_phys);
     crate::memory::phys::snapshot_baseline();
-    crate::serial_write("[BOOT] -> VAHI Frame Tracker: OK\n");
 }
 
 /// Initialize platform devices: ACPI, APIC, SMP, PS/2, PCI, IOMMU, USB.
@@ -170,7 +141,25 @@ pub unsafe fn init_devices() {
 
     // Get TSC frequency from APIC calibration (now available after APIC init)
     // Keep bus frequency separate from CPU/TSC frequency
-    let tsc_freq = crate::hal::timer::get_tsc_frequency();
+    let mut tsc_freq = crate::hal::timer::get_tsc_frequency();
+    // If TSC timer not initialized yet, use estimated frequency from APIC bus calibration
+    if tsc_freq == 0 {
+        if let Some(est_tsc) = crate::apic::get_tsc_frequency_hz() {
+            tsc_freq = est_tsc as u64;
+            crate::serial_write("[BOOT] Using estimated TSC frequency from APIC bus calibration: ");
+            crate::serial_write_hex(tsc_freq);
+            crate::serial_write(" Hz\n");
+        }
+    }
+    // If TSC timer not initialized yet, use estimated frequency from APIC bus calibration
+    if tsc_freq == 0 {
+        if let Some(est_tsc) = crate::apic::get_tsc_frequency_hz() {
+            tsc_freq = est_tsc as u64;
+            crate::serial_write("[BOOT] Using estimated TSC frequency from APIC bus calibration: ");
+            crate::serial_write_hex(tsc_freq);
+            crate::serial_write(" Hz\n");
+        }
+    }
     crate::serial_write("[BOOT] TSC frequency: ");
     crate::serial_write_hex(tsc_freq);
     crate::serial_write(" Hz\n");
@@ -185,50 +174,31 @@ pub unsafe fn init_devices() {
         crate::serial_write("\n");
     }
 
-    // Also set bus frequency for APIC timer reference
-    if let Some(bus_freq) = crate::apic::get_bus_frequency_hz() {
-        crate::serial_write("[BOOT] APIC bus frequency: ");
-        crate::serial_write_hex(bus_freq as u64);
-        crate::serial_write(" Hz\n");
-    }
-
     // Re-initialize TSC timer now that platform info has CPU frequency
     <crate::arch::CurrentArch as crate::arch::Arch>::init_hal_timer();
     #[cfg(feature = "self_test")]
     crate::tests::run_all();
     #[cfg(feature = "smp")]
-    {
-        crate::serial_write("[BOOT] SMP init...\n");
-        crate::smp::init();
-    }
-    crate::serial_write("[BOOT] PS/2 init...\n");
+    crate::smp::init();
+
     crate::drivers::ps2::init();
-    crate::serial_write("[BOOT] PCI enumerate...\n");
     crate::pci::enumerate_pci();
-    crate::serial_write("[BOOT] IOMMU init...\n");
     crate::iommu::init();
     #[cfg(feature = "iommu")]
     crate::iommu::register_vahi_arch_iommu();
-    crate::serial_write("[BOOT] USB init...\n");
     crate::drivers::usb::init();
 }
 
 /// Initialize VFS, object namespace, networking, security, and optional
 /// subsystems (ASH, hypervisor).
 pub fn init_vfs_network() {
-    crate::serial_write("[BOOT] VFS init...\n");
     if let Some(ramdisk_data) = crate::limine::ramdisk() {
         *crate::vfs::RAMDISK.lock() = Some(ramdisk_data);
-        crate::serial_write("[BOOT] initrd from Limine modules\n");
     }
     crate::vfs::init();
-    crate::serial_write("[BOOT] object manager init...\n");
     crate::objects::namespace::init();
     #[cfg(feature = "net")]
-    {
-        crate::serial_write("[BOOT] net init...\n");
-        crate::net::init();
-    }
+    crate::net::init();
 
     // Enable E1000 interrupts now that the network stack is ready.
     #[cfg(all(feature = "net", not(target_arch = "aarch64")))]
@@ -239,19 +209,10 @@ pub fn init_vfs_network() {
             dev.lock().inner.enable_interrupts();
         }
     }
-    crate::serial_write("[BOOT] LSM init...\n");
     crate::security::init();
-    crate::serial_write("[BOOT] CFI init...\n");
     crate::sync::cfi::cfi_init();
     #[cfg(feature = "ash")]
-    {
-        crate::serial_write("[BOOT] ASH init...\n");
-        crate::ash::manager::init();
-    }
+    crate::ash::manager::init();
     #[cfg(feature = "hypervisor")]
-    {
-        crate::serial_write("[BOOT] hypervisor init...\n");
-        crate::hypervisor::init();
-    }
-    crate::serial_write("[BOOT] -> SARGA OS: Graphical Console Mode Active!\n");
+    crate::hypervisor::init();
 }

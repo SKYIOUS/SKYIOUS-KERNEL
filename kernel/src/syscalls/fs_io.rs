@@ -138,7 +138,7 @@ pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> u64 {
             let mut recv_buf = alloc::vec![0u8; count];
             match crate::net::unix::recvfrom_unix(
                 handle,
-                recv_buf.as_mut_ptr() as *mut u8,
+                recv_buf.as_mut_ptr(),
                 count as u64,
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
@@ -358,7 +358,7 @@ pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> u64 {
         Some(FileDescriptor::UnixSocket(handle, _)) => {
             match crate::net::unix::sendto_unix(
                 handle,
-                data.as_ptr() as *const u8,
+                data.as_ptr(),
                 count as u64,
                 core::ptr::null(),
                 0,
@@ -448,7 +448,7 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: i32) -> u64 {
             let new_pos = match whence {
                 0 => offset as usize,
                 1 => (cur as i64 + offset) as usize,
-                2 => (stat.st_size as i64 + offset) as usize,
+                2 => (stat.st_size + offset) as usize,
                 _ => return errno::Errno::EINVAL as u64,
             };
             *file_off.lock() = new_pos;
@@ -862,7 +862,7 @@ pub fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: *mut u64, count: u64) -
                     return errno::Errno::EFAULT as u64;
                 }
             }
-            total as u64
+            total
         }
         _ => errno::Errno::EBADF as u64,
     }
@@ -1170,7 +1170,7 @@ pub fn sys_mincore(addr: u64, len: usize, vec: *mut u8) -> u64 {
     };
 
     let end = addr + len as u64;
-    let page_count = (len + page_size as usize - 1) / page_size as usize;
+    let page_count = len.div_ceil(page_size as usize);
     // Linux mincore reports ONE BYTE PER PAGE, not a bit vector: a bit vector
     // makes glibc/musl read residency flags out of the wrong byte.
     let mut result = alloc::vec![0u8; page_count];

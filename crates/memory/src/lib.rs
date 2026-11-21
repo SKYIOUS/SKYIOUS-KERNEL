@@ -9,16 +9,16 @@
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | `buddy` | Power-of-two page allocator (`BUDDY_ALLOCATOR` global) |
-//! | `slab` | Fixed-size block allocator for kernel structs |
-//! | `paging` | Page table manipulation: map, unmap, `AddressSpace` |
-//! | `phys` | Physical address translation (virt_to_phys) |
-//! | `virt` | Virtual memory helpers (HHDM offset) |
-//! | `swap` | Page-out to disk and page-in on fault |
-//! | `isolate` | Per-process address space isolation |
 //! | `frame_info` | High-water-mark allocation tracking (increment/decrement/count) |
-//! | `stack` | Kernel stack allocation for threads |
-//! | `overcommit` | Memory overcommit policy |
+//! | `buddy` | Power-of-two page allocator (`BUDDY_ALLOCATOR` global) [x86_64] |
+//! | `slab` | Fixed-size block allocator for kernel structs [x86_64] |
+//! | `paging` | Page table manipulation: map, unmap, `AddressSpace` [x86_64] |
+//! | `phys` | Physical address translation (virt_to_phys) [x86_64] |
+//! | `virt` | Virtual memory helpers (HHDM offset) [x86_64] |
+//! | `swap` | Page-out to disk and page-in on fault [x86_64] |
+//! | `isolate` | Per-process address space isolation [x86_64] |
+//! | `stack` | Kernel stack allocation for threads [x86_64] |
+//! | `overcommit` | Memory overcommit policy [x86_64] |
 //!
 //! ## Kernel Integration
 //!
@@ -37,20 +37,33 @@
 
 extern crate alloc;
 
-#[cfg(target_arch = "aarch64")]
-pub mod aarch64;
-pub mod buddy;
+// frame_info is the only cross-platform module
 pub mod frame_info;
+
+// x86_64-specific modules
+#[cfg(target_arch = "x86_64")]
+pub mod buddy;
+#[cfg(target_arch = "x86_64")]
 pub mod isolate;
+#[cfg(target_arch = "x86_64")]
 pub mod overcommit;
+#[cfg(target_arch = "x86_64")]
 pub mod paging;
+#[cfg(target_arch = "x86_64")]
 pub mod phys;
+#[cfg(target_arch = "x86_64")]
 pub mod slab;
+#[cfg(target_arch = "x86_64")]
 pub mod stack;
+#[cfg(target_arch = "x86_64")]
 pub mod swap;
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 pub mod virt;
 
+#[cfg(target_arch = "aarch64")]
+pub mod aarch64;
+
+#[cfg(target_arch = "x86_64")]
 pub mod allocator {
     use crate::slab::{FixedSizeBlockAllocator, Locked};
     pub static ALLOCATOR: Locked<FixedSizeBlockAllocator> =
@@ -73,7 +86,7 @@ pub fn physical_memory_offset() -> u64 {
         .expect("PHYSICAL_MEMORY_OFFSET not initialized")
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 /// # Safety
 /// `physical_memory_offset` must be the correct identity map offset. Must only be called once.
 pub unsafe fn init(
@@ -92,7 +105,7 @@ pub unsafe fn init_aarch64(physical_memory_offset: u64) -> u64 {
     physical_memory_offset
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 pub fn virt_to_phys(virt: x86_64::VirtAddr) -> Option<x86_64::PhysAddr> {
     use x86_64::structures::paging::Translate;
     let offset_val = *PHYSICAL_MEMORY_OFFSET.get()?;
@@ -102,12 +115,30 @@ pub fn virt_to_phys(virt: x86_64::VirtAddr) -> Option<x86_64::PhysAddr> {
     mapper.translate_addr(virt)
 }
 
+/// Translate a virtual address using a specific PML4 frame (for cross-address-space translation).
+///
+/// # Safety
+/// The `pml4_frame` must be a valid physical frame containing a page table.
+/// The `physical_memory_offset` must be the correct HHDM offset.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn virt_to_phys_with_pml4(
+    virt: x86_64::VirtAddr,
+    pml4_frame: x86_64::structures::paging::PhysFrame,
+    physical_memory_offset: x86_64::VirtAddr,
+) -> Option<x86_64::PhysAddr> {
+    use x86_64::structures::paging::Translate;
+    let pml4_virt = physical_memory_offset + pml4_frame.start_address().as_u64();
+    let pml4 = &mut *(pml4_virt.as_mut_ptr::<x86_64::structures::paging::PageTable>());
+    let mapper = x86_64::structures::paging::OffsetPageTable::new(pml4, physical_memory_offset);
+    mapper.translate_addr(virt)
+}
+
 #[cfg(target_arch = "aarch64")]
 pub fn virt_to_phys(virt: u64) -> Option<u64> {
     crate::aarch64::virt_to_phys(virt)
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 pub fn virt_to_phys_dma(virt: x86_64::VirtAddr) -> x86_64::PhysAddr {
     virt_to_phys(virt).unwrap_or_else(|| {
         panic!(
@@ -126,24 +157,24 @@ pub fn virt_to_phys_dma(virt: u64) -> u64 {
 /// # Safety
 /// `user_ptr` must be a valid user-space pointer for `len` bytes.
 pub unsafe fn _copy_from_user(kernel_buf: &mut [u8], user_ptr: *const u8, len: usize) {
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!("stac", options(nostack, preserves_flags));
     core::ptr::copy_nonoverlapping(user_ptr, kernel_buf.as_mut_ptr(), len);
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!("clac", options(nostack, preserves_flags));
 }
 
 /// # Safety
 /// `user_ptr` must be a valid user-space pointer for `len` bytes.
 pub unsafe fn copy_to_user(user_ptr: *mut u8, kernel_buf: &[u8], len: usize) {
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!("stac", options(nostack, preserves_flags));
     core::ptr::copy_nonoverlapping(kernel_buf.as_ptr(), user_ptr, len);
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!("clac", options(nostack, preserves_flags));
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub unsafe fn active_level_4_table(
     physical_memory_offset: x86_64::VirtAddr,
@@ -158,6 +189,7 @@ pub unsafe fn active_level_4_table(
 
 /// # Safety
 /// Must only be called once during boot after the Limine memory map is available.
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn init_frame_allocator_limine() {
     let mut buddy = crate::buddy::BUDDY_ALLOCATOR.lock();
     let mut total_pages: usize = 0;

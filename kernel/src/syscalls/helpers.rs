@@ -256,7 +256,7 @@ pub fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -
                 fsgid: cred.fsgid,
                 cap_effective: cred.cap_effective,
             },
-            &*sec,
+            &sec,
             access,
         ) {
             return errno::Errno::EACCES as u64;
@@ -273,7 +273,7 @@ pub fn add_fd(process: &Arc<Process>, node: Arc<dyn VfsNode>, open_flags: i32) -
         let limit = core::cmp::max(ht.len(), fd_table.len());
         let mut idx = 0usize;
         while idx < limit
-            && (ht.is_valid(idx as u64) || fd_table.get(idx).map_or(false, |s| s.is_some()))
+            && (ht.is_valid(idx as u64) || fd_table.get(idx).is_some_and(|s| s.is_some()))
         {
             idx += 1;
         }

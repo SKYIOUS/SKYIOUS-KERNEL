@@ -46,7 +46,7 @@ impl Compositor {
         // Right-click new press — open context menu
         if right_click_new {
             // Don't open context menu on taskbar
-            if y >= SCREEN_HEIGHT - 40 && y < SCREEN_HEIGHT {
+            if (SCREEN_HEIGHT - 40..SCREEN_HEIGHT).contains(&y) {
                 return;
             }
             let mut hit = false;
@@ -70,7 +70,7 @@ impl Compositor {
         // Original left-click handling
         if left_click {
             // Check start menu button
-            if x >= 5 && x < 65 && y >= SCREEN_HEIGHT - 35 && y < SCREEN_HEIGHT - 5 {
+            if (5..65).contains(&x) && (SCREEN_HEIGHT - 35..SCREEN_HEIGHT - 5).contains(&y) {
                 self.start_menu_open = !self.start_menu_open;
                 return;
             }
@@ -103,14 +103,14 @@ impl Compositor {
             }
 
             // Desktop icon clicks (SYSTEM, FILES)
-            if y >= 20 && y < 70 && x >= 20 && x < 68 {
+            if (20..70).contains(&y) && (20..68).contains(&x) {
                 self.create_info_window(
                     "SYSTEM",
                     "SARGA OS System\n\nKernel: Vahi v0.3.0\nCPU: x86_64\nMemory: Managed",
                 );
                 return;
             }
-            if y >= 100 && y < 150 && x >= 20 && x < 68 {
+            if (100..150).contains(&y) && (20..68).contains(&x) {
                 self.create_file_manager_window();
                 return;
             }

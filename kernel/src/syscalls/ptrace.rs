@@ -119,11 +119,9 @@ pub fn enqueue_stop(pid: u64, reason: PtraceStop) {
 /// Dequeue a stop event for a specific tracee pid.
 pub fn dequeue_stop(pid: u64) -> Option<PtraceStop> {
     let mut q = STOP_QUEUE.lock();
-    if let Some(idx) = q.iter().position(|(p, _)| *p == pid) {
-        Some(q.remove(idx).1)
-    } else {
-        None
-    }
+    q.iter()
+        .position(|(p, _)| *p == pid)
+        .map(|idx| q.remove(idx).1)
 }
 
 // ─── Helper: look up a process by pid ─────────────────────────────

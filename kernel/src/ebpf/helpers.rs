@@ -16,10 +16,10 @@ pub fn bpf_helper_map_lookup_elem(
         Some(m) => {
             let ksz = m.key_size();
             let vsz = m.value_size();
-            if key_off.checked_add(ksz).map_or(true, |e| e > STACK_SIZE) {
+            if key_off.checked_add(ksz).is_none_or(|e| e > STACK_SIZE) {
                 return -1;
             }
-            if val_off.checked_add(vsz).map_or(true, |e| e > STACK_SIZE) {
+            if val_off.checked_add(vsz).is_none_or(|e| e > STACK_SIZE) {
                 return -1;
             }
             let mut key = [0u8; STACK_SIZE];
@@ -51,7 +51,7 @@ pub fn bpf_helper_get_ticks() -> u64 {
 }
 
 pub fn bpf_helper_debug_print(stack: &[u8; STACK_SIZE], msg_off: usize, len: usize) {
-    if msg_off.checked_add(len).map_or(true, |e| e > STACK_SIZE) {
+    if msg_off.checked_add(len).is_none_or(|e| e > STACK_SIZE) {
         return;
     }
     let s = match core::str::from_utf8(&stack[msg_off..msg_off + len]) {

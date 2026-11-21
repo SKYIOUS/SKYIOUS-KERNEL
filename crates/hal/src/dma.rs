@@ -1,7 +1,16 @@
 //! DMA buffer abstractions.
 //!
 //! Provides `DmaBuf` for single allocations and `PooledDma` for pooled
-//! hot-path DMA buffers. These are stubs extracted from `kernel/src/hal/dma.rs`.
+//! hot-path DMA buffers.
+//!
+//! See ADR-012: Shared Driver Primitives.
+//!
+//! Consolidates per-driver DMA helpers:
+//! - `phys_of` / `dma_addr`: replaces per-driver `virt_to_phys(...).unwrap()` pattern
+//! - `DmaRing<T>`: replaces virtq/TRB/command-list ring boilerplate
+//! - Drivers keep their spec logic; only address-mapping and ring mechanics move here
+
+// Previously stubs extracted from `kernel/src/hal/dma.rs`.
 
 extern crate alloc;
 

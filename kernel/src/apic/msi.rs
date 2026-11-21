@@ -106,7 +106,7 @@ impl Pool {
     }
 
     fn free(&mut self, v: u8) {
-        if v >= MSI_START && v < MSI_END {
+        if (MSI_START..MSI_END).contains(&v) {
             self.bits.clear(v);
         }
     }

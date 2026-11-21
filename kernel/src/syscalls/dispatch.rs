@@ -1826,7 +1826,7 @@ fn do_syscall_body(
                     }
                 } else {
                     // Kernel default trampoline — copy code bytes to user stack.
-                    let code_ptr = super::signal::SIGNAL_RESTORER.as_ptr() as *const u8;
+                    let code_ptr = super::signal::SIGNAL_RESTORER.as_ptr();
                     let code_len = super::signal::SIGNAL_RESTORER.len();
                     let dst = ret_kptr as *mut u8;
                     unsafe {

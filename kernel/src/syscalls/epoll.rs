@@ -3,6 +3,8 @@
 //! Implements epoll_create1, epoll_ctl, and epoll_wait for event-driven I/O.
 //! Each epoll instance is backed by a file descriptor that monitors a set of
 //! other file descriptors for readiness events (EPOLLIN, EPOLLOUT, etc.).
+//!
+//! See ADR-015: epoll Implementation.
 
 use crate::sync::IrqSafeMutex as Mutex;
 use crate::syscalls::errno;
@@ -389,7 +391,7 @@ pub fn sys_epoll_wait(epfd: u64, events_ptr: *mut u8, maxevents: i32, timeout_ms
             None // block indefinitely
         } else {
             // Convert ms to ticks (round up so we never under-sleep)
-            let ticks = ((timeout_ms as u64) + 9) / 10;
+            let ticks = (timeout_ms as u64).div_ceil(10);
             let now = crate::interrupts::get_ticks();
             Some(now.saturating_add(ticks))
         };

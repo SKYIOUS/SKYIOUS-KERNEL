@@ -20,6 +20,9 @@
 //! - `Running` — currently executing on a CPU.
 //! - `Blocked` — waiting on a pipe, futex, or sleep timer.
 //! - `Exited` — finished; cleaned up on next context switch.
+//!
+//! See ADR-005: Stride Scheduling with Proportional Fairness.
+//! See ADR-016: Scheduler Architecture.
 
 pub mod spawn;
 pub mod switch;
@@ -41,6 +44,7 @@ use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::thread::{Thread, ThreadId};
 use alloc::boxed::Box;
 use alloc::collections::{BinaryHeap, VecDeque};
+use core::ops::DerefMut;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ─── Scheduling policy constants ────────────────────────────────
@@ -147,7 +151,7 @@ pub struct PerCpuScheduler {
     /// Permanent per-CPU idle thread.
     pub idle: Option<Box<Thread>>,
     /// ThreadId of `idle`, used to recognize a preempted idle thread.
-    idle_id: Option<ThreadId>,
+    pub idle_id: Option<ThreadId>,
     /// One-shot: set when this CPU first schedules a process-bearing
     /// (userspace) thread, so the boot log can show multi-CPU execution
     /// with a single line per CPU instead of per-switch tracing.
@@ -314,14 +318,12 @@ impl PerCpuScheduler {
     pub fn pick_next(&mut self) -> Option<Box<Thread>> {
         let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
 
-        // 1. Global pending queue first
-        if let Some(t) = GLOBAL
+        // 1. Check global pending queue, but don't return immediately if it's a normal thread
+        // and there's an eligible deadline thread locally. Peek at pending thread first.
+        let mut pending_thread = GLOBAL
             .pending_queue
             .try_lock()
-            .and_then(|mut q| q.pop_front())
-        {
-            return Some(t);
-        }
+            .and_then(|mut q| q.pop_front());
 
         // 2. SCHED_DEADLINE (EDF) threads have highest priority — earliest absolute deadline runs first
         // Select from ready_queues BEFORE flush_ready_queues moves them to stride_heap
@@ -344,10 +346,50 @@ impl PerCpuScheduler {
                 }
             }
         }
+
+        // If we have a pending thread, check if it's a deadline thread.
+        // If both pending and local have deadline threads, pick the one with earliest deadline.
+        // If pending is normal but local has deadline, prefer local deadline thread.
+        if let Some(pending) = pending_thread.take() {
+            if is_deadline(pending.policy) {
+                // Pending is deadline thread - compare with best local deadline
+                if let Some(local_deadline) = best_deadline {
+                    // Use < to favor local thread on equal deadlines (reduces context switches)
+                    if pending.sched_deadline < local_deadline {
+                        return Some(pending);
+                    }
+                    // Local deadline is earlier, fall through to return local
+                } else {
+                    // No local deadline thread, return pending deadline thread
+                    return Some(pending);
+                }
+            }
+            // Pending is normal thread - if we have local deadline thread, prefer it
+            if best_deadline.is_some() {
+                // Put pending back and fall through to deadline selection
+                if let Some(mut q) = GLOBAL.pending_queue.try_lock() {
+                    q.push_front(pending);
+                } else {
+                    // Lock failed: keep pending thread locally so it's not lost.
+                    // Return it after deadline thread selection if no deadline thread runs.
+                    pending_thread = Some(pending);
+                }
+            } else {
+                // No local deadline: keep locally to run immediately
+                // Don't re-queue to global - it causes the thread to starve behind the idle thread
+                pending_thread = Some(pending);
+            }
+        }
+
         if let (Some(level), Some(idx)) = (best_dl_level, best_dl_idx) {
             if let Some(thread) = self.ready_queues[level].remove(idx) {
                 return Some(thread);
             }
+        }
+
+        // If we have a pending normal thread and no deadline thread, return it
+        if pending_thread.is_some() {
+            return pending_thread;
         }
 
         // Now flush ready queues into stride heap for SCHED_OTHER
@@ -570,6 +612,28 @@ impl GlobalScheduler {
         self.futex_queue.lock().push_back(Box::new(thread));
     }
 
+    /// Wake threads matching a predicate from a given queue.
+    ///
+    /// This is the unified wake function that both `wake_blocked_threads`
+    /// and `wake_futex` delegate to. It drains threads from `queue`,
+    /// wakes up to `max_wake` matching ones, and pushes non-matching
+    /// ones back.
+    fn wake_threads<Q, M, C>(
+        &self,
+        queue: &mut Q,
+        max_wake: u32,
+        target_ready: &mut PerCpuScheduler,
+        matches: M,
+        clear_block: C,
+    ) -> u32
+    where
+        Q: DerefMut<Target = VecDeque<Box<Thread>>>,
+        M: Fn(&Thread) -> bool,
+        C: FnMut(&mut Thread),
+    {
+        target_ready.drain_wake(queue.deref_mut(), max_wake, matches, clear_block)
+    }
+
     /// Wake threads blocked on a pipe key.
     pub fn wake_blocked_threads(
         &self,
@@ -578,26 +642,24 @@ impl GlobalScheduler {
         target_ready: &mut PerCpuScheduler,
     ) -> u32 {
         let mut block = self.block_queue.lock();
-        target_ready.drain_wake(
+        self.wake_threads(
             &mut block,
             max_wake,
+            target_ready,
             |t| t.pipe_block_key == Some(key),
-            |t| {
-                t.pipe_block_key = None;
-            },
+            |t| t.pipe_block_key = None,
         )
     }
 
     /// Wake threads waiting on a futex.
     pub fn wake_futex(&self, uaddr: u64, max_wake: u32, target_ready: &mut PerCpuScheduler) -> u32 {
         let mut futex = self.futex_queue.lock();
-        target_ready.drain_wake(
+        self.wake_threads(
             &mut futex,
             max_wake,
+            target_ready,
             |t| t.futex_wake_addr == Some(uaddr),
-            |t| {
-                t.futex_wake_addr = None;
-            },
+            |t| t.futex_wake_addr = None,
         )
     }
 }

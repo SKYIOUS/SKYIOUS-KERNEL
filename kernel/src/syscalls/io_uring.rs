@@ -88,7 +88,7 @@ pub struct IoUringInstance {
 impl IoUringInstance {
     pub fn new(entries: u32) -> Self {
         let n = entries as usize;
-        let ring_mask = (entries - 1) as u32;
+        let ring_mask = entries - 1;
         let cq_entries = entries * 2;
         IoUringInstance {
             sq_ring: IoRingRing {
@@ -250,7 +250,7 @@ fn process_sqe(sqe: &IoSqEntry) -> IoCqe {
         },
         IORING_OP_POLL_ADD => IoCqe {
             user_data: ud,
-            res: do_poll_add(sqe.fd, sqe.len as u32),
+            res: do_poll_add(sqe.fd, sqe.len),
             flags: 0,
         },
         IORING_OP_POLL_REMOVE => IoCqe {
@@ -465,7 +465,9 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
                 return Errno::EFAULT as u64;
             }
             inst.fixed_buffers = raw
-                .chunks_exact(core::mem::size_of::<IoVec>())
+                .as_chunks::<{ core::mem::size_of::<IoVec>() }>()
+                .0
+                .iter()
                 .map(|c| {
                     let addr = u64::from_ne_bytes(c[..8].try_into().unwrap_or([0u8; 8]));
                     let len = u64::from_ne_bytes(c[8..16].try_into().unwrap_or([0u8; 8]));
@@ -488,8 +490,10 @@ pub fn sys_io_uring_register(fd: u64, opcode: u32, arg: u64, nr_args: u32) -> u6
                 return Errno::EFAULT as u64;
             }
             inst.fixed_files = raw
-                .chunks_exact(core::mem::size_of::<i32>())
-                .map(|c| i32::from_ne_bytes(c.try_into().unwrap_or([0u8; 4])))
+                .as_chunks::<{ core::mem::size_of::<i32>() }>()
+                .0
+                .iter()
+                .map(|c| i32::from_ne_bytes(*c))
                 .collect();
             0
         }

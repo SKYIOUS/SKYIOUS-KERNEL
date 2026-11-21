@@ -199,7 +199,7 @@ impl<'a> EbpfVm<'a> {
                         BPF_CALL => {
                             match insn.imm {
                                 1 => {
-                                    let map_fd = regs.r(1) as u64;
+                                    let map_fd = regs.r(1);
                                     let key_off = regs.r(2) as usize;
                                     let val_off = regs.r(3) as usize;
                                     let ret = super::helpers::bpf_helper_map_lookup_elem(
@@ -301,7 +301,7 @@ impl<'a> EbpfVm<'a> {
                         0x00 => unsafe { *(stack.as_ptr().add(addr) as *const u64) },
                         0x08 => unsafe { *(stack.as_ptr().add(addr) as *const u32) as u64 },
                         0x10 => unsafe { *(stack.as_ptr().add(addr) as *const u16) as u64 },
-                        0x18 => unsafe { *(stack.as_ptr().add(addr) as *const u8) as u64 },
+                        0x18 => unsafe { *(stack.as_ptr().add(addr)) as u64 },
                         _ => 0,
                     };
                     regs.set_r(dst, val);
@@ -334,7 +334,7 @@ impl<'a> EbpfVm<'a> {
                         0x00 => unsafe { *(stack.as_mut_ptr().add(addr) as *mut u64) = val },
                         0x08 => unsafe { *(stack.as_mut_ptr().add(addr) as *mut u32) = val as u32 },
                         0x10 => unsafe { *(stack.as_mut_ptr().add(addr) as *mut u16) = val as u16 },
-                        0x18 => unsafe { *(stack.as_mut_ptr().add(addr) as *mut u8) = val as u8 },
+                        0x18 => unsafe { *stack.as_mut_ptr().add(addr) = val as u8 },
                         _ => {}
                     }
                     pc += 1;
