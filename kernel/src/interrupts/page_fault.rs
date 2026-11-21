@@ -10,6 +10,7 @@ use x86_64::structures::idt::{InterruptStackFrame, PageFaultErrorCode};
 use x86_64::structures::paging::PageTableFlags;
 
 use super::diag::IrqFmtBuf;
+use crate::vdso::{vdso_map_cpu_page_into, VDSO_BASE};
 
 // Page-fault dispatch trampoline. The IDT #PF entry points here instead of
 // directly at `page_fault_handler` so user-copy faults can be aborted
@@ -120,6 +121,23 @@ pub(super) extern "x86-interrupt" fn page_fault_handler(
         let page_addr = fault_addr.as_u64() & !0xFFF;
         let page = x86_64::structures::paging::Page::containing_address(fault_addr);
 
+        // Handle vDSO page fault: map the specific CPU's vDSO page if fault is in vDSO range
+        // Only handle non-protection-violation faults (demand paging); let protection
+        // violations continue to the existing fault handling path.
+        const VDSO_RANGE_END: u64 = VDSO_BASE + (crate::task::scheduler::MAX_CPUS as u64) * 4096;
+        if fault_addr.as_u64() >= VDSO_BASE
+            && fault_addr.as_u64() < VDSO_RANGE_END
+            && !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        {
+            let cpu_id = ((fault_addr.as_u64() - VDSO_BASE) / 4096) as usize;
+            use crate::memory::buddy::BuddyFrameAllocator;
+            let mut fa = BuddyFrameAllocator;
+            if let Some(mut mapper) = unsafe { proc.address_space.mapper() } {
+                let _ = vdso_map_cpu_page_into(cpu_id, &mut mapper, &mut fa);
+            }
+            return;
+        }
+
         // Check global swap map for a swapped-out page
         let swap_entry = crate::memory::swap::SWAP_PAGE_MAP.lock().remove(&page_addr);
 
@@ -158,9 +176,9 @@ pub(super) extern "x86-interrupt" fn page_fault_handler(
                 }
                 // Cgroup memory.max check — enforce at page fault time
                 {
-                    let cg_path = proc.cgroup_path.lock();
+                    let cg_path = &proc.cgroup_path;
                     let hierarchy = crate::syscalls::cgroup::cgroup_ensure();
-                    if let Some(cg) = hierarchy.find_cgroup(&cg_path) {
+                    if let Some(cg) = hierarchy.find_cgroup(cg_path) {
                         if !cg.can_allocate(4096) {
                             return; // Don't allocate — cgroup memory limit reached
                         }
@@ -186,8 +204,8 @@ pub(super) extern "x86-interrupt" fn page_fault_handler(
 
                         // Account memory in cgroup
                         {
-                            let cg_path = proc.cgroup_path.lock();
-                            crate::syscalls::cgroup::cgroup_account_memory(&cg_path, 4096);
+                            let cg_path = &proc.cgroup_path;
+                            crate::syscalls::cgroup::cgroup_account_memory(cg_path, 4096);
                         }
 
                         let virt = x86_64::VirtAddr::new(
@@ -211,9 +229,9 @@ pub(super) extern "x86-interrupt" fn page_fault_handler(
                 }
                 // Cgroup memory.max check for brk region
                 {
-                    let cg_path = proc.cgroup_path.lock();
+                    let cg_path = &proc.cgroup_path;
                     let hierarchy = crate::syscalls::cgroup::cgroup_ensure();
-                    if let Some(cg) = hierarchy.find_cgroup(&cg_path) {
+                    if let Some(cg) = hierarchy.find_cgroup(cg_path) {
                         if !cg.can_allocate(4096) {
                             return; // Don't allocate — cgroup memory limit reached
                         }
@@ -235,8 +253,8 @@ pub(super) extern "x86-interrupt" fn page_fault_handler(
                         crate::memory::frame_info::increment(frame.start_address());
                         // Account memory in cgroup
                         {
-                            let cg_path = proc.cgroup_path.lock();
-                            crate::syscalls::cgroup::cgroup_account_memory(&cg_path, 4096);
+                            let cg_path = &proc.cgroup_path;
+                            crate::syscalls::cgroup::cgroup_account_memory(cg_path, 4096);
                         }
                         let virt = x86_64::VirtAddr::new(
                             crate::memory::physical_memory_offset()

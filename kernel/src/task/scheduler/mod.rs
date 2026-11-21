@@ -41,28 +41,52 @@ use crate::sync::IrqSafeMutex as Mutex;
 use crate::task::thread::{Thread, ThreadId};
 use alloc::boxed::Box;
 use alloc::collections::{BinaryHeap, VecDeque};
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ─── Scheduling policy constants ────────────────────────────────
 pub const SCHED_NORMAL: u32 = 0;
 pub const SCHED_FIFO: u32 = 1;
 pub const SCHED_RR: u32 = 2;
 pub const SCHED_BATCH: u32 = 3;
+pub const SCHED_DEADLINE: u32 = 6; // Linux-compatible
 
 /// Returns true if the scheduling class is real-time (FIFO or RR).
 pub fn is_realtime(class: u32) -> bool {
     class == SCHED_FIFO || class == SCHED_RR
 }
 
+/// Returns true if the scheduling class is deadline (EDF).
+pub fn is_deadline(class: u32) -> bool {
+    class == SCHED_DEADLINE
+}
+
 /// Returns true if `candidate_class` should preempt `current_class`.
+/// Priority order: SCHED_DEADLINE > SCHED_FIFO > SCHED_RR > SCHED_NORMAL/SCHED_BATCH
 pub fn should_preempt(current_class: u32, candidate_class: u32) -> bool {
-    is_realtime(candidate_class) && !is_realtime(current_class)
+    // Compare class ranks: DEADLINE(6) > FIFO(1) > RR(2) > NORMAL/BATCH(0/3)
+    let current_rank = match current_class {
+        SCHED_DEADLINE => 3,
+        SCHED_FIFO => 2,
+        SCHED_RR => 1,
+        _ => 0,
+    };
+    let candidate_rank = match candidate_class {
+        SCHED_DEADLINE => 3,
+        SCHED_FIFO => 2,
+        SCHED_RR => 1,
+        _ => 0,
+    };
+    candidate_rank > current_rank
 }
 
 // ─── Statics ────────────────────────────────────────────────────
 
 /// When set, no CPU runs the scheduler (checked by `schedule()`/`try_schedule()`).
 pub static SCHED_QUIESCE: AtomicBool = AtomicBool::new(false);
+
+/// Online CPU tracking: bitmask of CPUs that have completed bringup and can respond to IPIs.
+/// Bit i = 1 means CPU i is online. BSP (CPU 0) is online from boot.
+pub static ONLINE_CPUS: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) const MAX_CPUS: usize = 8;
 
@@ -288,8 +312,6 @@ impl PerCpuScheduler {
     }
 
     pub fn pick_next(&mut self) -> Option<Box<Thread>> {
-        self.flush_ready_queues();
-
         let current_cpu = core::cmp::min(crate::smp::get_cpu_id(), MAX_CPUS - 1);
 
         // 1. Global pending queue first
@@ -301,7 +323,37 @@ impl PerCpuScheduler {
             return Some(t);
         }
 
-        // 2. RT threads have strict priority over SCHED_OTHER.
+        // 2. SCHED_DEADLINE (EDF) threads have highest priority — earliest absolute deadline runs first
+        // Select from ready_queues BEFORE flush_ready_queues moves them to stride_heap
+        let mut best_deadline: Option<u64> = None;
+        let mut best_dl_level: Option<usize> = None;
+        let mut best_dl_idx: Option<usize> = None;
+        for level in (0..8).rev() {
+            for idx in 0..self.ready_queues[level].len() {
+                let t = &self.ready_queues[level][idx];
+                if !is_deadline(t.policy) {
+                    continue;
+                }
+                if t.affinity_mask & (1u64 << current_cpu) == 0 {
+                    continue;
+                }
+                if best_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
+                    best_deadline = Some(t.sched_deadline);
+                    best_dl_level = Some(level);
+                    best_dl_idx = Some(idx);
+                }
+            }
+        }
+        if let (Some(level), Some(idx)) = (best_dl_level, best_dl_idx) {
+            if let Some(thread) = self.ready_queues[level].remove(idx) {
+                return Some(thread);
+            }
+        }
+
+        // Now flush ready queues into stride heap for SCHED_OTHER
+        self.flush_ready_queues();
+
+        // 3. RT threads have strict priority over SCHED_OTHER.
         //    Search all priority levels for RT threads (FIFO=1, RR=2).
         //    RT threads with higher rt_priority (1-99) run first.
         let mut best_level: Option<usize> = None;
@@ -314,6 +366,9 @@ impl PerCpuScheduler {
                 if t.policy == 0 {
                     continue;
                 } // Not RT
+                if is_deadline(t.policy) {
+                    continue;
+                } // Already handled above
                 if t.affinity_mask & (1u64 << current_cpu) == 0 {
                     continue;
                 }
@@ -359,14 +414,39 @@ impl PerCpuScheduler {
             break;
         }
 
-        // 4. Work stealing — steal from other CPUs' RT queues first, then SCHED_OTHER
+        // 4. Work stealing — steal from other CPUs' deadline queues first, then RT, then SCHED_OTHER
         for i in 0..MAX_CPUS {
             if i == current_cpu {
                 continue;
             }
             if let Some(mut other) = PER_CPU[i].try_lock() {
                 other.flush_ready_queues();
-                // Steal RT threads first — find best candidate by index
+                // Steal deadline threads first — earliest deadline
+                let mut steal_dl_level: Option<usize> = None;
+                let mut steal_dl_idx: Option<usize> = None;
+                let mut steal_dl_deadline: Option<u64> = None;
+                for level in (0..8).rev() {
+                    for idx in 0..other.ready_queues[level].len() {
+                        let t = &other.ready_queues[level][idx];
+                        if !is_deadline(t.policy) {
+                            continue;
+                        }
+                        if t.affinity_mask & (1u64 << current_cpu) == 0 {
+                            continue;
+                        }
+                        if steal_dl_deadline.is_none_or(|deadline| t.sched_deadline < deadline) {
+                            steal_dl_level = Some(level);
+                            steal_dl_idx = Some(idx);
+                            steal_dl_deadline = Some(t.sched_deadline);
+                        }
+                    }
+                }
+                if let (Some(level), Some(idx)) = (steal_dl_level, steal_dl_idx) {
+                    if let Some(thread) = other.ready_queues[level].remove(idx) {
+                        return Some(thread);
+                    }
+                }
+                // Steal RT threads second
                 let mut steal_level: Option<usize> = None;
                 let mut steal_idx: Option<usize> = None;
                 let mut steal_prio: u32 = 0;
@@ -374,6 +454,9 @@ impl PerCpuScheduler {
                     for idx in 0..other.ready_queues[level].len() {
                         let t = &other.ready_queues[level][idx];
                         if t.policy == 0 {
+                            continue;
+                        }
+                        if is_deadline(t.policy) {
                             continue;
                         }
                         if t.affinity_mask & (1u64 << current_cpu) == 0 {
@@ -647,6 +730,27 @@ pub fn init() {
             sched.idle = Some(idle);
         }
     }
+}
+
+/// Mark a CPU as online (called from AP bringup after scheduler starts).
+pub fn mark_cpu_online(cpu_id: usize) {
+    if cpu_id < MAX_CPUS {
+        ONLINE_CPUS.fetch_or(1u64 << cpu_id, Ordering::Release);
+    }
+}
+
+/// Check if a CPU is online.
+pub fn is_cpu_online(cpu_id: usize) -> bool {
+    if cpu_id >= MAX_CPUS {
+        return false;
+    }
+    ONLINE_CPUS.load(Ordering::Acquire) & (1u64 << cpu_id) != 0
+}
+
+/// Iterate over online CPU IDs.
+pub fn online_cpu_ids() -> alloc::vec::Vec<usize> {
+    let mask = ONLINE_CPUS.load(Ordering::Acquire);
+    (0..MAX_CPUS).filter(|&i| mask & (1u64 << i) != 0).collect()
 }
 
 /// Thread-context sleep until tick `target` — the shared body of

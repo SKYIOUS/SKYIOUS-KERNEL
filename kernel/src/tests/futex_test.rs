@@ -77,9 +77,14 @@ fn test_futex_wake_prepopulated() -> Result<(), &'static str> {
         policy: 0,
         rt_priority: 0,
         rr_time_slice: 0,
+        sched_class: 0,
+        sched_deadline: 0,
+        sched_runtime: 0,
+        sched_period: 0,
+        cpu_time_ns: 0,
+        slice_start_tsc: 0,
         affinity_mask: 0xFFFFFFFFFFFFFFFF,
         fpu_state: None,
-        sched_class: 0,
     };
     crate::task::scheduler::add_futex_thread(t);
     let t2 = Thread {
@@ -100,9 +105,14 @@ fn test_futex_wake_prepopulated() -> Result<(), &'static str> {
         policy: 0,
         rt_priority: 0,
         rr_time_slice: 0,
+        sched_class: 0,
+        sched_deadline: 0,
+        sched_runtime: 0,
+        sched_period: 0,
+        cpu_time_ns: 0,
+        slice_start_tsc: 0,
         affinity_mask: 0xFFFFFFFFFFFFFFFF,
         fpu_state: None,
-        sched_class: 0,
     };
     crate::task::scheduler::add_futex_thread(t2);
     let woken = crate::task::scheduler::wake_futex(0xAAAA, 10);

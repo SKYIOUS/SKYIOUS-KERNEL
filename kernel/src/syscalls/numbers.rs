@@ -253,6 +253,7 @@ pub const SYS_LANDLOCK_RESTRICT_SELF: u64 = 446;
 
 // Phase 6: Container syscalls
 pub const SYS_UNSHARE: u64 = 272;
+pub const SYS_GETCPU: u64 = 309; // Linux x86_64: 309
 pub const SYS_SETNS: u64 = 464;
 pub const SYS_CGROUP_MKDIR: u64 = 461;
 pub const SYS_CGROUP_WRITE: u64 = 462;

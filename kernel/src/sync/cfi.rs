@@ -73,6 +73,12 @@ pub fn cfi_init() {
         crate::sync::rcu::synchronize_rcu as *const () as usize,
     );
 
+    // vDSO IPI handler for TSC sync — called via IPI broadcast
+    register_static(
+        &mut targets,
+        crate::vdso::vdso_ipi_update_tsc_base as *const () as usize,
+    );
+
     // Sort for binary search
     targets.sort_unstable();
 

@@ -501,9 +501,9 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
     };
     // Cgroup memory.max check
     {
-        let cg_path = process.cgroup_path.lock();
+        let cg_path = &process.cgroup_path;
         let hierarchy = crate::syscalls::cgroup::cgroup_ensure();
-        if let Some(cg) = hierarchy.find_cgroup(&cg_path) {
+        if let Some(cg) = hierarchy.find_cgroup(cg_path) {
             if !cg.can_allocate(len) {
                 return errno::Errno::ENOMEM as u64;
             }

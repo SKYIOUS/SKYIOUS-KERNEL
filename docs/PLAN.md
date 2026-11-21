@@ -1,74 +1,74 @@
 # Vahi Kernel — Master Plan
 
-**Date:** 2026-08-22
+**Date:** 2026-11-19
 **Replaces:** All previously deleted plan files (architecture-review-plan, implementation-plan-1, implementation-plan-2, kernel-future-plan, apic-subsystem-plan, tasks/plan.md, tasks/todo.md)
 
 ---
 
-## Honest Current State
+## Scope
 
-This plan is written against what the code **actually contains**, not what any previous document claimed.
+**This is the Vahi Kernel project only.** The OS/userspace (shell, init, coreutils, toolchain) is a separate project in another folder. This plan covers kernel work only.
 
 ### What exists and works
-- **344 Rust source files, ~82,266 lines** across kernel + 18 extracted crates
+- **344 Rust source files, ~82,266 lines** across kernel + 17 workspace crates (+ gdt not in workspace, sync kernel-internal)
 - **216 kernel src files** in `kernel/src/` across 30+ subsystems
-- **207 syscalls** (`pub fn sys_*`) decomposed across 36 files in `syscalls/` (ADR-010 done)
-- **18 extracted crates** in `crates/` (sync, memory, crypto, hal, limine, apic, types, arch, gdt, interrupts, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci)
-- **9 filesystems**: SkyFS (journaling), ext2 (R+W), ext4 (read-only), FAT32, TarFS, ramfs/tmpfs, devfs, ctlfs, FUSE bridge
+- **~130 syscalls dispatched**, ~40 fully functional (`pub fn sys_*`) across 36 files in `syscalls/`
+- **17 workspace crates** in `crates/` (memory, crypto, hal, limine, apic, types, arch, task, syscalls, vfs, net, drivers, acpi, objects, ipc, pci, verified); gdt NOT in workspace; sync is kernel-internal
+- **2 supported filesystems** (TarFS, DevFS), **7 experimental/partial** (SkyFS, ext2, ext4, FAT32, ramfs, ctlfs, FUSE)
 - **Scheduler**: Stride heap + SCHED_FIFO/SCHED_RR + CPU affinity + work stealing
-- **Memory**: Buddy allocator, slab, page tables (COW), page cache, swap, frame tracking, stack allocator
-- **Networking**: smoltcp TCP/UDP, DHCP, DNS, Unix sockets, zero-copy, RSS, TSO
-- **Security**: SMAP/SMEP/UMIP, KASLR, CFI, seccomp BPF, Landlock, capabilities, audit
-- **Hypervisor**: VMX/SVM, EPT/NPT, vCPU, 10+ VM syscalls (16 files)
-- **eBPF**: Full VM, verifier, JIT (x86_64), 4 helpers, maps (7 files)
-- **ASH**: Verifier, interpreter, manager, hooks (net, syscall), JIT via ebpf/jit.rs, W^X exec-memory allocator (8 files)
-- **GUI**: Compositor at 30 FPS, window manager, terminal, splash, notifications, clipboard (15 files)
-- **Crypto**: SHA-256, HMAC, PBKDF2, entropy (3 files)
-- **Objects**: KernelObject trait, handle table, security, namespace (12 files)
-- **Containers**: PID/Mount/Net/IPC/UTS/User namespaces, cgroup v2, unshare/setns
-- **SMP**: SIPI boot, work stealing, per-CPU schedulers
-- **Testing**: 146 selftests, stress tests, syscall fuzzer, coverage tracking
-- **Boot**: Limine bootloader, UEFI, KASLR, boot state machine
+- **Memory**: Buddy allocator, slab, page tables (COW via isolate VM), swap (in-memory stub), frame tracking, stack allocator
+- **Networking**: smoltcp TCP/UDP, DHCP, DNS, Unix sockets, zero-copy, RSS, TSO, TCP Reno congestion control
+- **Security**: SMAP/SMEP/UMIP (CR4 bits only), KASLR (obfuscation only — relocations never applied, A-6), CFI ("2 static targets" — not real), seccomp BPF (verifier exists, no filter execution), Landlock (structures defined, no enforcement), capabilities (data structures exist, enforcement minimal), audit (serial output only)
+- **Hypervisor**: VMX/SVM structures, EPT/NPT, vCPU, 10+ VM syscall numbers — **STUB, no real VMX/SVM execution**
+- **eBPF**: VM, verifier, JIT (x86_64), 4 helpers, maps — **PARTIAL, feature-gated**
+- **ASH**: Verifier, interpreter, manager, hooks (net, syscall), JIT via ebpf/jit.rs, W^X exec-memory allocator — **FEATURE-GATED, syscall handlers unreachable**
+- **GUI**: Compositor, window manager, terminal, splash, notifications, clipboard — **PARTIAL, 10 dead fns including core entry points; not usable as desktop**
+- **Crypto**: SHA-256, HMAC, PBKDF2, entropy (RDRAND+TSC)
+- **Objects**: KernelObject trait, handle table, security, namespace
+- **Containers**: PID/Mount/Net/IPC/UTS/User namespaces (data structures), cgroup v2 (stub), unshare/setns (stub)
+- **SMP**: SIPI boot, work stealing, per-CPU schedulers — **SMP-1/2 work; SMP-4 hangs after tests; SMP-8 hangs early boot (S-1, S-2 OPEN)**
+- **Testing**: 228 selftests (count in `tests/selftest_count.txt`), stress tests, syscall fuzzer, coverage tracking
+- **Boot**: Limine bootloader, UEFI, KASLR (obfuscation only), boot state machine
 
-### Thermo-Nuclear Review Findings (verified against code)
+### Thermo-Nuclear Review Findings (verified against code, 2026-08-03; addressed in F2)
 
-| Finding | Severity | Evidence |
-|---------|----------|----------|
-| **19 modules suppress `#![allow(dead_code)]`** | High | ash/, drivers/audio/, drivers/usb/uhci+ xhci, hypervisor/svm+devices, memory/phys+virt, shell.rs, task/keyboard, verified/*, vfs/skyfs/* — these mask potentially dead code across the entire codebase |
-| **95 total `allow(dead_code)` annotations** | High | Not just main.rs — scattered across apic/, ash/, drivers/, verified/, vfs/skyfs/ |
-| **27 clippy lints suppressed in main.rs alone** | Medium | Includes `too_many_arguments`, `collapsible_if`, `single_match`, `needless_return` — masks real style issues |
-| **main.rs is a god module (614 lines, 14 functions)** | High | Contains: `gui_refresh_task` (80 lines of GUI input handling), `network_poll_task`, `test_memory_allocations` (47 lines of trace spam + spin loops), `spawn_userspace_app` (65 lines of inline ELF loading), `panic` handler, serial I/O utilities, KASLR init — most of these belong in dedicated modules |
-| **`gui_refresh_task` handles raw PS/2 scancodes in main.rs** | Medium | Alt-Tab window switching, modifier key tracking, and scancode decoding logic lives in the boot module instead of gui/ |
-| **`spawn_userspace_app` duplicates process loading logic** | Medium | Inline ELF loading + FD setup + credential assignment duplicates what `process_lifecycle.rs` does via execve |
-| **`test_memory_allocations` is pure noise** | Low | 8 serial_write TRACE lines + 10k spin_loop iterations — should be gated behind self_test or removed |
-| **APIC has unused public functions** | Low | `apic_id_for_cpu`, `init_timer_count`, `set_timer_count`, `timer_ticks` — never called from live code |
-| **Scheduler has near-duplicate wake paths** | Medium | `wake_blocked_threads` (by key) and `wake_futex` (by uaddr) share ~90% of logic but are separate implementations |
+| Finding | Severity | Evidence | Status |
+|---------|----------|----------|--------|
+| **19 modules suppress `#![allow(dead_code)]`** | High | ash/, drivers/audio/, drivers/usb/uhci+ xhci, hypervisor/svm+devices, memory/phys+virt, shell.rs, task/keyboard, verified/*, vfs/skyfs/* | ✅ Reduced to ~7 legitimate (acpi_prt, vdso, hypervisor, kaslr_reloc, security, selftest, shell, sync, vfs) |
+| **95 total `allow(dead_code)` annotations** | High | Not just main.rs — scattered across apic/, ash/, drivers/, verified/, vfs/skyfs/ | ✅ Reduced to ~19 legitimate placeholders |
+| **27 clippy lints suppressed in main.rs alone** | Medium | Includes `too_many_arguments`, `collapsible_if`, `single_match`, `needless_return` | ✅ main.rs clippy clean (292 lines) |
+| **main.rs is a god module (614 lines, 14 functions)** | High | GUI logic, ELF loading, trace spam, panic handler, serial I/O, KASLR init | ✅ Decomposed to 292 lines; entry logic in entry.rs |
+| **`gui_refresh_task` handles raw PS/2 scancodes in main.rs** | Medium | Alt-Tab, modifier tracking, scancode decoding in boot module | ✅ Moved to gui/input.rs |
+| **`spawn_userspace_app` duplicates process loading logic** | Medium | Inline ELF loading + FD setup duplicates process_lifecycle.rs | ✅ Removed; execve path used |
+| **`test_memory_allocations` is pure noise** | Low | 8 TRACE lines + 10k spin_loop | ✅ Removed |
+| **APIC has unused public functions** | Low | `apic_id_for_cpu`, `init_timer_count`, `set_timer_count`, `timer_ticks` | ✅ Removed from smp.rs |
+| **Scheduler has near-duplicate wake paths** | Medium | `wake_blocked_threads` and `wake_futex` share ~90% logic | ⚠️ Evaluated — keep separate (different wake queues) |
 
 ### What's unverified or missing
 | Gap | Evidence | Priority |
 |-----|----------|----------|
-| 100-consecutive-boot test | Never run | High |
+| 100-consecutive-boot test | Never run (25/25 boots pass at SMP-1/2) | High |
 | Real userspace binaries | No integration test runs `ls`, `cat`, etc. in QEMU | High |
-| Performance baselines | No measurements of fork, pipe, TCP, context-switch throughput | High |
-| Memory leak detection | No page-frame or slab leak tracking exists | High |
-| main.rs god module | 614 lines, 14 functions, GUI logic, ELF loading, trace spam — belongs in dedicated modules | High |
-| 95 `allow(dead_code)` annotations | 19 modules blanket-suppress dead code — masks real dead code across apic, ash, drivers, verified, skyfs | High |
-| `vahi-verified` crate extraction incomplete | `crates/vfs` verification feature gates code that imports `vahi_verified::{journal,runner}` — a crate that does not exist in the workspace. The in-tree `kernel/src/verified/` module is the intended extraction source; `crates/vfs/src/lib.rs` ships a compile-only stub (no-op bodies, overridden by vahi_kernel) so the `--features verification` clippy/build gate is green in the interim | High |
-| 4+ CPU SMP stress | Only tested with2 CPUs | Medium |
+| Performance baselines | 6 microbenchmarks exist (`tests/benchmarks.rs`) but no CI regression thresholds | High |
+| Memory leak detection | Frame HWM + slab snapshots added (F1.6) — PASS on current tree | High |
+| `vahi-verified` crate extraction incomplete | `crates/vfs` verification feature gates code that imports `vahi_verified::{journal,runner}` — crate does not exist in workspace; `kernel/src/verified/` is the source | High |
+| 4+ CPU SMP stress | SMP-4 hangs after tests (S-2); SMP-8 hangs early boot (S-1) — issues.md | High |
 | Dynamic linking | ELF loader supports it but no musl-linked binary tested | Medium |
 | Real hardware | Everything runs in QEMU only | Medium |
-| Scheduler wake duplication | `wake_blocked_threads` and `wake_futex` share ~90% logic | Medium |
-| Documentation accuracy | `kernel-future-plan.md` was deleted but many docs reference stale info | Medium |
-| 27 clippy lints suppressed in main.rs | Masks style issues like `too_many_arguments`, `collapsible_if` | Low |
-| APIC unused public functions | `apic_id_for_cpu`, `init_timer_count`, `set_timer_count`, `timer_ticks` — never called | Low |
+| Scheduler wake duplication | `wake_blocked_threads` and `wake_futex` share ~90% logic — evaluated, keep separate (different wake queues) | Medium |
+| Documentation accuracy | Stale docs being reconciled this session | Medium |
+| Cross-arch builds | aarch64 FAILS at vahi-sync x86_64-only asm (P-1); riscv64 not built in CI | High |
+| KASLR relocations | Never applied — ELF magic check fails (A-6) | High |
+| SkyFS crash testing | No crash testing, no fsck, unbounded extent copy (F-2) | High |
+| ext2 dir traversal | Unbounded — corrupt rec_len walks past block (F-1) | High |
 
 ### Files approaching the 1k-line threshold
 | File | Lines | Risk |
 |------|-------|------|
 | `syscalls/dispatch.rs` | 1692 | Over — needs split |
-| `task/process.rs` | 1320 | Over — needs split |
-| `syscalls/process_lifecycle.rs` | 1287 | Over — needs split |
-| `iommu.rs` | 1226 | Over — needs split |
+| `task/process.rs` | 1034 | Over — types submodule (400+ lines) extracted; Process impl cohesive |
+| `syscalls/process_lifecycle.rs` | 982 | Over — cohesive impl for fork/exec/wait/exit; no split needed |
+| `iommu.rs` | 1141 | Over — single driver, acceptable as-is |
 | `syscalls/fs_stat.rs` | 1152 | Over — needs split |
 | `syscalls/net_options.rs` | 949 | Impending |
 | `crates/vfs/src/defs.rs` | 933 | Impending |
@@ -83,7 +83,9 @@ This plan is written against what the code **actually contains**, not what any p
 | `syscalls/process_creds.rs` | 741 | Acceptable |
 | `crates/drivers/src/net/e1000.rs` | 729 | Acceptable |
 | `crates/drivers/src/storage/ahci.rs` | 699 | OK |
-| `task/scheduler/mod.rs` | 662 | OK |
+| `task/scheduler/mod.rs` | 749 | Split into 4 submodules (spawn, switch, tick, mod) |
+
+**Note:** `main.rs` reduced to 292 lines (F2.3 done); `interrupts.rs` split into 4 submodules (F3.1 done).
 
 ---
 
@@ -107,24 +109,24 @@ The plan has three tiers:
 | F1.1 | **Benchmark harness**: Add `tests/benchmarks.rs` with timed loops for fork/exec throughput, pipe bandwidth, context-switch latency, mmap/munmap churn | Benchmark prints numbers to serial; QEMU selftest includes them |
 | F1.2 | **Boot reliability**: Script100 consecutive QEMU boots with serial capture; count passes/failures | Script exists, run overnight, report: X/100 passed |
 | F1.3 | **Userspace smoke test**: In QEMU, boot to init, run `ls /`, `cat /etc/hostname`, `echo hello`, verify output on serial | Integration test script passes |
-| F1.4 | **SMP stress**: Boot with4 and8 CPUs, run stress test for 60 seconds, report pass/fail | `smp 4` and `smp 8` QEMU boots succeed, no lockups |
+| F1.4 | **SMP stress**: Boot with 4 and 8 CPUs, run stress test for 60 seconds, report pass/fail | **BLOCKED**: SMP-4 hangs after tests (S-2); SMP-8 hangs early boot (S-1) — issues.md |
 | F1.5 | **Fuzz long run**: Run syscall fuzzer for 1 hour minimum, capture crashes | Zero crashes |
 | F1.6 | **Memory leak auditing**: Add page-frame high-water-mark tracking and slab utilization snapshots. Take snapshots before/after boot test, after SMP stress, after fuzz run. Alert if any subsystem leaks frames or slab blocks | Leak report printed at shutdown; no net growth across stress runs |
 | F1.7 | **Filesystem crash-recovery baseline**: Write files, kill QEMU with `-no-reboot` (simulates power loss), reboot, verify data integrity. Establish baseline crash-recovery pass rate | Baseline documented; pass rate known before Tier 2 work |
 
 ### Phase F2: Kill Dead Weight
 
-**Goal:** Every line of code earns its place. The actual scope is 95 `allow(dead_code)` annotations across19 modules — not just main.rs.
+**Goal:** Every line of code earns its place. The actual scope was 95 `allow(dead_code)` annotations across 19 modules — reduced to ~7 module-level and ~19 function-level (all legitimate placeholders).
 
 | Task | What | Done When |
 |------|------|-----------|
-| F2.1 | **Remove module-level `#![allow(dead_code)]`** from all19 modules one at a time. Fix or remove each resulting warning. Modules: ash/, drivers/audio/, drivers/usb/uhci+xhci, hypervisor/svm+devices, memory/phys+virt, shell.rs, task/keyboard, verified/*, vfs/skyfs/* | Each module builds without blanket suppression |
-| F2.2 | **Remove function-level `allow(dead_code)`** from the remaining ~76 annotations. Fix or remove each. | Total `allow(dead_code)` count drops to near zero |
-| F2.3 | **Decompose main.rs** (539 lines): Move `gui_refresh_task` to `gui/input.rs`, move `spawn_userspace_app`+`app_starter` to `boot/launcher.rs`, move `test_memory_allocations` behind `#[cfg(feature = "self_test")]` or delete, keep only `kernel_main`, `panic`, serial I/O, KASLR in main.rs | main.rs under300 lines; gui input logic in gui/; ELF loading in boot/ |
-| F2.4 | **Remove boot-trace spam**: Delete the8 `[TRACE]` serial_write lines in `test_memory_allocations` and the 10k spin_loop. If the memory test is worth keeping, gate it behind self_test. | Clean serial output: only BOOT/TEST/SELF-TEST messages |
-| F2.5 | **Remove APIC dead code**: Delete or `#[cfg(test)]` gate unused functions `apic_id_for_cpu`, `init_timer_count`, `set_timer_count`, `timer_ticks` | No unused public functions in apic/ |
-| F2.6 | **Grep for TODO/FIXME/HACK**: 4 found (3 in apic/errata.rs stubs, 1 in vfs/fuse.rs). Categorize each — errata stubs are intentional placeholders, fuse TODO needs a real fix | Zero actionable TODOs left in code |
-| F2.7 | **Reduce clippy suppressions in main.rs**: Remove the blanket `#![allow(clippy::...)]` block (27 lints). Fix the real issues (too_many_arguments → restructure; collapsible_if → flatten) | Clippy runs clean on main.rs without blanket suppression |
+| F2.1 | **Remove module-level `#![allow(dead_code)]`** from all modules. Fix or remove each resulting warning. Modules: ash/, drivers/audio/, drivers/usb/uhci+xhci, hypervisor/svm+devices, memory/phys+virt, shell.rs, task/keyboard, verified/*, vfs/skyfs/* | ✅ Done — reduced from 19 to ~7 legitimate (acpi_prt, vdso, hypervisor, kaslr_reloc, security, selftest, shell, sync, vfs) |
+| F2.2 | **Remove function-level `allow(dead_code)`** from the remaining annotations. Fix or remove each. | ✅ Done — reduced from 95 to ~19 legitimate placeholders |
+| F2.3 | **Decompose main.rs** (was 614 lines, now 292): Move `gui_refresh_task` to `gui/input.rs`, move `spawn_userspace_app`+`app_starter` to `boot/launcher.rs`, move `test_memory_allocations` behind `#[cfg(feature = "self_test")]` or delete, keep only `kernel_main`, `panic`, serial I/O, KASLR in main.rs | ✅ Done — main.rs 292 lines; entry logic in entry.rs |
+| F2.4 | **Remove boot-trace spam**: Delete the 8 `[TRACE]` serial_write lines in `test_memory_allocations` and the 10k spin_loop. If the memory test is worth keeping, gate it behind self_test. | ✅ Done — clean serial output: only BOOT/TEST/SELF-TEST messages |
+| F2.5 | **Remove APIC dead code**: Delete or `#[cfg(test)]` gate unused functions `apic_id_for_cpu`, `init_timer_count`, `set_timer_count`, `timer_ticks` | ✅ Done — removed from smp.rs |
+| F2.6 | **Grep for TODO/FIXME/HACK**: 4 found (3 in apic/errata.rs stubs, 1 in vfs/fuse.rs). Categorize each — errata stubs are intentional placeholders, fuse TODO needs a real fix | ✅ Done — 3 TODOs = 1 logical issue (namespace flags for vDSO) — intentional placeholder |
+| F2.7 | **Reduce clippy suppressions in main.rs**: Remove the blanket `#![allow(clippy::...)]` block (27 lints). Fix the real issues (too_many_arguments → restructure; collapsible_if → flatten) | ✅ Done — clippy clean on main.rs (0 errors) |
 
 ### Phase F3: Structural Evaluation (if needed)
 
@@ -134,9 +136,11 @@ The plan has three tiers:
 
 | Task | What | Done When |
 |------|------|-----------|
-| F3.1 | **Evaluate `interrupts.rs` (979 lines)**: Assess whether interrupt dispatch and handler registration are distinct concerns worth separating. If they share state and read as one unit, leave it | Justified decision documented; tests still pass |
-| F3.2 | **Evaluate `task/scheduler.rs` (913 lines)**: Assess whether stride logic and run-queue management are separable without breaking locality. Also evaluate merging `wake_blocked_threads` and `wake_futex` into a single `wake_matching` helper (they share ~90% logic) | Same criteria; duplication reduced |
-| F3.3 | **Evaluate `task/process.rs` (886 lines)**: Assess whether ELF loading and process lifecycle are distinct enough to split. Process creation, forking, execve, and teardown share heavy state | Same criteria |
+| F3.1 | **Evaluate `interrupts.rs` (979 lines)**: Assess whether interrupt dispatch and handler registration are distinct concerns worth separating. If they share state and read as one unit, leave it | ✅ Done — already split into 4 submodules (diag, exceptions, page_fault, irq) — 216 lines in mod.rs |
+| F3.2 | **Evaluate `task/scheduler/`**: Assess whether stride logic and run-queue management are separable without breaking locality. Also evaluate merging `wake_blocked_threads` and `wake_futex` into a single `wake_matching` helper (they share ~90% logic) | ✅ Done — split into 4 submodules (spawn, switch, tick, mod) — 749 lines; wake paths evaluated — keep separate (different wake queues) |
+| F3.3 | **Evaluate `task/process.rs` (1034 lines)**: Assess whether ELF loading and process lifecycle are distinct enough to split. Process creation, forking, execve, and teardown share heavy state | ✅ Done — types submodule (400+ lines) extracted; Process impl cohesive; no split needed |
+| F3.4 | **Evaluate `process_lifecycle.rs` (982 lines)** | ✅ Done — cohesive impl for fork/exec/wait/exit; no split needed |
+| F3.5 | **Evaluate `iommu.rs` (1141 lines)** | ✅ Done — single driver, acceptable as-is |
 
 ### Phase F4: Documentation Truth Reconciliation
 
@@ -144,11 +148,11 @@ The plan has three tiers:
 
 | Task | What | Done When |
 |------|------|-----------|
-| F4.1 | **Delete or rewrite `docs/kernel-future-plan.md`** (already deleted) — replace with pointer to this plan | No stale plan files |
-| F4.2 | **Update `README.md`** feature tables against actual code (e.g., "12+ drivers" — verify count) | README matches code |
-| F4.3 | **Update `docs/roadmap-revised/`** to remove the "✅ COMPLETE" claims that are unverified (e.g., "Phase 9 complete" when some features are stubs) | Honest status in all roadmap docs |
-| F4.4 | **Add `docs/ROADMAP.md`** — single source of truth, replaces the11-file roadmap-revised directory | One file, current, linked from README |
-| F4.5 | **ADR index consistency**: Verify all25 ADRs reference real code, delete or update orphaned ones | Each ADR's "implemented" claim matches code |
+| F4.1 | **Delete or rewrite `docs/kernel-future-plan.md`** (already deleted) — replace with pointer to this plan | ✅ Done — no stale plan files |
+| F4.2 | **Update `README.md`** feature tables against actual code (e.g., "12+ drivers" — verify count) | 🔄 In Progress — this session |
+| F4.3 | **Update `docs/roadmap-revised/`** to remove the "✅ COMPLETE" claims that are unverified (e.g., "Phase 9 complete" when some features are stubs) | ✅ Done — ROADMAP.md corrected; roadmap-revised/ to be archived |
+| F4.4 | **Add `docs/ROADMAP.md`** — single source of truth, replaces the 11-file roadmap-revised directory | ✅ Done — ROADMAP.md exists and corrected |
+| F4.5 | **ADR index consistency**: Verify all ADRs reference real code, delete or update orphaned ones | 🔄 In Progress — ADR-017 needs update (KASLR), ADR-013/014 missing |
 
 ### Phase F5: CI Hardening
 
@@ -156,28 +160,15 @@ The plan has three tiers:
 
 | Task | What | Done When |
 |------|------|-----------|
-| F5.1 | **CI builds all feature combos**: default, all-features, each feature solo | `ci.yml` matrix covers all combos |
-| F5.2 | **CI runs clippy with `-D warnings`** on default, no-features, all-features, release+self_test, extracted crates; solo-feature builds are not clippy'd (tracked as gap) | Zero clippy regressions on gated combos |
-| F5.3 | **Nightly QEMU selftest in CI**: Build bootimage, run QEMU, parse serial for "N passed, 0 failed" | CI green means kernel boots and tests pass |
-| F5.4 | **Dependabot or manual audit**: Ensure crates haven't gone stale or have CVEs | Quarterly check or automated |
+| F5.1 | **CI builds all feature combos**: default, all-features, each feature solo | ✅ Done — `ci.yml` matrix covers all combos |
+| F5.2 | **CI runs clippy with `-D warnings`** on default, no-features, all-features, release+self_test, extracted crates; solo-feature builds are not clippy'd (tracked as gap) | ✅ Done — zero clippy regressions on gated combos |
+| F5.3 | **Nightly QEMU selftest in CI**: Build bootimage, run QEMU, parse serial for "N passed, 0 failed" | ✅ Done — SMP 1 + SMP 2 pass; SMP 4/8 not tested |
+| F5.4 | **Dependabot or manual audit**: Ensure crates haven't gone stale or have CVEs | ✅ Done — `.github/dependabot.yml` + nightly cargo audit |
+| F5.5 | **Cross-arch CI** | ❌ Failing — aarch64 build fails at vahi-sync (issues.md P-1) |
 
 ---
 
-## Tier 2: Growth — Real Hardware, Missing Capabilities
-
-### Phase G1: Userspace Ecosystem
-
-**Goal:** Actually run programs, not just boot to a shell prompt.
-
-**Rationale for doing this before real hardware:** Debugging musl startup failures, dynamic loading, or signal delivery quirks in QEMU with GDB attached is drastically easier than troubleshooting userland panics on bare metal with broken ACPI tables. Get the software stack solid first.
-
-| Task | What | Done When |
-|------|------|-----------|
-| G1.1 | **Static binary compatibility**: Build coreutils (ls, cat, echo, mkdir, rm, cp, mv) as static musl-linked binaries, run on Vahi | All 7 utilities work end-to-end |
-| G1.2 | **Dynamic linking**: Get `ld.so`-style loading working for at least one binary | A dynamically-linked binary runs |
-| G1.3 | **init system**: Verify PID1 init process works correctly (orphan reaping, signal handling) | `init` starts, spawns shell, reaps zombies |
-| G1.4 | **Shell**: Get a real shell (dash/ash/mksh) working with readline-like input | Shell accepts commands, runs programs, handles signals |
-| G1.5 | **Toolchain-critical syscalls**: Verify `clock_nanosleep`, full `futex` operations (WAIT/WAKE/CMP_REQUEUE/PRIVATE), and `clock_gettime` monotonic clock are correct. musl/glibc `crt1.o` calls these during early process setup before `main()` | Static musl binary reaches `main()` without crashing |
+## Tier 2: Growth — Real Hardware, Missing Capabilities (Kernel Only)
 
 ### Phase G2: Real Hardware Bring-Up
 
@@ -190,9 +181,9 @@ The plan has three tiers:
 | G2.3 | **SMP on real hardware**: QEMU SMP is simplified; real hardware has weird AP startup timing | 4+ cores work on real hardware |
 | G2.4 | **PCI device discovery**: Real hardware has more devices; ensure driver probing doesn't crash | Enumerates all PCI devices without panic |
 
-### Phase G3: POSIX Compliance (Missing Syscalls)
+### Phase G3: POSIX Compliance (Missing Kernel Syscalls)
 
-**Goal:** Run more real-world software.
+**Goal:** Add missing syscalls needed by real-world software.
 
 | Task | What | Done When |
 |------|------|-----------|
@@ -209,7 +200,7 @@ The plan has three tiers:
 
 | Task | What | Done When |
 |------|------|-----------|
-| G4.1 | **TCP stress**: Transfer100MB+ file over TCP, verify byte correctness | Checksum matches |
+| G4.1 | **TCP stress**: Transfer 100MB+ file over TCP, verify byte correctness | Checksum matches |
 | G4.2 | **Concurrent connections**: 100+ simultaneous TCP connections | No lockups, no memory exhaustion |
 | G4.3 | **DNS resolver hardening**: Handle timeouts, retries, malformed responses | DNS works with real resolver (8.8.8.8) |
 | G4.4 | **Socket option completeness**: Verify all 25+ socket options actually affect behavior | Each option tested with real traffic |
@@ -221,11 +212,10 @@ The plan has three tiers:
 | Task | What | Done When |
 |------|------|-----------|
 | G5.1 | **SkyFS crash test**: Write files, kill QEMU mid-write, reboot, verify journal replay | Files either fully written or fully absent after crash |
-| G5.2 | **ext2 write stress**: Create/delete1000 files, verify integrity | No corruption |
+| G5.2 | **ext2 write stress**: Create/delete 1000 files, verify integrity | No corruption |
 | G5.3 | **Concurrent file access**: Multiple processes writing to same file | No data corruption |
 | G5.4 | **FIFO/pipe stress**: Fill pipe buffer, verify backpressure | Writer blocks when pipe full |
 
----
 
 ## Tier 3: Aspiration — Advanced Features
 
@@ -238,6 +228,7 @@ The plan has three tiers:
 | A1.3 | **RCU optimization**: Reduce grace-period overhead for read-heavy workloads |
 | A1.4 | **Scheduler EEVDF migration**: Replace stride with EEVDF for better latency fairness |
 | A1.5 | **Context switch optimization**: Minimize save/restore overhead |
+| A1.6 | **vDSO (Virtual Dynamic Shared Object)**: Map a read-only kernel data page into every userspace process. Kernel updates `clock_gettime` (CLOCK_MONOTONIC, CLOCK_REALTIME), `getpid`, `getcpu` data on timer tick. Userspace reads directly without syscall overhead. Target: 100× faster time/process queries. Requires: vDSO data struct, page mapping at process creation, timer tick update, fast-path syscall stubs. |
 
 ### Phase A2: Advanced Kernel Features
 
@@ -273,29 +264,30 @@ The plan has three tiers:
 ```
 F1 (Measure + Leak Audit) → F2 (Clean) → F3 (Evaluate) → F4 (Docs) → F5 (CI)
     ↓
-G1 (Userspace) → G2 (Real HW) → G3 (POSIX) → G4 (Network) → G5 (FS)
+G2 (Real HW) → G3 (POSIX Syscalls) → G4 (Network) → G5 (FS)
     ↓
 A1 (Perf) → A2 (Features) → A3 (Security) → A4 (Multi-arch)
 ```
+
+**Note:** G1 (Userspace Ecosystem) is in the separate OS project. This kernel plan covers G2-G5.
 
 Each phase has a verification gate. Don't start the next phase until the current one's gate passes.
 
 ---
 
-## Verification Gates
+## Verification Gates (Honest)
 
-| Gate | Criteria |
-|------|----------|
-| F1 pass | Boot reliability script run; benchmarks produce numbers; userspace smoke test passes; leak audit shows zero net growth |
-| F2 pass | `allow(dead_code)` count near zero (from 95); main.rs under300 lines; clean serial output; clippy clean on main.rs |
-| F3 pass | All files evaluated; splits justified or declined; scheduler wake duplication addressed; all builds pass |
-| F4 pass | All docs match code; single roadmap file exists |
-| F5 pass | CI matrix covers all feature combos; QEMU selftest in CI |
-| G1 pass | Static coreutils work; shell works; init reaps zombies; musl crt1.o reaches main() |
-| G2 pass | Boots on real hardware;4+ CPUs work |
-| G3 pass | getrandom/memfd_create/prlimit64 work; signal-heavy programs don't crash |
-| G4 pass | 100MB TCP transfer succeeds; 100 concurrent connections work |
-| G5 pass | SkyFS survives crash; ext2 write stress passes; concurrent writes work |
+| Gate | Criteria | Current |
+|------|----------|---------|
+| F1 pass | Boot reliability script run; benchmarks produce numbers; self-test suite passes; leak audit shows zero net growth | ❌ F1.2 (100-boot never run), F1.3 (userspace smoke untested), F1.4 (SMP 4/8 blocked S-1/S-2), F1.5 (fuzz long run deferred), F1.7 (FS crash-recovery deferred) |
+| F2 pass | `allow(dead_code)` count near zero (from 95); main.rs under 300 lines; clean serial output; clippy clean on main.rs without blanket suppression | ✅ All criteria met |
+| F3 pass | All files evaluated; splits justified or declined; scheduler wake duplication addressed; all builds pass | ⚠️ Partial — files evaluated, splits justified, wake duplication evaluated (kept separate), builds pass |
+| F4 pass | All docs match code; single roadmap file exists | 🔄 In Progress — this reconciliation session |
+| F5 pass | CI matrix covers all feature combos; QEMU selftest in CI; cross-arch green | ❌ Cross-arch red (aarch64 fails at vahi-sync P-1) |
+| G2 pass | Boots on real hardware; 4+ CPUs work | 🔲 Not started |
+| G3 pass | getrandom/memfd_create/prlimit64/getrusage/kqueue work; signal-heavy programs don't crash | ⚠️ Partial — getrandom/memfd_create/prlimit64/getrusage ✅; kqueue deferred; signal hardening partial |
+| G4 pass | 100MB TCP transfer succeeds; 100 concurrent connections work | 🔲 Not started |
+| G5 pass | SkyFS survives crash; ext2 write stress passes; concurrent writes work | 🔲 Not started |
 
 ---
 
@@ -327,45 +319,18 @@ Each phase has a verification gate. Don't start the next phase until the current
 
 ## Phase A0: KASLR Relocation Correctness (issue A-6)
 
-**Status: IMPLEMENTED AND VERIFIED (2026-10-16).** Integrated as commit
-`310b2b4` (`feat(kaslr): validated PIE relocations with slid-address boot`,
-parent `67a1d37`) on `refactor/syscall-hygiene`. The shipped route is the PIC
-link — no `--emit-relocs`, no explicit `relocation-model=static`
-(`kernel/.cargo/config.toml`): the result is a PIE (`ET_DYN`) whose `.rela`
-holds only `R_X86_64_RELATIVE` entries and is placed alloc inside a `PT_LOAD`
-(4,507 entries / 108,168 bytes prod; 4,661 / 111,864 selftest). The
-`--emit-relocs` diagnosis below is kept as history; that route was superseded
-during implementation.
+**Status: PARTIAL — relocations applied on PIC builds but A-6 remains OPEN.** The PIC link route (commit `310b2b4`) places `R_X86_64_RELATIVE` entries in an alloc `.rela` section inside a `PT_LOAD`, and the relocation walk runs on boot. However, `issues.md A-6` remains **STILL OPEN** because:
 
-Verified on the exact commit (Phase 5, 2026-10-16):
-- Selftest and prod artifacts rebuilt **bit-exact** from the integrated tree
-  (`F204AD76…`, `9242AA8E…`).
-- TAP gate: **189/189 passed, 0 failed**, including all 12 `kaslr:*`
-  relocation contract tests.
-- Prod boot at slide `0x16600000`: `[KASLR] rela entries=119b in_image=119b
-  out_of_image=0`; boots through services to the `login:` prompt.
-- gdb: RIP executes in the slid address space (RIP − slide resolves to
-  `…switch::schedule + 409`); GOT slots hold `addend + slide`
-  (`0xffffffff966e5000 == 0xffffffff800e5000 + 0x16600000`).
-- ELF: `.rela` is `SHF_ALLOC` inside a `PT_LOAD`; `DT_RELA`/`DT_RELASZ` match
-  the section; no W+X; no differing-permission page sharing.
+1. The `--emit-relocs` path (non-PIC) was never made to work — lld emits non-alloc `.rela` sections
+2. The `[KASLR-VERIFY] match:` printer still prints `NO` (A0.4 unfixed)
+3. SMP≥2 boots with relocations untested; audit profiles untested
+4. The ELF magic gate in `kaslr_reloc.rs:338` still fails on non-PIC builds
 
-Tested configuration: x86_64 `--release`, QEMU/TCG with OVMF, **smp=1**.
-**Unproven on this commit:** smp≥2 boots, the 105-boot reliability matrix,
-`--profile audit` builds.
+**Honest assessment:** KASLR currently provides **obfuscation only** — the kernel randomizes its mapping but the relocation walk only works on the PIC build path. The non-PIC (release) build path has zero relocations applied. A-6 in `issues.md` correctly tracks this as OPEN.
 
-Remaining debt in this area (unchanged, not silently closed): the
-`[KASLR-VERIFY] match:` printer still prints `NO` (see A0.4); `[KASLR] DBG`
-/ `DBG2` / span debug lines still print; `.rodata` still mapped in an
-`rw-` segment; the A-6 rows in `docs/architecture/issues.md` still read
-"STILL OPEN".
+Evidence ledger: `docs/architecture/issues.md` (A-6), inventory in `docs/architecture/UNDONE-audit-profile.md`.
 
-Historically, KASLR randomised the page mapping without correcting a single
-embedded pointer; the kernel booted only because every old address remained
-aliased, so a green self-test suite was **not** evidence that KASLR worked.
-
-Evidence ledger: `docs/architecture/issues.md` (A-6), inventory in
-`docs/architecture/UNDONE-audit-profile.md`.
+The sections below document the historical `--emit-relocs` investigation (kept for context) and the PIC route tasks.
 
 ### Architecture decision
 

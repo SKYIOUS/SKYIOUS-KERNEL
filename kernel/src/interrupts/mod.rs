@@ -188,3 +188,45 @@ pub(crate) use diag::serial_fmt;
 // ADR-029-syscall-module-lint-hygiene.md
 #[cfg(feature = "self_test")]
 pub(crate) use diag::IrqFmtBuf;
+
+/// Save RFLAGS and disable interrupts (CLI). Returns the previous RFLAGS.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn save_and_cli() -> u64 {
+    let flags: u64;
+    unsafe {
+        core::arch::asm!("pushfq; pop {0}; cli", out(reg) flags);
+    }
+    flags
+}
+
+/// Restore interrupt state from saved RFLAGS.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn restore_if(flags: u64) {
+    if flags & 0x200 != 0 {
+        unsafe {
+            core::arch::asm!("sti");
+        }
+    }
+}
+
+/// Save DAIF and disable interrupts (aarch64). Returns the previous DAIF.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn save_and_cli() -> u64 {
+    let daif: u64;
+    unsafe {
+        core::arch::asm!("mrs {0}, daif; msr daifset, #2", out(reg) daif);
+    }
+    daif
+}
+
+/// Restore interrupt state from saved DAIF (aarch64).
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn restore_if(daif: u64) {
+    unsafe {
+        core::arch::asm!("msr daif, {0}", in(reg) daif);
+    }
+}

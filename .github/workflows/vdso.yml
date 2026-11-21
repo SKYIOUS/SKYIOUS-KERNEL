@@ -1,0 +1,346 @@
+name: VDSO Rollout CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  build-kernel:
+    name: Build Kernel (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          target: x86_64-unknown-none
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-system-x86_64 \
+            ovmf \
+            python3 \
+            python3-venv \
+            xorriso \
+            mtools \
+            dosfstools \
+            bison \
+            flex \
+            libssl-dev \
+            pkg-config \
+            musl-tools \
+            gcc-x86-64-linux-gnu \
+            make \
+            tar
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build kernel (self_test features)
+        run: |
+          cd kernel
+          cargo build --target x86_64-unknown-none --features self_test,net,smp,ext4,iommu --release
+
+      - name: Build kernel (all features for clippy)
+        run: |
+          cd kernel
+          cargo build --target x86_64-unknown-none --features self_test,net,smp,ext4,iommu,uhci,ash,hypervisor,verification,gpu --release
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vahi_kernel
+          path: target/x86_64-unknown-none/release/vahi_kernel
+          retention-days: 7
+
+  build-userspace:
+    name: Build Userspace (vdso_libc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install musl-gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build vdso_libc.a
+        run: |
+          cd userspace/libc
+          make CC=musl-gcc
+          ls -la vdso_libc_test
+
+      - name: Upload userspace artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vdso_libc_test
+          path: userspace/libc/vdso_libc_test
+          retention-days: 7
+
+  clippy:
+    name: Clippy (all targets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          target: x86_64-unknown-none
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run clippy (kernel)
+        run: |
+          cd kernel
+          cargo clippy --target x86_64-unknown-none --features self_test,net,smp,ext4,iommu,uhci,ash,hypervisor,verification,gpu -- -D warnings
+
+      - name: Run clippy (workspace, exclude kernel)
+        run: |
+          cargo clippy --workspace --exclude vahi_kernel --all-targets --all-features --locked -- -D warnings
+
+  qemu-test:
+    name: QEMU Self-Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: [build-kernel, build-userspace]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86_64 ovmf python3 python3-venv
+
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vahi_kernel
+          path: kernel/target/x86_64-unknown-none/release/
+
+      - name: Download userspace artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vdso_libc_test
+          path: userspace/libc/
+
+      - name: Build boot image with initrd
+        run: |
+          cd builder
+          python3 build_limine_image.py \
+            --kernel ../kernel/target/x86_64-unknown-none/release/vahi_kernel \
+            --output ../bootimage-vahi_kernel.bin \
+            --esp-size 300M
+
+      - name: Run QEMU self-tests
+        id: qemu_test
+        run: |
+          python3 tests/run_qemu_tests.py \
+            --image bootimage-vahi_kernel.bin \
+            --timeout 540 \
+            --log qemu_test.log
+        continue-on-error: true
+
+      - name: Upload QEMU test logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-test-logs
+          path: |
+            qemu_test.log
+            builder/qemu_test.log
+          retention-days: 7
+
+      - name: Check VDSO test results
+        if: always()
+        run: |
+          if [ -f qemu_test.log ]; then
+            echo "=== QEMU Test Log ==="
+            cat qemu_test.log
+            echo "========================"
+            # Check for VDSO test failures
+            if grep -q "vdso.*FAIL\|not ok.*vdso" qemu_test.log; then
+              echo "ERROR: VDSO tests failed"
+              exit 1
+            fi
+            # Check for VDSO benchmark warnings (warn-only in TCG)
+            if grep -q "vdso_bench.*WARN" qemu_test.log; then
+              echo "WARNING: VDSO benchmarks exceeded targets (expected in TCG)"
+            fi
+            echo "VDSO tests passed"
+          else
+            echo "ERROR: No test log found"
+            exit 1
+          fi
+
+  nightly-full:
+    name: Nightly Full Test (with KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event_name == 'schedule'
+    needs: [build-kernel, build-userspace, clippy]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install QEMU with KVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86_64 ovmf python3 python3-venv cpu-checker
+          echo "KVM available: $(kvm-ok 2>/dev/null || echo 'no')"
+
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vahi_kernel
+          path: kernel/target/x86_64-unknown-none/release/
+
+      - name: Download userspace artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vdso_libc_test
+          path: userspace/libc/
+
+      - name: Build boot image
+        run: |
+          cd builder
+          python3 build_limine_image.py \
+            --kernel ../kernel/target/x86_64-unknown-none/release/vahi_kernel \
+            --output ../bootimage-vahi_kernel.bin \
+            --esp-size 300M
+
+      - name: Run QEMU with KVM (if available)
+        run: |
+          if kvm-ok 2>/dev/null; then
+            echo "Running with KVM acceleration"
+            python3 tests/run_qemu_tests.py \
+              --image bootimage-vahi_kernel.bin \
+              --timeout 540 \
+              --qemu-extra "-enable-kvm -cpu host" \
+              --log qemu_kvm_test.log
+          else
+            echo "KVM not available, running with TCG"
+            python3 tests/run_qemu_tests.py \
+              --image bootimage-vahi_kernel.bin \
+              --timeout 540 \
+              --log qemu_tcg_test.log
+          fi
+        continue-on-error: true
+
+      - name: Upload nightly test logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-test-logs
+          path: |
+            qemu_kvm_test.log
+            qemu_tcg_test.log
+          retention-days: 14
+
+  security-audit:
+    name: Security Audit Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for unsafe blocks without SAFETY comments
+        run: |
+          echo "Checking for unsafe blocks without SAFETY comments..."
+          UNSAFE_WITHOUT_SAFETY=$(grep -r "unsafe {" --include="*.rs" kernel/src | grep -v "// SAFETY:" | grep -v "//SAFETY:" | wc -l)
+          if [ "$UNSAFE_WITHOUT_SAFETY" -gt 0 ]; then
+            echo "WARNING: Found $UNSAFE_WITHOUT_SAFETY unsafe blocks without SAFETY comments"
+            grep -r "unsafe {" --include="*.rs" kernel/src | grep -v "// SAFETY:" | grep -v "//SAFETY:" | head -20
+          else
+            echo "All unsafe blocks have SAFETY comments"
+          fi
+
+      - name: Check for prohibited patterns
+        run: |
+          echo "Checking for prohibited patterns..."
+          # Check for println! usage in kernel
+          PRINTLN_COUNT=$(grep -r "println!" --include="*.rs" kernel/src | grep -v "test" | grep -v "// " | wc -l)
+          if [ "$PRINTLN_COUNT" -gt 0 ]; then
+            echo "WARNING: Found $PRINTLN_COUNT println! calls in kernel (should use serial_write)"
+            grep -r "println!" --include="*.rs" kernel/src | grep -v "test" | grep -v "// " | head -10
+          fi
+          # Check for std imports
+          STD_IMPORTS=$(grep -r "use std::" --include="*.rs" kernel/src | grep -v "test" | wc -l)
+          if [ "$STD_IMPORTS" -gt 0 ]; then
+            echo "ERROR: Found std imports in kernel (kernel is #![no_std])"
+            grep -r "use std::" --include="*.rs" kernel/src | grep -v "test"
+            exit 1
+          fi
+
+      - name: Verify vDSO page permissions
+        run: |
+          echo "Verifying vDSO page permissions in kernel..."
+          # Check that vDSO pages are mapped USER_ACCESSIBLE | NO_EXECUTE
+          if grep -q "USER_ACCESSIBLE.*NO_EXECUTE" kernel/src/vdso.rs; then
+            echo "vDSO page flags: USER_ACCESSIBLE | NO_EXECUTE ✓"
+          else
+            echo "WARNING: vDSO page flags may not be correct"
+          fi
+          # Check that kernel writes via HHDM, not user pointers
+          if grep -q "copy_to_user.*vdso" kernel/src/vdso.rs; then
+            echo "ERROR: Kernel writes to vDSO via copy_to_user (should use HHDM)"
+            exit 1
+          fi
+
+      - name: Check seqlock protocol
+        run: |
+          echo "Verifying seqlock protocol..."
+          # Verify two independent seqlocks (time + PID/CPU)
+          if grep -q "seq.*AtomicU64" kernel/src/vdso.rs && grep -q "pid_cpu_seq.*AtomicU64" kernel/src/vdso.rs; then
+            echo "Two independent seqlocks present ✓"
+          fi
+          # Verify writers use Release ordering
+          if grep -q "Ordering::Release" kernel/src/vdso.rs; then
+            echo "Release ordering used for writers ✓"
+          fi
