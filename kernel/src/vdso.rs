@@ -28,13 +28,11 @@ pub const fn vdso_virt_addr_for_cpu(cpu_id: usize) -> u64 {
 /// Bitfield exposed via vDSO for userspace feature detection.
 pub mod kernel_flags {
     pub const HAS_AVX2: u64 = 1 << 0; // CPUID leaf 7 EBX bit 5
-
-    // The self-tests decode these ABI bits; only AVX2 detection sets a bit today.
-    #[cfg(feature = "self_test")]
+    #[allow(dead_code)] // Used by userspace via vDSO
     pub const HAS_NVME: u64 = 1 << 1; // NVMe controller present
-    #[cfg(feature = "self_test")]
+    #[allow(dead_code)] // Used by userspace via vDSO
     pub const HAS_XHCI: u64 = 1 << 2; // xHCI USB controller present
-    #[cfg(feature = "self_test")]
+    #[allow(dead_code)] // Used by userspace via vDSO
     pub const HAS_VIRTIO_GPU: u64 = 1 << 3; // VirtIO GPU present
                                             // Bits 4-15 reserved for net stack version and FS features
 }
