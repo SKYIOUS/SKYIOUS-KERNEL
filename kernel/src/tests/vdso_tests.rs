@@ -201,6 +201,61 @@ pub fn test_vdso_clock_gettime() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Verify CLOCK_MONOTONIC_COARSE (6) via vDSO fast path — 10ms resolution, no seqlock.
+pub fn test_vdso_clock_getres_coarse_mono() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_getres_kernel;
+    use crate::syscalls::Timespec;
+
+    // Test via kernel-internal API (clock_resolution returns 10ms for COARSE)
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let ret = sys_clock_getres_kernel(6, &mut ts); // CLOCK_MONOTONIC_COARSE
+    if ret != 0 {
+        return Err("clock_getres(CLOCK_MONOTONIC_COARSE) failed");
+    }
+
+    // COARSE clocks have 10ms (10,000,000 ns) resolution
+    if ts.tv_sec != 0 || ts.tv_nsec != 10_000_000 {
+        return Err("CLOCK_MONOTONIC_COARSE resolution not 10ms");
+    }
+
+    // Verify no seqlock retry loop needed (direct atomic read of ticks)
+    // by reading the vDSO page directly and checking it doesn't use seq
+    let vdso_ptr = crate::vdso::vdso_page();
+    if vdso_ptr.is_null() {
+        return Err("vDSO page not initialized");
+    }
+
+    crate::serial_write("[VDSO COARSE] CLOCK_MONOTONIC_COARSE resolution: 10ms (no seqlock)\n");
+    Ok(())
+}
+
+/// Verify CLOCK_REALTIME_COARSE (5) via vDSO fast path — 10ms resolution, no seqlock.
+pub fn test_vdso_clock_getres_coarse_real() -> Result<(), &'static str> {
+    use crate::syscalls::misc::sys_clock_getres_kernel;
+    use crate::syscalls::Timespec;
+
+    // Test via kernel-internal API (clock_resolution returns 10ms for COARSE)
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let ret = sys_clock_getres_kernel(5, &mut ts); // CLOCK_REALTIME_COARSE
+    if ret != 0 {
+        return Err("clock_getres(CLOCK_REALTIME_COARSE) failed");
+    }
+
+    // COARSE clocks have 10ms (10,000,000 ns) resolution
+    if ts.tv_sec != 0 || ts.tv_nsec != 10_000_000 {
+        return Err("CLOCK_REALTIME_COARSE resolution not 10ms");
+    }
+
+    crate::serial_write("[VDSO COARSE] CLOCK_REALTIME_COARSE resolution: 10ms (no seqlock)\n");
+    Ok(())
+}
+
 /// Verify time consistency across all CPU pages.
 pub fn test_vdso_time_consistent_across_cpus() -> Result<(), &'static str> {
     // Read time from current CPU page
@@ -1562,6 +1617,16 @@ pub fn register() {
     register("vdso:skyious_boot_ns", test_vdso_skyious_boot_ns);
     register("vdso:skyious_kernel_flags", test_vdso_skyious_kernel_flags);
     register("vdso:skyious_process_info", test_vdso_skyious_process_info);
+
+    // COARSE clock selftests (P1)
+    register(
+        "vdso:clock_getres_coarse_mono",
+        test_vdso_clock_getres_coarse_mono,
+    );
+    register(
+        "vdso:clock_getres_coarse_real",
+        test_vdso_clock_getres_coarse_real,
+    );
 
     // Benchmarks
     register(

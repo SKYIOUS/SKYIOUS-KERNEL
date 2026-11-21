@@ -33,7 +33,7 @@ const fn clock_resolution(clock_id: u64) -> (i64, i64) {
 
     match clock_id {
         CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => (0, 1),
-        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => (0, 1_000_000),
+        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => (0, 10_000_000),
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => (0, 1),
         CLOCK_SKYIOUS_THREAD_CPUTIME
         | CLOCK_SKYIOUS_SCHED_DEADLINE
@@ -65,9 +65,9 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
     const CLOCK_SKYIOUS_KERNEL_FLAGS: u64 = 103;
     const CLOCK_SKYIOUS_PROCESS_INFO: u64 = 104;
 
-    // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC and CLOCK_REALTIME (x86_64 only)
+    // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC, CLOCK_REALTIME, and COARSE clocks (x86_64 only)
     #[cfg(target_arch = "x86_64")]
-    if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME) {
+    if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE) {
         let (sec, nsec) = crate::vdso_read_tsc_time(clock_id);
         if sec != 0 || nsec != 0 {
             tp.tv_sec = sec as i64;
@@ -420,9 +420,9 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     const CLOCK_SKYIOUS_KERNEL_FLAGS: u64 = 103;
     const CLOCK_SKYIOUS_PROCESS_INFO: u64 = 104;
 
-    // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC and CLOCK_REALTIME (x86_64 only)
+    // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC, CLOCK_REALTIME, and COARSE clocks (x86_64 only)
     #[cfg(target_arch = "x86_64")]
-    if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME) {
+    if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE) {
         let (sec, nsec) = crate::vdso_read_tsc_time(clock_id);
         if sec != 0 || nsec != 0 {
             let ts = Timespec {
@@ -487,11 +487,7 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
             let total_ms = ticks * 10;
             let coarse_sec = (total_ms / 1000) as i64;
             Timespec {
-                tv_sec: if clock_id == CLOCK_REALTIME_COARSE {
-                    coarse_sec
-                } else {
-                    coarse_sec
-                },
+                tv_sec: coarse_sec,
                 tv_nsec: 0,
             }
         }
@@ -612,6 +608,18 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
     0
 }
 
+/// Kernel-internal version of clock_getres that writes directly to a kernel pointer.
+/// Used by selftests and kernel code that needs resolution without copy_to_user overhead.
+pub fn sys_clock_getres_kernel(clock_id: u64, res: &mut Timespec) -> u64 {
+    let (sec, nsec) = clock_resolution(clock_id);
+    if sec == 0 && nsec == 0 {
+        return errno::Errno::EINVAL as u64;
+    }
+    res.tv_sec = sec;
+    res.tv_nsec = nsec;
+    0
+}
+
 pub fn sys_clock_getres(clock_id: u64, res: *mut Timespec) -> u64 {
     // Resolution via compile-time constant function
     let (sec, nsec) = clock_resolution(clock_id);
@@ -622,8 +630,8 @@ pub fn sys_clock_getres(clock_id: u64, res: *mut Timespec) -> u64 {
         tv_sec: sec,
         tv_nsec: nsec,
     };
-    if !res.is_null() {
-        if unsafe {
+    if !res.is_null()
+        && unsafe {
             user_access::copy_to_user(
                 res as *mut u8,
                 core::slice::from_raw_parts(
@@ -633,9 +641,8 @@ pub fn sys_clock_getres(clock_id: u64, res: *mut Timespec) -> u64 {
             )
         }
         .is_err()
-        {
-            return errno::Errno::EFAULT as u64;
-        }
+    {
+        return errno::Errno::EFAULT as u64;
     }
     0
 }
@@ -884,7 +891,7 @@ pub fn sys_select(
                     FileDescriptor::IoUringFd(data) => data
                         .lock()
                         .downcast_ref::<crate::syscalls::io_uring::IoUringInstance>()
-                        .map_or(false, |i| i.peek_cqes() > 0),
+                        .is_some_and(|i| i.peek_cqes() > 0),
                     FileDescriptor::InotifyFd { instance_key, .. } => {
                         crate::syscalls::inotify::inotify_has_events(*instance_key)
                     }
@@ -1366,9 +1373,7 @@ pub fn sys_getrandom(buf: *mut u8, count: usize, flags: u64) -> u64 {
         if i < to_fill {
             let val = crate::crypto::GLOBAL_ENTROPY.get_u64();
             let bytes = val.to_le_bytes();
-            for j in i..to_fill {
-                chunk[j] = bytes[j - i];
-            }
+            chunk[i..to_fill].copy_from_slice(&bytes[..to_fill - i]);
         }
         let dest = unsafe { buf.add(written) };
         if unsafe { crate::syscalls::user_access::copy_to_user(dest, &chunk[..to_fill]) }.is_err() {

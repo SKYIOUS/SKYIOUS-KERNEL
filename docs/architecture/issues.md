@@ -557,3 +557,39 @@ bounds symbols in `linker.ld` -- today the tables are non-alloc and appear in no
 Also noted: `main.rs:350`'s `[KASLR-VERIFY] match:` check compares a RIP taken
 24 bytes into the function prologue against the function's *entry* address, so it
 reports `NO` even on a correct slide. The check is wrong, not the trampoline.
+
+---
+
+## VDSO Security Audit (P6 — 2026-11-20)
+
+Scope: Full audit of vDSO implementation per design.md. Three reviewer roles:
+- Reviewer 1: Correctness/tests — `tsc_base_origin` leak, seqlock side channels, kernel_flags exposure
+- Reviewer 2: Design/boundaries — userspace pointer validation, vDSO page mapping, IRQ context safety
+- Reviewer 3: Security/maintainability — IPI DoS, frame ref leaks, ABI versioning gaps
+
+### Findings
+
+| # | Area | Finding | Severity | Evidence | Status |
+|---|------|---------|----------|----------|--------|
+| V-1 | `tsc_base_origin` | Info leak: reveals boot time + TSC epoch | Low | `vdso.rs:515` reads `tsc_base_origin`; boot time is public via `uptime` anyway | Accepted (boot time public) |
+| V-2 | Seqlock retries | Side channel: timing reveals writer activity | Low | Writers are timer IRQ (100 Hz) + context switch — predictable, no secret data | Accepted (no secret data) |
+| V-3 | `kernel_flags` | Exposes hardware inventory (NVMe, xHCI, GPU) | Low | `lspci`/`lsusb` already expose this; no capabilities leaked | Accepted |
+| V-4 | Userspace pointer validation | Kernel writes to userspace vDSO page via HHDM | Medium | Page mapped `USER_ACCESSIBLE \| PRESENT \| NO_EXECUTE`; kernel writes via HHDM (kernel mapping), not user pointer | Verified safe |
+| V-5 | `vdso_update_process_info` | Called from IRQ? `cgroup_id` is `Option` to skip in IRQ | Medium | Audit all call sites: only from `fork`/`execve`/`setns` (process context) | Verified safe |
+| V-6 | TSC sync IPI | DoS via malicious IPI broadcast | Low | `smp_broadcast_func` restricted to kernel; no userspace trigger | Verified safe |
+| V-7 | Frame ref leaks | `VDSO_FRAME_REFS` permanently pins frames; no CPU hotplug cleanup | Medium | Hotplug not implemented; design documented in `design.md` § Hotplug Cleanup | Deferred (no hotplug) |
+| V-8 | ABI versioning | No version check in kernel; userspace must verify | Medium | `vdso_abi_version` added at 0x090; userspace reads via CLOCK_SKYIOUS_VDSO_VERSION (105) | Implemented |
+| V-9 | `vdso_is_mapped` | Uses `mincore` syscall; TOCTOU if page unmapped between check and use | Low | Fallback is correct (syscall); log-once prevents spam | Accepted |
+
+### Reviewer Sign-Off
+
+- **Reviewer 1 (Correctness)**: [ ] Pass / [ ] Fail — Notes: _______________
+- **Reviewer 2 (Design/Boundaries)**: [ ] Pass / [ ] Fail — Notes: _______________
+- **Reviewer 3 (Security/Maintainability)**: [ ] Pass / [ ] Fail — Notes: _______________
+
+### Action Items
+
+- [ ] All critical/high findings fixed
+- [ ] Medium findings: fixed or accepted with rationale in issue
+- [ ] Low findings: documented
+- [ ] Re-review after fixes (max 3 rounds)

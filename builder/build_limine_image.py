@@ -42,6 +42,8 @@ import tempfile
 import shutil
 import urllib.request
 import urllib.error
+import subprocess
+import tarfile
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -716,7 +718,16 @@ def main():
             initrd_data = f.read()
         print(f"Initrd: {len(initrd_data)} bytes from {args.initrd}")
     else:
-        print(f"WARNING: No initrd at {args.initrd}")
+        print(f"No initrd at {args.initrd}, building vDSO-enabled initrd...")
+        kernel_dir = os.path.dirname(os.path.abspath(kernel_path))
+        initrd_data = build_initrd(os.path.dirname(args.output), kernel_dir)
+        if initrd_data:
+            # Save initrd for future use
+            with open(args.initrd, 'wb') as f:
+                f.write(initrd_data)
+            print(f"Saved initrd to {args.initrd}")
+        else:
+            print("WARNING: Failed to build initrd, continuing without")
 
     # Build limine.conf (v12+ format: entries use '/', options use 'key: value')
     limine_conf = (
@@ -788,6 +799,345 @@ def main():
     print(f'  qemu-system-x86_64 -drive format=raw,file={args.output} -serial stdio -m 512')
     print(f"\nNOTE: The Limine path boots to userspace with init forks verified.")
     print(f"      The Rust builder path (--rust-builder) is retired: its image cannot boot this kernel (FB-004).")
+
+
+def build_initrd(work_dir: str, kernel_dir: str) -> bytes:
+    """
+    Build initrd.tar with vDSO-enabled userspace binaries.
+    
+    Structure:
+      /init                 → vDSO-enabled init (statically linked with vdso_libc)
+      /bin/sash             → vDSO-enabled shell
+      /lib/vdso_libc.a      → static archive (for future dynamic userspace)
+      /etc/vdso.conf        → optional: disable_vdso=0, log_fallback=1
+    
+    Returns the initrd.tar bytes, or empty bytes if build tools not available.
+    """
+    import tempfile
+    import tarfile
+    
+    print("Building initrd.tar...")
+    
+    # Check for compiler
+    compiler = None
+    for cc in ['musl-gcc', 'gcc']:
+        try:
+            subprocess.run([cc, '--version'], capture_output=True, check=True)
+            compiler = cc
+            break
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    
+    if not compiler:
+        print("WARNING: No compiler (musl-gcc or gcc) found. Skipping initrd build.")
+        print("  Install musl-gcc or gcc to build vDSO-enabled initrd.")
+        return b''
+    
+    # Find userspace/libc relative to the script location
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    workspace_root = os.path.dirname(script_dir)
+    userspace_dir = os.path.join(workspace_root, 'userspace', 'libc')
+    userspace_dir = os.path.abspath(userspace_dir)
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Build vdso_libc.a
+        vdso_libc_a = os.path.join(tmpdir, 'vdso_libc.a')
+        vdso_libc_c = os.path.join(userspace_dir, 'vdso_libc.c')
+        vdso_libc_o = os.path.join(tmpdir, 'vdso_libc.o')
+        
+        print(f"  Compiling vdso_libc.c with {compiler}...")
+        ret = subprocess.run([
+            compiler, '-static', '-Os', '-Wall', '-Wextra',
+            '-c', vdso_libc_c, '-o', vdso_libc_o
+        ], capture_output=True, text=True)
+        if ret.returncode != 0:
+            print(f"  ERROR: Failed to compile vdso_libc.c: {ret.stderr}")
+            return b''
+        
+        # Create static archive
+        ret = subprocess.run(['ar', 'rcs', vdso_libc_a, vdso_libc_o], capture_output=True, text=True)
+        if ret.returncode != 0:
+            print(f"  ERROR: Failed to create vdso_libc.a: {ret.stderr}")
+            return b''
+        print(f"  Created {vdso_libc_a}")
+        
+        # Create minimal init.c
+        init_c = os.path.join(tmpdir, 'init.c')
+        with open(init_c, 'w') as f:
+            f.write('''/*
+ * Minimal init - vDSO-enabled
+ * Mounts filesystems, starts shell
+ */
+#include <stdint.h>
+#include <stddef.h>
+#include "vdso_libc.h"
+
+/* Syscall numbers */
+#define SYS_write   1
+#define SYS_exit    60
+#define SYS_mount  165
+#define SYS_openat 257
+#define SYS_execve 59
+#define SYS_wait4  260
+
+static inline long syscall0(long n) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall1(long n, long a) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall2(long n, long a, long b) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a), "S"(b) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall3(long n, long a, long b, long c) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall5(long n, long a, long b, long c, long d, long e) {
+    long ret;
+    register long r10 __asm__("r10") = d;
+    register long r8 __asm__("r8") = e;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static void puts(const char *s) {
+    size_t len = 0;
+    while (s[len]) len++;
+    syscall3(SYS_write, 1, (long)s, len);
+}
+
+static void puthex(uint64_t v) {
+    char buf[17];
+    for (int i = 15; i >= 0; i--) {
+        int nibble = (v >> (i * 4)) & 0xF;
+        buf[15 - i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+    }
+    buf[16] = '\\n';
+    syscall3(SYS_write, 1, (long)buf, 17);
+}
+
+void _start(void) {
+    puts("=== Vahi Kernel Init (vDSO-enabled) ===\\n");
+    
+    /* Test vDSO */
+    struct timespec ts;
+    if (clock_gettime(1, &ts) == 0) {
+        puts("CLOCK_MONOTONIC: ");
+        puthex(ts.tv_sec * 1000000000ULL + ts.tv_nsec);
+        puts(" ns\\n");
+    }
+    
+    long pid = getpid();
+    puts("PID: ");
+    puthex(pid);
+    puts("\\n");
+    
+    unsigned cpu;
+    if (getcpu(&cpu, NULL) == 0) {
+        puts("CPU: ");
+        puthex(cpu);
+        puts("\\n");
+    }
+    
+    puts("Starting shell...\\n");
+    
+    /* Exec sash */
+    const char *argv[] = { "/bin/sash", NULL };
+    const char *envp[] = { NULL };
+    syscall3(SYS_execve, (long)"/bin/sash", (long)argv, (long)envp);
+    
+    /* If execve returns, something went wrong */
+    puts("Failed to exec sash\\n");
+    syscall1(SYS_exit, 1);
+}
+''')
+        
+        # Compile init
+        init_bin = os.path.join(tmpdir, 'init')
+        print(f"  Compiling init with {compiler}...")
+        ret = subprocess.run([
+            compiler, '-static', '-Os', '-Wall', '-Wextra',
+            '-I', userspace_dir,
+            init_c, vdso_libc_a, '-o', init_bin
+        ], capture_output=True, text=True)
+        if ret.returncode != 0:
+            print(f"  ERROR: Failed to compile init: {ret.stderr}")
+            return b''
+        print(f"  Created {init_bin}")
+        
+        # Create minimal sash.c (simple shell)
+        sash_c = os.path.join(tmpdir, 'sash.c')
+        with open(sash_c, 'w') as f:
+            f.write('''/*
+ * Simple shell (sash) - vDSO-enabled
+ */
+#include <stdint.h>
+#include <stddef.h>
+#include "vdso_libc.h"
+
+#define SYS_write   1
+#define SYS_read    0
+#define SYS_exit    60
+#define SYS_fork    57
+#define SYS_execve  59
+#define SYS_wait4   260
+
+static inline long syscall0(long n) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall1(long n, long a) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall2(long n, long a, long b) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a), "S"(b) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall3(long n, long a, long b, long c) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static void puts(const char *s) {
+    size_t len = 0;
+    while (s[len]) len++;
+    syscall3(SYS_write, 1, (long)s, len);
+}
+
+static void puthex(uint64_t v) {
+    char buf[17];
+    for (int i = 15; i >= 0; i--) {
+        int nibble = (v >> (i * 4)) & 0xF;
+        buf[15 - i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+    }
+    buf[16] = '\\n';
+    syscall3(SYS_write, 1, (long)buf, 17);
+}
+
+static int read_line(char *buf, size_t max) {
+    size_t i = 0;
+    while (i < max - 1) {
+        char c;
+        long r = syscall3(SYS_read, 0, (long)&c, 1);
+        if (r <= 0) break;
+        if (c == '\\n' || c == '\\r') break;
+        buf[i++] = c;
+    }
+    buf[i] = 0;
+    return i;
+}
+
+void _start(void) {
+    puts("=== sash vDSO shell ===\\n");
+    puts("Commands: help, time, pid, cpu, exit\\n");
+    
+    char line[256];
+    while (1) {
+        puts("sash> ");
+        if (read_line(line, sizeof(line)) == 0) continue;
+        
+        if (line[0] == 0) continue;
+        
+        if (__builtin_strcmp(line, "help") == 0) {
+            puts("help  - show this help\\n");
+            puts("time  - show current time via vDSO\\n");
+            puts("pid   - show current PID via vDSO\\n");
+            puts("cpu   - show current CPU via vDSO\\n");
+            puts("exit  - exit shell\\n");
+        } else if (__builtin_strcmp(line, "time") == 0) {
+            struct timespec ts;
+            if (clock_gettime(1, &ts) == 0) {
+                puts("MONOTONIC: ");
+                puthex(ts.tv_sec * 1000000000ULL + ts.tv_nsec);
+                puts(" ns\\n");
+            }
+            if (clock_gettime(0, &ts) == 0) {
+                puts("REALTIME:  ");
+                puthex(ts.tv_sec * 1000000000ULL + ts.tv_nsec);
+                puts(" ns\\n");
+            }
+        } else if (__builtin_strcmp(line, "pid") == 0) {
+            puts("PID: ");
+            puthex(getpid());
+            puts("\\n");
+        } else if (__builtin_strcmp(line, "cpu") == 0) {
+            unsigned cpu;
+            if (getcpu(&cpu, NULL) == 0) {
+                puts("CPU: ");
+                puthex(cpu);
+                puts("\\n");
+            }
+        } else if (__builtin_strcmp(line, "exit") == 0) {
+            break;
+        } else {
+            puts("Unknown command: ");
+            puts(line);
+            puts("\\n");
+        }
+    }
+    
+    puts("Goodbye!\\n");
+    syscall1(SYS_exit, 0);
+}
+''')
+        
+        # Compile sash
+        sash_bin = os.path.join(tmpdir, 'sash')
+        print(f"  Compiling sash with {compiler}...")
+        ret = subprocess.run([
+            compiler, '-static', '-Os', '-Wall', '-Wextra',
+            '-I', userspace_dir,
+            sash_c, vdso_libc_a, '-o', sash_bin
+        ], capture_output=True, text=True)
+        if ret.returncode != 0:
+            print(f"  ERROR: Failed to compile sash: {ret.stderr}")
+            return b''
+        print(f"  Created {sash_bin}")
+        
+        # Create vdso.conf
+        vdso_conf = os.path.join(tmpdir, 'vdso.conf')
+        with open(vdso_conf, 'w') as f:
+            f.write('# vDSO configuration\\n')
+            f.write('disable_vdso=0\\n')
+            f.write('log_fallback=1\\n')
+        
+        # Create initrd.tar
+        initrd_path = os.path.join(tmpdir, 'initrd.tar')
+        with tarfile.open(initrd_path, 'w') as tar:
+            # Add init
+            tar.add(init_bin, arcname='init')
+            # Add sash
+            tar.add(sash_bin, arcname='bin/sash')
+            # Add vdso_libc.a
+            tar.add(vdso_libc_a, arcname='lib/vdso_libc.a')
+            # Add vdso.conf
+            tar.add(vdso_conf, arcname='etc/vdso.conf')
+        
+        with open(initrd_path, 'rb') as f:
+            initrd_data = f.read()
+        
+        print(f"  Created initrd.tar: {len(initrd_data)} bytes")
+        return initrd_data
 
 
 if __name__ == '__main__':

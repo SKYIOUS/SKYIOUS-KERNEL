@@ -1,0 +1,184 @@
+.\" vdso.7 — SKYIOUS Kernel vDSO Interface
+.\" Generated as part of VDSO Rollout
+.\" SPDX-License-Identifier: MIT
+.TH VDSO 7 "2026-11-20" "SKYIOUS Kernel v0.3.0" "Kernel Interfaces"
+.SH NAME
+vdso \- Virtual Dynamic Shared Object (SKYIOUS Kernel)
+.SH SYNOPSIS
+.B #include <vdso_libc.h>
+.PP
+.B int clock_gettime(clockid_t clk_id, struct timespec *tp);
+.PP
+.B int clock_getres(clockid_t clk_id, struct timespec *tp);
+.PP
+.B long getpid(void);
+.PP
+.B int getcpu(unsigned *cpu, unsigned *node);
+.PP
+.B uint64_t get_time_ns_tsc(void);
+.SH DESCRIPTION
+The SKYIOUS Kernel provides a Virtual Dynamic Shared Object (vDSO) as the
+.B primary ABI
+for time, process ID, and CPU ID queries. Unlike Linux where vDSO is an
+optimization with syscalls as the primary interface, SKYIOUS userspace
+libraries (vdso_libc, init, sash) use vDSO fast paths by default and fall
+back to syscalls only when the vDSO page is unavailable.
+
+Each CPU has its own 4 KiB vDSO page mapped at a fixed virtual address
+range starting at \fB0x0000_7FFF_FFFC_0000\fR (256 KiB below USER_MMAP_TOP).
+CPU N's page is at \fBVDSO_BASE + N * 4096\fR.
+
+The vDSO data structure is updated by the kernel on timer ticks (100 Hz) and
+context switches. Userspace reads use a seqlock protocol for consistency.
+.SH DATA STRUCTURE
+The vDSO page contains the following fields (offsets from page base):
+
+.TS
+l l l.
+Offset Size Field Description
+_
+0x000 8 seq Seqlock for time fields (even=consistent, odd=updating)
+0x008 8 monotonic_sec Monotonic clock seconds
+0x010 4 monotonic_nsec Monotonic clock nanoseconds
+0x018 8 realtime_sec Real-time clock seconds
+0x020 4 realtime_nsec Real-time clock nanoseconds
+0x028 8 tsc_freq_hz TSC frequency in Hz (read-only after init)
+0x030 4 tsc_mult TSC multiplier (read-only after init)
+0x034 4 tsc_shift TSC shift (read-only after init)
+0x038 8 tsc_base TSC base at last sync
+0x040 8 tsc_base_origin Original TSC base at boot (preserved across syncs)
+0x048 8 pid_cpu_seq Seqlock for PID/CPU fields
+0x050 8 pid Current process ID
+0x058 4 cpu_id Current CPU ID
+0x060 8 thread_cputime_ns Thread CPU time (CLOCK_SKYIOUS_THREAD_CPUTIME)
+0x068 8 kernel_flags Kernel feature flags (CLOCK_SKYIOUS_KERNEL_FLAGS)
+0x070 8 process_cgroup_id Cgroup ID (CLOCK_SKYIOUS_PROCESS_INFO)
+0x078 8 process_namespace_flags Namespace flags (CLOCK_SKYIOUS_PROCESS_INFO)
+0x080 8 process_cap_effective Effective capabilities (CLOCK_SKYIOUS_PROCESS_INFO)
+0x088 4 tsc_sync_ack_count TSC sync IPI acknowledgment count
+0x08C 4 tsc_sync_seq TSC sync sequence number
+0x090 4 vdso_abi_version vDSO ABI version (monotonic integer)
+.TE
+
+.SH CLOCK IDS
+The following clock IDs are supported via vDSO fast path:
+
+.TS
+l l l l.
+ID Name Fast Path Notes
+_
+0 CLOCK_REALTIME Yes TSC + cached RTC interpolation
+1 CLOCK_MONOTONIC Yes TSC-based (invariant)
+5 CLOCK_REALTIME_COARSE Yes 10ms resolution, tick-based
+6 CLOCK_MONOTONIC_COARSE Yes 10ms resolution, tick-based
+7 CLOCK_BOOTTIME Yes Same as MONOTONIC
+4 CLOCK_MONOTONIC_RAW Yes Same as MONOTONIC
+100 CLOCK_SKYIOUS_THREAD_CPUTIME No Syscall fallback (omits running slice)
+101 CLOCK_SKYIOUS_SCHED_DEADLINE No Syscall fallback
+102 CLOCK_SKYIOUS_BOOT_NS Yes TSC + tsc_base_origin (preserved across syncs)
+103 CLOCK_SKYIOUS_KERNEL_FLAGS Yes Direct atomic load
+104 CLOCK_SKYIOUS_PROCESS_INFO Yes Direct atomic loads
+105 CLOCK_SKYIOUS_VDSO_VERSION Yes Direct atomic load (ABI version)
+.TE
+
+Clocks 2 (CLOCK_PROCESS_CPUTIME_ID) and 3 (CLOCK_THREAD_CPUTIME_ID)
+always use syscall fallback.
+
+.SH SEQLK PROTOCOL
+Two independent seqlocks protect different field groups:
+
+.TP
+.B seq (time fields)
+Writer (timer tick, 100 Hz): increments to odd, writes monotonic_sec,
+monotonic_nsec, realtime_sec, realtime_nsec, increments to even.
+Reader: reads seq (Acquire), reads data (Relaxed), reads seq again
+(Acquire), retries if seq changed or odd.
+
+.TP
+.B pid_cpu_seq (PID/CPU fields)
+Writer (context switch): increments to odd, writes pid and cpu_id,
+increments to even.
+Reader: same protocol as time fields.
+
+Userspace must also validate CPU identity: after reading cpu_id from the
+vDSO page, compare it with the CPU obtained from the getcpu syscall (or
+rdpid instruction). If they differ, the thread has migrated; retry with the
+new CPU's page.
+
+.SH FALLBACK PROTOCOL
+If the vDSO page is not mapped (e.g., first access before kernel maps it,
+or after mprotect/unmap), vdso_libc immediately falls back to the
+corresponding syscall and logs a one-time message via the kernel serial
+console. No retry loop is attempted — the page will not appear
+spontaneously.
+
+The fallback is also used for clocks not exposed via vDSO fast path.
+
+.SH ABI VERSIONING
+The vDSO ABI version is a monotonic integer stored in
+\fBvdso_abi_version\fR (offset 0x090). Current version is 1.
+
+Policy:
+.RS
+.IP \(bu
+Increment ONLY on incompatible layout/semantic changes (field removal,
+offset change, seqlock protocol change).
+.IP \(bu
+Compatible additions (new fields at end, new clock IDs, new kernel_flags
+bits) do NOT bump version.
+.IP \(bu
+Userspace reads version at startup via CLOCK_SKYIOUS_VDSO_VERSION (105).
+Mismatch → syscall-only fallback.
+.RE
+
+.SH AUXILIARY VECTOR
+AT_SYSINFO_EHDR (type 33) points to VDSO_BASE (CPU 0's page). Userspace
+computes per-CPU page address:
+.EX
+vdso_page(cpu_id) = AT_SYSINFO_EHDR + cpu_id * 4096
+.EE
+
+.SH TSC TIME CALCULATION
+.nf
+.elapsed = rdtsc() - tsc_base
+.ns = (elapsed * tsc_mult) >> tsc_shift
+.sec = ns / 1e9
+.nsec = ns % 1e9
+.fi
+
+For CLOCK_REALTIME, the kernel caches a consistent (RTC sec, RTC nsec, TSC
+timestamp) triple under a seqlock. Interpolation uses the cached TSC
+timestamp, so TSC synchronization does not cause wall-clock steps.
+
+.SH FILES
+.B /lib/vdso_libc.a
+Static archive providing vDSO primary ABI.
+
+.B /etc/vdso.conf
+Optional configuration: disable_vdso=0, log_fallback=1.
+
+.SH EXAMPLE
+.EX
+#include "vdso_libc.h"
+#include <stdio.h>
+
+int main() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    printf("MONOTONIC: %ld.%09ld\\n", ts.tv_sec, ts.tv_nsec);
+    
+    printf("PID: %ld\\n", getpid());
+    
+    unsigned cpu;
+    getcpu(&cpu, NULL);
+    printf("CPU: %u\\n", cpu);
+    
+    return 0;
+}
+.EE
+
+.SH SEE ALSO
+vdso(2), clock_gettime(2), getpid(2), getcpu(2), vdso-userspace(7)
+.SH AUTHORS
+SKYIOUS Kernel Team
+.\" End of vdso.7

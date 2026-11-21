@@ -59,7 +59,8 @@ pub mod kernel_flags {
 ///   0x080: process_cap_effective (AtomicU64) — effective capabilities for CLOCK_SKYIOUS_PROCESS_INFO (104)
 ///   0x088: tsc_sync_ack_count (AtomicU32) — TSC sync IPI acknowledgment count (Phase 2.3)
 ///   0x08C: tsc_sync_seq (AtomicU32) — TSC sync sequence number (Phase 2.3)
-///   0x090-0xFFF: reserved (zero)
+///   0x090: vdso_abi_version (AtomicU32) — vDSO ABI version (monotonic integer)
+///   0x094-0xFFF: reserved (zero)
 #[repr(C, align(4096))]
 pub struct VdsoData {
     pub seq: AtomicU64,
@@ -96,7 +97,11 @@ pub struct VdsoData {
     /// TSC sync sequence number for Phase 2.3
     /// Incremented by coordinator (CPU 0) before each sync
     pub tsc_sync_seq: AtomicU32,
-    _reserved: [u64; 494], // Fill to 4096 bytes exactly (494 * 8 = 3952, + 144 = 4096)
+    /// vDSO ABI version — monotonic integer (v1, v2, v3...).
+    /// Incremented ONLY on incompatible layout/semantic changes.
+    /// Userspace reads at startup; mismatch -> syscall-only fallback.
+    pub vdso_abi_version: AtomicU32,
+    _reserved: [u64; 493], // Fill to 4096 bytes exactly (493 * 8 = 3944, + 152 = 4096)
 }
 
 // Compile-time size check
@@ -218,6 +223,9 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
         }
         vdso.realtime_sec.store(rt_sec as u64, Ordering::Release);
         vdso.realtime_nsec.store(rt_nsec as u32, Ordering::Release);
+
+        // Initialize vDSO ABI version (v1 = current layout)
+        vdso.vdso_abi_version.store(1, Ordering::Release);
 
         // Ensure all initialization writes are visible before publishing the page pointer
         core::sync::atomic::fence(Ordering::SeqCst);
@@ -540,6 +548,24 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
         let ns = ((elapsed_boot as u128 * tsc_mult as u128) >> tsc_shift) as u64;
         let sec = ns / 1_000_000_000;
         let nsec = (ns % 1_000_000_000) as u32;
+        (sec, nsec)
+    } else if clock_id == 5 {
+        // CLOCK_REALTIME_COARSE - 10ms resolution from ticks (no seqlock needed)
+        // Same as MONOTONIC_COARSE + cached RTC offset
+        let ticks = crate::interrupts::get_ticks();
+        let total_ms = ticks * 10;
+        let sec = total_ms / 1000;
+        let nsec = ((total_ms % 1000) * 1_000_000) as u32;
+        // Add cached RTC offset for realtime
+        let (rt_sec, rt_nsec) = get_cached_rtc();
+        let total_ns = rt_sec * 1_000_000_000 + rt_nsec as u64 + sec * 1_000_000_000 + nsec as u64;
+        (total_ns / 1_000_000_000, (total_ns % 1_000_000_000) as u32)
+    } else if clock_id == 6 {
+        // CLOCK_MONOTONIC_COARSE - 10ms resolution from ticks (no seqlock needed)
+        let ticks = crate::interrupts::get_ticks();
+        let total_ms = ticks * 10;
+        let sec = total_ms / 1000;
+        let nsec = ((total_ms % 1000) * 1_000_000) as u32;
         (sec, nsec)
     } else {
         (0, 0)

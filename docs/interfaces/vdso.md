@@ -44,7 +44,8 @@ vdso_virt_addr(cpu_id) = VDSO_BASE + cpu_id * 4096
 | 0x080 | 8 | `process_cap_effective` | Effective capabilities for CLOCK_SKYIOUS_PROCESS_INFO (104) |
 | 0x088 | 4 | `tsc_sync_ack_count` | TSC sync IPI acknowledgment count |
 | 0x08C | 4 | `tsc_sync_seq` | TSC sync sequence number |
-| 0x090+ | ~3952 | `_reserved` | Reserved for future use |
+| 0x090 | 4 | `vdso_abi_version` | vDSO ABI version (monotonic integer) |
+| 0x094+ | ~3948 | `_reserved` | Reserved for future use |
 
 ## Seqlock Protocol
 
@@ -76,11 +77,14 @@ vdso_page(cpu_id) = AT_SYSINFO_EHDR + cpu_id * 4096
 |----------|------|-----------|-------|
 | 0 | CLOCK_REALTIME | ✅ TSC + cached RTC | Interpolates from cached RTC + TSC delta |
 | 1 | CLOCK_MONOTONIC | ✅ TSC-based | TSC elapsed since `tsc_base` |
+| 5 | CLOCK_REALTIME_COARSE | ✅ Tick-based | 10ms resolution, no seqlock |
+| 6 | CLOCK_MONOTONIC_COARSE | ✅ Tick-based | 10ms resolution, no seqlock |
 | 7 | CLOCK_BOOTTIME | ✅ Same as MONOTONIC | Uses cached monotonic snapshot |
 | 4 | CLOCK_MONOTONIC_RAW | ✅ Same as MONOTONIC | Uses cached monotonic snapshot |
 | 102 | CLOCK_SKYIOUS_BOOT_NS | ✅ TSC + `tsc_base_origin` | Raw TSC ns since boot (preserved across TSC syncs) |
 | 103 | CLOCK_SKYIOUS_KERNEL_FLAGS | ✅ Direct atomic load | Kernel feature bitfield |
 | 104 | CLOCK_SKYIOUS_PROCESS_INFO | ✅ Direct atomic loads | Cgroup ID, namespace flags, capabilities |
+| 105 | CLOCK_SKYIOUS_VDSO_VERSION | ✅ Direct atomic load | vDSO ABI version (monotonic integer) |
 
 Other clocks (2=CLOCK_PROCESS_CPUTIME_ID, 3=CLOCK_THREAD_CPUTIME_ID, 100=CLOCK_SKYIOUS_THREAD_CPUTIME, 101=CLOCK_SKYIOUS_SCHED_DEADLINE) fall back to syscall because:
 - Thread CPU time (3, 100) omits the current running slice in the vDSO fast path
@@ -180,6 +184,9 @@ struct vdso_data *get_vdso_page(int cpu_id) {
 
 ## Version
 
-Current ABI version: 1
+Current ABI version: 1 (`vdso_abi_version = 1`)
 - Kernel: Vahi Kernel v0.3.0+
 - Architecture: x86_64
+- Policy: Monotonic integer. Incremented ONLY on incompatible layout/semantic changes.
+  Compatible additions (new fields at end, new clock IDs, new kernel_flags bits) do NOT bump version.
+- Userspace reads version at startup via `CLOCK_SKYIOUS_VDSO_VERSION` (105); mismatch → syscall-only fallback.

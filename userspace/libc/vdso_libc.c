@@ -85,6 +85,40 @@ struct vdso_data {
  * Internal vDSO access helpers
  * ============================================================ */
 
+/* Log-once helper to avoid spam */
+static int vdso_logged_fallback = 0;
+
+static inline void vdso_log_once(const char *msg) {
+    if (!__atomic_load_n(&vdso_logged_fallback, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&vdso_logged_fallback, 1, __ATOMIC_RELEASE);
+        /* Write to serial via syscall */
+        size_t len = 0;
+        while (msg[len]) len++;
+        register long syscall_nr __asm__("rax") = 1; /* SYS_write */
+        register long rdi __asm__("rdi") = 1; /* fd = stdout */
+        register long rsi __asm__("rsi") = (long)msg;
+        register long rdx __asm__("rdx") = (long)len;
+        __asm__ volatile("syscall" : : "a"(1), "D"(1), "S"(msg), "d"(len) : "rcx", "r11", "memory");
+    }
+}
+
+/* Check if vDSO page is mapped and accessible using mincore */
+static inline int vdso_is_mapped(const struct vdso_data *vdso) {
+    /* Use mincore syscall (27) to check if page is resident */
+    unsigned char vec;
+    register long syscall_nr __asm__("rax") = 27; /* SYS_mincore */
+    register long rdi __asm__("rdi") = (long)vdso;
+    register long rsi __asm__("rsi") = 4096;
+    register long rdx __asm__("rdx") = (long)&vec;
+    long ret;
+    __asm__ volatile("syscall"
+        : "=a"(ret)
+        : "a"(27), "D"(vdso), "S"(4096), "d"(&vec)
+        : "rcx", "r11", "memory");
+    if (ret != 0) return 0;
+    return (vec & 1) != 0;
+}
+
 static inline const struct vdso_data *vdso_page_current(void) {
     unsigned cpu = 0, node = 0;
     long ret;
@@ -98,6 +132,10 @@ static inline const struct vdso_data *vdso_page_current(void) {
         return NULL; /* getcpu syscall failed */
     }
     const struct vdso_data *vdso = (const struct vdso_data *)(VDSO_BASE + cpu * 4096);
+    /* Check if vDSO page is mapped */
+    if (!vdso_is_mapped(vdso)) {
+        return NULL;
+    }
     /* Check kernel-provided availability contract: seq must be even and tsc_freq_hz non-zero */
     uint64_t seq = __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE);
     uint64_t freq = __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_ACQUIRE);
@@ -325,10 +363,38 @@ int clock_gettime(int clock_id, struct timespec *tp) {
             return 0;
         }
 
-        case 5: /* CLOCK_REALTIME_COARSE */
+        case 5: /* CLOCK_REALTIME_COARSE */ {
+            /* Coarse clocks: 10ms resolution - read tick-based fields directly (no seqlock needed) */
+            uint64_t seq;
+            long sec, nsec;
+            do {
+                seq = __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE);
+                if (seq & 1) continue;
+                sec = (long)__atomic_load_n(&vdso->realtime_sec, __ATOMIC_RELAXED);
+                nsec = (long)__atomic_load_n(&vdso->realtime_nsec, __ATOMIC_RELAXED);
+            } while (seq != __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE) || (seq & 1));
+            /* Round to 10ms resolution */
+            nsec = (nsec / 10000000) * 10000000;
+            tp->tv_sec = sec;
+            tp->tv_nsec = nsec;
+            return 0;
+        }
+
         case 6: /* CLOCK_MONOTONIC_COARSE */ {
-            /* Coarse clocks - fall through to syscall */
-            break;
+            /* Coarse clocks: 10ms resolution - read tick-based fields directly (no seqlock needed) */
+            uint64_t seq;
+            long sec, nsec;
+            do {
+                seq = __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE);
+                if (seq & 1) continue;
+                sec = (long)__atomic_load_n(&vdso->monotonic_sec, __ATOMIC_RELAXED);
+                nsec = (long)__atomic_load_n(&vdso->monotonic_nsec, __ATOMIC_RELAXED);
+            } while (seq != __atomic_load_n(&vdso->seq, __ATOMIC_ACQUIRE) || (seq & 1));
+            /* Round to 10ms resolution */
+            nsec = (nsec / 10000000) * 10000000;
+            tp->tv_sec = sec;
+            tp->tv_nsec = nsec;
+            return 0;
         }
 
         default:
@@ -337,6 +403,7 @@ int clock_gettime(int clock_id, struct timespec *tp) {
 
 fallback:
     /* Syscall fallback - ONLY when vDSO is unavailable or clock not supported */
+    vdso_log_once("[vdso_libc] clock_gettime: vDSO unavailable, using syscall fallback\n");
     register long syscall_nr __asm__("rax") = 228; /* SYS_clock_gettime */
     register long rdi __asm__("rdi") = clock_id;
     register long rsi __asm__("rsi") = (long)tp;
@@ -414,6 +481,7 @@ long getpid(void) {
     return (long)pid;
 
 fallback:
+    vdso_log_once("[vdso_libc] getpid: vDSO unavailable, using syscall fallback\n");
     register long syscall_nr __asm__("rax") = 39; /* SYS_getpid */
     long ret;
     __asm__ volatile("syscall" : "=a"(ret) : "a"(39) : "rcx", "r11", "memory");
@@ -441,6 +509,7 @@ int getcpu(unsigned *cpu, unsigned *node) {
     return 0;
 
 fallback:
+    vdso_log_once("[vdso_libc] getcpu: vDSO unavailable, using syscall fallback\n");
     register long syscall_nr __asm__("rax") = 309; /* SYS_getcpu */
     register long rdi __asm__("rdi") = (long)cpu;
     register long rsi __asm__("rsi") = (long)node;
@@ -459,7 +528,10 @@ fallback:
 
 uint64_t get_time_ns_tsc(void) {
     const struct vdso_data *vdso = vdso_page_current();
-    if (!vdso) return 0;
+    if (!vdso) {
+        vdso_log_once("[vdso_libc] get_time_ns_tsc: vDSO unavailable, returning 0\n");
+        return 0;
+    }
 
     uint64_t freq = __atomic_load_n(&vdso->tsc_freq_hz, __ATOMIC_ACQUIRE);
     if (freq == 0) return 0;
