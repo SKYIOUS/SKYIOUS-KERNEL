@@ -1,3 +1,4 @@
+#[cfg(feature = "smp")]
 use crate::arch::Arch;
 #[cfg(feature = "smp")]
 use crate::println;
@@ -6,6 +7,7 @@ use crate::vdso::vdso_update_tsc_base;
 #[cfg(feature = "smp")]
 use core::arch::global_asm;
 
+#[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "smp")]
 use x86_64::registers::control::Cr3;
@@ -22,6 +24,7 @@ pub const TRAMPOLINE_PHYS: u64 = 0x8000;
 pub const DATA_PHYS: u64 = 0x7000;
 
 /// Shared data between BSP and APs during boot
+#[cfg(feature = "smp")]
 #[repr(C)]
 pub struct SmpBootData {
     pub stack_ptr: u64,
@@ -33,6 +36,7 @@ pub struct SmpBootData {
 // SAFETY: BOOT_DATA is static mut because it's shared between BSP and APs during boot.
 // Access is synchronized via atomic operations and only during the boot sequence.
 // After boot, this data is no longer accessed.
+#[cfg(feature = "smp")]
 pub static mut BOOT_DATA: SmpBootData = SmpBootData {
     stack_ptr: 0,
     code_ptr: 0,

@@ -62,6 +62,7 @@ pub fn cfi_init() {
 
     // Register core kernel functions that are called via transmuted pointers.
     // SMP entry point — called when APs boot
+    #[cfg(feature = "smp")]
     register_static(
         &mut targets,
         crate::smp::ap_kernel_entry as *const () as usize,

@@ -506,7 +506,6 @@ fn stress_vdso_concurrent_reads() -> Result<(), &'static str> {
 
     Ok(())
 }
-#[cfg(target_arch = "x86_64")]
 
 /// Stress test: vDSO PID/CPU reads under concurrent access.
 /// Verifies pid_cpu_seqlock under concurrent reads.
@@ -628,7 +627,6 @@ fn stress_tsc_monotonicity() -> Result<(), &'static str> {
 
     Ok(())
 }
-#[cfg(target_arch = "x86_64")]
 
 /// Stress test: High-frequency vDSO time reads simulating real workload.
 /// Simulates a busy userspace application polling time.
@@ -687,10 +685,10 @@ fn stress_vdso_heavy_load() -> Result<(), &'static str> {
 
     Ok(())
 }
-#[cfg(target_arch = "x86_64")]
 
 /// Stress test: vDSO clock_getres consistency.
 /// Verifies resolution values are consistent across all clocks.
+#[cfg(target_arch = "x86_64")]
 fn stress_clock_getres_consistency() -> Result<(), &'static str> {
     use crate::syscalls::misc::sys_clock_getres;
     use crate::syscalls::Timespec;
@@ -794,7 +792,6 @@ pub fn run_vdso_stress_suite() -> Result<(), &'static str> {
 
     Ok(())
 }
-#[cfg(target_arch = "x86_64")]
 
 // ---------------------------------------------------------------------------
 // Registration

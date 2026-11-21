@@ -28,11 +28,13 @@ pub const fn vdso_virt_addr_for_cpu(cpu_id: usize) -> u64 {
 /// Bitfield exposed via vDSO for userspace feature detection.
 pub mod kernel_flags {
     pub const HAS_AVX2: u64 = 1 << 0; // CPUID leaf 7 EBX bit 5
-    #[allow(dead_code)] // Used by userspace via vDSO
+
+    // The self-tests decode these ABI bits; only AVX2 detection sets a bit today.
+    #[cfg(feature = "self_test")]
     pub const HAS_NVME: u64 = 1 << 1; // NVMe controller present
-    #[allow(dead_code)] // Used by userspace via vDSO
+    #[cfg(feature = "self_test")]
     pub const HAS_XHCI: u64 = 1 << 2; // xHCI USB controller present
-    #[allow(dead_code)] // Used by userspace via vDSO
+    #[cfg(feature = "self_test")]
     pub const HAS_VIRTIO_GPU: u64 = 1 << 3; // VirtIO GPU present
                                             // Bits 4-15 reserved for net stack version and FS features
 }
@@ -263,25 +265,14 @@ pub fn init_vdso(mut frame_allocator: impl FrameAllocator<Size4KiB>) -> Result<(
         let cpu0_hhdm = info.hhdm_vaddr;
         let cpu0_vdso = unsafe { &*(cpu0_hhdm as *const VdsoData) };
         let flags = cpu0_vdso.kernel_flags.load(Ordering::Acquire);
-        for cpu_id in 1..crate::task::scheduler::MAX_CPUS {
-            let ptr = VDSO_PAGES
-                .get(cpu_id)
-                .map(|a| a.load(Ordering::Acquire))
-                .filter(|&v| !v.is_null());
-            if let Some(ptr) = ptr {
-                let info = unsafe { &*ptr };
-                let hhdm_vaddr = info.hhdm_vaddr;
-                let vdso = unsafe { &*(hhdm_vaddr as *const VdsoData) };
-                vdso.kernel_flags.store(flags, Ordering::Release);
-            }
-        }
+        crate::vdso_set_kernel_flag(flags);
     }
 
     Ok(())
 }
 
 /// Update kernel feature flags on all CPU vDSO pages.
-/// Called by device drivers when they detect hardware (NVMe, xHCI, VirtIO-GPU, etc.).
+/// Boot uses this to publish detected CPU flags; device drivers can add hardware flags.
 /// Uses atomic OR to add the flag to existing flags on all CPUs.
 pub fn vdso_set_kernel_flag(flag: u64) {
     for ptr in VDSO_PAGES.iter().take(crate::task::scheduler::MAX_CPUS) {

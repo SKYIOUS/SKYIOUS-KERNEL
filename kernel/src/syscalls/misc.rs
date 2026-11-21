@@ -67,7 +67,10 @@ pub fn sys_clock_gettime_kernel(clock_id: u64, tp: &mut Timespec) -> u64 {
 
     // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC, CLOCK_REALTIME, and COARSE clocks (x86_64 only)
     #[cfg(target_arch = "x86_64")]
-    if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE) {
+    if matches!(
+        clock_id,
+        CLOCK_MONOTONIC | CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+    ) {
         let (sec, nsec) = crate::vdso_read_tsc_time(clock_id);
         if sec != 0 || nsec != 0 {
             tp.tv_sec = sec as i64;
@@ -422,7 +425,10 @@ pub fn sys_clock_gettime(clock_id: u64, tp: *mut Timespec) -> u64 {
 
     // Fast path: try vDSO TSC-based time for CLOCK_MONOTONIC, CLOCK_REALTIME, and COARSE clocks (x86_64 only)
     #[cfg(target_arch = "x86_64")]
-    if matches!(clock_id, CLOCK_MONOTONIC | CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE) {
+    if matches!(
+        clock_id,
+        CLOCK_MONOTONIC | CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+    ) {
         let (sec, nsec) = crate::vdso_read_tsc_time(clock_id);
         if sec != 0 || nsec != 0 {
             let ts = Timespec {

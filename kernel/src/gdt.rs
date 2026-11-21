@@ -136,6 +136,7 @@ pub fn init() {
 /// K-02: CPU identity is established (via `lapic::init` + CPUID fallback)
 /// before this runs on an AP, so the CPU id is passed in rather than read
 /// through per-CPU machinery (`current_cpu_idx`) that is not valid yet.
+#[cfg(feature = "smp")]
 pub fn init_ap(cpu_id: usize) {
     use alloc::boxed::Box;
     use x86_64::instructions::segmentation::{Segment, CS, DS, SS};

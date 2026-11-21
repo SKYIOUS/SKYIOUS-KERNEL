@@ -931,8 +931,6 @@ pub unsafe fn activate_kaslr_mapping() {
     kaslr_trampoline(new_pml4_phys, slide, old_rsp);
 }
 
-/// Get the current KASLR slide value
-
 // kaslr_trampoline: performs CR3 switch and jumps to slid _start
 // This is a separate function to ensure the inline asm is generated.
 // # Safety: never returns. new_pml4_phys must be physical address of new PML4,
@@ -988,6 +986,7 @@ unsafe fn kaslr_trampoline(new_pml4_phys: u64, slide: u64, old_rsp: u64) -> ! {
     );
 }
 
+/// Get the current KASLR slide value.
 pub fn get_kaslr_slide() -> u64 {
     crate::KERNEL_SLIDE.load(core::sync::atomic::Ordering::Relaxed)
 }

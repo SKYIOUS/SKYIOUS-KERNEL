@@ -143,7 +143,7 @@ pub fn init_idt() {
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(target_arch = "x86_64", feature = "smp"))]
 pub fn init_ap() {
     if let Some(IdtPtr(ptr)) = *IDT.lock() {
         use x86_64::instructions::tables::{lidt, DescriptorTablePointer};

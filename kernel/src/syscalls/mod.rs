@@ -56,8 +56,6 @@ use crate::task::process::CURRENT_PROCESS;
 
 /// Maximum supported CPU count.
 pub const MAX_CPUS: usize = 8;
-/// Upper bound for a single read/write syscall buffer allocation.
-/// Larger requests are clamped (callers must loop Ã¢â‚¬â€ POSIX allows short I/O).
 
 /// Array of per-CPU area pointers for indexed access from non-GS contexts.
 #[derive(Clone, Copy)]
@@ -67,8 +65,6 @@ unsafe impl Sync for PerCpuPtr {}
 
 pub static PER_CPU_AREAS: crate::sync::IrqSafeMutex<alloc::vec::Vec<PerCpuPtr>> =
     crate::sync::IrqSafeMutex::new(alloc::vec::Vec::new());
-
-/// Get the current CPU's per-CPU data via GS segment.
 
 #[repr(C)]
 pub struct PerCpuData {
@@ -133,9 +129,6 @@ pub fn set_kernel_stack(stack_top: u64) {
 extern "C" {
     fn syscall_entry();
 }
-
-/// Inner dispatch without emulation redirect Ã¢â‚¬â€ called by both the public entry
-/// point and the Linux emulation layer to avoid infinite recursion.
 
 pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
@@ -240,11 +233,6 @@ core::arch::global_asm!(
     "#
 );
 
-/// Linux-compatible capget: read capability sets
-
-/// Linux-compatible capset: set capability sets (root only)
-
-/// sigprocmask: examine/change signal mask
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ pause Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ sigaltstack Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
