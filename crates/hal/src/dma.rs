@@ -71,7 +71,8 @@ impl DmaBuf {
 
 impl Drop for DmaBuf {
     fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.size, 4096).unwrap();
+        let layout = Layout::from_size_align(self.size, 4096)
+            .expect("DmaBuf size must be 4096-aligned for dealloc");
         // SAFETY: ptr was allocated by alloc() in DmaBuf::new() with the
         // same layout. No double-free risk — Drop runs once per instance.
         unsafe { dealloc(self.ptr.as_ptr(), layout) };
@@ -122,7 +123,8 @@ impl PooledDma {
 impl Drop for PooledDma {
     fn drop(&mut self) {
         if !self.from_pool {
-            let layout = Layout::from_size_align(self.size, 4096).unwrap();
+            let layout = Layout::from_size_align(self.size, 4096)
+                .expect("PooledDma size must be 4096-aligned for dealloc");
             // SAFETY: virt_addr was allocated by alloc() in PooledDma::alloc()
             // with the same layout. Pooled buffers are returned to the pool.
             unsafe { dealloc(self.virt_addr, layout) };

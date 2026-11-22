@@ -488,7 +488,7 @@ pub fn load_dynamic_binary(
                 Some(alloc::string::String::from_utf8_lossy(&interp_bytes[..null_pos]).to_string());
             crate::serial_write(&alloc::format!(
                 "[ELF_DYN] Found PT_INTERP: {}\n",
-                interp_path.as_ref().unwrap()
+                interp_path.as_ref().expect("interp_path should be Some after PT_INTERP parsing")
             ));
             break;
         }
