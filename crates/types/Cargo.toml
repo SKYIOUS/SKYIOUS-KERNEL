@@ -9,3 +9,6 @@ spin = "0.9"
 
 [features]
 default = []
+
+[dev-dependencies]
+proptest = { workspace = true }
