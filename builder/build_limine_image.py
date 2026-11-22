@@ -864,7 +864,7 @@ def build_initrd(work_dir: str, kernel_dir: str) -> bytes:
     userspace_dir = os.path.abspath(userspace_dir)
     
     # Both programs enter at their own _start and have no libc startup code.
-    cflags = ['-ffreestanding', '-fno-stack-protector', '-Os', '-Wall', '-Wextra']
+    cflags = ['-ffreestanding', '-fno-stack-protector', '-O0', '-march=x86-64', '-Wall', '-Wextra']
     with tempfile.TemporaryDirectory() as tmpdir:
         # Build vdso_libc.a
         vdso_libc_a = os.path.join(tmpdir, 'vdso_libc.a')
@@ -994,7 +994,7 @@ void _start(void) {
         init_bin = os.path.join(tmpdir, 'init')
         print(f"  Compiling init with {compiler}...")
         ret = subprocess.run([
-            compiler, *cflags, '-static', '-nostdlib',
+            compiler, *cflags, '-static', '-nostartfiles',
             '-I', userspace_dir,
             init_c, vdso_libc_a, '-o', init_bin
         ], capture_output=True, text=True)
@@ -1139,7 +1139,7 @@ void _start(void) {
         sash_bin = os.path.join(tmpdir, 'sash')
         print(f"  Compiling sash with {compiler}...")
         ret = subprocess.run([
-            compiler, *cflags, '-static', '-nostdlib',
+            compiler, *cflags, '-static', '-nostartfiles',
             '-I', userspace_dir,
             sash_c, vdso_libc_a, '-o', sash_bin
         ], capture_output=True, text=True)
