@@ -77,7 +77,7 @@ vdso_page(cpu_id) = AT_SYSINFO_EHDR + cpu_id * 4096
 |----------|------|-----------|-------|
 | 0 | CLOCK_REALTIME | ✅ TSC + cached RTC | Interpolates from cached RTC + TSC delta |
 | 1 | CLOCK_MONOTONIC | ✅ TSC-based | TSC elapsed since `tsc_base` |
-| 5 | CLOCK_REALTIME_COARSE | ✅ Tick-based | 10ms resolution, no seqlock |
+| 5 | CLOCK_REALTIME_COARSE | ✅ Cached realtime | 10ms resolution |
 | 6 | CLOCK_MONOTONIC_COARSE | ✅ Tick-based | 10ms resolution, no seqlock |
 | 7 | CLOCK_BOOTTIME | ✅ Same as MONOTONIC | Uses cached monotonic snapshot |
 | 4 | CLOCK_MONOTONIC_RAW | ✅ Same as MONOTONIC | Uses cached monotonic snapshot |
@@ -124,7 +124,7 @@ nsec = ns % 1e9
 ```
 
 ### Kernel interpolation (vdso_read_tsc_time)
-The kernel-side `vdso_read_tsc_time()` implements the above. For CLOCK_REALTIME it reads a seqlock-protected RTC sample (sec, nsec, TSC timestamp) and interpolates from that timestamp. TSC synchronization does not change the cached sample or its timestamp. `get_cached_rtc()` returns the time fields of the same sample. The RTC seqlock now uses `compare_exchange_weak` for writer serialization across CPUs.
+The kernel-side `vdso_read_tsc_time()` implements the above. For CLOCK_REALTIME it reads a seqlock-protected RTC sample (sec, nsec, TSC timestamp) and interpolates from that timestamp. For CLOCK_REALTIME_COARSE it uses the same interpolation and rounds down to 10 ms. TSC synchronization does not change the cached sample or its timestamp. `get_cached_rtc()` returns the time fields of the same sample. The RTC seqlock now uses `compare_exchange_weak` for writer serialization across CPUs.
 
 Userspace libc reads the cached `realtime_sec`/`realtime_nsec` fields directly (seqlock-protected by `seq`), which are updated by the timer tick handler at 100 Hz.
 

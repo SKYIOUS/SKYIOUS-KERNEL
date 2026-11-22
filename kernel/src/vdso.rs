@@ -517,9 +517,8 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
         let sec = ns / 1_000_000_000;
         let nsec = (ns % 1_000_000_000) as u32;
         (sec, nsec)
-    } else if clock_id == 0 {
-        // CLOCK_REALTIME
-        // CLOCK_REALTIME - use RTC base + TSC delta
+    } else if clock_id == 0 || clock_id == 5 {
+        // CLOCK_REALTIME and CLOCK_REALTIME_COARSE use the same RTC sample.
         let (rt_sec, rt_nsec, sampled_tsc) = cached_rtc_sample();
         let (lo, hi) = read_tsc();
         let tsc_now = ((hi as u64) << 32) | lo as u64;
@@ -534,7 +533,12 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
         let total_ns = base_ns.saturating_add(ns);
         let sec = total_ns / 1_000_000_000;
         let nsec = (total_ns % 1_000_000_000) as u32;
-        (sec, nsec)
+        if clock_id == 5 {
+            let coarse_nsec = (nsec / 10_000_000) * 10_000_000;
+            (sec, coarse_nsec)
+        } else {
+            (sec, nsec)
+        }
     } else if clock_id == 102 {
         // CLOCK_SKYIOUS_BOOT_NS - use origin base to preserve boot time across syncs
         // Boot time: TSC since boot using the original TSC base origin
@@ -543,12 +547,6 @@ pub fn vdso_read_tsc_time(clock_id: u64) -> (u64, u32) {
         let sec = ns / 1_000_000_000;
         let nsec = (ns % 1_000_000_000) as u32;
         (sec, nsec)
-    } else if clock_id == 5 {
-        // CLOCK_REALTIME_COARSE - 10ms resolution from cached RTC (no seqlock needed)
-        // Return cached RTC sample at 10ms granularity
-        let (rt_sec, rt_nsec) = get_cached_rtc();
-        let coarse_nsec = (rt_nsec as u64 / 10_000_000) * 10_000_000;
-        (rt_sec, coarse_nsec as u32)
     } else if clock_id == 6 {
         // CLOCK_MONOTONIC_COARSE - 10ms resolution from ticks (no seqlock needed)
         let ticks = crate::interrupts::get_ticks();

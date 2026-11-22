@@ -12,7 +12,7 @@ their fast-path availability, and implementation details.
 | 2 | `CLOCK_PROCESS_CPUTIME_ID` | No | Syscall (scheduler) | 1 ns | Yes |
 | 3 | `CLOCK_THREAD_CPUTIME_ID` | No | Syscall (scheduler) | 1 ns | Yes |
 | 4 | `CLOCK_MONOTONIC_RAW` | Yes | TSC (same as MONOTONIC) | 1 ns | Yes |
-| 5 | `CLOCK_REALTIME_COARSE` | **Yes (P1)** | Ticks (10 ms) | 10 ms | Yes |
+| 5 | `CLOCK_REALTIME_COARSE` | **Yes (P1)** | Cached realtime (vDSO); TSC + cached RTC (kernel) | 10 ms | Yes |
 | 6 | `CLOCK_MONOTONIC_COARSE` | **Yes (P1)** | Ticks (10 ms) | 10 ms | Yes |
 | 7 | `CLOCK_BOOTTIME` | Yes | TSC (same as MONOTONIC) | 1 ns | Yes |
 | 8 | `CLOCK_REALTIME_ALARM` | No | Not implemented | — | Yes |
@@ -45,10 +45,10 @@ their fast-path availability, and implementation details.
 - **Precision**: 1 ns
 - **Monotonic guarantee**: Never goes backward. TSC is invariant on modern x86_64.
 
-### CLOCK_REALTIME_COARSE (5) — Tick-Based (P1 New)
+### CLOCK_REALTIME_COARSE (5)
 
-- **Fast path**: Reads `ticks` counter directly: `sec = ticks * 10 / 1000`, `nsec = (ticks * 10 % 1000) * 1_000_000` + cached RTC offset
-- **Seqlock**: **None needed** — single atomic read of `ticks` is consistent on x86_64
+- **vDSO fast path**: Reads the cached realtime fields under the vDSO page seqlock and rounds down to 10 ms.
+- **Kernel TSC path**: Interpolates from the same seqlock-protected RTC sample as `CLOCK_REALTIME` and rounds down to 10 ms.
 - **Resolution**: 10 ms (10,000,000 ns)
 - **Use case**: Timeout calculations, polling loops where 10 ms precision is sufficient
 

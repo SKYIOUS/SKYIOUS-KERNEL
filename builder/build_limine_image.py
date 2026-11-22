@@ -44,6 +44,7 @@ import urllib.request
 import urllib.error
 import subprocess
 import tarfile
+from typing import Optional
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -801,6 +802,25 @@ def main():
     print(f"      The Rust builder path (--rust-builder) is retired: its image cannot boot this kernel (FB-004).")
 
 
+def find_x86_64_elf(path: str) -> Optional[str]:
+    # Some Windows compiler drivers append .exe even for ELF output.
+    for candidate in (path, path + '.exe'):
+        try:
+            with open(candidate, 'rb') as f:
+                header = f.read(64)
+        except FileNotFoundError:
+            continue
+        if (
+            len(header) == 64
+            and header[:7] == b'\x7fELF\x02\x01\x01'  # ELF64, little endian, version 1
+            and struct.unpack_from('<HHI', header, 16) in ((2, 62, 1), (3, 62, 1))
+        ):
+            # ET_EXEC or ET_DYN (PIE), EM_X86_64, EV_CURRENT.
+            return candidate
+    print(f"  ERROR: Expected an x86_64 ELF executable at {path} or {path}.exe")
+    return None
+
+
 def build_initrd(work_dir: str, kernel_dir: str) -> bytes:
     """
     Build initrd.tar with vDSO-enabled userspace binaries.
@@ -818,27 +838,33 @@ def build_initrd(work_dir: str, kernel_dir: str) -> bytes:
     
     print("Building initrd.tar...")
     
-    # Check for compiler
-    compiler = None
-    for cc in ['musl-gcc', 'gcc']:
-        try:
-            subprocess.run([cc, '--version'], capture_output=True, check=True)
-            compiler = cc
+    if os.name == 'nt':
+        toolchains = [
+            ('x86_64-elf-gcc', 'x86_64-elf-ar'),
+            ('x86_64-linux-musl-gcc', 'x86_64-linux-musl-ar'),
+            ('x86_64-linux-gnu-gcc', 'x86_64-linux-gnu-ar'),
+        ]
+    else:
+        toolchains = [('musl-gcc', 'ar'), ('gcc', 'ar')]
+
+    for cc, ar in toolchains:
+        compiler = shutil.which(cc)
+        archiver = shutil.which(ar)
+        if compiler and archiver:
             break
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-    
-    if not compiler:
-        print("WARNING: No compiler (musl-gcc or gcc) found. Skipping initrd build.")
-        print("  Install musl-gcc or gcc to build vDSO-enabled initrd.")
+    else:
+        programs = ' or '.join(f'{cc} with {ar}' for cc, ar in toolchains)
+        print(f"WARNING: Install {programs} to build the vDSO initrd. Skipping.")
         return b''
-    
+
     # Find userspace/libc relative to the script location
     script_dir = os.path.dirname(os.path.abspath(__file__))
     workspace_root = os.path.dirname(script_dir)
     userspace_dir = os.path.join(workspace_root, 'userspace', 'libc')
     userspace_dir = os.path.abspath(userspace_dir)
     
+    # Both programs enter at their own _start and have no libc startup code.
+    cflags = ['-ffreestanding', '-fno-stack-protector', '-Os', '-Wall', '-Wextra']
     with tempfile.TemporaryDirectory() as tmpdir:
         # Build vdso_libc.a
         vdso_libc_a = os.path.join(tmpdir, 'vdso_libc.a')
@@ -847,7 +873,7 @@ def build_initrd(work_dir: str, kernel_dir: str) -> bytes:
         
         print(f"  Compiling vdso_libc.c with {compiler}...")
         ret = subprocess.run([
-            compiler, '-static', '-Os', '-Wall', '-Wextra',
+            compiler, *cflags,
             '-c', vdso_libc_c, '-o', vdso_libc_o
         ], capture_output=True, text=True)
         if ret.returncode != 0:
@@ -855,7 +881,7 @@ def build_initrd(work_dir: str, kernel_dir: str) -> bytes:
             return b''
         
         # Create static archive
-        ret = subprocess.run(['ar', 'rcs', vdso_libc_a, vdso_libc_o], capture_output=True, text=True)
+        ret = subprocess.run([archiver, 'rcs', vdso_libc_a, vdso_libc_o], capture_output=True, text=True)
         if ret.returncode != 0:
             print(f"  ERROR: Failed to create vdso_libc.a: {ret.stderr}")
             return b''
@@ -968,16 +994,16 @@ void _start(void) {
         init_bin = os.path.join(tmpdir, 'init')
         print(f"  Compiling init with {compiler}...")
         ret = subprocess.run([
-            compiler, '-static', '-nostartfiles', '-Os', '-Wall', '-Wextra',
+            compiler, *cflags, '-static', '-nostdlib',
             '-I', userspace_dir,
             init_c, vdso_libc_a, '-o', init_bin
         ], capture_output=True, text=True)
         if ret.returncode != 0:
             print(f"  ERROR: Failed to compile init: {ret.stderr}")
             return b''
-        # On Windows, gcc may produce .exe
-        if not os.path.exists(init_bin) and os.path.exists(init_bin + '.exe'):
-            init_bin = init_bin + '.exe'
+        init_bin = find_x86_64_elf(init_bin)
+        if init_bin is None:
+            return b''
         print(f"  Created {init_bin}")
         
         # Create minimal sash.c (simple shell)
@@ -1037,6 +1063,11 @@ static void puthex(uint64_t v) {
     syscall3(SYS_write, 1, (long)buf, 17);
 }
 
+static int streq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
 static int read_line(char *buf, size_t max) {
     size_t i = 0;
     while (i < max - 1) {
@@ -1061,13 +1092,13 @@ void _start(void) {
         
         if (line[0] == 0) continue;
         
-        if (__builtin_strcmp(line, "help") == 0) {
+        if (streq(line, "help")) {
             puts("help  - show this help\\n");
             puts("time  - show current time via vDSO\\n");
             puts("pid   - show current PID via vDSO\\n");
             puts("cpu   - show current CPU via vDSO\\n");
             puts("exit  - exit shell\\n");
-        } else if (__builtin_strcmp(line, "time") == 0) {
+        } else if (streq(line, "time")) {
             struct timespec ts;
             if (clock_gettime(1, &ts) == 0) {
                 puts("MONOTONIC: ");
@@ -1079,18 +1110,18 @@ void _start(void) {
                 puthex(ts.tv_sec * 1000000000ULL + ts.tv_nsec);
                 puts(" ns\\n");
             }
-        } else if (__builtin_strcmp(line, "pid") == 0) {
+        } else if (streq(line, "pid")) {
             puts("PID: ");
             puthex(getpid());
             puts("\\n");
-        } else if (__builtin_strcmp(line, "cpu") == 0) {
+        } else if (streq(line, "cpu")) {
             unsigned cpu;
             if (getcpu(&cpu, NULL) == 0) {
                 puts("CPU: ");
                 puthex(cpu);
                 puts("\\n");
             }
-        } else if (__builtin_strcmp(line, "exit") == 0) {
+        } else if (streq(line, "exit")) {
             break;
         } else {
             puts("Unknown command: ");
@@ -1108,16 +1139,16 @@ void _start(void) {
         sash_bin = os.path.join(tmpdir, 'sash')
         print(f"  Compiling sash with {compiler}...")
         ret = subprocess.run([
-            compiler, '-static', '-nostartfiles', '-Os', '-Wall', '-Wextra',
+            compiler, *cflags, '-static', '-nostdlib',
             '-I', userspace_dir,
             sash_c, vdso_libc_a, '-o', sash_bin
         ], capture_output=True, text=True)
         if ret.returncode != 0:
             print(f"  ERROR: Failed to compile sash: {ret.stderr}")
             return b''
-        # On Windows, gcc may produce .exe
-        if not os.path.exists(sash_bin) and os.path.exists(sash_bin + '.exe'):
-            sash_bin = sash_bin + '.exe'
+        sash_bin = find_x86_64_elf(sash_bin)
+        if sash_bin is None:
+            return b''
         print(f"  Created {sash_bin}")
         
         # Create vdso.conf

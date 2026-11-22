@@ -181,21 +181,22 @@ jobs:
           python3 tests/run_qemu_tests.py \
             --image bootimage-vahi_kernel.bin \
             --timeout 540 \
-            --log qemu_test.log
-          if ! grep -q "TAP version" qemu_test.log; then
+            --log qemu_test.log \
+            --serial qemu_serial.log || exit $?
+          if ! grep -q "^TAP version" qemu_serial.log; then
             echo "ERROR: No TAP output found"
             exit 1
           fi
-          if grep -q "not ok.*vdso" qemu_test.log; then
+          if grep -Eq "^not ok [0-9]+ - vdso" qemu_serial.log; then
             echo "ERROR: VDSO tests failed"
             exit 1
           fi
-          VDSO_PASS=$(grep -c "ok.*vdso" qemu_test.log || true)
+          VDSO_PASS=$(grep -Ec "^ok [0-9]+ - vdso" qemu_serial.log || true)
           if [ "$VDSO_PASS" -lt 25 ]; then
             echo "ERROR: Only $VDSO_PASS vDSO tests passed (expected 25+)"
             exit 1
           fi
-          echo "VDSO tests: $VDSO_PASS passed" 
+          echo "VDSO tests: $VDSO_PASS passed"
 
       - name: Upload QEMU test logs
         uses: actions/upload-artifact@v4
@@ -204,6 +205,7 @@ jobs:
           name: qemu-test-logs
           path: |
             qemu_test.log
+            qemu_serial.log
             builder/qemu_test.log
           retention-days: 7
 
@@ -213,19 +215,20 @@ jobs:
           if [ -f qemu_test.log ]; then
             echo "=== QEMU Test Log ==="
             cat qemu_test.log
-            echo "========================"
+          fi
+          if [ -f qemu_serial.log ]; then
             # Check for VDSO test failures
-            if grep -q "vdso.*FAIL\|not ok.*vdso" qemu_test.log; then
+            if grep -Eq "vdso.*FAIL|^not ok [0-9]+ - vdso" qemu_serial.log; then
               echo "ERROR: VDSO tests failed"
               exit 1
             fi
             # Check for VDSO benchmark warnings (warn-only in TCG)
-            if grep -q "vdso_bench.*WARN" qemu_test.log; then
+            if grep -q "vdso_bench.*WARN" qemu_serial.log; then
               echo "WARNING: VDSO benchmarks exceeded targets (expected in TCG)"
             fi
             echo "VDSO tests passed"
           else
-            echo "ERROR: No test log found"
+            echo "ERROR: No QEMU serial log found"
             exit 1
           fi
 

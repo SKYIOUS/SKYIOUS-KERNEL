@@ -80,7 +80,7 @@ calling syscalls directly. The API is identical.
 |----------|----------|------------|-------|
 | 0 | `CLOCK_REALTIME` | 1 ns | TSC + cached RTC |
 | 1 | `CLOCK_MONOTONIC` | 1 ns | TSC-based |
-| 5 | `CLOCK_REALTIME_COARSE` | 10 ms | Tick-based, no seqlock |
+| 5 | `CLOCK_REALTIME_COARSE` | 10 ms | Cached realtime under the vDSO page seqlock |
 | 6 | `CLOCK_MONOTONIC_COARSE` | 10 ms | Tick-based, no seqlock |
 | 7 | `CLOCK_BOOTTIME` | 1 ns | Same as MONOTONIC |
 | 4 | `CLOCK_MONOTONIC_RAW` | 1 ns | Same as MONOTONIC |
