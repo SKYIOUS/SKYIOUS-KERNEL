@@ -751,7 +751,7 @@ fn stress_clock_getres_consistency() -> Result<(), &'static str> {
 
             let expected_ns = match clock_id {
                 5 | 6 => 10_000_000, // coarse clocks (10ms)
-                _ => 1,             // high-res clocks
+                _ => 1,              // high-res clocks
             };
 
             if ts.tv_nsec != expected_ns {
