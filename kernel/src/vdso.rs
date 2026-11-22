@@ -28,11 +28,11 @@ pub const fn vdso_virt_addr_for_cpu(cpu_id: usize) -> u64 {
 /// Bitfield exposed via vDSO for userspace feature detection.
 pub mod kernel_flags {
     pub const HAS_AVX2: u64 = 1 << 0; // CPUID leaf 7 EBX bit 5
-    #[allow(dead_code)] // Used by userspace via vDSO
+    // ponytail: HAS_NVME defined but only set by device drivers, not yet wired; upgrade: wire vdso_set_kernel_flag calls in driver init
     pub const HAS_NVME: u64 = 1 << 1; // NVMe controller present
-    #[allow(dead_code)] // Used by userspace via vDSO
+    // ponytail: HAS_XHCI defined but only set by device drivers, not yet wired; upgrade: wire vdso_set_kernel_flag calls in driver init
     pub const HAS_XHCI: u64 = 1 << 2; // xHCI USB controller present
-    #[allow(dead_code)] // Used by userspace via vDSO
+    // ponytail: HAS_VIRTIO_GPU defined but only set by device drivers, not yet wired; upgrade: wire vdso_set_kernel_flag calls in driver init
     pub const HAS_VIRTIO_GPU: u64 = 1 << 3; // VirtIO GPU present
                                             // Bits 4-15 reserved for net stack version and FS features
 }
