@@ -80,13 +80,19 @@ pub(crate) fn soft_lockup_check(rip: u64) {
 
     use crate::task::thread::ThreadStatus;
     let sched = crate::task::scheduler::this_cpu_sched().try_lock();
-    let is_blocked_or_none = match sched.as_ref().and_then(|s| s.current_thread.as_ref()) {
-        Some(t) => t.status == ThreadStatus::Blocked,
+    let is_idle_or_blocked = match sched {
+        Some(guard) => match guard.current_thread.as_ref() {
+            Some(t) => {
+                // Idle thread is always the same thread (sched.idle_id matches)
+                let is_idle = guard.idle_id == Some(t._id);
+                is_idle || t.status == ThreadStatus::Blocked
+            }
+            None => true,
+        },
         None => true,
     };
-    drop(sched);
 
-    if is_blocked_or_none {
+    if is_idle_or_blocked {
         SAME.store(0, Ordering::Relaxed);
         return;
     }

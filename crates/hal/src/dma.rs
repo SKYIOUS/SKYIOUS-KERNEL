@@ -1,7 +1,16 @@
 //! DMA buffer abstractions.
 //!
 //! Provides `DmaBuf` for single allocations and `PooledDma` for pooled
-//! hot-path DMA buffers. These are stubs extracted from `kernel/src/hal/dma.rs`.
+//! hot-path DMA buffers.
+//!
+//! See ADR-012: Shared Driver Primitives.
+//!
+//! Consolidates per-driver DMA helpers:
+//! - `phys_of` / `dma_addr`: replaces per-driver `virt_to_phys(...).unwrap()` pattern
+//! - `DmaRing<T>`: replaces virtq/TRB/command-list ring boilerplate
+//! - Drivers keep their spec logic; only address-mapping and ring mechanics move here
+
+// Previously stubs extracted from `kernel/src/hal/dma.rs`.
 
 extern crate alloc;
 
@@ -62,7 +71,14 @@ impl DmaBuf {
 
 impl Drop for DmaBuf {
     fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.size, 4096).unwrap();
+        let layout = match Layout::from_size_align(self.size, 4096) {
+            Ok(l) => l,
+            Err(_) => {
+                // This should never happen as size is always 4096-aligned
+                // but we handle it gracefully instead of panicking
+                return;
+            }
+        };
         // SAFETY: ptr was allocated by alloc() in DmaBuf::new() with the
         // same layout. No double-free risk — Drop runs once per instance.
         unsafe { dealloc(self.ptr.as_ptr(), layout) };
@@ -113,7 +129,14 @@ impl PooledDma {
 impl Drop for PooledDma {
     fn drop(&mut self) {
         if !self.from_pool {
-            let layout = Layout::from_size_align(self.size, 4096).unwrap();
+            let layout = match Layout::from_size_align(self.size, 4096) {
+                Ok(l) => l,
+                Err(_) => {
+                    // This should never happen as size is always 4096-aligned
+                    // but we handle it gracefully instead of panicking
+                    return;
+                }
+            };
             // SAFETY: virt_addr was allocated by alloc() in PooledDma::alloc()
             // with the same layout. Pooled buffers are returned to the pool.
             unsafe { dealloc(self.virt_addr, layout) };

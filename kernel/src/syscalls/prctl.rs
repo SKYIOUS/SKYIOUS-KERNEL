@@ -144,7 +144,7 @@ pub fn sys_prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, _arg5: u64) -> u6
 
         PR_SET_TIMERSLACK => {
             proc.timerslack
-                .store(arg2 as u64, core::sync::atomic::Ordering::SeqCst);
+                .store(arg2, core::sync::atomic::Ordering::SeqCst);
             0
         }
 

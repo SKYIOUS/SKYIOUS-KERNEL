@@ -1,5 +1,7 @@
 //! KASLR: kernel base slide state and early entropy init.
 //!
+//! See ADR-017: KASLR (Kernel Address Space Layout Randomization).
+//!
 //! Extracted from `kernel/src/main.rs` (F2.3 main.rs decomposition, stage 1).
 // ponytail: kaslr helpers partially unwired (kaslr_reloc path still feature-gated
 // under verification-only code); see ADR-029-syscall-module-lint-hygiene.md

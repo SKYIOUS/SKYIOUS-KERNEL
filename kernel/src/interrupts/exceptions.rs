@@ -127,7 +127,6 @@ pub(super) extern "x86-interrupt" fn double_fault_handler(
         }
     }
     let df_len = w.len;
-    drop(w);
     crate::serial_write(core::str::from_utf8(&scratch[..df_len]).unwrap_or(""));
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }

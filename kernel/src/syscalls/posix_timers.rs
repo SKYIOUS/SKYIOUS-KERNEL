@@ -86,9 +86,7 @@ pub fn check_posix_timers() {
             continue;
         }
 
-        if expired.overrun < i32::MAX {
-            expired.overrun += 1;
-        }
+        expired.overrun = expired.overrun.saturating_add(1);
 
         if expired.sigev_notify == SIGEV_SIGNAL {
             let table = crate::task::process::PROCESS_TABLE.lock();
@@ -261,10 +259,7 @@ pub fn sys_timer_settime(
         let interval = timespec_to_ns(&new_its.it_interval);
         let value_ns = timespec_to_ns(&new_its.it_value);
 
-        if value_ns == 0 && (new_its.it_value.tv_sec != 0 || new_its.it_value.tv_nsec != 0) {
-            timer.active = false;
-            timer.value = 0;
-        } else if value_ns == 0 {
+        if value_ns == 0 {
             timer.active = false;
             timer.value = 0;
         } else {
@@ -500,7 +495,7 @@ pub fn sys_timerfd_settime(
                 // Arm
                 let ticks_per_ns: u64 = 100_000_000; // 100 Hz → 10ms per tick
                 let now_ticks = crate::interrupts::get_ticks();
-                let ticks = (it_value_ns + ticks_per_ns - 1) / ticks_per_ns;
+                let ticks = it_value_ns.div_ceil(ticks_per_ns);
                 t.it_value_ns = it_value_ns;
                 t.it_interval_ns = it_interval_ns;
                 t.wake_tick = now_ticks + ticks;

@@ -59,7 +59,7 @@ impl HandleTable {
                 fsgid: cred.fsgid,
                 cap_effective: cred.cap_effective,
             },
-            &*sec,
+            &sec,
             desired_access,
         ) {
             return Err(());

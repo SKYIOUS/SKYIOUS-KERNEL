@@ -6,6 +6,17 @@ use super::*;
 use crate::task::process::FileDescriptor;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// Per-CPU cached PID for lock-free sys_getpid.
+/// Updated at context switch in prepare_switch with Release ordering.
+pub static CURRENT_PID: [AtomicU64; crate::task::scheduler::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::task::scheduler::MAX_CPUS];
+
+/// Per-CPU cached CPU ID for lock-free sys_getcpu.
+/// Updated at context switch in prepare_switch with Release ordering.
+pub static CURRENT_CPU_ID: [AtomicU32; crate::task::scheduler::MAX_CPUS] =
+    [const { AtomicU32::new(0) }; crate::task::scheduler::MAX_CPUS];
 
 pub fn sys_getppid() -> u64 {
     get_current_process().map_or(0, |p| p.parent_id.unwrap_or(0))
@@ -154,13 +165,18 @@ pub fn sys_exit(status: u64) -> u64 {
         }
     }
 
-    // Mark current thread as exited
+    // Mark current thread as exited and schedule away — disable interrupts
+    // to prevent a race where an interrupt fires between marking Exited and
+    // calling schedule(), causing try_schedule() to switch to idle and the
+    // original schedule() to return to userspace.
+    unsafe {
+        core::arch::asm!("pushfq; pop rax; cli", out("rax") _, options(nostack, preserves_flags));
+    }
     crate::task::scheduler::with_current_thread(|thread| {
         thread.status = crate::task::thread::ThreadStatus::Exited;
     });
     crate::task::scheduler::schedule();
-    // The thread is Exited; schedule() switches away and frees the stack.
-    // If it ever returned, idle-wait rather than returning from sys_exit.
+    // schedule() should never return; if it does, halt.
     loop {
         x86_64::instructions::interrupts::enable_and_hlt();
     }
@@ -357,8 +373,8 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
     }
 
     let policy = unsafe { *(attr_ptr.add(4) as *const u32) };
-    // Validate policy: 0=SCHED_NORMAL, 1=SCHED_FIFO, 2=SCHED_RR, 3=SCHED_BATCH
-    if policy > 3 {
+    // Validate policy: 0=SCHED_NORMAL, 1=SCHED_FIFO, 2=SCHED_RR, 3=SCHED_BATCH, 6=SCHED_DEADLINE
+    if policy > 6 || policy == 4 || policy == 5 {
         return errno::Errno::EINVAL as u64;
     }
 
@@ -368,6 +384,36 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
         0
     };
 
+    // Read SCHED_DEADLINE attributes if policy is DEADLINE
+    let (sched_runtime, sched_deadline, sched_period) = if policy == 6 {
+        if size < 48 {
+            return errno::Errno::EINVAL as u64;
+        }
+        let mut runtime: u64 = 0;
+        let mut deadline: u64 = 0;
+        let mut period: u64 = 0;
+        // SAFETY: We create a slice pointing to valid local stack variables (runtime, deadline, period)
+        // which are properly aligned and initialized. The slice is only used for copy_from_user.
+        let runtime_slice =
+            unsafe { core::slice::from_raw_parts_mut(&mut runtime as *mut u64 as *mut u8, 8) };
+        let deadline_slice =
+            unsafe { core::slice::from_raw_parts_mut(&mut deadline as *mut u64 as *mut u8, 8) };
+        let period_slice =
+            unsafe { core::slice::from_raw_parts_mut(&mut period as *mut u64 as *mut u8, 8) };
+        if unsafe { user_access::copy_from_user(runtime_slice, attr_ptr.add(16)) }.is_err()
+            || unsafe { user_access::copy_from_user(deadline_slice, attr_ptr.add(24)) }.is_err()
+            || unsafe { user_access::copy_from_user(period_slice, attr_ptr.add(32)) }.is_err()
+        {
+            return errno::Errno::EFAULT as u64;
+        }
+        if runtime == 0 || deadline == 0 || period == 0 || deadline > period {
+            return errno::Errno::EINVAL as u64;
+        }
+        (runtime, deadline, period)
+    } else {
+        (0, 0, 0)
+    };
+
     // Map scheduling policy to priority and RT fields
     let (priority, rt_priority, rr_quantum) = if policy == 1 || policy == 2 {
         // SCHED_FIFO / SCHED_RR: rt_priority 1-99
@@ -375,6 +421,9 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
         let quantum = if policy == 2 { 4u32 } else { 0u32 }; // 4 ticks for RR
                                                              // RT threads go to priority level 7 (highest) for queue ordering
         (7u8, rt_prio, quantum)
+    } else if policy == 6 {
+        // SCHED_DEADLINE: highest priority for queue ordering
+        (7u8, 0, 0)
     } else {
         // SCHED_NORMAL (0) / SCHED_BATCH (3): map nice [-20..19] to priority [0..7]
         let nice = nice_or_rt_prio;
@@ -408,7 +457,12 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
                 cur.rr_time_slice = rr_quantum;
                 cur.priority = priority;
                 cur.sched_class = policy;
-                if policy == 1 || policy == 2 {
+                if policy == 6 {
+                    cur.sched_runtime = sched_runtime;
+                    cur.sched_deadline = sched_deadline;
+                    cur.sched_period = sched_period;
+                    cur.stride = 0; // DEADLINE threads don't use stride
+                } else if policy == 1 || policy == 2 {
                     cur.stride = 0; // RT threads don't use stride
                 }
             }
@@ -426,7 +480,12 @@ pub fn sys_sched_setattr(pid: i64, attr_ptr: *const u8, _flags: u64) -> u64 {
                 t.rr_time_slice = rr_quantum;
                 t.priority = priority;
                 t.sched_class = policy;
-                if policy == 1 || policy == 2 {
+                if policy == 6 {
+                    t.sched_runtime = sched_runtime;
+                    t.sched_deadline = sched_deadline;
+                    t.sched_period = sched_period;
+                    t.stride = 0;
+                } else if policy == 1 || policy == 2 {
                     t.stride = 0;
                 }
             }
@@ -672,9 +731,9 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
     };
     // Cgroup pids.max check
     {
-        let cg_path = parent.cgroup_path.lock();
+        let cg_path = &parent.cgroup_path;
         let hierarchy = crate::syscalls::cgroup::cgroup_ensure();
-        if let Some(cg) = hierarchy.find_cgroup(&cg_path) {
+        if let Some(cg) = hierarchy.find_cgroup(cg_path) {
             if !cg.can_fork() {
                 return errno::Errno::EAGAIN as u64;
             }
@@ -737,10 +796,19 @@ pub fn sys_fork(regs_ptr: *mut u64) -> u64 {
     parent.children.lock().push(child_pid);
     crate::task::process::Process::register(child_arc.clone());
 
+    // Update vDSO with current process info (cgroup, namespace, capabilities)
+    #[cfg(target_arch = "x86_64")]
+    crate::vdso_update_process_info(
+        crate::smp::get_cpu_id() as u32,
+        Some(parent.cgroup_path.len() as u64),
+        0, // namespace flags - TODO: implement
+        parent.creds.lock().cap_effective,
+    );
+
     // 4. Add to scheduler
     crate::task::scheduler::spawn_thread(child_thread);
 
-    return child_pid;
+    child_pid
 }
 
 /// Release the page tables and frame references taken by the COW clone when
@@ -894,17 +962,17 @@ pub fn sys_clone(
         *child_process.clear_child_tid.lock() = child_tidptr as u64;
     }
 
-    if flags & CLONE_CHILD_SETTID != 0 && !child_tidptr.is_null() {
-        if write_child_u32(
+    if flags & CLONE_CHILD_SETTID != 0
+        && !child_tidptr.is_null()
+        && write_child_u32(
             &child_process.address_space,
             child_tidptr as u64,
             child_pid as u32,
         )
         .is_err()
-        {
-            discard_cloned_child(&child_process);
-            return errno::Errno::EFAULT as u64;
-        }
+    {
+        discard_cloned_child(&child_process);
+        return errno::Errno::EFAULT as u64;
     }
 
     if flags & CLONE_PARENT_SETTID != 0 && !parent_tid.is_null() {
@@ -952,7 +1020,7 @@ pub fn sys_clone(
     }
 
     crate::task::scheduler::spawn_thread(child_thread);
-    return child_pid;
+    child_pid
 }
 
 pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8) -> u64 {
@@ -1048,7 +1116,91 @@ pub fn sys_wait4(pid: i64, status_ptr: *mut i32, options: i32, _rusage: *mut u8)
 }
 
 pub fn sys_getpid() -> u64 {
+    // Fast path: read from per-CPU cached PID (lock-free, updated at context switch)
+    #[cfg(target_arch = "x86_64")]
+    {
+        let cpu_idx = crate::smp::get_cpu_id();
+        let pid = CURRENT_PID[cpu_idx].load(Ordering::Acquire);
+        if pid != 0 {
+            return pid;
+        }
+    }
+    // Fallback: vDSO seqlock path
+    #[cfg(target_arch = "x86_64")]
+    {
+        let vdso_ptr = crate::vdso_page();
+        if !vdso_ptr.is_null() {
+            // SAFETY: vdso_page returns valid pointer if not null
+            let vdso = unsafe { &*vdso_ptr };
+            let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
+            loop {
+                let pid = vdso.pid.load(Ordering::Relaxed);
+                let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+                if seq == seq2 && seq % 2 == 0 {
+                    return pid;
+                }
+                seq = seq2;
+            }
+        }
+    }
+    // Fallback: slow path
     get_current_process().map_or(0, |p| p.id)
+}
+
+pub fn sys_getcpu(cpu: *mut u32, node: *mut u32) -> u64 {
+    use crate::syscalls::user_access;
+    let cpu_id = crate::smp::get_cpu_id() as u32;
+
+    // Fast path: read from per-CPU cached CPU ID (lock-free, updated at context switch)
+    let cpu_val = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let cpu_idx = crate::smp::get_cpu_id();
+            let cached_cpu = CURRENT_CPU_ID[cpu_idx].load(Ordering::Acquire);
+            if cached_cpu != 0 {
+                cached_cpu
+            } else {
+                // Fallback: vDSO seqlock path
+                let vdso_ptr = crate::vdso_page();
+                if !vdso_ptr.is_null() {
+                    // SAFETY: vdso_page returns valid pointer if not null
+                    let vdso = unsafe { &*vdso_ptr };
+                    let mut seq = vdso.pid_cpu_seq.load(Ordering::Acquire);
+                    loop {
+                        let cpu = vdso.cpu_id.load(Ordering::Relaxed);
+                        let seq2 = vdso.pid_cpu_seq.load(Ordering::Acquire);
+                        if seq == seq2 && seq % 2 == 0 {
+                            break cpu;
+                        }
+                        seq = seq2;
+                    }
+                } else {
+                    cpu_id
+                }
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            cpu_id
+        }
+    };
+
+    // Write CPU to user pointer (Linux getcpu behavior)
+    if !cpu.is_null()
+        && unsafe { user_access::copy_to_user(cpu as *mut u8, &cpu_val.to_ne_bytes()) }.is_err()
+    {
+        return errno::Errno::EFAULT as u64;
+    }
+
+    // Node is optional; write 0 if provided (we don't track NUMA nodes)
+    if !node.is_null() {
+        let node_val: u32 = 0;
+        if unsafe { user_access::copy_to_user(node as *mut u8, &node_val.to_ne_bytes()) }.is_err() {
+            return errno::Errno::EFAULT as u64;
+        }
+    }
+
+    0
 }
 
 pub fn sys_execve(
@@ -1196,9 +1348,17 @@ pub fn sys_execve(
 
     // 4. Load ELF into new AddressSpace
     use crate::memory::paging::AddressSpace;
+    use crate::vdso::vdso_map_into;
     let mut frame_allocator = crate::memory::buddy::BuddyFrameAllocator;
     let new_as =
         AddressSpace::new(&mut frame_allocator).expect("Failed to create new AddressSpace");
+
+    // Map vDSO page into the new address space
+    if let Some(mut mapper) = unsafe { new_as.mapper() } {
+        if let Err(()) = vdso_map_into(&mut mapper, &mut frame_allocator) {
+            crate::serial_write("[EXEC] vDSO mapping failed\n");
+        }
+    }
 
     let process = match crate::task::process::Process::load_elf(&elf_data, new_as) {
         Ok(p) => p,
@@ -1270,8 +1430,28 @@ pub fn sys_execve(
     }
 
     drop(exec_guard);
+
+    // Refresh PID publication during exec before entering userspace:
+    // update both CURRENT_PID and the vDSO PID to reflect the replacement process
+    let cpu_idx = crate::smp::get_cpu_id();
+    crate::syscalls::process_lifecycle::CURRENT_PID[cpu_idx]
+        .store(process_arc.id, Ordering::Release);
+
+    // Update vDSO with new process info (cgroup, namespace, capabilities)
+    #[cfg(target_arch = "x86_64")]
+    crate::vdso_update_process_info(
+        crate::smp::get_cpu_id() as u32,
+        Some(process_arc.cgroup_path.len() as u64),
+        0, // namespace flags - TODO: implement
+        process_arc.creds.lock().cap_effective,
+    );
+
+    // Also update vDSO PID/CPU for the current CPU
+    #[cfg(target_arch = "x86_64")]
+    crate::vdso_update_pid_cpu(process_arc.id, crate::smp::get_cpu_id() as u32);
+
     unsafe {
-        crate::task::thread::jump_to_usermode(entry, user_rsp);
+        crate::task::thread::jump_to_usermode(entry, user_rsp, None);
     }
 }
 

@@ -15,7 +15,6 @@ members = [
     "crates/hal",
     "crates/limine",
     "crates/types",
-    "crates/apic",
     "crates/acpi",
     "crates/objects",
     "crates/ipc",
@@ -37,7 +36,6 @@ default-members = [
     "crates/hal",
     "crates/limine",
     "crates/types",
-    "crates/apic",
     "crates/acpi",
     "crates/objects",
     "crates/ipc",
@@ -51,6 +49,9 @@ version = "0.3.0"
 edition = "2021"
 
 [workspace.dependencies]
+# Property-based testing (host-side only)
+proptest = "1.12"
+# ADR-002: hashbrown + foldhash for HashMap-based data structures (O(1) lookups, DoS-resistant)
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
 
 [profile.dev]

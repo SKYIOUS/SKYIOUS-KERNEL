@@ -235,7 +235,8 @@ pub fn find_capability(dev: &PciDevice, cap_id: u8) -> Option<u8> {
 }
 
 /// Enable Message Signaled Interrupts (MSI) for a device.
-/// Returns allocated vector on success.
+/// Returns allocated vector on success. x86_64 only.
+#[cfg(target_arch = "x86_64")]
 pub fn pci_enable_msi(dev: &PciDevice, target_cpu: u8) -> Option<u8> {
     let cap = find_capability(dev, 0x05)?; // MSI Cap ID = 0x05
 
@@ -265,6 +266,12 @@ pub fn pci_enable_msi(dev: &PciDevice, target_cpu: u8) -> Option<u8> {
     );
 
     Some(vector)
+}
+
+/// Enable MSI for a device (stub for non-x86_64 architectures).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn pci_enable_msi(_dev: &PciDevice, _target_cpu: u8) -> Option<u8> {
+    None
 }
 
 /// Enable Bus Mastering in Command Register (bit 2)

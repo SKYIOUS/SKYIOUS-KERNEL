@@ -5,6 +5,8 @@
 //! variable-length inotify_event structs.
 //!
 //! Events are fired by calling `inotify_emit()` from VFS operations.
+//!
+//! See ADR-015: epoll Implementation (epoll integration).
 
 use super::errno;
 use crate::sync::IrqSafeMutex as Mutex;
@@ -144,7 +146,7 @@ static NEXT_INOTIFY_KEY: core::sync::atomic::AtomicU64 = core::sync::atomic::Ato
 /// `name` is the filename (last component), empty for watches on the file itself.
 pub fn inotify_emit(path: &str, mask: u32, cookie: u32, name: &str) {
     let instances = INOTIFY_INSTANCES.lock();
-    for (_key, inst_arc) in instances.iter() {
+    for inst_arc in instances.values() {
         let mut inst = inst_arc.lock();
         if inst.events.len() >= inst.max_events {
             // Queue overflow — emit IN_Q_OVERFLOW once, then stop.

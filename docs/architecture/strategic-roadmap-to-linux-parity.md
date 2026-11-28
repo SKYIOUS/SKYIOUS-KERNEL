@@ -1,6 +1,6 @@
 # Vahi Kernel — Strategic Roadmap to Linux Parity
 
-> **Historical planning artifact.** This document may contain superseded scope, estimates, or implementation-status claims. Use `docs/roadmap-revised/00-master-index.md` and `docs/decisions/` for current planning and decisions.
+> **Historical planning artifact.** This document may contain superseded scope, estimates, or implementation-status claims. Use `docs/archive/roadmap-revised-2026-11-19/00-master-index.md` and `docs/decisions/` for current planning and decisions.
 
 ## 1. Current State Grade Card
 

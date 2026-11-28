@@ -10,6 +10,56 @@ use super::{
 };
 use core::sync::atomic::Ordering;
 
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn read_tsc() -> u64 {
+    let (lo, hi): (u32, u32);
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi);
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Charge CPU time to the outgoing thread and its process.
+/// Called during context switch when a thread is switched out.
+/// Uses TSC delta since the thread's last slice_start_tsc.
+#[cfg(target_arch = "x86_64")]
+fn charge_cpu_time(old: &mut crate::task::thread::Thread, new: &mut crate::task::thread::Thread) {
+    let tsc_now = read_tsc();
+    let tsc_delta = tsc_now.wrapping_sub(old.slice_start_tsc);
+
+    // Convert TSC delta to nanoseconds using vDSO calibration
+    // We need the TSC frequency from vDSO
+    let vdso_ptr = crate::vdso_page();
+    if !vdso_ptr.is_null() {
+        let vdso = unsafe { &*vdso_ptr };
+        let tsc_freq = vdso.tsc_freq_hz.load(Ordering::Acquire);
+        if tsc_freq > 0 {
+            let tsc_mult = vdso.tsc_mult;
+            let tsc_shift = vdso.tsc_shift;
+            let ns = ((tsc_delta as u128 * tsc_mult as u128) >> tsc_shift) as u64;
+
+            // Add to thread's CPU time
+            old.cpu_time_ns = old.cpu_time_ns.saturating_add(ns);
+
+            // Update vDSO page with outgoing thread's total CPU time for CLOCK_SKYIOUS_THREAD_CPUTIME (100)
+            crate::vdso_update_thread_cputime(crate::smp::get_cpu_id() as u32, old.cpu_time_ns);
+
+            // Add to process's CPU time (atomic, since multiple threads can run concurrently)
+            if let Some(ref proc) = old.process {
+                proc.cpu_time_ns.fetch_add(ns, Ordering::Relaxed);
+            }
+        }
+    }
+
+    // Set the new thread's slice start TSC
+    new.slice_start_tsc = tsc_now;
+
+    // Publish incoming thread's CPU time to vDSO (for when it becomes current)
+    // This is done outside any calibration-dependent condition
+    crate::vdso_update_thread_cputime(crate::smp::get_cpu_id() as u32, new.cpu_time_ns);
+}
+
 // ─── Architecture-specific interrupt helpers ────────────────────
 
 #[cfg(target_arch = "x86_64")]
@@ -86,10 +136,7 @@ impl PerCpuScheduler {
                     _ => false,
                 };
                 if want_idle {
-                    match self.idle.take() {
-                        Some(idle) => idle,
-                        None => return None,
-                    }
+                    self.idle.take()?
                 } else {
                     return None;
                 }
@@ -134,6 +181,21 @@ impl PerCpuScheduler {
             crate::syscalls::get_per_cpu()
                 .current_process
                 .store(process.id, core::sync::atomic::Ordering::Relaxed);
+            // Update vDSO with current PID and CPU ID
+            #[cfg(target_arch = "x86_64")]
+            crate::vdso_update_pid_cpu(process.id, crate::smp::get_cpu_id() as u32);
+            // Update vDSO with process info (cgroup, namespace, capabilities)
+            #[cfg(target_arch = "x86_64")]
+            {
+                // Membership is immutable, so publishing it cannot contend in IRQ context.
+                let cgroup_id = Some(process.cgroup_path.len() as u64);
+                crate::vdso_update_process_info(
+                    crate::smp::get_cpu_id() as u32,
+                    cgroup_id,
+                    0, // namespace flags - TODO: implement
+                    process.creds.lock().cap_effective,
+                );
+            }
         }
 
         // Lazily allocate FPU state buffer for the incoming thread (x86_64 only)
@@ -147,7 +209,20 @@ impl PerCpuScheduler {
         let new_rsp = next.stack_ptr;
         let stack_top = next.stack_top();
 
+        // Update per-CPU cached PID and CPU ID for lock-free sys_getpid/sys_getcpu
+        let cpu_idx = crate::smp::get_cpu_id();
+        if let Some(ref process) = next.process {
+            crate::syscalls::process_lifecycle::CURRENT_PID[cpu_idx]
+                .store(process.id, Ordering::Release);
+        }
+        crate::syscalls::process_lifecycle::CURRENT_CPU_ID[cpu_idx]
+            .store(crate::smp::get_cpu_id() as u32, Ordering::Release);
+
         let old_rsp_ptr = if let Some(mut old) = self.current_thread.take() {
+            // Charge CPU time to the outgoing thread before it's switched out
+            #[cfg(target_arch = "x86_64")]
+            charge_cpu_time(&mut old, &mut next);
+
             if old.status == crate::task::thread::ThreadStatus::Exited {
                 // Park dying thread — stack reclaimed on next route_outgoing.
                 self.switching_old = Some(old);
@@ -170,6 +245,12 @@ impl PerCpuScheduler {
                 p
             }
         } else {
+            // No outgoing thread - initialize new thread's slice_start_tsc
+            #[cfg(target_arch = "x86_64")]
+            {
+                let tsc_now = read_tsc();
+                next.slice_start_tsc = tsc_now;
+            }
             self.switching_old = None;
             &raw mut self.dummy
         };
@@ -196,7 +277,6 @@ impl PerCpuScheduler {
                     ),
                 );
                 let n = w.len;
-                drop(w);
                 crate::serial_write(core::str::from_utf8(&scratch[..n]).unwrap_or(""));
             }
         }
@@ -221,7 +301,7 @@ impl PerCpuScheduler {
             .as_ref()
             .and_then(|t| t.fpu_state.as_ref())
             .map(|b| b.as_ref() as *const _ as *mut crate::task::thread::FpuArea)
-            .unwrap_or(core::ptr::null_mut());
+            .unwrap_or_default();
         let (old, new) = self.prepare_switch()?;
         let cur = self.current_thread.as_ref()?;
         let fs_base = cur.fs_base;
@@ -229,7 +309,7 @@ impl PerCpuScheduler {
             .fpu_state
             .as_ref()
             .map(|b| b.as_ref() as *const _ as *const crate::task::thread::FpuArea)
-            .unwrap_or(core::ptr::null());
+            .unwrap_or_default();
         Some((old, new, fs_base, old_fpu_ptr, new_fpu))
     }
 
@@ -258,22 +338,19 @@ pub fn schedule() {
             let mut s = this_cpu_sched().lock();
             s.prepare_switch_tls()
         }
-        .map_or(
-            (
-                core::ptr::null_mut(),
-                0,
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null(),
-            ),
-            |(a, b, c, d, e)| (a, b, c, d, e),
-        );
+        .unwrap_or((
+            core::ptr::null_mut(),
+            0,
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+        ));
         #[cfg(target_arch = "aarch64")]
         let (old_ptr, new_sp, new_fs) = {
             let mut s = this_cpu_sched().lock();
             s.prepare_switch_tls()
         }
-        .map_or((core::ptr::null_mut(), 0, 0), |(a, b, c)| (a, b, c));
+        .unwrap_or((core::ptr::null_mut(), 0, 0));
 
         if !old_ptr.is_null() {
             #[cfg(target_arch = "x86_64")]
@@ -295,7 +372,7 @@ pub fn schedule() {
                 if cur.status == crate::task::thread::ThreadStatus::Blocked {
                     let time_wake = cur
                         .sleep_until
-                        .map_or(false, |t| crate::interrupts::get_ticks() >= t);
+                        .is_some_and(|t| crate::interrupts::get_ticks() >= t);
                     let sig_wake =
                         cur.sleep_until.is_some() && crate::syscalls::check_signal_interrupt();
                     if time_wake || sig_wake {

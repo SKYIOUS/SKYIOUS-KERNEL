@@ -25,6 +25,7 @@ impl EntropyHarvester {
     }
 
     /// Generates a 64-bit random value by harvesting available hardware sources.
+    #[cfg(target_arch = "x86_64")]
     pub fn get_u64(&self) -> u64 {
         // 1. RDTSC (Always available)
         let lo: u32;
@@ -72,6 +73,63 @@ impl EntropyHarvester {
         let mut hash_input = [0u8; 16];
         hash_input[..8].copy_from_slice(&current.to_le_bytes());
         hash_input[8..16].copy_from_slice(&tsc.to_le_bytes());
+
+        let mut output = [0u8; 32];
+        sha256(&hash_input, &mut output);
+        let mut result = 0u64;
+        for byte in output.iter().take(8) {
+            result = (result << 8) | (*byte as u64);
+        }
+
+        self.add_entropy(result);
+        result
+    }
+
+    /// aarch64 entropy source using CNTVCT_EL0 (generic timer counter) and RNDR if available.
+    #[cfg(target_arch = "aarch64")]
+    pub fn get_u64(&self) -> u64 {
+        // 1. CNTVCT_EL0 - 64-bit system counter (generic timer)
+        let tsc: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, cntvct_el0", out(reg) tsc, options(nostack, preserves_flags));
+        }
+        self.add_entropy(tsc);
+
+        // 2. RNDR (Random Number from RNG) - if hardware RNG is available
+        // Check if RNDR is implemented by trying to read it
+        // On aarch64, RNDR is available if FEAT_RNG is implemented
+        let mut rdrand_val: u64 = 0;
+        let success: u8 = 0;
+        // Note: RNDR requires FEAT_RNG which may not be present on all aarch64 CPUs
+        // For now, skip RNDR and use timer-based entropy
+        if success != 0 {
+            self.add_entropy(rdrand_val);
+        }
+
+        // 3. Current pool value mixed with a hash
+        let current = self.pool.load(Ordering::SeqCst);
+        let mut hash_input = [0u8; 16];
+        hash_input[..8].copy_from_slice(&current.to_le_bytes());
+        hash_input[8..16].copy_from_slice(&tsc.to_le_bytes());
+
+        let mut output = [0u8; 32];
+        sha256(&hash_input, &mut output);
+        let mut result = 0u64;
+        for byte in output.iter().take(8) {
+            result = (result << 8) | (*byte as u64);
+        }
+
+        self.add_entropy(result);
+        result
+    }
+
+    /// Fallback for other architectures - use pool mixing only
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    pub fn get_u64(&self) -> u64 {
+        let current = self.pool.load(Ordering::SeqCst);
+        let mut hash_input = [0u8; 16];
+        hash_input[..8].copy_from_slice(&current.to_le_bytes());
+        hash_input[8..16].copy_from_slice(&0u64.to_le_bytes()); // No hardware timer
 
         let mut output = [0u8; 32];
         sha256(&hash_input, &mut output);

@@ -68,6 +68,7 @@ pub enum BootError {
     StackAllocationFailed,
     ConsoleUnavailable,
     UserspaceEntryFailed,
+    VdsoMappingFailed,
 }
 
 /// Recoverable boot warnings.

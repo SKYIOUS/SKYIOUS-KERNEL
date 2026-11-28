@@ -105,13 +105,13 @@ pub fn init() {
 
     // 2. Setup GDT with the initialized TSS
     // Leak a reference to the global TSS for the BSP GDT entry
-    let tss_ptr = Box::leak(Box::new(TSS.lock().clone()));
+    let tss_ptr = Box::leak(Box::new(*TSS.lock()));
     unsafe { LOADED_TSS[0] = tss_ptr as *mut TaskStateSegment };
 
     let mut gdt = GDT.0.clone();
     let tss_selector = gdt.add_entry(Descriptor::tss_segment(tss_ptr));
 
-    let mut selectors = GDT.1.clone();
+    let mut selectors = GDT.1;
     selectors.tss_selector = tss_selector;
     unsafe { *core::ptr::addr_of_mut!(SELECTORS) = Some(selectors) };
 
@@ -136,6 +136,7 @@ pub fn init() {
 /// K-02: CPU identity is established (via `lapic::init` + CPUID fallback)
 /// before this runs on an AP, so the CPU id is passed in rather than read
 /// through per-CPU machinery (`current_cpu_idx`) that is not valid yet.
+#[cfg(feature = "smp")]
 pub fn init_ap(cpu_id: usize) {
     use alloc::boxed::Box;
     use x86_64::instructions::segmentation::{Segment, CS, DS, SS};

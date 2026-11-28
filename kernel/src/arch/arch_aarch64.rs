@@ -157,6 +157,7 @@ impl Arch for AArch64Arch {
             ram_size: 0,
             has_fpu: true,
             has_simd: true,
+            tsc_invariant: false,
             boot_time_ticks: 0,
         }
     }

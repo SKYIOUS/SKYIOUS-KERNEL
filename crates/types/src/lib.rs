@@ -13,6 +13,8 @@
 //! - **Trait definitions only.** No implementations — the kernel provides them.
 //! - **`no_std` only.** Uses `alloc` for `Vec`/`String` where needed.
 //! - **API stability.** Breaking changes require an ADR.
+//!
+//! See ADR-026: Single process/scheduler lineage (kernel-owned), vahi-types as the crate boundary.
 
 #![no_std]
 

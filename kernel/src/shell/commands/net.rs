@@ -107,8 +107,8 @@ pub fn fetch(url: &str, out: &mut dyn FnMut(&str)) {
     if url.is_empty() {
         return;
     }
-    let host = if url.starts_with("http://") {
-        &url[7..]
+    let host = if let Some(stripped) = url.strip_prefix("http://") {
+        stripped
     } else {
         url
     };

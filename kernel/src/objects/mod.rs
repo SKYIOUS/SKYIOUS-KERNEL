@@ -5,6 +5,7 @@ pub mod namespace;
 pub mod net_integration;
 pub mod security;
 
+/// Kernel object model — see ADR-019: Kernel Object Model Redesign
 pub use vahi_objects::ObjectHeader;
 pub use vahi_objects::ObjectTypeId;
 pub use vahi_objects::{

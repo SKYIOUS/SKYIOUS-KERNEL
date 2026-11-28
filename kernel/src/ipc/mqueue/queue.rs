@@ -217,7 +217,7 @@ impl MqQueue {
     /// Drop the registration if `pid` owns it; a NULL `mq_notify` by any
     /// other process is silently ignored, as on Linux.
     pub fn clear_notify(&mut self, pid: u64) {
-        if self.notify.map_or(false, |n| n.owner_pid == pid) {
+        if self.notify.is_some_and(|n| n.owner_pid == pid) {
             self.notify = None;
         }
     }

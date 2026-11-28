@@ -115,17 +115,10 @@ pub(crate) struct WindowAnimation {
 impl Compositor {
     pub fn new() -> Self {
         let size = SCREEN_WIDTH * SCREEN_HEIGHT;
-        let mut buffer = Vec::with_capacity(size);
-        for _ in 0..size {
-            buffer.push(0x001A237E);
-        } // Deep Blue Background
+        let buffer = alloc::vec![0x001A237E; size].into_boxed_slice(); // Deep Blue Background
 
-        let backbuffer = buffer.into_boxed_slice();
-        let mut bg_cache = alloc::vec::Vec::with_capacity(size);
-        for _ in 0..size {
-            bg_cache.push(0x001A237E);
-        }
-        let bg_cache = bg_cache.into_boxed_slice();
+        let backbuffer = buffer;
+        let bg_cache = alloc::vec![0x001A237E; size].into_boxed_slice();
         Self {
             backbuffer,
             background_cache: bg_cache,

@@ -383,8 +383,7 @@ impl VfsNode for ProcFsNode {
                                 "io" => read_proc_io(pid),
                                 _ => {
                                     // Check for /proc/PID/fd/N
-                                    if file.starts_with("fd/") {
-                                        let fd_str = &file[3..];
+                                    if let Some(fd_str) = file.strip_prefix("fd/") {
                                         if let Ok(fd_num) = fd_str.parse::<usize>() {
                                             read_proc_fd(pid, fd_num)
                                         } else {

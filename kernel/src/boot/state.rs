@@ -3,6 +3,8 @@
 //! Each state is a function that takes `&BootContext` and returns
 //! `Result<BootState, BootError>`. The main loop validates transitions
 //! and logs every state change.
+//!
+//! See ADR-004: Formal Boot State Machine for PID 1 Launch.
 
 use crate::boot::{
     logger::BootLogger, BootContext, BootError, BootEvent, BootSession, BootState, BootWarning,
@@ -29,8 +31,8 @@ pub fn run_boot() -> ! {
             BootState::ParseElf => state_parse_elf(&mut ctx, &mut session),
             BootState::CreateAddressSpace => state_create_address_space(&mut ctx, &mut session),
             BootState::MapStack => state_map_stack(&mut ctx, &mut session),
-            BootState::CreatePid1 => state_create_pid1(&mut ctx, &mut session),
-            BootState::SetupConsole => state_setup_console(&mut ctx, &mut session),
+            BootState::CreatePid1 => state_create_pid1(&mut ctx, &session),
+            BootState::SetupConsole => state_setup_console(&mut ctx, &session),
             BootState::EnterUserspace => state_enter_userspace(&ctx, &session),
             BootState::Running => {
                 BootLogger::info(&ctx, "Boot complete, entering scheduler dispatch");
@@ -128,10 +130,20 @@ fn state_create_address_space(
     session: &mut BootSession,
 ) -> Result<BootState, BootError> {
     use crate::memory::buddy::BuddyFrameAllocator;
+    #[cfg(target_arch = "x86_64")]
+    use crate::vdso::vdso_map_into;
     let mut frame_allocator = BuddyFrameAllocator;
     let elf_data = ctx.elf_data.as_ref().ok_or(BootError::InitNotFound)?;
     let address_space = crate::memory::paging::AddressSpace::new(&mut frame_allocator)
         .ok_or(BootError::AddressSpaceCreationFailed)?;
+
+    // Map vDSO page into the address space (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    if let Some(mut mapper) = unsafe { address_space.mapper() } {
+        vdso_map_into(&mut mapper, &mut frame_allocator)
+            .map_err(|_| BootError::VdsoMappingFailed)?;
+    }
+
     let mut process =
         Process::load_elf(elf_data, address_space).map_err(|_| BootError::InvalidElf)?;
     // Force PID 1 — Process::load_elf assigns next_id() (100+), but
@@ -261,6 +273,7 @@ fn state_enter_userspace(ctx: &BootContext, session: &BootSession) -> Result<Boo
     unsafe {
         process.address_space.activate();
     }
+    let tls_range = *process.tls_range.lock();
     BootLogger::info(
         ctx,
         &alloc::format!(
@@ -273,6 +286,6 @@ fn state_enter_userspace(ctx: &BootContext, session: &BootSession) -> Result<Boo
     // user stack mapped with argv, PID 1 registered in the process table, and the address
     // space activated. This function diverges (never returns).
     unsafe {
-        crate::task::thread::jump_to_usermode(session.entry_point, session.user_rsp);
+        crate::task::thread::jump_to_usermode(session.entry_point, session.user_rsp, tls_range);
     }
 }

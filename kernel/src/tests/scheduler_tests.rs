@@ -20,9 +20,14 @@ fn make_test_thread(priority: u8, sleep_until: Option<u64>) -> Thread {
         policy: 0,
         rt_priority: 0,
         rr_time_slice: 0,
+        sched_class: 0,
+        sched_deadline: 0,
+        sched_runtime: 0,
+        sched_period: 0,
+        cpu_time_ns: 0,
+        slice_start_tsc: 0,
         affinity_mask: 0xFFFFFFFFFFFFFFFF,
         fpu_state: None,
-        sched_class: 0,
     }
 }
 

@@ -149,10 +149,7 @@ pub fn sys_seccomp(op: u32, flags: u32, user_insns: *const u8) -> u64 {
 /// syscall must return without executing.
 pub fn check_syscall(nr: u64, args: &[u64; 6]) -> Option<u64> {
     let lock = CURRENT_PROCESS.lock();
-    let proc = match *lock {
-        Some(ref p) => p,
-        None => return None, // No process = allow
-    };
+    let proc = lock.as_ref()?;
 
     let mode = proc.security.lock().seccomp.mode;
     if mode == SECCOMP_MODE_DISABLED {
@@ -172,7 +169,6 @@ pub fn check_syscall(nr: u64, args: &[u64; 6]) -> Option<u64> {
         SECCOMP_RET_KILL_PROCESS => {
             crate::serial_write("[SECCOMP] Killed process syscall=");
             crate::serial_write(&alloc::format!("{} pid={}\n", nr, proc.id));
-            drop(lock);
             super::process::sys_exit(128 + 31); // SIGSYS
                                                 // sys_exit never returns; this is unreachable
             #[allow(unreachable_code)]

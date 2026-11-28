@@ -216,14 +216,14 @@ pub fn sys_timerfd_settime(
             // Absolute time: convert the it_value to a tick and compute delta from now
             let abs_ns = it_value_ns;
             let now_ns = now_ticks * NS_PER_TICK;
-            let delta_ns = if abs_ns > now_ns { abs_ns - now_ns } else { 0 };
-            let ticks = (delta_ns + NS_PER_TICK - 1) / NS_PER_TICK;
+            let delta_ns = abs_ns.saturating_sub(now_ns);
+            let ticks = delta_ns.div_ceil(NS_PER_TICK);
             t.it_value_ns = it_value_ns;
             t.it_interval_ns = it_interval_ns;
             t.wake_tick = now_ticks + ticks;
         } else {
             // Relative time
-            let ticks = (it_value_ns + NS_PER_TICK - 1) / NS_PER_TICK;
+            let ticks = it_value_ns.div_ceil(NS_PER_TICK);
             t.it_value_ns = it_value_ns;
             t.it_interval_ns = it_interval_ns;
             t.wake_tick = now_ticks + ticks;
@@ -315,7 +315,7 @@ pub fn check_timerfds() {
 
     let current_tick = crate::interrupts::get_ticks();
 
-    for (_, proc) in table.iter() {
+    for proc in table.values() {
         let files = match proc.files.try_lock() {
             Some(f) => f,
             None => continue,
@@ -338,7 +338,7 @@ pub fn check_timerfds() {
 
                     if t.it_interval_ns > 0 {
                         // Re-arm for the next interval
-                        let interval_ticks = (t.it_interval_ns + NS_PER_TICK - 1) / NS_PER_TICK;
+                        let interval_ticks = t.it_interval_ns.div_ceil(NS_PER_TICK);
                         t.wake_tick = current_tick + interval_ticks;
                     } else {
                         // One-shot: disarm

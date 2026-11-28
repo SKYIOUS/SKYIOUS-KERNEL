@@ -394,6 +394,12 @@ const fn build_table() -> [Option<SyscallHandler>; TABLE_SIZE] {
     sys_handler!(
         t,
         args,
+        numbers::SYS_GETCPU,
+        process::sys_getcpu(args.a1 as *mut u32, args.a2 as *mut u32)
+    );
+    sys_handler!(
+        t,
+        args,
         numbers::SYS_SENDFILE,
         fs::sys_sendfile(args.a1, args.a2, args.a3 as *mut u64, args.a4)
     );
@@ -1820,7 +1826,7 @@ fn do_syscall_body(
                     }
                 } else {
                     // Kernel default trampoline — copy code bytes to user stack.
-                    let code_ptr = super::signal::SIGNAL_RESTORER.as_ptr() as *const u8;
+                    let code_ptr = super::signal::SIGNAL_RESTORER.as_ptr();
                     let code_len = super::signal::SIGNAL_RESTORER.len();
                     let dst = ret_kptr as *mut u8;
                     unsafe {

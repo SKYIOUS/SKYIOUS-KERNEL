@@ -42,7 +42,7 @@ impl Default for CpuController {
 }
 
 /// Memory controller limits
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MemoryController {
     pub max: Option<u64>,      // memory.max — max memory in bytes
     pub high: Option<u64>,     // memory.high — high watermark
@@ -52,53 +52,20 @@ pub struct MemoryController {
     pub current: u64,          // memory.current — current usage
 }
 
-impl Default for MemoryController {
-    fn default() -> Self {
-        Self {
-            max: None,
-            high: None,
-            low: None,
-            min: None,
-            swap_max: None,
-            current: 0,
-        }
-    }
-}
-
 /// PID controller limits
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PidsController {
     pub max: Option<u32>, // pids.max — max number of processes
     pub current: u32,     // pids.current — current number of processes
 }
 
-impl Default for PidsController {
-    fn default() -> Self {
-        Self {
-            max: None,
-            current: 0,
-        }
-    }
-}
-
 /// I/O controller limits
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct IoController {
     pub max_read_bps: Option<u64>,   // io.max — max read bytes per second
     pub max_write_bps: Option<u64>,  // io.max — max write bytes per second
     pub max_read_iops: Option<u64>,  // io.max — max read IOPS
     pub max_write_iops: Option<u64>, // io.max — max write IOPS
-}
-
-impl Default for IoController {
-    fn default() -> Self {
-        Self {
-            max_read_bps: None,
-            max_write_bps: None,
-            max_read_iops: None,
-            max_write_iops: None,
-        }
-    }
 }
 
 /// A cgroup

@@ -27,6 +27,9 @@
 //! - Handle table uses first-fit slot allocation
 //! - Security checks on every handle insert
 //! - Close-on-exec handled during fork
+//!
+//! See ADR-019: Kernel Object Model Redesign.
+//! See ADR-023: Vahi IPC Model.
 
 #![no_std]
 

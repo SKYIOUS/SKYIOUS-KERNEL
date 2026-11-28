@@ -107,7 +107,7 @@ impl AddressSpace {
     }
 
     /// Returns the physical address of the PML4.
-    pub fn _pml4_phys(&self) -> PhysFrame {
+    pub fn pml4_frame(&self) -> PhysFrame {
         self.pml4_frame
     }
 

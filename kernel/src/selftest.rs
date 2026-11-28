@@ -2,6 +2,7 @@ use crate::sync::IrqSafeMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
+/// Kernel self-test protocol — see ADR-027: T-00 Kernel Self-Test Protocol and QEMU Exit Mechanism.
 pub type TestFn = fn() -> Result<(), &'static str>;
 
 // QEMU isa-debug-exit exit codes, distinguished by the host runner:

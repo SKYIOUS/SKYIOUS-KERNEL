@@ -22,7 +22,7 @@ vahi-net = { path = "../crates/net" }
 vahi-arch = { path = "../crates/arch" }
 vahi-verified = { path = "../crates/verified", optional = true }
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
-spin = "0.9.8"
+spin = "0.12.3"
 volatile = "0.2.6"
 linked_list_allocator = "0.10.5"
 crossbeam-queue = { version = "0.3.12", default-features = false, features = ["alloc"] }

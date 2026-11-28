@@ -1,3 +1,13 @@
+//! Syscall layer decomposition.
+//!
+//! See ADR-010: Decompose the Syscall Layer.
+//!
+//! The syscall layer is decomposed into per-domain files with a thin dispatch
+//! table in `mod.rs`. Each domain file compiles independently under its feature
+//! gate (e.g., `net.rs` only with `net` feature).
+//!
+//! Dispatch table in `dispatch.rs` maps syscall numbers to handler functions.
+
 use x86_64::structures::paging::{Mapper, Page, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
 
@@ -57,8 +67,7 @@ use crate::task::process::CURRENT_PROCESS;
 /// Maximum supported CPU count.
 pub const MAX_CPUS: usize = 8;
 /// Upper bound for a single read/write syscall buffer allocation.
-/// Larger requests are clamped (callers must loop Ã¢â‚¬â€ POSIX allows short I/O).
-
+/// Larger requests are clamped (callers must loop — POSIX allows short I/O).
 /// Array of per-CPU area pointers for indexed access from non-GS contexts.
 #[derive(Clone, Copy)]
 pub struct PerCpuPtr(pub *mut PerCpuData);
@@ -69,7 +78,6 @@ pub static PER_CPU_AREAS: crate::sync::IrqSafeMutex<alloc::vec::Vec<PerCpuPtr>> 
     crate::sync::IrqSafeMutex::new(alloc::vec::Vec::new());
 
 /// Get the current CPU's per-CPU data via GS segment.
-
 #[repr(C)]
 pub struct PerCpuData {
     pub self_ptr: u64,   // offset 0x00 Ã¢â‚¬â€ pointer to self (gs:0x0 reads this)
@@ -136,7 +144,6 @@ extern "C" {
 
 /// Inner dispatch without emulation redirect Ã¢â‚¬â€ called by both the public entry
 /// point and the Linux emulation layer to avoid infinite recursion.
-
 pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
 pub const SEEK_END: i32 = 2;
@@ -240,13 +247,11 @@ core::arch::global_asm!(
     "#
 );
 
-/// Linux-compatible capget: read capability sets
-
-/// Linux-compatible capset: set capability sets (root only)
-
-/// sigprocmask: examine/change signal mask
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ pause Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
+/// Linux-compatible capget: read capability sets
+/// Linux-compatible capset: set capability sets (root only)
+/// sigprocmask: examine/change signal mask
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ sigaltstack Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 use crate::task::process::stack_t;
 use crate::task::process::{MINSIGSTKSZ, SS_DISABLE, SS_ONSTACK};

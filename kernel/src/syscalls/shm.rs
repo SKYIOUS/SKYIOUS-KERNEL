@@ -472,11 +472,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: *mut u8) -> u64 {
 
         IPC_STAT | SHM_STAT | SHM_STAT_ANY => {
             let segments = SHM_SEGMENTS.lock();
-            let seg_id = if cmd == IPC_STAT {
-                shmid as u32
-            } else {
-                shmid as u32
-            };
+            let seg_id = shmid as u32;
             let seg = match segments.get(&seg_id) {
                 Some(s) => s,
                 None => return errno::Errno::EINVAL as u64,

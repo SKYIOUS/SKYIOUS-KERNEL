@@ -70,14 +70,14 @@ pub fn virt_to_phys(virt: u64) -> Option<u64> {
     let table_pa = active_table_phys();
 
     // Walk L0
-    let l0_entry = read_pt_entry(table_pa, l0_idx)?;
+    let l0_entry = unsafe { read_pt_entry(table_pa, l0_idx)? };
     if l0_entry & DESC_TYPE_MASK != DESC_TYPE_TABLE {
         return None;
     }
     let l1_pa = l0_entry & 0x0000_FFFF_FFFF_F000;
 
     // Walk L1 (can be a 1GB block)
-    let l1_entry = read_pt_entry(l1_pa, l1_idx)?;
+    let l1_entry = unsafe { read_pt_entry(l1_pa, l1_idx)? };
     let l1_type = l1_entry & DESC_TYPE_MASK;
     if l1_type == DESC_TYPE_BLOCK {
         // 1GB block
@@ -89,7 +89,7 @@ pub fn virt_to_phys(virt: u64) -> Option<u64> {
     let l2_pa = l1_entry & 0x0000_FFFF_FFFF_F000;
 
     // Walk L2 (can be a 2MB block)
-    let l2_entry = read_pt_entry(l2_pa, l2_idx)?;
+    let l2_entry = unsafe { read_pt_entry(l2_pa, l2_idx)? };
     let l2_type = l2_entry & DESC_TYPE_MASK;
     if l2_type == DESC_TYPE_BLOCK {
         // 2MB block
@@ -101,7 +101,7 @@ pub fn virt_to_phys(virt: u64) -> Option<u64> {
     let l3_pa = l2_entry & 0x0000_FFFF_FFFF_F000;
 
     // Walk L3 (must be a page)
-    let l3_entry = read_pt_entry(l3_pa, l3_idx)?;
+    let l3_entry = unsafe { read_pt_entry(l3_pa, l3_idx)? };
     if l3_entry & DESC_TYPE_MASK != DESC_TYPE_PAGE {
         return None;
     }
@@ -277,15 +277,10 @@ fn walk_or_create(table_pa: u64, index: usize, phys_offset: u64) -> Option<u64> 
 }
 
 /// Allocate a zeroed page for page table use.
+/// TODO: Implement aarch64-specific frame allocation.
 fn buddy_alloc_frame_raw() -> Option<u64> {
-    crate::buddy::allocate_raw_frame_addr().map(|pa| {
-        let phys_offset = crate::PHYSICAL_MEMORY_OFFSET.get().copied().unwrap_or(0);
-        let virt = phys_offset + pa;
-        unsafe {
-            core::ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE as usize);
-        }
-        pa
-    })
+    // aarch64 frame allocation not yet implemented
+    None
 }
 
 /// Copy data from user space to kernel space.

@@ -409,12 +409,12 @@ pub unsafe fn apply_kaslr_relocations(slide: u64) -> RelocationOutcome {
     // SAFETY: all are linker-defined symbols; only their numeric values are
     // taken, never dereferenced.
     let (rela_start_addr, rela_end_addr, bounds) = {
-        let start = core::ptr::addr_of!(__rela_start) as *const u8;
-        let end = core::ptr::addr_of!(__rela_end) as *const u8;
-        let image_start = core::ptr::addr_of!(__kernel_start) as *const u8;
-        let image_end = core::ptr::addr_of!(__kernel_end) as *const u8;
-        let writable_start = core::ptr::addr_of!(__writable_start) as *const u8;
-        let writable_end = core::ptr::addr_of!(__writable_end) as *const u8;
+        let start = core::ptr::addr_of!(__rela_start);
+        let end = core::ptr::addr_of!(__rela_end);
+        let image_start = core::ptr::addr_of!(__kernel_start);
+        let image_end = core::ptr::addr_of!(__kernel_end);
+        let writable_start = core::ptr::addr_of!(__writable_start);
+        let writable_end = core::ptr::addr_of!(__writable_end);
         (
             start as usize,
             end as usize,
@@ -931,8 +931,6 @@ pub unsafe fn activate_kaslr_mapping() {
     kaslr_trampoline(new_pml4_phys, slide, old_rsp);
 }
 
-/// Get the current KASLR slide value
-
 // kaslr_trampoline: performs CR3 switch and jumps to slid _start
 // This is a separate function to ensure the inline asm is generated.
 // # Safety: never returns. new_pml4_phys must be physical address of new PML4,
@@ -988,6 +986,7 @@ unsafe fn kaslr_trampoline(new_pml4_phys: u64, slide: u64, old_rsp: u64) -> ! {
     );
 }
 
+/// Get the current KASLR slide value.
 pub fn get_kaslr_slide() -> u64 {
     crate::KERNEL_SLIDE.load(core::sync::atomic::Ordering::Relaxed)
 }

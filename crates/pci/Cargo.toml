@@ -6,7 +6,7 @@ description = "PCI bus enumeration and configuration space access"
 
 [dependencies]
 spin = "0.9"
-vahi-apic = { path = "../apic" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
+vahi-apic = { path = "../apic" }
 x86_64 = { version = "0.14.2", default-features = false, features = ["instructions", "abi_x86_interrupt"] }

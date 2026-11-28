@@ -1,9 +1,23 @@
+//! SMP (Symmetric Multiprocessing) support via SIPI + Per-CPU Schedulers.
+//!
+//! See ADR-007: SMP Support via SIPI + Per-CPU Schedulers.
+//!
+//! The kernel uses SIPI to boot APs with a trampoline at physical address 0x8000.
+//! Each CPU has its own `Mutex<PerCpuScheduler>` with `MAX_CPUS = 8`.
+//! The global `GLOBAL` struct holds shared queues (pending, sleep, block, futex),
+//! each with its own Mutex to minimize contention. Work stealing is used for
+//! idle CPUs. Reschedule IPIs are broadcast when threads are woken.
+
+#[cfg(feature = "smp")]
 use crate::arch::Arch;
 #[cfg(feature = "smp")]
 use crate::println;
+#[cfg(all(target_arch = "x86_64", feature = "smp"))]
+use crate::vdso::vdso_update_tsc_base;
 #[cfg(feature = "smp")]
 use core::arch::global_asm;
 
+#[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "smp")]
 use x86_64::registers::control::Cr3;
@@ -20,6 +34,7 @@ pub const TRAMPOLINE_PHYS: u64 = 0x8000;
 pub const DATA_PHYS: u64 = 0x7000;
 
 /// Shared data between BSP and APs during boot
+#[cfg(feature = "smp")]
 #[repr(C)]
 pub struct SmpBootData {
     pub stack_ptr: u64,
@@ -31,6 +46,7 @@ pub struct SmpBootData {
 // SAFETY: BOOT_DATA is static mut because it's shared between BSP and APs during boot.
 // Access is synchronized via atomic operations and only during the boot sequence.
 // After boot, this data is no longer accessed.
+#[cfg(feature = "smp")]
 pub static mut BOOT_DATA: SmpBootData = SmpBootData {
     stack_ptr: 0,
     code_ptr: 0,
@@ -70,8 +86,8 @@ fn allocate_low_pml4() -> Option<PhysFrame> {
     // new_pml4 is newly allocated and writable, current_pml4 is the active kernel page table.
     // Copying kernel entries (256..512) is safe as they're identical in both tables.
     unsafe {
-        let new_pml4 = &mut *(new_pml4_virt.as_mut_ptr() as *mut PageTable);
-        let current_pml4 = &*(current_pml4_virt.as_ptr() as *const PageTable);
+        let new_pml4: &mut PageTable = &mut *new_pml4_virt.as_mut_ptr();
+        let current_pml4: &PageTable = &*current_pml4_virt.as_ptr();
         // Copy kernel higher-half entries
         for i in 256..512 {
             new_pml4[i] = current_pml4[i].clone();
@@ -362,6 +378,7 @@ pub fn init() {
     );
 }
 
+#[cfg(feature = "smp")]
 #[no_mangle]
 pub extern "C" fn ap_kernel_entry() -> ! {
     crate::serial_write("[AP] ap_kernel_entry\n");
@@ -394,6 +411,12 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     // CPU-ID provider fallback) would give the same value.
     let cpu_id = crate::apic::current_lapic_id() as usize;
 
+    // Update this AP's vDSO TSC base with its own TSC value.
+    // This must be called after the CPU ID is known and before the CPU
+    // starts handling timer interrupts that read the TSC base.
+    #[cfg(target_arch = "x86_64")]
+    vdso_update_tsc_base(cpu_id as u32);
+
     // GS/per-CPU state. From here on IrqSafeMutex and per-CPU access are
     // valid on this CPU.
     crate::syscalls::init_gs_base(cpu_id);
@@ -421,6 +444,28 @@ pub extern "C" fn ap_kernel_entry() -> ! {
     // IDT all valid on this CPU.
     x86_64::instructions::interrupts::enable();
 
+    // Mark this CPU as online so it can participate in synchronization (IPI ack).
+    // Must be called AFTER IDT is loaded, TSS/IST set up, and interrupts enabled,
+    // so the CPU can immediately handle IPIs (TLB shootdown, reschedule, etc.).
+    crate::task::scheduler::mark_cpu_online(cpu_id);
+
+    // Update the idle thread's fs_base to match this CPU's GS base.
+    // The idle thread was created on the BSP with fs_base=0; if we don't update
+    // it, the scheduler will restore fs_base=0 when switching to the idle thread,
+    // losing this CPU's per-CPU data (GS base).
+    if let Some(sched_mutex) = crate::task::scheduler::cpu_sched(cpu_id) {
+        if let Some(mut sched) = sched_mutex.try_lock() {
+            if let Some(ref mut idle_thread) = sched.idle {
+                // Get current GS base (set by init_gs_base above)
+                let gs_base: u64;
+                unsafe {
+                    core::arch::asm!("rdgsbase {}", out(reg) gs_base, options(nostack, preserves_flags));
+                }
+                idle_thread.fs_base = gs_base;
+            }
+        }
+    }
+
     // This core is now ready to be scheduled.
     crate::println!("SMP: CPU {} entering scheduler", cpu_id);
     crate::task::scheduler::schedule();
@@ -435,78 +480,6 @@ pub fn get_cpu_id() -> usize {
     crate::apic::current_lapic_id() as usize
 }
 
-/// Calls a function on a specific CPU core via IPI.
-/// `func` must be a pointer to an `extern "C" fn(u64)`.
-// ponytail: F2.2 — SMP IPI primitive not yet wired into cross-CPU dispatch; see ADR-029-syscall-module-lint-hygiene.md
-#[allow(dead_code)]
-pub fn smp_call_function(cpu_id: u8, func: extern "C" fn(u64), _arg: u64) {
-    // CFI: validate function pointer before dispatching via IPI
-    if !crate::sync::cfi::cfi_check(func as *const () as usize) {
-        crate::serial_write("[CFI] Blocked invalid SMP IPI function pointer\n");
-        return;
-    }
-    // Set the function pointer and argument in the target's per-CPU data
-    let areas = crate::syscalls::PER_CPU_AREAS.lock();
-    if let Some(ptr) = areas.get(cpu_id as usize) {
-        let raw = ptr.0;
-        if !raw.is_null() {
-            unsafe {
-                (*raw)
-                    .ipi_kind
-                    .store(3, core::sync::atomic::Ordering::Release); // Func
-                (*raw)
-                    .ipi_arg
-                    .store(func as u64, core::sync::atomic::Ordering::Release);
-            }
-        }
-    }
-    drop(areas);
-
-    crate::apic::send_ipi(cpu_id, 251, 0); // IpiFunc vector
-    if !crate::apic::wait_for_ipi() {
-        crate::serial_write(&alloc::format!("[SMP] IPI to CPU {} stalled\n", cpu_id));
-    }
-}
-
-/// Broadcasts a function call to all CPU cores except self.
-// ponytail: F2.2 — SMP broadcast IPI not yet wired; see ADR-029-syscall-module-lint-hygiene.md
-#[allow(dead_code)]
-pub fn smp_broadcast(func: extern "C" fn(u64), _arg: u64) {
-    // CFI: validate function pointer before broadcasting
-    if !crate::sync::cfi::cfi_check(func as *const () as usize) {
-        crate::serial_write("[CFI] Blocked invalid SMP broadcast function pointer\n");
-        return;
-    }
-    let areas = crate::syscalls::PER_CPU_AREAS.lock();
-    for ptr in areas.iter() {
-        let raw = ptr.0;
-        if !raw.is_null() {
-            unsafe {
-                (*raw)
-                    .ipi_kind
-                    .store(3, core::sync::atomic::Ordering::Release); // Func
-                (*raw)
-                    .ipi_arg
-                    .store(func as u64, core::sync::atomic::Ordering::Release);
-            }
-        }
-    }
-    drop(areas);
-
-    let current_cpu = get_cpu_id() as u8;
-    for cpu_id in 0..crate::syscalls::MAX_CPUS as u8 {
-        if cpu_id != current_cpu {
-            crate::apic::send_ipi(cpu_id, 251, 0);
-            if !crate::apic::wait_for_ipi() {
-                crate::serial_write(&alloc::format!(
-                    "[SMP] broadcast IPI to CPU {} stalled\n",
-                    cpu_id
-                ));
-            }
-        }
-    }
-}
-
 /// Fire-and-forget broadcast: set func+arg on every other CPU's PerCpuData
 /// and send a single broadcast IPI.  Unlike `smp_broadcast` this does NOT
 /// wait for each IPI to finish, making it suitable for reschedule hints.
@@ -514,7 +487,7 @@ pub fn smp_broadcast_func(kind: u64, arg: u64) {
     let current = get_cpu_id();
     let areas = crate::syscalls::PER_CPU_AREAS.lock();
     for (cpu_id, ptr) in areas.iter().enumerate() {
-        if cpu_id == current as usize {
+        if cpu_id == current {
             continue;
         }
         let raw = ptr.0;
@@ -531,17 +504,4 @@ pub fn smp_broadcast_func(kind: u64, arg: u64) {
     }
     drop(areas);
     crate::apic::send_broadcast_ipi(251);
-}
-
-/// Broadcasts a TLB flush IPI to all other CPU cores.
-/// Phase H1: Ensure memory coherence during page table changes.
-// ponytail: F2.2 — TLB shootdown IPI not yet wired into page-table paths; see ADR-029-syscall-module-lint-hygiene.md
-#[allow(dead_code)]
-pub fn broadcast_tlb_flush(addr: u64) {
-    // Broadcast vector 250 (TlbFlush) to all excluding self
-    crate::apic::send_broadcast_ipi(250);
-    if !crate::apic::wait_for_ipi() {
-        crate::serial_write("[SMP] broadcast TLB flush IPI stalled\n");
-    }
-    let _ = addr;
 }

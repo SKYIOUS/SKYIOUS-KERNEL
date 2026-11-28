@@ -251,13 +251,16 @@ impl ExecRegion {
     /// Get a mutable pointer to the region's memory (valid while in RW state).
     /// Use this to copy JIT code before calling flip_to_rx().
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.virt.as_mut_ptr() as *mut u8
+        self.virt.as_mut_ptr()
     }
 
     /// Get a function pointer to the executable page.
     /// Must call `flip_to_rx()` first. The returned pointer is valid for execution.
+    #[allow(clippy::unnecessary_cast)]
     pub fn get_fn<T>(&self) -> *const T {
         // Safety: caller must have called flip_to_rx() first
+        // clippy::unnecessary_cast is a false positive here: virt.as_ptr() returns *const u8,
+        // but we need *const T for the generic return type.
         self.virt.as_ptr() as *const T
     }
 }

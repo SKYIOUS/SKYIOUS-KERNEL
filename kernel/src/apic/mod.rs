@@ -415,3 +415,60 @@ fn route_gsi(gsi: u8, vector: u8, active_low: bool, level: bool) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bus frequency (calibrated by LAPIC timer init)
+// ---------------------------------------------------------------------------
+
+/// Minimum reasonable bus frequency (24 MHz — CPUID.0x15 can return this on some CPUs).
+const MIN_BUS_FREQUENCY_HZ: u32 = 24_000_000;
+/// Maximum reasonable bus frequency (4 GHz).
+const MAX_BUS_FREQUENCY_HZ: u32 = 4_000_000_000;
+
+/// Calibrated bus frequency in Hz. Set by LAPIC timer initialization.
+/// 0 means not yet calibrated.
+static BUS_FREQUENCY_HZ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Get the calibrated bus frequency in Hz.
+/// Returns `None` if not yet calibrated.
+pub fn get_bus_frequency_hz() -> Option<u32> {
+    let freq = BUS_FREQUENCY_HZ.load(core::sync::atomic::Ordering::Acquire);
+    if freq == 0 {
+        None
+    } else {
+        Some(freq)
+    }
+}
+
+/// Get the estimated TSC frequency in Hz (bus_freq * 10).
+/// Returns `None` if bus frequency not yet calibrated.
+pub fn get_tsc_frequency_hz() -> Option<u32> {
+    let freq = BUS_FREQUENCY_HZ.load(core::sync::atomic::Ordering::Acquire);
+    if freq == 0 {
+        None
+    } else {
+        Some(freq * 10)
+    }
+}
+
+/// Set the calibrated bus frequency in Hz (called by LAPIC timer init).
+/// Only sets the value if not already calibrated (first writer wins).
+/// Returns an error if freq_hz is 0 or unreasonably large.
+pub(crate) fn set_bus_frequency_hz(freq_hz: u32) -> Result<(), &'static str> {
+    if freq_hz == 0 {
+        return Err("bus frequency cannot be 0");
+    }
+    // Sanity check: bus frequency should be in a reasonable range
+    if !(MIN_BUS_FREQUENCY_HZ..=MAX_BUS_FREQUENCY_HZ).contains(&freq_hz) {
+        return Err("bus frequency out of expected range");
+    }
+    BUS_FREQUENCY_HZ
+        .compare_exchange(
+            0,
+            freq_hz,
+            core::sync::atomic::Ordering::Release,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .ok();
+    Ok(())
+}

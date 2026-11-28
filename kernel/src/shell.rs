@@ -70,11 +70,11 @@ impl Shell {
             pc_keyboard::KeyCode::ArrowDown => {
                 if self.history_index < self.history.len() {
                     self.history_index += 1;
-                    if self.history_index == self.history.len() {
-                        self.clear_line_and_buffer();
-                    } else {
-                        self.replace_buffer_with_history();
-                    }
+                }
+                if self.history_index == self.history.len() {
+                    self.clear_line_and_buffer();
+                } else {
+                    self.replace_buffer_with_history();
                 }
             }
             _ => {}

@@ -4,6 +4,7 @@ use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use vahi_hal::sync::IrqSafeMutex as Mutex;
 
+/// Page cache — see ADR-014: Page Cache.
 pub const PAGE_SIZE: usize = 4096;
 // ponytail: FIFO eviction, LRU if perf matters
 const MAX_CACHED_PAGES: usize = 4096;

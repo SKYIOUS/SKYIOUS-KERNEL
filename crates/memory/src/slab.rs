@@ -3,6 +3,7 @@ use core::ptr;
 use core::ptr::NonNull;
 use linked_list_allocator::LockedHeap;
 
+/// Slab allocator — see ADR-013: Slab Allocator.
 /// The block sizes to use.
 /// Must be powers of 2 because they are also used as alignment (except for very small ones).
 /// Extended to include smaller sizes for better memory efficiency.

@@ -22,6 +22,7 @@ const DT_RELAENT: u64 = 9;
 const DT_STRSZ: u64 = 10;
 const DT_SYMENT: u64 = 11;
 const DT_JMPREL: u64 = 23;
+const DT_INTERP: u64 = 3;
 
 const R_X86_64_GLOB_DAT: u64 = 6;
 const R_X86_64_JUMP_SLOT: u64 = 7;
@@ -246,7 +247,8 @@ fn load_library(
     vmas: &mut Vec<Vma>,
 ) -> Result<LibInfo, &'static str> {
     let vfs = VFS.lock();
-    let path = alloc::string::String::from("/lib/") + name;
+    let mut path = alloc::string::String::from("/lib/");
+    path.push_str(name);
     let node = vfs.resolve_path(&path).ok_or("Shared library not found")?;
     drop(vfs);
     let elf_data = node
@@ -307,7 +309,15 @@ fn load_library(
     } else {
         core::ptr::null()
     };
-    let sym_count = if symt > 0 { 4096 / symt } else { 0 };
+    let sym_count = if symt > 0 {
+        (4096u64)
+            .checked_div(symt as u64)
+            .unwrap_or(0)
+            .try_into()
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
     Ok(LibInfo {
         base: load_base,
@@ -348,7 +358,11 @@ fn apply_rela(
     let rela_ent = get_dt(&entries, DT_RELAENT).unwrap_or(24) as usize;
     let jmp_addr = get_dt(&entries, DT_JMPREL);
 
-    let count = if rela_ent > 0 { rela_sz / rela_ent } else { 0 };
+    let count = if rela_ent > 0 {
+        rela_sz.checked_div(rela_ent).unwrap_or(0)
+    } else {
+        0
+    };
 
     if let Some(rela_base) = rela_addr {
         let rela_base_abs = base + rela_base;
@@ -433,52 +447,124 @@ fn apply_rela(
     Ok(())
 }
 
+/// Result of dynamic binary loading, including optional interpreter info.
+pub struct DynamicLoadResult {
+    pub entry_point: u64,
+    pub interp_entry_point: Option<u64>,
+}
+
 pub fn load_dynamic_binary(
     elf_data: &[u8],
     address_space: &mut AddressSpace,
-    _entry_point: &mut u64,
+    entry_point: &mut u64,
     vmas: &mut Vec<Vma>,
-) -> Result<(), &'static str> {
+) -> Result<DynamicLoadResult, &'static str> {
     let elf = ElfFile::new(elf_data).map_err(|_| "Failed to parse ELF for dynamic linking")?;
     let base: u64 = 0;
 
-    let mut dyn_vaddr = 0u64;
+    let mut interp_path: Option<String> = None;
+    let mut needed_libs = Vec::new();
 
+    // First pass: check for PT_INTERP program header (interpreter path)
     for ph in elf.program_iter() {
-        if let Ok(program::Type::Dynamic) = ph.get_type() {
-            dyn_vaddr = ph.virtual_addr();
+        if let Ok(program::Type::Interp) = ph.get_type() {
+            // PT_INTERP contains the interpreter path directly
+            let interp_off = ph.offset() as usize;
+            let interp_filesz = ph.file_size() as usize;
+            if interp_off
+                .checked_add(interp_filesz)
+                .map(|e| e > elf_data.len())
+                .unwrap_or(true)
+            {
+                return Err("PT_INTERP segment ranges past end of file");
+            }
+            // The interpreter path is a null-terminated string at the offset
+            let interp_bytes = &elf_data[interp_off..interp_off + interp_filesz];
+            let null_pos = interp_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(interp_filesz);
+            interp_path =
+                Some(alloc::string::String::from_utf8_lossy(&interp_bytes[..null_pos]).to_string());
+            // interp_path is guaranteed to be Some here since we just set it
+            let interp_str = interp_path.as_deref().unwrap_or("");
+            crate::serial_write(&alloc::format!(
+                "[ELF_DYN] Found PT_INTERP: {}\n",
+                interp_str,
+            ));
             break;
         }
     }
 
-    if dyn_vaddr == 0 {
-        return Ok(());
-    }
+    // Also check for DT_INTERP in .dynamic section (fallback)
+    let dyn_vaddr = {
+        let mut dv = 0u64;
+        for ph in elf.program_iter() {
+            if let Ok(program::Type::Dynamic) = ph.get_type() {
+                dv = ph.virtual_addr();
+                break;
+            }
+        }
+        dv
+    };
 
-    let mapper = unsafe { address_space.mapper().ok_or("Failed to get mapper")? };
+    if dyn_vaddr != 0 {
+        let mapper = unsafe { address_space.mapper().ok_or("Failed to get mapper")? };
 
-    let mut needed_libs = Vec::new();
-    let entries = parse_dt_entries(base + dyn_vaddr, &mapper);
-    let strtab_vaddr = get_dt(&entries, DT_STRTAB).map(|v| base + v).unwrap_or(0);
-    let strsz = get_dt(&entries, DT_STRSZ).unwrap_or(0) as usize;
+        let entries = parse_dt_entries(base + dyn_vaddr, &mapper);
+        let strtab_vaddr = get_dt(&entries, DT_STRTAB).map(|v| base + v).unwrap_or(0);
+        let strsz = get_dt(&entries, DT_STRSZ).unwrap_or(0) as usize;
 
-    for &(tag, val) in &entries {
-        if tag == DT_NEEDED && strtab_vaddr != 0 {
-            needed_libs.push(read_dt_str(val, strtab_vaddr, strsz, &mapper)?);
+        for &(tag, val) in &entries {
+            crate::serial_write(&alloc::format!(
+                "[ELF_DYN] DT entry: tag={} val={}\n",
+                tag,
+                val
+            ));
+            if tag == DT_NEEDED && strtab_vaddr != 0 {
+                needed_libs.push(read_dt_str(val, strtab_vaddr, strsz, &mapper)?);
+            } else if tag == DT_INTERP && strtab_vaddr != 0 {
+                interp_path = Some(read_dt_str(val, strtab_vaddr, strsz, &mapper)?);
+            }
         }
     }
 
-    if needed_libs.is_empty() {
-        return Ok(());
-    }
-
+    // Load needed libraries first
     let mut lib_infos = Vec::new();
     for name in &needed_libs {
         let info = load_library(name, address_space, vmas)?;
         lib_infos.push(info);
     }
 
-    apply_rela(&lib_infos, base + dyn_vaddr, base, &mapper)?;
+    if dyn_vaddr != 0 {
+        let mapper = unsafe { address_space.mapper().ok_or("Failed to get mapper")? };
+        apply_rela(&lib_infos, base + dyn_vaddr, base, &mapper)?;
+    }
 
-    Ok(())
+    // Check if there's an interpreter
+    if let Some(interp_path) = interp_path {
+        crate::serial_write(&alloc::format!(
+            "[ELF_DYN] Found interpreter: {}\n",
+            interp_path
+        ));
+        // Load the interpreter
+        let interp_info = load_library(&interp_path, address_space, vmas)?;
+        // The interpreter's entry point is its base + its ELF entry point offset
+        // For shared libraries, the entry point is typically at the base
+        let interp_entry = interp_info.base;
+        crate::serial_write(&alloc::format!(
+            "[ELF_DYN] Interpreter loaded at base=0x{:x}, entry=0x{:x}\n",
+            interp_info.base,
+            interp_entry
+        ));
+        return Ok(DynamicLoadResult {
+            entry_point: *entry_point,
+            interp_entry_point: Some(interp_entry),
+        });
+    }
+
+    Ok(DynamicLoadResult {
+        entry_point: *entry_point,
+        interp_entry_point: None,
+    })
 }

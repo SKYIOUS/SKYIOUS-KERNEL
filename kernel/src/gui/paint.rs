@@ -123,7 +123,7 @@ impl Compositor {
                 continue;
             }
             if anim.fade_out {
-                let a = (255 * anim.frame / anim.total) as u32;
+                let a = 255 * anim.frame / anim.total;
                 let overlay = a.min(255) << 24;
                 drawing::draw_rect_alpha(
                     &mut self.backbuffer,
@@ -136,7 +136,7 @@ impl Compositor {
                     overlay,
                 );
             } else {
-                let a = 255 - (255 * anim.frame / anim.total) as u32;
+                let a = 255 - 255 * anim.frame / anim.total;
                 let overlay = a.min(255) << 24;
                 drawing::draw_rect_alpha(
                     &mut self.backbuffer,
