@@ -484,9 +484,8 @@ pub fn load_dynamic_binary(
                 .iter()
                 .position(|&b| b == 0)
                 .unwrap_or(interp_filesz);
-            interp_path = Some(
-                alloc::string::String::from_utf8_lossy(&interp_bytes[..null_pos]).to_string(),
-            );
+            interp_path =
+                Some(alloc::string::String::from_utf8_lossy(&interp_bytes[..null_pos]).to_string());
             // interp_path is guaranteed to be Some here since we just set it
             let interp_str = interp_path.as_deref().unwrap_or("");
             crate::serial_write(&alloc::format!(
